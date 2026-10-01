@@ -1,0 +1,5 @@
+# Line endings: shell scripts must be LF, Windows scripts CRLF.
+*.sh text eol=lf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+* text=auto

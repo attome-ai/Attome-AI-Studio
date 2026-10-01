@@ -1,0 +1,49 @@
+# Private planning notes (kept on this machine only)
+/docs/
+
+# Local toolchain and dependencies installed by setup
+/.deps/
+/vcpkg_installed/
+
+# Build output
+/build/
+/out/
+/cmake-build-*/
+CMakeUserPresets.json
+CMakeCache.txt
+CMakeFiles/
+compile_commands.json
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# Node (code layers)
+node_modules/
+
+# Local app state, caches, generated media
+/.attome/
+*.attome-cache/
+/models/
+/cache/
+
+# Secrets and local config
+.env
+.env.*
+*.key
+*.pem
+
+# Editors and OS
+.vs/
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+*.user
+*.suo
+.DS_Store
+Thumbs.db
+*.log
