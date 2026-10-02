@@ -20,6 +20,7 @@
 #include "atm/patch/patch.hpp"
 #include "atm/render/render.hpp"
 #include "atm/storage/file.hpp"
+#include "timeline.hpp"
 
 #if defined(_WIN32)
 #include <process.h>
@@ -696,8 +697,38 @@ struct Engine::Impl {
   // Recipes for agents. Tool descriptions are short because MCP clients cut long ones; the details live here.
   Result<json> guide_get(const json &params) {
     static const std::pair<const char *, const char *> kTopics[] = {
+        {"timeline",
+         "timeline.edit is the easy way to edit: {\"project\":…,\"ops\":[…]} applies all ops as one step. Give an op "
+         "\"id\":\"$new:name\" and later ops use that name. Times: \"2.5s\", \"75@30\", timecode.\n"
+         "- add_clip {asset (from media.import) or path, track? (ID, $new name or \"new\"; default the bottom video "
+         "track, or an audio track for sound files), at? (default: after the last clip of the track), source_in? "
+         "(default 0), duration? (default the rest of the file), with_audio? (false mutes it), volume?, gain_db?, "
+         "position?, scale?, opacity?, fade_in?, fade_out?}\n"
+         "- add_text {text (\\n for a new line), at? (0), duration? (3s), placement? (center | lower_third | top | "
+         "bottom) or position?, size? (0.08 of the height), color? (#ffffff), bold? (true), fade_in?, fade_out?} - "
+         "goes on a Titles track on top\n"
+         "- add_adjustment {at?, duration? (2s), blur? (radius, e.g. 0.02), opacity?, fade_in?, fade_out?} - blurs "
+         "everything below; goes on an Effects track under the titles\n"
+         "- add_transition {between: [first, second], duration? (1s), alignment? (center | start | end)} - a dissolve; "
+         "the clips must touch, and center needs half the duration of spare media on each side of the cut\n"
+         "- add_track {kind (video | audio), name?, position? (top | bottom), below? / above? (track ID)}\n"
+         "- delete {clip} or {transition}; ripple_delete {clip} (closes the gap); move {clip, to?, track?}; trim {clip, edge (in | out), to or delta}; "
+         "split {clip, at}\n"
+         "- set_property {target (clip, track or fx ID), path (e.g. \"audio.gain_db\", \"transform.opacity\", "
+         "\"content.text\", \"volume\", \"params.radius\"), value} or {target, path \"transform.opacity|position|"
+         "scale\", keyframes: [{t, v, interp?, ease?}]}\n"
+         "Example: four clips with dissolves, a fading title, a blur and music:\n"
+         "[{\"op\":\"add_clip\",\"id\":\"$new:a\",\"asset\":\"ast_…\",\"source_in\":\"1s\",\"duration\":\"4s\",\"with_audio\":false},"
+         "{\"op\":\"add_clip\",\"id\":\"$new:b\",\"asset\":\"ast_…\",\"source_in\":\"1s\",\"duration\":\"4s\",\"with_audio\":false},"
+         "{\"op\":\"add_transition\",\"between\":[\"$new:a\",\"$new:b\"],\"duration\":\"1s\"},"
+         "{\"op\":\"add_text\",\"text\":\"Summer in the City\\nصيف في المدينة\",\"placement\":\"lower_third\",\"duration\":\"4s\","
+         "\"fade_in\":\"0.5s\",\"fade_out\":\"0.5s\"},"
+         "{\"op\":\"add_adjustment\",\"duration\":\"2s\",\"blur\":0.02,\"fade_out\":\"1s\"},"
+         "{\"op\":\"add_clip\",\"asset\":\"ast_music…\",\"at\":\"0s\",\"duration\":\"8s\",\"gain_db\":-12,\"fade_out\":\"2s\"}]\n"
+         "Leave handles for dissolves: start clips a little into their files (source_in) and do not use them to "
+         "their very end. The result has id_map ($new names -> IDs), notes and the new duration."},
         {"clips",
-         "Tracks and clips.\n"
+         "Tracks and clips as raw project.patch ops (timeline.edit builds these for you).\n"
          "Add a track: {\"op\":\"add\",\"path\":\"<seq_id>/tracks/$new:v1\",\"value\":{\"kind\":\"video\",\"name\":\"V1\"}} "
          "(kind \"audio\" for sound only). Tracks stack in order: the first is the bottom layer. The sequence ID comes "
          "from project.create or project.inspect.\n"
@@ -776,7 +807,7 @@ struct Engine::Impl {
       if (want.empty() || want == name)
         text += std::string("## ") + name + "\n" + body + "\n\n";
     if (text.empty())
-      return bad_param("topic", "must be one of clips, text, dissolves, keyframes, effects, audio, times");
+      return bad_param("topic", "must be one of timeline, clips, text, dissolves, keyframes, effects, audio, times");
     return json{{"text", std::move(text)}};
   }
 
@@ -1011,6 +1042,121 @@ struct Engine::Impl {
     return out;
   }
 
+  // ---- media.import and timeline.edit (F1 §5.8, §5.10) ---------------------------------------------------------
+
+  // Files become assets of the project (root "assets"), with what media.probe found. A path already imported is reused.
+  Result<json> media_import(const json &params) {
+    ATM_TRY(Project *pr, project(params));
+    const auto paths = params.find("paths");
+    if (paths == params.end() || !paths->is_array() || paths->empty())
+      return bad_param("paths", "is required: a list of absolute file paths");
+    const json &root = pr->doc.root();
+    json ops = json::array(), assets = json::array();
+    std::vector<std::pair<std::string, size_t>> pending; // placeholder -> index in `assets`
+    for (size_t i = 0; i < paths->size(); ++i) {
+      if (!(*paths)[i].is_string())
+        return bad_param("paths", "must hold strings");
+      const std::string path = (*paths)[i].get<std::string>();
+      ATM_TRY(json info, media_probe({{"path", path}}));
+      std::string existing;
+      if (root.contains("assets"))
+        for (auto it = root["assets"].begin(); it != root["assets"].end(); ++it)
+          if (it->value("path", "") == path)
+            existing = it.key();
+      const std::u8string file = to_path(path).filename().u8string();
+      json asset = {{"name", std::string(file.begin(), file.end())}};
+      for (auto it = info.begin(); it != info.end(); ++it)
+        asset[it.key()] = it.value();
+      if (!existing.empty()) {
+        asset["id"] = existing;
+        assets.push_back(std::move(asset));
+        continue;
+      }
+      const std::string ph = "$new:asset" + std::to_string(i);
+      ops.push_back({{"op", "add"}, {"path", pr->doc.id() + "/assets/" + ph}, {"value", asset}});
+      pending.emplace_back(ph, assets.size());
+      assets.push_back(std::move(asset));
+    }
+    uint64_t revision = pr->revision;
+    if (!ops.empty()) {
+      json p = {{"project", params["project"]},
+                {"patch", {{"ops", std::move(ops)}, {"label", "Import " + std::to_string(pending.size()) + " file(s)"}}}};
+      if (params.contains("task_id"))
+        p["task_id"] = params["task_id"];
+      ATM_TRY(json res, project_patch(p));
+      for (const auto &[ph, at] : pending)
+        assets[at]["id"] = res["id_map"].value(ph, "");
+      revision = res.value("revision", revision);
+    }
+    return json{{"assets", std::move(assets)}, {"revision", revision}};
+  }
+
+  // Replaces every string equal to a placeholder of an earlier op with the ID it became.
+  static void resolve_placeholders(json &v, const json &id_map) {
+    if (v.is_string()) {
+      if (const auto it = id_map.find(v.get_ref<const std::string &>()); it != id_map.end())
+        v = *it;
+    } else if (v.is_structured()) {
+      for (json &e : v)
+        resolve_placeholders(e, id_map);
+    }
+  }
+
+  // Each op becomes patch ops against a scratch copy holding the earlier ops, so later ops see what earlier ones made;
+  // the whole call is then applied to the project as one Patch (validated, journaled, one undo step per task).
+  Result<json> timeline_edit(const json &params) {
+    ATM_TRY(Project *pr, project(params));
+    const auto ops = params.find("ops");
+    if (ops == params.end() || !ops->is_array() || ops->empty())
+      return bad_param("ops", "is required: a list of timeline ops (guide.get topic \"timeline\")");
+    const json &root = pr->doc.root();
+    timeline::Context ctx;
+    ctx.sequence = params.value("sequence", std::string());
+    if (ctx.sequence.empty() && root.contains("sequence_order") && !root["sequence_order"].empty())
+      ctx.sequence = root["sequence_order"][0].get<std::string>();
+    if (!root.contains("sequences") || !root["sequences"].contains(ctx.sequence))
+      return fail(ErrorCode::NotFound, "R_NO_SEQUENCE", "The project has no sequence \"" + ctx.sequence + "\".");
+    ATM_TRY(Rational rate, Rational::parse(root["sequences"][ctx.sequence].value("rate", std::string("30"))));
+    ctx.rate = rate;
+    ctx.probe = [this](const std::string &path) { return media_probe({{"path", path}}); };
+
+    ATM_TRY(doc::Document scratch, doc::Document::from_json(root));
+    json all = json::array(), id_map = json::object(), notes = json::array();
+    for (size_t i = 0; i < ops->size(); ++i) {
+      json op = (*ops)[i];
+      resolve_placeholders(op, id_map);
+      if (op.is_object() && op.contains("id")) // its own name stays a placeholder
+        op["id"] = (*ops)[i]["id"];
+      ATM_TRY(timeline::Built built, timeline::build(scratch, op, i, ctx));
+      auto applied = patch::apply(scratch, built.ops, {.keep = true, .validate = false});
+      if (!applied) {
+        Error e = std::move(applied.error());
+        e.message = "ops[" + std::to_string(i) + "] (" + op.value("op", std::string("?")) + "): " + e.message;
+        e.details = {{"op_index", i}};
+        return tl::unexpected(std::move(e));
+      }
+      for (auto it = built.names.begin(); it != built.names.end(); ++it)
+        if (const auto made = applied->id_map.find(it.key()); made != applied->id_map.end())
+          id_map[it.key()] = *made;
+      for (json &o : applied->ops)
+        all.push_back(std::move(o));
+      for (json &n : built.notes)
+        notes.push_back(std::move(n));
+    }
+    json p = {{"project", params["project"]},
+              {"patch", {{"ops", std::move(all)}, {"label", params.value("label", "Timeline: " + std::to_string(ops->size()) + " op(s)")}}},
+              {"dry_run", params.value("dry_run", false)}};
+    if (params.contains("task_id"))
+      p["task_id"] = params["task_id"];
+    ATM_TRY(json res, project_patch(p));
+    res["id_map"] = std::move(id_map);
+    res["notes"] = std::move(notes);
+    res["duration"] = timeline::sequence_duration(scratch, ctx);
+    if (!res.value("applied", false) && res.contains("inverse")) // a dry run: the inverse is noise for an agent
+      res.erase("inverse");
+    return res;
+  }
+
   Result<std::shared_ptr<Job>> job_param(const json &params) {
     ATM_TRY(const std::string *id, string_param(params, "job_id"));
     const auto it = jobs.find(*id);
@@ -1097,7 +1243,8 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
      R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},"id":{"type":"string"}},"required":["project","id"]})",
      &Impl::project_get},
     {"project.patch", "core", true,
-     "Edit the project with an ID-addressed Patch; all ops apply or none do. Call guide.get first: it shows the "
+     "Low-level edit with an ID-addressed Patch; prefer timeline.edit, and use this for what it does not cover. "
+     "All ops apply or none do. guide.get shows the "
      "exact shapes of tracks, clips, text, dissolves, keyframes, effects and sound (topics: clips, text, dissolves, "
      "keyframes, effects, audio, times).\n"
      "Ops: add, remove, replace, move, insert_order, remove_order, test. A path is \"<StableID>/<field>[/…]\": add "
@@ -1117,10 +1264,33 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
        "task_id":{"type":"string","description":"Groups several edits into one task"}},
        "required":["project","patch"]})",
      &Impl::project_patch},
+    {"timeline.edit", "core", true,
+     "Edit the timeline with high-level ops, all applied together as one undoable step: add_track, add_clip, add_text, "
+     "add_adjustment, add_transition, delete, ripple_delete, move, trim, split, set_property. Clip defaults are "
+     "worked out for you (append to the track, the rest of the file, a Titles track for text, an Effects track under "
+     "it for blur). Give an op \"id\": \"$new:name\" and later ops can use that name. guide.get topic \"timeline\" "
+     "has every op's fields and a complete example. Times accept \"2.5s\", \"75@30\" or timecode.",
+     R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},
+       "ops":{"type":"array","items":{"type":"object","properties":{
+         "op":{"type":"string","enum":["add_track","add_clip","add_text","add_adjustment","add_transition","delete",
+                                       "ripple_delete","move","trim","split","set_property"]},
+         "id":{"type":"string","description":"$new:name for what this op creates"}},"required":["op"]}},
+       "sequence":{"type":"string"},"label":{"type":"string"},"dry_run":{"type":"boolean"},
+       "task_id":{"type":"string","description":"Groups several calls into one task"}},
+       "required":["project","ops"]})",
+     &Impl::timeline_edit},
+    {"media.import", "core", true,
+     "Add media files to the project as assets (probed for size, length and sound). Returns their asset IDs for "
+     "timeline.edit add_clip. Importing a path again returns the same asset.",
+     R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},
+       "paths":{"type":"array","items":{"type":"string"},"description":"Absolute paths of video, image or sound files"},
+       "task_id":{"type":"string"}},
+       "required":["project","paths"]})",
+     &Impl::media_import},
     {"guide.get", "core", false,
      "How to write the project: the shapes of tracks and clips, text, dissolves, keyframe animation, effects, sound "
      "and times, with examples ready to adapt. Read it before the first project.patch.",
-     R"({"type":"object","properties":{"topic":{"type":"string","enum":["clips","text","dissolves","keyframes","effects","audio","times"],
+     R"({"type":"object","properties":{"topic":{"type":"string","enum":["timeline","clips","text","dissolves","keyframes","effects","audio","times"],
        "description":"Leave out to get every topic"}}})",
      &Impl::guide_get},
     {"project.undo", "core", true, "Undo the last edit (steps: N).",

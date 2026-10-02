@@ -52,6 +52,8 @@ attome new Demo.attome --rate 30000/1001
 attome inspect Demo.attome --json          # shows the sequence ID to use below
 attome patch Demo.attome edits.json        # {"ops": [{"op": "add", "path": "<seq id>/tracks/$new:v1", "value": {"kind": "video", "name": "V1"}}]}
 attome undo Demo.attome
+attome import Demo.attome a.mp4 music.wav  # media.import: files become assets
+attome timeline Demo.attome ops.json       # timeline.edit: [{"op": "add_clip", "path": "C:/media/a.mp4"}, {"op": "add_text", "text": "Hi"}]
 attome tools                               # every command is also a Tool of the daemon
 attome daemon start                        # optional: keeps projects open between commands
 ```
@@ -64,7 +66,7 @@ attome daemon start                        # optional: keeps projects open betwe
 { "mcpServers": { "attome": { "command": "C:\\path\\to\\build\\win-msvc-release\\bin\\attome.exe", "args": ["mcp", "--stdio"] } } }
 ```
 
-For Claude Code: `claude mcp add attome -- C:\path\to\attome.exe mcp --stdio`. The agent gets `guide_get` (how to write clips, text, dissolves and keyframes), `project_create`, `project_inspect`, `project_patch`, `project_undo`, `media_probe`, `see_frames` and `see_contact_sheet` (rendered frames attached as images, so it can check its edit by eye), `render_sequence` and `jobs_wait`. Names, descriptions and parameter schemas come from the engine (`attome tools --json`), so they match the CLI. Try:
+For Claude Code: `claude mcp add attome -- C:\path\to\attome.exe mcp --stdio`. The agent gets `guide_get` (how to edit, with examples), `media_import`, `timeline_edit` (the whole cut in one call: clips, text, dissolves, blur, music, and edits such as split, trim and move), `project_create`, `project_inspect`, `project_patch`, `project_undo`, `media_probe`, `see_frames` and `see_contact_sheet` (rendered frames attached as images, so it can check its edit by eye), `render_sequence` and `jobs_wait`. Names, descriptions and parameter schemas come from the engine (`attome tools --json`), so they match the CLI. Try:
 
 > Using the Attome tools, create a 1280x720 project at C:\demo\summer.attome. Put C:\demo\a.mp4 and C:\demo\b.mp4 one after the other, 3 seconds each, muted. Add the title "Summer in the City" over the first 2 seconds in the lower third. Show me a contact sheet, then render to C:\demo\summer.mp4.
 

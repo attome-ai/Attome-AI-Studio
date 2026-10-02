@@ -475,6 +475,47 @@ int main(int argc, char **argv) {
     } while (watch && exit_status == 0);
   });
 
+  std::vector<std::string> files;
+  auto *cmd_import = app.add_subcommand("import", "Add media files to a project as assets: attome import Demo.attome a.mp4 b.wav");
+  cmd_import->add_option("project", project)->required();
+  cmd_import->add_option("files", files)->required();
+  cmd_import->callback([&] {
+    json paths = json::array();
+    for (const std::string &f : files)
+      paths.push_back(abs_path(f));
+    exit_status = finish(opt, call(opt, "media.import", {{"project", abs_path(project)}, {"paths", std::move(paths)}}));
+  });
+
+  auto *cmd_timeline = app.add_subcommand("timeline", "Apply timeline ops from a file (\"-\" reads stdin): attome timeline Demo.attome ops.json");
+  cmd_timeline->add_option("project", project)->required();
+  cmd_timeline->add_option("ops", file, "JSON file: [ops] or {\"ops\": [...]}")->required();
+  cmd_timeline->add_flag("--dry-run", dry_run, "Check the ops without changing the project");
+  cmd_timeline->add_option("--task", task, "Task ID that groups this edit with others");
+  cmd_timeline->callback([&] {
+    std::string text;
+    if (file == "-") {
+      text.assign(std::istreambuf_iterator<char>(std::cin), std::istreambuf_iterator<char>());
+    } else {
+      auto read = atm::storage::read_file(std::filesystem::path(std::u8string(file.begin(), file.end())));
+      if (!read) {
+        exit_status = finish(opt, {{"ok", false}, {"error", atm::error_to_json(read.error())}});
+        return;
+      }
+      text = std::move(*read);
+    }
+    json ops = json::parse(text, nullptr, false);
+    if (ops.is_object() && ops.contains("ops"))
+      ops = ops["ops"];
+    if (!ops.is_array()) {
+      exit_status = finish(opt, {{"ok", false}, {"error", {{"code", -32700}, {"message", "The ops file is not a JSON array of ops."}}}});
+      return;
+    }
+    json params = {{"project", abs_path(project)}, {"ops", std::move(ops)}, {"dry_run", dry_run}};
+    if (!task.empty())
+      params["task_id"] = task;
+    exit_status = finish(opt, call(opt, "timeline.edit", std::move(params)));
+  });
+
   auto *cmd_mcp = app.add_subcommand("mcp", "Serve the Tools to an AI agent over MCP: attome mcp --stdio");
   bool mcp_stdio = false;
   cmd_mcp->add_flag("--stdio", mcp_stdio, "Speak MCP on stdin/stdout (the only transport so far)");
