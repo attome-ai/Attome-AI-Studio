@@ -39,6 +39,7 @@ void apply_theme() {
   style.ItemSpacing = ImVec2(8.0f, 7.0f);
   style.ScrollbarSize = 10.0f;
   style.DockingSeparatorSize = 3.0f;
+  style.WindowMenuButtonPosition = ImGuiDir_Right; // the dock arrow sits at the far right of a panel tab bar
   ImVec4 *c = style.Colors;
   c[ImGuiCol_Text] = rgb(0xeceff6);
   c[ImGuiCol_TextDisabled] = rgb(0x636d85);
