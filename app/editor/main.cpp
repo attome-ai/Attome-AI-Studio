@@ -3,6 +3,8 @@
 //   attome-editor [project.attome [media files to import…]]
 
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <string>
 
 #include <SDL3/SDL.h>
@@ -88,6 +90,7 @@ int main(int argc, char **argv) {
     SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Attome", SDL_GetError(), nullptr);
     return 1;
   }
+  SDL_InitSubSystem(SDL_INIT_AUDIO); // best effort: without a sound device the editor still works, silently
   SDL_Window *window =
       SDL_CreateWindow("Attome", 1600, 960, SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY | SDL_WINDOW_MAXIMIZED);
   SDL_Renderer *renderer = window ? SDL_CreateRenderer(window, nullptr) : nullptr;
@@ -134,6 +137,10 @@ int main(int argc, char **argv) {
       app.open_project(argv[1]);
     for (int i = 2; i < argc; ++i) // further arguments are media files to import
       app.on_drop(argv[i]);
+    // ATTOME_EDITOR_SELFTEST=1: play for two seconds, print where the sound and the playhead are, and quit.
+    const bool selftest = std::getenv("ATTOME_EDITOR_SELFTEST") != nullptr;
+    const auto started = std::chrono::steady_clock::now();
+    bool selftest_playing = false;
 
     auto last = std::chrono::steady_clock::now();
     int awake = 4; // frames to draw before the loop may sleep again
@@ -158,6 +165,18 @@ int main(int argc, char **argv) {
       const double dt = std::min(0.25, std::chrono::duration<double>(now - last).count());
       last = now;
 
+      if (selftest) {
+        const double t = std::chrono::duration<double>(now - started).count();
+        if (!selftest_playing && t > 2.0) {
+          app.play(true);
+          selftest_playing = true;
+        }
+        if (t > 4.5) {
+          std::fprintf(stderr, "%s\n", app.audio_report().c_str());
+          std::fflush(stderr);
+          running = false;
+        }
+      }
       ATM_PROFILE_FRAME();
       ImGui_ImplSDLRenderer3_NewFrame();
       ImGui_ImplSDL3_NewFrame();

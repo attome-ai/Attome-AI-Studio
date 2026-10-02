@@ -28,7 +28,7 @@ What exists today:
 - a first editor, `attome-editor` (Windows only for now): import video files, arrange them on a multi-track timeline (move, trim, split, opacity, volume), preview, and export an H.264 + AAC `.mp4`
 - the same export for scripts and agents: `attome render Demo.attome -o out.mp4`
 
-Not built yet: AI generation, the MCP server, text, effects and transitions, audio playback in the preview, the GPU compositor, JSON Schema validation, Suggested Edits and per-task undo. Decode and encode use the Windows media stack today, so import and export work on Windows only; the macOS and Linux code paths of the rest are written but have only been built and tested on Windows.
+Not built yet: AI generation, the MCP server, text, effects and transitions, the GPU compositor, JSON Schema validation, Suggested Edits and per-task undo. Decode and encode use the Windows media stack today, so import and export work on Windows only; the macOS and Linux code paths of the rest are written but have only been built and tested on Windows.
 
 ### The editor
 

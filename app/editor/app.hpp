@@ -12,6 +12,7 @@
 #include <SDL3/SDL.h>
 
 #include "atm/base/rational.hpp"
+#include "audio.hpp"
 #include "client.hpp"
 #include "preview.hpp"
 #include "thumbs.hpp"
@@ -47,6 +48,9 @@ public:
   void on_drop(const char *path) { dropped_.emplace_back(path); }
   void frame(double dt); // one UI frame
   bool busy() const;     // true while something animates, so the main loop should not sleep
+  void seek(int64_t frame); // move the playhead; the sound follows when playing
+  void play(bool on);    // start or stop playback; the sound follows the playhead
+  std::string audio_report() const; // one line about the audio state, for the self-test
   bool wants_quit() const { return quit_; }
   void shutdown();
 
@@ -97,6 +101,8 @@ private:
   std::string pref_dir_;
   Client client_;
   Preview preview_;
+  AudioMixer audio_mixer_;
+  AudioOut audio_out_;
 
   // project mirror
   std::string project_path_, project_id_, project_name_, seq_id_;

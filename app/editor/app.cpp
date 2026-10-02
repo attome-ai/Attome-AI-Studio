@@ -72,7 +72,38 @@ void App::shutdown() {
     client_.call("daemon.shutdown", json::object(), unused, error);
 }
 
-bool App::busy() const { return playing_ || !drag_id_.empty() || !job_id_.empty(); }
+bool App::busy() const { return playing_ || !drag_id_.empty() || !job_id_.empty() || audio_mixer_.busy(); }
+
+void App::play(bool on) {
+  on = on && total_frames_ > 0;
+  if (on == playing_)
+    return;
+  playing_ = on;
+  play_accum_ = 0.0;
+  if (on) {
+    if (playhead_ >= total_frames_ - 1)
+      playhead_ = 0;
+    audio_out_.play(playhead_ * int64_t(media::kAudioRate) * rate_.den() / rate_.num());
+  } else {
+    audio_out_.stop();
+  }
+}
+
+// Moves the playhead; when playing, the sound restarts at the new place.
+void App::seek(int64_t frame) {
+  playhead_ = std::clamp<int64_t>(frame, 0, std::max<int64_t>(0, total_frames_));
+  if (playing_)
+    audio_out_.play(playhead_ * int64_t(media::kAudioRate) * rate_.den() / rate_.num());
+}
+
+std::string App::audio_report() const {
+  char text[200];
+  std::snprintf(text, sizeof text, "audio: device=%s mix_frames=%zu playing=%d position=%lld playhead=%lld of %lld",
+                audio_out_.ok() ? "ok" : "none", audio_out_.mix_frames(), int(playing_),
+                static_cast<long long>(audio_out_.position()), static_cast<long long>(playhead_),
+                static_cast<long long>(total_frames_));
+  return text;
+}
 
 void App::say(std::string text, bool error) {
   status_ = std::move(text);
@@ -182,6 +213,7 @@ void App::refresh() {
   // The viewer renders a fitted, smaller picture of the canvas.
   if (auto comp = render::compile(doc_)) {
     const double fit = std::min({1.0, 1280.0 / canvas_w_, 720.0 / canvas_h_});
+    audio_mixer_.set_composition(*comp);
     preview_.set_composition(std::move(*comp), int(canvas_w_ * fit), int(canvas_h_ * fit));
   }
 }
@@ -384,7 +416,7 @@ void App::start_export(const std::string &path) {
   job_id_ = result.value("job_id", "");
   job_ = {{"state", "running"}, {"progress", 0.0}, {"output", result.value("output", path)}};
   export_open_ = true;
-  playing_ = false;
+  play(false);
 }
 
 // ---- native dialogs ------------------------------------------------------------------------------------------
@@ -458,7 +490,7 @@ void App::shortcuts() {
   if (io.WantTextInput || project_path_.empty() || export_open_)
     return;
   if (ImGui::IsKeyPressed(ImGuiKey_Space, false))
-    playing_ = !playing_ && total_frames_ > 0;
+    play(!playing_);
   if (ImGui::IsKeyPressed(ImGuiKey_Delete, false))
     delete_selected();
   if (ImGui::IsKeyPressed(ImGuiKey_S, false) && !io.KeyCtrl)
@@ -472,13 +504,13 @@ void App::shortcuts() {
   if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_E, false))
     ask_export();
   if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow, true))
-    playhead_ = std::max<int64_t>(0, playhead_ - 1);
+    seek(playhead_ - 1);
   if (ImGui::IsKeyPressed(ImGuiKey_RightArrow, true))
-    playhead_ = std::min(total_frames_, playhead_ + 1);
+    seek(playhead_ + 1);
   if (ImGui::IsKeyPressed(ImGuiKey_Home, false))
-    playhead_ = 0;
+    seek(0);
   if (ImGui::IsKeyPressed(ImGuiKey_End, false))
-    playhead_ = total_frames_;
+    seek(total_frames_);
 }
 
 namespace {
@@ -633,14 +665,27 @@ void App::frame(double dt) {
   poll(clock_);
   shortcuts();
 
+  if (auto mix = audio_mixer_.take()) {
+    const bool was_playing = playing_;
+    audio_out_.set_mix(std::move(mix));
+    if (was_playing) // a mix finished while playing: continue from the playhead with the new sound
+      audio_out_.play(playhead_ * int64_t(media::kAudioRate) * rate_.den() / rate_.num());
+  }
   if (playing_) {
-    play_accum_ += dt * fps();
-    const int64_t step = int64_t(play_accum_);
-    play_accum_ -= double(step);
-    playhead_ += step;
+    audio_out_.pump();
+    const int64_t heard = audio_out_.position();
+    if (heard >= 0 && heard < int64_t(audio_out_.mix_frames())) {
+      // The audio clock is the master: the playhead is the frame being heard.
+      playhead_ = heard * rate_.num() / (int64_t(media::kAudioRate) * rate_.den());
+    } else { // no sound to follow (no device, mix not ready, or the sound ended): use the wall clock
+      play_accum_ += dt * fps();
+      const int64_t step = int64_t(play_accum_);
+      play_accum_ -= double(step);
+      playhead_ += step;
+    }
     if (playhead_ >= total_frames_) {
       playhead_ = std::max<int64_t>(0, total_frames_ - 1);
-      playing_ = false;
+      play(false);
     }
   }
   for (auto &[path, thumb] : thumbs_.take()) { // finished poster frames become textures
@@ -1104,7 +1149,7 @@ void App::draw_viewer() {
   ImGui::InvisibleButton("##play", ImVec2(44.0f, 44.0f));
   const bool play_hover = ImGui::IsItemHovered();
   if (ImGui::IsItemClicked() && total_frames_ > 0)
-    playing_ = !playing_;
+    play(!playing_);
   dl->AddCircleFilled(ImVec2(cx, cy), 21.0f, hex(play_hover ? look::raised : look::bg));
   dl->AddCircle(ImVec2(cx, cy), 21.0f, hex(look::accent), 0, 2.0f);
   if (playing_) {
@@ -1127,13 +1172,13 @@ void App::jump_cut(bool forward) {
   if (forward) {
     for (const int64_t c : cuts)
       if (c > playhead_) {
-        playhead_ = c;
+        seek(c);
         return;
       }
   } else {
     for (auto it = cuts.rbegin(); it != cuts.rend(); ++it)
       if (*it < playhead_) {
-        playhead_ = *it;
+        seek(*it);
         return;
       }
   }
@@ -1213,7 +1258,7 @@ void App::draw_timeline() {
   ImGui::InvisibleButton("##ruler", ImVec2(content_w - header_w, ruler_h));
   if (ImGui::IsItemActive()) {
     playhead_ = std::clamp<int64_t>(std::llround((mouse.x - origin.x - header_w) / pps_ * rate), 0, total_frames_);
-    playing_ = false;
+    play(false);
   }
   dl->AddRectFilled(ImVec2(win.x, origin.y), ImVec2(win.x + view_w, origin.y + ruler_h), hex(look::panel));
   dl->AddLine(ImVec2(win.x, origin.y + ruler_h), ImVec2(win.x + view_w, origin.y + ruler_h), hex(look::line));
