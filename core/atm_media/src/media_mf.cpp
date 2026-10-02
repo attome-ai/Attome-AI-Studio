@@ -1,4 +1,4 @@
-#if defined(_WIN32)
+#if defined(_WIN32) && !defined(ATM_MEDIA_FFMPEG)
 // Media Foundation backend.
 
 #include "atm/media/media.hpp"

@@ -1,36 +1,40 @@
-#if !defined(_WIN32)
-// No media backend on this system yet (the plan's FFmpeg backend, F1). Every call reports Unsupported.
+// What a system lacks so far reports Unsupported: media decode and encode without a backend (neither Media Foundation
+// nor FFmpeg), and text and stills outside Windows until their portable versions land (F1 plan).
 
 #include "atm/media/media.hpp"
 
+#if !defined(_WIN32)
 namespace atm::media {
 namespace {
-tl::unexpected<Error> unsupported() {
-  return fail(ErrorCode::Unsupported, "M_NO_BACKEND", "Media decode and encode are not built for this system yet.", {},
+tl::unexpected<Error> unsupported(const char *what) {
+  return fail(ErrorCode::Unsupported, "M_NO_BACKEND", std::string(what) + " is not built for this system yet.", {},
               "Use the Windows build for now.");
 }
 } // namespace
 
+#if !defined(ATM_MEDIA_FFMPEG)
 struct VideoReader::Impl {};
 struct Encoder::Impl {};
 VideoReader::~VideoReader() = default;
 Encoder::~Encoder() = default;
 
-Result<MediaInfo> probe(const std::string &) { return unsupported(); }
-Result<std::unique_ptr<VideoReader>> VideoReader::open(const std::string &, int, int) { return unsupported(); }
-Result<FrameView> VideoReader::frame_at(int64_t) { return unsupported(); }
-Result<std::vector<float>> read_audio(const std::string &, int64_t, int64_t) { return unsupported(); }
-Result<std::unique_ptr<Encoder>> Encoder::create(const EncodeSettings &) { return unsupported(); }
-Result<void> Encoder::video(const uint8_t *, int64_t) { return unsupported(); }
-Result<void> Encoder::audio(const float *, size_t) { return unsupported(); }
-Result<void> Encoder::finish() { return unsupported(); }
-Result<TextBitmap> render_text(const std::string &, float, bool, int) { return unsupported(); }
-Result<void> write_jpeg(const std::string &, const uint8_t *, int, int, float) { return unsupported(); }
+Result<MediaInfo> probe(const std::string &) { return unsupported("Media decode"); }
+Result<std::unique_ptr<VideoReader>> VideoReader::open(const std::string &, int, int) { return unsupported("Media decode"); }
+Result<FrameView> VideoReader::frame_at(int64_t) { return unsupported("Media decode"); }
+Result<std::vector<float>> read_audio(const std::string &, int64_t, int64_t) { return unsupported("Media decode"); }
+Result<std::unique_ptr<Encoder>> Encoder::create(const EncodeSettings &) { return unsupported("Media encode"); }
+Result<void> Encoder::video(const uint8_t *, int64_t) { return unsupported("Media encode"); }
+Result<void> Encoder::audio(const float *, size_t) { return unsupported("Media encode"); }
+Result<void> Encoder::finish() { return unsupported("Media encode"); }
 
 const std::string &Encoder::name() const {
   static const std::string none;
   return none;
 }
+#endif
+
+Result<TextBitmap> render_text(const std::string &, float, bool, int) { return unsupported("Text rendering"); }
+Result<void> write_jpeg(const std::string &, const uint8_t *, int, int, float) { return unsupported("Still image output"); }
 
 } // namespace atm::media
 #endif

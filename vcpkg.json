@@ -12,7 +12,37 @@
     "sdl3",
     {
       "name": "imgui",
-      "features": ["docking-experimental", "sdl3-binding", "sdl3-renderer-binding"]
+      "features": [
+        "docking-experimental",
+        "sdl3-binding",
+        "sdl3-renderer-binding"
+      ]
     }
-  ]
+  ],
+  "features": {
+    "ffmpeg": {
+      "description": "Portable media backend: LGPL FFmpeg (no GPL parts), Cisco OpenH264 and the NVIDIA / AMD hardware encoders.",
+      "dependencies": [
+        {
+          "name": "ffmpeg",
+          "default-features": false,
+          "features": [
+            "avcodec",
+            "avformat",
+            "swresample",
+            "swscale",
+            "openh264",
+            {
+              "name": "nvcodec",
+              "platform": "(windows | linux) & x64"
+            },
+            {
+              "name": "amf",
+              "platform": "windows | linux"
+            }
+          ]
+        }
+      ]
+    }
+  }
 }

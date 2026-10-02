@@ -6,7 +6,8 @@
       "hidden": true,
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/${presetName}",
-      "toolchainFile": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake"
+      "toolchainFile": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+      "cacheVariables": { "VCPKG_OVERLAY_TRIPLETS": "${sourceDir}/triplets" }
     },
     {
       "name": "win",
@@ -34,6 +35,11 @@
     },
     { "name": "win-msvc-release", "inherits": "win", "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" } },
     { "name": "win-msvc-debug", "inherits": "win", "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" } },
+    {
+      "name": "win-ffmpeg-release",
+      "inherits": "win",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release", "ATM_MEDIA_BACKEND": "ffmpeg", "VCPKG_MANIFEST_FEATURES": "ffmpeg" }
+    },
     { "name": "linux-clang-release", "inherits": "linux", "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" } },
     { "name": "linux-clang-debug", "inherits": "linux", "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" } },
     { "name": "mac-clang-release", "inherits": "mac", "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" } },
@@ -42,6 +48,7 @@
   "buildPresets": [
     { "name": "win-msvc-release", "configurePreset": "win-msvc-release" },
     { "name": "win-msvc-debug", "configurePreset": "win-msvc-debug" },
+    { "name": "win-ffmpeg-release", "configurePreset": "win-ffmpeg-release" },
     { "name": "linux-clang-release", "configurePreset": "linux-clang-release" },
     { "name": "linux-clang-debug", "configurePreset": "linux-clang-debug" },
     { "name": "mac-clang-release", "configurePreset": "mac-clang-release" },
@@ -50,6 +57,7 @@
   "testPresets": [
     { "name": "win-msvc-release", "configurePreset": "win-msvc-release", "output": { "outputOnFailure": true } },
     { "name": "win-msvc-debug", "configurePreset": "win-msvc-debug", "output": { "outputOnFailure": true } },
+    { "name": "win-ffmpeg-release", "configurePreset": "win-ffmpeg-release", "output": { "outputOnFailure": true } },
     { "name": "linux-clang-release", "configurePreset": "linux-clang-release", "output": { "outputOnFailure": true } },
     { "name": "mac-clang-release", "configurePreset": "mac-clang-release", "output": { "outputOnFailure": true } }
   ]
