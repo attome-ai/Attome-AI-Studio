@@ -144,6 +144,31 @@ TEST_CASE("keyframes: transform keys are stored in canonical time and checked on
                               {"value", {{"t", "0s"}, {"v", json::array({0.2, 0.5})}}}}})));
 }
 
+TEST_CASE("audio: clip gain, pan and fades and track volume are checked, fades in canonical time", "[audio]") {
+  Fixture f;
+  auto r = f.patch(json::array({{{"op", "replace"},
+                                 {"path", f.a + "/audio"},
+                                 {"value", {{"gain_db", -12}, {"pan", -0.5}, {"fade_in", "0.5s"}, {"fade_out", "15@30"}}}},
+                                {{"op", "replace"}, {"path", f.track + "/volume_db"}, {"value", -3}}}));
+  INFO((r ? "" : r.error().message));
+  REQUIRE(r);
+  const json clip = f.engine.call("project.get", {{"project", f.project}, {"id", f.a}})->at("object");
+  CHECK(clip["audio"]["fade_in"] == "1/2");
+  CHECK(clip["audio"]["fade_out"] == "1/2");
+
+  CHECK(f.rule_of(json::array({{{"op", "replace"}, {"path", f.a + "/audio/gain_db"}, {"value", "loud"}}})) ==
+        "AUDIO_TYPE_MISMATCH");
+  CHECK(f.rule_of(json::array({{{"op", "replace"}, {"path", f.a + "/audio/pan"}, {"value", 2}}})) == "AUDIO_TYPE_MISMATCH");
+  CHECK(f.rule_of(json::array({{{"op", "replace"}, {"path", f.a + "/audio/fade_curve"}, {"value", "s_curve"}}})) ==
+        "AUDIO_TYPE_MISMATCH");
+  CHECK(f.rule_of(json::array({{{"op", "replace"}, {"path", f.a + "/audio/fade_out"}, {"value", "1.75s"}}})) ==
+        "AUDIO_FADE_TOO_LONG"); // 0.5 + 1.75 > 2 s
+  CHECK(f.rule_of(json::array({{{"op", "replace"}, {"path", f.track + "/pan"}, {"value", -3}}})) == "AUDIO_TYPE_MISMATCH");
+  // Shortening the clip below its fades is refused too.
+  CHECK(f.rule_of(json::array({{{"op", "replace"}, {"path", f.a + "/timing/duration"}, {"value", "0.75s"}}})) ==
+        "AUDIO_FADE_TOO_LONG");
+}
+
 TEST_CASE("transitions: splitting the outgoing clip moves its dissolve to the right half (the editor's split)",
           "[transition]") {
   Fixture f;

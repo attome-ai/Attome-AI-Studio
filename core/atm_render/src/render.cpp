@@ -235,6 +235,11 @@ Result<Composition> compile(const json &project, std::string_view sequence_id) {
     if (tit == tracks->end())
       continue;
     const bool video = tit->value("kind", "video") != "audio";
+    const auto number = [](const json &obj, const char *key, double fallback) {
+      const auto it = obj.find(key);
+      return it != obj.end() && it->is_number() ? it->get<double>() : fallback;
+    };
+    const double track_db = number(*tit, "volume_db", 0.0), track_pan = number(*tit, "pan", 0.0);
     const auto clips = tit->find("clips");
     if (clips != tit->end() && clips->is_object())
       for (auto it = clips->begin(); it != clips->end(); ++it) {
@@ -272,6 +277,20 @@ Result<Composition> compile(const json &project, std::string_view sequence_id) {
         l.start_frame = start;
         l.origin_frame = start;
         l.frames = std::max<int64_t>(1, end - start);
+        l.clip_end_frame = start + l.frames;
+        {
+          const json audio = clip.value("audio", json::object());
+          const double db = (audio.is_object() ? number(audio, "gain_db", 0.0) : 0.0) + track_db;
+          l.gain = db <= -96.0 ? 0.0f : float(std::pow(10.0, std::min(db, 24.0) / 20.0));
+          l.pan = std::clamp(float((audio.is_object() ? number(audio, "pan", 0.0) : 0.0) + track_pan), -1.0f, 1.0f);
+          if (audio.is_object()) {
+            ATM_TRY(Rational fade_in, rational_field(audio, "fade_in", "0"));
+            ATM_TRY(Rational fade_out, rational_field(audio, "fade_out", "0"));
+            l.fade_in_hns = std::max<int64_t>(0, int64_t(fade_in.to_seconds_lossy() * double(media::kHnsPerSecond) + 0.5));
+            l.fade_out_hns = std::max<int64_t>(0, int64_t(fade_out.to_seconds_lossy() * double(media::kHnsPerSecond) + 0.5));
+            l.fade_linear = audio.value("fade_curve", std::string("equal_power")) == "linear";
+          }
+        }
         l.source_in_hns = int64_t(source_in.to_seconds_lossy() * double(media::kHnsPerSecond) + 0.5);
         if (const auto tr = clip.find("transform"); tr != clip.end() && tr->is_object()) {
           if (const auto op = tr->find("opacity"); op != tr->end() && op->is_number())
@@ -509,7 +528,7 @@ Result<std::vector<float>> mix_audio(const Composition &c) {
   const size_t total = size_t(c.frame_hns(c.frames) * media::kAudioRate / media::kHnsPerSecond);
   std::vector<float> mix(total * 2, 0.0f);
   for (const Layer &l : c.layers) {
-    if (l.volume <= 0.0f || l.is_text)
+    if (l.volume <= 0.0f || l.gain <= 0.0f || l.is_text)
       continue;
     auto pcm = media::read_audio(l.path, l.source_in_hns, c.frame_hns(l.frames));
     if (!pcm)
@@ -538,9 +557,23 @@ Result<std::vector<float>> mix_audio(const Composition &c) {
       fades[nfades++] = fade_of(c.layers[size_t(l.mixed_by)], false);
     if (l.mix_with >= 0)
       fades[nfades++] = fade_of(l, true);
+    // The clip's own fades, in stereo samples from its ends; pan as balance (the far side keeps its full level).
+    const auto to_samples = [](int64_t hns) { return int64_t(hns * media::kAudioRate / media::kHnsPerSecond); };
+    const int64_t clip_from = to_samples(c.frame_hns(l.origin_frame)), clip_to = to_samples(c.frame_hns(l.clip_end_frame));
+    const int64_t fade_in = to_samples(l.fade_in_hns), fade_out = to_samples(l.fade_out_hns);
+    const auto curve = [&](double u) {
+      u = std::clamp(u, 0.0, 1.0);
+      return l.fade_linear ? u : std::sin(u * 1.5707963267948966);
+    };
+    const float side[2] = {std::min(1.0f, 1.0f - l.pan), std::min(1.0f, 1.0f + l.pan)};
     for (size_t i = 0; i < n; ++i) {
       const size_t at = offset + i;
-      float gain = l.volume;
+      float gain = l.volume * l.gain * side[at & 1];
+      const int64_t s = int64_t(at / 2);
+      if (fade_in > 0 && s - clip_from < fade_in)
+        gain *= float(curve(double(s - clip_from) / double(fade_in)));
+      if (fade_out > 0 && clip_to - s < fade_out)
+        gain *= float(curve(double(clip_to - s) / double(fade_out)));
       for (int k = 0; k < nfades; ++k)
         if (const Fade &f = fades[k]; f.len > 0 && at >= f.from && at < f.from + f.len) {
           const double p = double((at - f.from) / 2) / double(f.len / 2);

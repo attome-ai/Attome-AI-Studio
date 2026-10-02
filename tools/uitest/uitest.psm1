@@ -45,12 +45,13 @@ function Invoke-Attome {
 }
 
 function Start-Editor {
-  param([Parameter(Mandatory)][string]$Project, [switch]$SelectFirstClip, [int]$WaitSeconds = 5)
+  param([Parameter(Mandatory)][string]$Project, [switch]$SelectFirstClip, [int]$WaitSeconds = 5, [string[]]$Import = @())
   $endpoint = "\\.\pipe\attome-uitest-$PID-$([guid]::NewGuid().ToString('N').Substring(0, 6))"
   $oldE = $env:ATTOME_ENDPOINT; $oldS = $env:ATTOME_EDITOR_SELECT
   $env:ATTOME_ENDPOINT = $endpoint
   if ($SelectFirstClip) { $env:ATTOME_EDITOR_SELECT = '1' } else { Remove-Item Env:\ATTOME_EDITOR_SELECT -ErrorAction SilentlyContinue }
-  try { $p = Start-Process (Join-Path (Get-BinDir) 'attome-editor.exe') -ArgumentList "`"$Project`"" -PassThru }
+  $editorArgs = (@($Project) + $Import | ForEach-Object { "`"$_`"" }) -join ' ' # media files are imported on start
+  try { $p = Start-Process (Join-Path (Get-BinDir) 'attome-editor.exe') -ArgumentList $editorArgs -PassThru }
   finally { $env:ATTOME_ENDPOINT = $oldE; if ($oldS) { $env:ATTOME_EDITOR_SELECT = $oldS } else { Remove-Item Env:\ATTOME_EDITOR_SELECT -ErrorAction SilentlyContinue } }
   Start-Sleep -Seconds $WaitSeconds
   $p.Refresh()

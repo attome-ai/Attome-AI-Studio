@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdio>
 #include <map>
 #include <optional>
 #include <set>
@@ -58,7 +59,7 @@ bool ends_with_order(string_view key) { return key.size() > 6 && key.substr(key.
 
 bool is_time_key(string_view k) {
   return k == "record_in" || k == "duration" || k == "source_in" || k == "t" || k == "start" || k == "in_offset" ||
-         k == "out_offset";
+         k == "out_offset" || k == "fade_in" || k == "fade_out";
 }
 
 bool is_time_like(const json &v) {
@@ -255,11 +256,68 @@ void check_keyframes(const json &clip, const std::string &clip_id, json &problem
   }
 }
 
+// Sound settings (F1 §4.1): clip "audio" {gain_db, pan, fade_in, fade_out, fade_curve}; track volume_db and pan.
+void check_number(const json &obj, const char *key, double lo, double hi, const std::string &owner, const std::string &path,
+                  json &problems) {
+  const auto v = obj.find(key);
+  if (v == obj.end() || (v->is_number() && v->get<double>() >= lo && v->get<double>() <= hi))
+    return;
+  char range[64];
+  std::snprintf(range, sizeof range, "a number from %g to %g", lo, hi);
+  problems.push_back(problem("AUDIO_TYPE_MISMATCH", path + "/" + key, owner,
+                             std::string(key) + " of " + owner + " must be " + range + ".",
+                             std::string(key) == "pan" ? "-1 is full left, 0 the centre, 1 full right."
+                                                       : "Gain in decibels: -12 is about a quarter of the level, 0 unchanged."));
+}
+
+void check_audio(const json &clip, const std::string &clip_id, const Rational &duration, json &problems) {
+  const auto it = clip.find("audio");
+  if (it == clip.end())
+    return;
+  const std::string path = clip_id + "/audio";
+  if (!it->is_object()) {
+    problems.push_back(problem("AUDIO_TYPE_MISMATCH", path, clip_id, "audio of clip " + clip_id + " must be an object.",
+                               "Write {\"gain_db\": -12, \"fade_out\": \"2s\"}."));
+    return;
+  }
+  check_number(*it, "gain_db", -96.0, 24.0, clip_id, path, problems);
+  check_number(*it, "pan", -1.0, 1.0, clip_id, path, problems);
+  const std::string curve = it->value("fade_curve", std::string("equal_power"));
+  if (curve != "equal_power" && curve != "linear")
+    problems.push_back(problem("AUDIO_TYPE_MISMATCH", path + "/fade_curve", clip_id,
+                               "fade_curve of clip " + clip_id + " is \"" + curve + "\".",
+                               "Use \"equal_power\" (the default) or \"linear\"."));
+  Rational total;
+  for (const char *key : {"fade_in", "fade_out"}) {
+    const auto f = it->find(key);
+    if (f == it->end())
+      continue;
+    std::optional<Rational> t;
+    if (f->is_string())
+      if (auto r = Rational::parse(f->get_ref<const std::string &>()))
+        t = *r;
+    if (!t || t->num() < 0) {
+      problems.push_back(problem("AUDIO_TYPE_MISMATCH", path + "/" + key, clip_id,
+                                 std::string(key) + " of clip " + clip_id + " must be a time of zero or more.",
+                                 "Write a time such as \"2s\"."));
+      return;
+    }
+    total = add(total, *t).value_or(total);
+  }
+  if (compare(total, duration) > 0)
+    problems.push_back(problem("AUDIO_FADE_TOO_LONG", path, clip_id,
+                               "The fades of clip " + clip_id + " (" + total.to_string() + " s together) are longer than the clip (" +
+                                   duration.to_string() + " s).",
+                               "Keep fade_in + fade_out at most the clip's duration."));
+}
+
 // Timing rules of one track: every clip has a valid timing, clips do not overlap, and transitions fit.
 void check_track(const doc::Document &doc, const std::string &track_id, json &problems) {
   const NodeRef *ref = doc.find(track_id);
   if (!ref)
     return;
+  check_number(*ref->node, "volume_db", -96.0, 24.0, track_id, track_id, problems);
+  check_number(*ref->node, "pan", -1.0, 1.0, track_id, track_id, problems);
   const auto clips = ref->node->find("clips");
   if (clips == ref->node->end() || !clips->is_object())
     return;
@@ -301,6 +359,7 @@ void check_track(const doc::Document &doc, const std::string &track_id, json &pr
                                  "Use a smaller record_in or duration."));
       continue;
     }
+    check_audio(*it, id, *rdur, problems);
     spans.push_back({*rin, *end, &id});
   }
   std::sort(spans.begin(), spans.end(), [](const Span &a, const Span &b) { return compare(a.in, b.in) < 0; });
@@ -369,11 +428,14 @@ public:
       if (doc_.find(id))
         tracks.insert(id);
     for (const std::string &id : timing_clips_) // clips, transitions and keyframes: check the track that holds them
-      for (const NodeRef *ref = doc_.find(id); ref && !ref->parent.empty(); ref = doc_.find(ref->parent))
-        if (id_prefix(ref->parent) == "trk") {
-          tracks.insert(ref->parent);
-          break;
-        }
+      if (id_prefix(id) == "trk" && doc_.find(id))
+        tracks.insert(id);
+      else
+        for (const NodeRef *ref = doc_.find(id); ref && !ref->parent.empty(); ref = doc_.find(ref->parent))
+          if (id_prefix(ref->parent) == "trk") {
+            tracks.insert(ref->parent);
+            break;
+          }
     for (const std::string &id : res_.created) {
       const string_view prefix = id_prefix(id);
       if (prefix == "trk") {
@@ -670,8 +732,9 @@ private:
 
   void note_timing(const std::string &id, const Path &p) {
     const string_view prefix = id_prefix(id);
-    if ((prefix == "clp" && p.n >= 2 && (p.seg[1] == "timing" || p.seg[1] == "media_ref" || p.seg[1] == "transform")) ||
-        prefix == "trn" || prefix == "kf")
+    if ((prefix == "clp" && p.n >= 2 &&
+         (p.seg[1] == "timing" || p.seg[1] == "media_ref" || p.seg[1] == "transform" || p.seg[1] == "audio")) ||
+        prefix == "trn" || prefix == "kf" || prefix == "trk")
       timing_clips_.insert(id);
   }
 

@@ -363,11 +363,49 @@ int main(int argc, char **argv) {
     exit_status = finish(opt, outcome);
   });
 
-  auto *cmd_sample = app.add_subcommand("sample", "Write a synthetic test clip (moving bar, beeps): attome sample a.mp4");
+  auto *cmd_sample = app.add_subcommand(
+      "sample", "Write a synthetic test clip (moving bar, beeps): attome sample a.mp4, or sound only: attome sample m.wav");
   cmd_sample->add_option("file", file)->required();
   cmd_sample->add_option("--seconds", seconds, "Length of the clip");
   cmd_sample->add_option("--height", height, "Picture height (16:9), default 720");
   cmd_sample->callback([&] {
+    if (file.size() > 4 && file.compare(file.size() - 4, 4, ".wav") == 0) { // sound only: a little arpeggio
+      const int rate = atm::media::kAudioRate;
+      const size_t frames = size_t(std::max(1.0, seconds) * rate);
+      std::string wav(44 + frames * 4, '\0');
+      const auto put = [&](size_t at, uint32_t v, int bytes) {
+        for (int i = 0; i < bytes; ++i)
+          wav[at + size_t(i)] = char((v >> (8 * i)) & 255);
+      };
+      wav.replace(0, 4, "RIFF");
+      put(4, uint32_t(36 + frames * 4), 4);
+      wav.replace(8, 8, "WAVEfmt ");
+      put(16, 16, 4);
+      put(20, 1, 2); // PCM
+      put(22, 2, 2); // stereo
+      put(24, uint32_t(rate), 4);
+      put(28, uint32_t(rate * 4), 4);
+      put(32, 4, 2);
+      put(34, 16, 2);
+      wav.replace(36, 4, "data");
+      put(40, uint32_t(frames * 4), 4);
+      static const double notes[] = {220.0, 261.63, 329.63, 392.0}; // A3 C4 E4 G4, a quarter second each
+      for (size_t i = 0; i < frames; ++i) {
+        const double t = double(i) / rate, in_note = std::fmod(t, 0.25);
+        const double env = std::min(1.0, in_note * 40.0) * std::exp(-in_note * 6.0);
+        const double v = 0.4 * env * std::sin(6.283185307179586 * notes[size_t(t / 0.25) % 4] * t);
+        const auto sample = uint32_t(uint16_t(int16_t(std::lround(v * 32767.0))));
+        put(44 + i * 4, sample, 2);
+        put(46 + i * 4, sample, 2);
+      }
+      const auto path = std::filesystem::path(std::u8string(file.begin(), file.end()));
+      if (auto written = atm::storage::atomic_write(std::filesystem::absolute(path), wav); !written) {
+        exit_status = finish(opt, {{"ok", false}, {"error", atm::error_to_json(written.error())}});
+        return;
+      }
+      exit_status = finish(opt, {{"ok", true}, {"result", {{"path", abs_path(file)}, {"seconds", double(frames) / rate}}}});
+      return;
+    }
     const int h = height > 0 ? height : 720, w = h * 16 / 9;
     const int fps = 30, frames = std::max(1, int(seconds * fps));
     auto fail_with = [&](const atm::Error &e) {

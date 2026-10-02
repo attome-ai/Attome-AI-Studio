@@ -28,6 +28,13 @@ struct Layer {
   int64_t source_in_hns = 0;  // where in the file the clip starts
   float opacity = 1.0f;
   float volume = 1.0f;
+  // Sound (the clip's "audio" object and its track): gain is linear and folds in the clip's gain_db and the track's
+  // volume_db (volume above stays a separate factor); pan is -1 (left) .. 1 (right), clip and track added. Fades are
+  // measured from the clip's own ends, [origin_frame, clip_end_frame), not from a dissolve's extension.
+  float gain = 1.0f, pan = 0.0f;
+  int64_t fade_in_hns = 0, fade_out_hns = 0;
+  bool fade_linear = false; // false: equal power (a quarter sine), the default
+  int64_t clip_end_frame = 0;
   // Transform (ADR-021 canvas fractions): position is where the clip's centre sits on the canvas, top-left origin,
   // so [0.5, 0.5] is the middle. Scale 1 is "fitted inside the canvas"; 2 is twice that size.
   float pos_x = 0.5f, pos_y = 0.5f, scale_x = 1.0f, scale_y = 1.0f;

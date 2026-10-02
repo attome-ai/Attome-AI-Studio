@@ -1,9 +1,12 @@
 #if defined(_WIN32) // the only media backend so far
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
 #include <chrono>
 #include <cstring>
+#include <cmath>
 #include <filesystem>
+#include <fstream>
 #include <thread>
 
 #include "atm/api/engine.hpp"
@@ -481,6 +484,99 @@ TEST_CASE("render: a clip between two dissolves fades its sound in and out", "[m
   CHECK(rms(*audio, 0.9, 1.1) / level > 0.88);
   CHECK(rms(*audio, 1.9, 2.1) / level < 1.12);
   CHECK(rms(*audio, 1.9, 2.1) / level > 0.88);
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}
+
+namespace {
+
+// A 16-bit stereo WAV of a 440 Hz tone at 0.3, `seconds` long: sound with no picture.
+void write_wav(const std::string &path, double seconds) {
+  const size_t frames = size_t(seconds * 48000.0);
+  std::string wav(44 + frames * 4, '\0');
+  const auto put = [&](size_t at, uint32_t v, int bytes) {
+    for (int i = 0; i < bytes; ++i)
+      wav[at + size_t(i)] = char((v >> (8 * i)) & 255);
+  };
+  wav.replace(0, 4, "RIFF");
+  put(4, uint32_t(36 + frames * 4), 4);
+  wav.replace(8, 8, "WAVEfmt ");
+  put(16, 16, 4);
+  put(20, 1, 2);
+  put(22, 2, 2);
+  put(24, 48000, 4);
+  put(28, 48000 * 4, 4);
+  put(32, 4, 2);
+  put(34, 16, 2);
+  wav.replace(36, 4, "data");
+  put(40, uint32_t(frames * 4), 4);
+  for (size_t i = 0; i < frames; ++i) {
+    const auto v = uint32_t(uint16_t(int16_t(std::lround(0.3 * 32767.0 * std::sin(6.283185307179586 * 440.0 * double(i) / 48000.0)))));
+    put(44 + i * 4, v, 2);
+    put(46 + i * 4, v, 2);
+  }
+  std::ofstream(fs::path(path), std::ios::binary).write(wav.data(), std::streamsize(wav.size()));
+}
+
+double channel_rms(const std::vector<float> &stereo, int channel, double from_s, double to_s) {
+  const size_t a = size_t(from_s * 48000.0), b = size_t(to_s * 48000.0);
+  double sum = 0.0;
+  for (size_t i = a; i < b; ++i)
+    sum += double(stereo[i * 2 + size_t(channel)]) * double(stereo[i * 2 + size_t(channel)]);
+  return std::sqrt(sum / double(b - a));
+}
+
+} // namespace
+
+TEST_CASE("render: a sound file on an audio track, with gain in dB, pan, fades and track volume", "[media]") {
+  const fs::path dir = fs::temp_directory_path() / atm::new_id("attome-sound");
+  fs::create_directories(dir);
+  const std::string music = (dir / "music.wav").string();
+  write_wav(music, 4.0);
+  const auto info = media::probe(music);
+  REQUIRE(info);
+  CHECK_FALSE(info->has_video);
+  CHECK(info->has_audio);
+
+  // Mixes 4 s of the file on an audio track with the given clip "audio" object and track fields.
+  const auto mix_with = [&](const json &audio, const json &track_extra) {
+    json track = {{"kind", "audio"},
+                  {"clips", {{"clp_m", {{"timing", {{"record_in", "0"}, {"duration", "4"}, {"source_in", "0"}}},
+                                        {"media_ref", {{"type", "file"}, {"path", music}}},
+                                        {"audio", audio}}}}}};
+    track.update(track_extra);
+    const json doc = {{"sequences", {{"seq_1", {{"rate", "30"}, {"track_order", {"trk_a"}}, {"tracks", {{"trk_a", track}}}}}}},
+                      {"sequence_order", {"seq_1"}}};
+    auto comp = atm::render::compile(doc);
+    REQUIRE(comp);
+    REQUIRE(comp->frames == 120); // a sound-only clip gives the sequence its length
+    auto mixed = atm::render::mix_audio(*comp);
+    REQUIRE(mixed);
+    return *mixed;
+  };
+  const auto plain = mix_with(json::object(), json::object());
+  const double level = channel_rms(plain, 0, 1.0, 3.0);
+  CHECK(level > 0.18); // 0.3 / sqrt(2)
+
+  const auto quieter = mix_with({{"gain_db", -12}}, json::object());
+  CHECK(channel_rms(quieter, 0, 1.0, 3.0) / level > 0.24); // 10^(-12/20) = 0.251
+  CHECK(channel_rms(quieter, 0, 1.0, 3.0) / level < 0.26);
+
+  const auto track_down = mix_with({{"gain_db", -6}}, {{"volume_db", -6}}); // clip and track add up
+  CHECK(channel_rms(track_down, 0, 1.0, 3.0) / level == Catch::Approx(0.251).margin(0.01));
+
+  const auto left = mix_with({{"pan", -1}}, json::object());
+  CHECK(channel_rms(left, 0, 1.0, 3.0) / level > 0.99);
+  CHECK(channel_rms(left, 1, 1.0, 3.0) < 0.001);
+
+  const auto faded = mix_with({{"fade_in", "1"}, {"fade_out", "2"}}, json::object());
+  CHECK(channel_rms(faded, 0, 0.0, 0.05) < 0.1 * level);              // starts from silence
+  CHECK(channel_rms(faded, 0, 1.0, 1.9) / level > 0.97);              // full between the fades
+  CHECK(channel_rms(faded, 0, 2.9, 3.1) / level > 0.6);               // half way down (equal power: sin 45° = 0.71)
+  CHECK(channel_rms(faded, 0, 2.9, 3.1) / level < 0.8);
+  CHECK(channel_rms(faded, 0, 3.95, 4.0) < 0.1 * level);              // ends in silence
+  const auto linear = mix_with({{"fade_out", "2"}, {"fade_curve", "linear"}}, json::object());
+  CHECK(channel_rms(linear, 0, 2.9, 3.1) / level < 0.56);             // linear: 0.5 half way
   std::error_code ec;
   fs::remove_all(dir, ec);
 }

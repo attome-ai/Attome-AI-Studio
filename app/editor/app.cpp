@@ -280,6 +280,14 @@ void App::refresh() {
             }
           detect_fades(c, rate_);
           c.volume = cit->value("volume", 1.0f);
+          if (const auto au = cit->find("audio"); au != cit->end() && au->is_object()) {
+            c.gain_db = au->value("gain_db", 0.0f);
+            c.pan = au->value("pan", 0.0f);
+            c.audio_fade_in = frames_of(*au, "fade_in", rate_);
+            c.audio_fade_out = frames_of(*au, "fade_out", rate_);
+          }
+          if (track.kind == "audio" && !c.path.empty())
+            audio_only_.insert(c.path);
           total_frames_ = std::max(total_frames_, c.start + c.frames);
           track.clips.push_back(std::move(c));
         }
@@ -398,21 +406,30 @@ void App::import_files(const std::vector<std::string> &paths) {
   if (project_path_.empty() || paths.empty())
     return;
   json ops = json::array();
-  // Target: the selected track, else the first one, else a new one.
-  std::string track = selected_track_;
-  const TrackUi *existing = nullptr;
-  for (const TrackUi &t : tracks_)
-    if (t.id == track || (track.empty() && !existing))
-      existing = &t;
-  int64_t at = 0;
-  if (existing) {
-    track = existing->id;
-    for (const ClipUi &c : existing->clips)
-      at = std::max(at, c.start + c.frames);
-  } else {
-    track = "$new:track";
-    ops.push_back({{"op", "add"}, {"path", seq_id_ + "/tracks/$new:track"}, {"value", {{"kind", "video"}, {"name", "V1"}}}});
-  }
+  // Each kind of file goes to the selected track when it fits, else the first track of its kind, else a new one.
+  struct Target {
+    std::string track;
+    int64_t at = 0;
+    bool created = false;
+  };
+  const auto target_for = [&](bool audio, const char *placeholder) {
+    Target t;
+    const TrackUi *found = nullptr;
+    for (const TrackUi &k : tracks_)
+      if ((k.kind == "audio") == audio && (k.id == selected_track_ || !found))
+        found = &k;
+    if (found) {
+      t.track = found->id;
+      for (const ClipUi &c : found->clips)
+        t.at = std::max(t.at, c.start + c.frames);
+    } else {
+      t.track = placeholder;
+      t.created = true;
+    }
+    return t;
+  };
+  Target video = target_for(false, "$new:track"), sound = target_for(true, "$new:audio");
+  bool video_used = false, sound_used = false, canvas_set = false;
   int added = 0;
   std::string problem;
   for (const std::string &path : paths) {
@@ -422,40 +439,57 @@ void App::import_files(const std::vector<std::string> &paths) {
       problem = error.message + "  " + error.hint;
       continue;
     }
-    if (!info.value("has_video", false)) {
-      problem = "\"" + file_name(path) + "\" has no video; audio-only clips are not supported yet.";
+    const bool has_video = info.value("has_video", false);
+    if (!has_video && !info.value("has_audio", false)) {
+      problem = "\"" + file_name(path) + "\" has neither video nor sound.";
       continue;
     }
     if (std::find(media_paths_.begin(), media_paths_.end(), path) == media_paths_.end())
       media_paths_.push_back(path);
+    if (!has_video)
+      audio_only_.insert(path);
+    Target &to = has_video ? video : sound;
+    (has_video ? video_used : sound_used) = true;
     const int64_t frames = std::max<int64_t>(1, int64_t(std::floor(info.value("seconds", 0.0) * fps())));
-    if (total_frames_ == 0 && added == 0) { // the first clip of a project sets the canvas
+    if (has_video && total_frames_ == 0 && !canvas_set) { // the first video of a project sets the canvas
       ops.push_back({{"op", "replace"}, {"path", seq_id_ + "/canvas/width"}, {"value", info.value("width", 1920)}});
       ops.push_back({{"op", "replace"}, {"path", seq_id_ + "/canvas/height"}, {"value", info.value("height", 1080)}});
+      canvas_set = true;
     }
     json media = {{"type", "file"}, {"path", path}, {"duration", info.value("duration", "0")},
-                  {"width", info.value("width", 0)}, {"height", info.value("height", 0)},
                   {"has_audio", info.value("has_audio", false)}};
-    if (info.contains("rate"))
-      media["rate"] = info["rate"];
-    ops.push_back({{"op", "add"},
-                   {"path", track + "/clips/$new:c" + std::to_string(added)},
-                   {"value",
-                    {{"name", file_name(path)},
-                     {"timing", {{"record_in", frames_text(at)}, {"duration", frames_text(frames)}, {"source_in", "0"}}},
-                     {"media_ref", std::move(media)},
-                     {"transform", {{"opacity", 1.0}}},
-                     {"volume", 1.0}}}});
-    at += frames;
+    if (has_video) {
+      media["width"] = info.value("width", 0);
+      media["height"] = info.value("height", 0);
+      if (info.contains("rate"))
+        media["rate"] = info["rate"];
+    }
+    json clip = {{"name", file_name(path)},
+                 {"timing", {{"record_in", frames_text(to.at)}, {"duration", frames_text(frames)}, {"source_in", "0"}}},
+                 {"media_ref", std::move(media)},
+                 {"volume", 1.0}};
+    if (has_video)
+      clip["transform"] = {{"opacity", 1.0}};
+    ops.push_back({{"op", "add"}, {"path", to.track + "/clips/$new:c" + std::to_string(added)}, {"value", std::move(clip)}});
+    to.at += frames;
     ++added;
   }
+  // New tracks go first in the patch, so the clips can name them.
+  json head = json::array();
+  if (video.created && video_used)
+    head.push_back({{"op", "add"}, {"path", seq_id_ + "/tracks/$new:track"}, {"value", {{"kind", "video"}, {"name", "V1"}}}});
+  if (sound.created && sound_used)
+    head.push_back({{"op", "add"}, {"path", seq_id_ + "/tracks/$new:audio"}, {"value", {{"kind", "audio"}, {"name", "A1"}}}});
+  for (json &op : ops)
+    head.push_back(std::move(op));
   if (added > 0) {
     json ids;
     const std::string label = added == 1 ? "Import " + file_name(paths[0]) : "Import " + std::to_string(added) + " clips";
-    if (patch(std::move(ops), label.c_str(), &ids)) {
+    if (patch(std::move(head), label.c_str(), &ids)) {
       selected_clip_ = ids.value("$new:c" + std::to_string(added - 1), "");
-      if (track == "$new:track")
-        selected_track_ = ids.value("$new:track", "");
+      for (const char *t : {"$new:track", "$new:audio"})
+        if (ids.contains(t))
+          selected_track_ = ids.value(t, "");
     }
   }
   if (!problem.empty())
@@ -605,7 +639,7 @@ void App::start_export(const std::string &path) {
 // ---- native dialogs ------------------------------------------------------------------------------------------
 
 void App::ask_import() {
-  static const SDL_DialogFileFilter filters[] = {{"Video", "mp4;mov;m4v;mkv;avi;wmv;webm"}, {"All files", "*"}};
+  static const SDL_DialogFileFilter filters[] = {{"Video and sound", "mp4;mov;m4v;mkv;avi;wmv;webm;mp3;wav;m4a;aac;wma;flac"}, {"All files", "*"}};
   SDL_ShowOpenFileDialog(
       [](void *self, const char *const *files, int) {
         App *app = static_cast<App *>(self);
@@ -1217,7 +1251,13 @@ void App::draw_media() {
     ImDrawList *dl = ImGui::GetWindowDrawList();
     const auto tex = thumb_tex_.find(path);
     dl->AddRectFilled(p, ImVec2(p.x + cell, p.y + thumb_h), hex(look::bg), 8.0f);
-    if (tex != thumb_tex_.end() && tex->second)
+    if (audio_only_.count(path)) { // no picture: a few bars like a waveform
+      for (int i = 0; i < 24; ++i) {
+        const float h = (0.2f + 0.6f * std::fabs(std::sin(float(i) * 1.7f))) * thumb_h * 0.6f;
+        const float x = p.x + cell * (0.15f + 0.7f * float(i) / 23.0f);
+        dl->AddLine(ImVec2(x, p.y + thumb_h * 0.5f - h * 0.5f), ImVec2(x, p.y + thumb_h * 0.5f + h * 0.5f), hex(look::aud), 3.0f);
+      }
+    } else if (tex != thumb_tex_.end() && tex->second)
       dl->AddImageRounded(ImTextureID(reinterpret_cast<intptr_t>(tex->second)), p, ImVec2(p.x + cell, p.y + thumb_h),
                           ImVec2(0, 0), ImVec2(1, 1), IM_COL32_WHITE, 8.0f);
     if (hovered)
@@ -1648,6 +1688,14 @@ void App::draw_timeline() {
       dl->AddRectFilled(ImVec2(x0, cy), ImVec2(x1 - 1.0f, cy + 3.0f), IM_COL32(255, 255, 255, 70), 5.0f, ImDrawFlags_RoundCornersTop);
       if (is_selected)
         dl->AddRect(ImVec2(x0, cy), ImVec2(x1 - 1.0f, cy + ch), hex(look::accent), 5.0f, 0, 2.0f);
+      if ((c.audio_fade_in > 0 || c.audio_fade_out > 0) && drag_id_ != c.id) { // sound fades: ramps at the ends
+        const float fx_in = x_of(double(start + std::min(c.audio_fade_in, frames)));
+        const float fx_out = x_of(double(start + frames - std::min(c.audio_fade_out, frames)));
+        if (c.audio_fade_in > 0)
+          dl->AddLine(ImVec2(x0, cy + ch - 2.0f), ImVec2(fx_in, cy + 2.0f), IM_COL32(255, 230, 160, 210), 1.5f);
+        if (c.audio_fade_out > 0)
+          dl->AddLine(ImVec2(fx_out, cy + 2.0f), ImVec2(x1 - 1.0f, cy + ch - 2.0f), IM_COL32(255, 230, 160, 210), 1.5f);
+      }
       if (!c.opacity_keys.empty() && drag_id_ != c.id) { // opacity over time, like an automation lane
         const int steps = std::clamp(int((x1 - x0) / 4.0f), 2, 400);
         std::vector<ImVec2> pts;
@@ -1938,8 +1986,11 @@ void App::draw_inspector() {
     copy_to(in_buf_, sizeof in_buf_, timecode(c->start));
     copy_to(dur_buf_, sizeof dur_buf_, timecode(c->frames));
     opacity_ = c->opacity;
-    volume_ = c->volume;
     fade_in_s_ = float(double(c->fade_in) / fps());
+    gain_db_ = c->gain_db;
+    pan_ = c->pan;
+    audio_fade_in_s_ = float(double(c->audio_fade_in) / fps());
+    audio_fade_out_s_ = float(double(c->audio_fade_out) / fps());
     fade_out_s_ = float(double(c->fade_out) / fps());
     scale_ = c->scale_x;
     if (c->is_text) {
@@ -2035,7 +2086,8 @@ void App::draw_inspector() {
     end_card();
   }
 
-  if (begin_card("##look", "Transform")) {
+  const bool picture = track->kind != "audio"; // clips on audio tracks are sound only
+  if (picture && begin_card("##look", "Transform")) {
     // Position is shown in canvas pixels from the centre; the document stores canvas fractions (ADR-021).
     ImGui::TextColored(hexv(look::fg2), "Position");
     ImGui::SameLine(88.0f);
@@ -2107,27 +2159,49 @@ void App::draw_inspector() {
     }
     ImGui::EndDisabled();
   }
-  end_card();
-
-  draw_fade_card(*c);
+  if (picture) {
+    end_card();
+    draw_fade_card(*c);
+  }
   draw_transition_card(*track, *c);
 
   const bool show_audio = !c->is_text; // text clips have no sound
   if (show_audio && begin_card("##sound", "Audio")) {
-    ImGui::TextColored(hexv(look::fg2), "Volume");
-    ImGui::SameLine(88.0f);
-    const float avail = ImGui::GetContentRegionAvail().x - 52.0f;
-    slim_slider("volume", &volume_, 0.0f, 2.0f, avail, "");
-    if (ImGui::IsItemDeactivatedAfterEdit()) {
-      const float v = std::round(volume_ * 100.0f) / 100.0f;
+    // One row: label, slider, value. The edit is sent when the slider is let go.
+    const auto row = [&](const char *label, const char *slider, float *value, float lo, float hi, const char *fmt,
+                         const char *key, const char *what, bool is_time) {
+      ImGui::TextColored(hexv(look::fg2), "%s", label);
+      ImGui::SameLine(88.0f);
+      slim_slider(slider, value, lo, hi, ImGui::GetContentRegionAvail().x - 60.0f, "");
+      if (ImGui::IsItemDeactivatedAfterEdit()) {
+        const float v = *value;
+        const std::string k = key, w = what;
+        pending_ = [this, id, v, k, w, is_time] {
+          const json value = is_time ? json(frames_text(std::llround(double(v) * fps()))) : json(std::round(v * 10.0f) / 10.0f);
+          patch(json::array({{{"op", "replace"}, {"path", id + "/audio/" + k}, {"value", value}}}), w.c_str());
+        };
+      }
+      ImGui::SameLine();
+      ImGui::PushFont(g_fonts.mono, 13.0f);
+      ImGui::TextColored(hexv(look::fg2), fmt, *value);
+      ImGui::PopFont();
+    };
+    row("Gain", "gain", &gain_db_, -40.0f, 12.0f, "%+.1f dB", "gain_db", "Change gain", false);
+    row("Pan", "pan", &pan_, -1.0f, 1.0f, "%+.1f", "pan", "Change pan", false);
+    const float max_fade = float(std::min(10.0, double(c->frames) / fps()));
+    row("Fade in", "afadein", &audio_fade_in_s_, 0.0f, max_fade, "%.2fs", "fade_in", "Sound fade in", true);
+    row("Fade out", "afadeout", &audio_fade_out_s_, 0.0f, max_fade, "%.2fs", "fade_out", "Sound fade out", true);
+    bool muted = c->volume <= 0.0f;
+    if (ImGui::Checkbox("Mute", &muted)) {
+      const float v = muted ? 0.0f : 1.0f;
       pending_ = [this, id, v] {
-        patch(json::array({{{"op", "replace"}, {"path", id + "/volume"}, {"value", v}}}), "Change volume");
+        patch(json::array({{{"op", "replace"}, {"path", id + "/volume"}, {"value", v}}}), v > 0.0f ? "Unmute" : "Mute");
       };
     }
-    ImGui::SameLine();
-    ImGui::PushFont(g_fonts.mono, 13.0f);
-    ImGui::TextColored(hexv(look::fg2), "%3.0f%%", volume_ * 100.0f);
-    ImGui::PopFont();
+    if (c->volume > 0.0f && c->volume != 1.0f) {
+      ImGui::SameLine(0.0f, 16.0f);
+      ImGui::TextColored(hexv(look::fg3), "volume x%.2f", c->volume);
+    }
   }
   if (show_audio)
     end_card();

@@ -25,14 +25,15 @@ What exists today:
 - a crash-safe journal: an edit that was acknowledged survives a kill
 - the `attomed` daemon (JSON-RPC over a per-user pipe or socket) and the `attome` command line
 - a zone profiler built into the engine, see [Profiling](#profiling)
-- a first editor, `attome-editor` (Windows only for now): import video files, arrange them on a multi-track timeline (move, trim, split, opacity, volume), preview, and export an H.264 + AAC `.mp4`
+- a first editor, `attome-editor` (Windows only for now): import video and sound files, arrange them on a multi-track timeline (move, trim, split, opacity, volume), preview, and export an H.264 + AAC `.mp4`
 - the same export for scripts and agents: `attome render Demo.attome -o out.mp4`
 - text clips (titles, lower thirds, captions) with a size, colour and position, drawn with DirectWrite so Arabic and other right-to-left text are shaped correctly in the preview and the export
 - dissolves between clips, with the sound cross-faded at equal power; a dissolve uses media beyond the cut, and an edit that leaves too little is refused with the largest length that fits
 - keyframes on opacity, position and scale (linear, hold and easing presets); the Inspector's Fade card fades a clip in and out, and the timeline draws the opacity curve on the clip
+- sound: music and other sound files on audio tracks, clip gain in dB, pan and fades (equal power or linear), track volume and pan, and mute; the Inspector's Audio card sets them
 - an MCP server, `attome mcp --stdio`: an AI agent such as Claude can build a project, look at frames and a contact sheet of it, and render it, see [Connect an AI agent](#connect-an-ai-agent)
 
-Not built yet: AI generation, effects, audio fades and gain in dB, transitions other than the dissolve, the GPU compositor, JSON Schema validation, Suggested Edits and per-task undo. Decode and encode use the Windows media stack today, so import and export work on Windows only; the macOS and Linux code paths of the rest are written but have only been built and tested on Windows.
+Not built yet: AI generation, effects and adjustment layers, transitions other than the dissolve, the GPU compositor, JSON Schema validation, Suggested Edits and per-task undo. Decode and encode use the Windows media stack today, so import and export work on Windows only; the macOS and Linux code paths of the rest are written but have only been built and tested on Windows.
 
 ### The editor
 

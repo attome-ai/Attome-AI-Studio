@@ -6,6 +6,7 @@
 #include <functional>
 #include <map>
 #include <mutex>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -45,6 +46,8 @@ struct ClipUi {
   bool fades_only = true;                   // false when the opacity keys are something other than fades
   bool animated = false;                    // any transform keyframes: the static values are not what plays
   json keyframes;                           // the clip's transform.keyframes, for split
+  float gain_db = 0.0f, pan = 0.0f;         // the clip's "audio" object
+  int64_t audio_fade_in = 0, audio_fade_out = 0; // frames
 };
 
 struct TransitionUi { // a dissolve over [cut - in, cut + out), where `to` starts
@@ -175,6 +178,7 @@ private:
   Thumbs thumbs_;
   std::map<std::string, SDL_Texture *> thumb_tex_;
   std::vector<std::string> media_paths_;
+  std::set<std::string> audio_only_; // media files without a picture
   char media_filter_[128] = {};
   int inspector_tab_ = 0;
   int rail_tab_ = 0; // 0 Media, 2 Text
@@ -183,12 +187,13 @@ private:
   bool text_bold_ = false;
   float dissolve_s_ = 1.0f; // length of a new dissolve, seconds
   float fade_in_s_ = 0.0f, fade_out_s_ = 0.0f;
+  float gain_db_ = 0.0f, pan_ = 0.0f, audio_fade_in_s_ = 0.0f, audio_fade_out_s_ = 0.0f;
 
   // inspector
   std::string insp_for_;
   uint64_t insp_rev_ = 0;
   char name_buf_[256] = {}, in_buf_[64] = {}, dur_buf_[64] = {};
-  float opacity_ = 1.0f, volume_ = 1.0f, scale_ = 1.0f, pos_px_[2] = {0.0f, 0.0f};
+  float opacity_ = 1.0f, scale_ = 1.0f, pos_px_[2] = {0.0f, 0.0f};
 
   // export
   std::string job_id_;

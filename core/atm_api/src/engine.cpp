@@ -737,6 +737,19 @@ struct Engine::Impl {
          "ease_in_expo, ease_out_expo, ease_in_out_expo or ease_out_back.\n"
          "Add one key to a clip that exists: {\"op\":\"add\",\"path\":\"<clip_id>/transform/keyframes/opacity/$new:k5\","
          "\"value\":{\"t\":\"2s\",\"v\":0.5}}. Keyframes replace the plain value while they exist."},
+        {"audio",
+         "Sound. Music or a voice-over is a clip on an audio track (kind \"audio\"); files without video (mp3, wav, "
+         "m4a) belong there. Video clips play their own sound too.\n"
+         "Music under everything at -12 dB with a 2 s fade-out:\n"
+         "{\"op\":\"add\",\"path\":\"<seq_id>/tracks/$new:a1\",\"value\":{\"kind\":\"audio\",\"name\":\"Music\"}}, then "
+         "{\"op\":\"add\",\"path\":\"$new:a1/clips/$new:m\",\"value\":{\"name\":\"music\",\"timing\":{\"record_in\":"
+         "\"0s\",\"duration\":\"20s\",\"source_in\":\"0s\"},\"media_ref\":{\"type\":\"file\",\"path\":\"C:/media/"
+         "song.mp3\",\"duration\":\"<from media.probe>\"},\"audio\":{\"gain_db\":-12,\"fade_in\":\"0s\",\"fade_out\":"
+         "\"2s\"}}}\n"
+         "Clip \"audio\": gain_db (-96 to 24; -12 is about a quarter of the level), pan (-1 left .. 1 right), fade_in "
+         "and fade_out (times from the clip's ends; together at most its duration), fade_curve \"equal_power\" "
+         "(default) or \"linear\". Mute a clip's own sound with \"volume\":0 (1 = unchanged). A track can carry "
+         "volume_db and pan for all its clips. Sound under a dissolve cross-fades by itself."},
         {"times",
          "Times accept \"12.5s\", \"375@30\" (frames at a rate), SMPTE \"00:00:12:15\" (needs the sequence rate) or "
          "{\"num\":25,\"den\":2} seconds. They are stored as exact rationals of seconds, such as \"25/2\". Cuts between "
@@ -748,7 +761,7 @@ struct Engine::Impl {
       if (want.empty() || want == name)
         text += std::string("## ") + name + "\n" + body + "\n\n";
     if (text.empty())
-      return bad_param("topic", "must be one of clips, text, dissolves, keyframes, times");
+      return bad_param("topic", "must be one of clips, text, dissolves, keyframes, audio, times");
     return json{{"text", std::move(text)}};
   }
 
@@ -1070,7 +1083,8 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
      &Impl::project_get},
     {"project.patch", "core", true,
      "Edit the project with an ID-addressed Patch; all ops apply or none do. Call guide.get first: it shows the "
-     "exact shapes of tracks, clips, text, dissolves and keyframes (topics: clips, text, dissolves, keyframes, times).\n"
+     "exact shapes of tracks, clips, text, dissolves, keyframes and sound (topics: clips, text, dissolves, keyframes, "
+     "audio, times).\n"
      "Ops: add, remove, replace, move, insert_order, remove_order, test. A path is \"<StableID>/<field>[/…]\": add "
      "{\"op\":\"add\",\"path\":\"<track_id>/clips/$new:c1\",\"value\":{…}}, change {\"op\":\"replace\",\"path\":"
      "\"<clip_id>/timing/duration\",\"value\":\"3s\"}, delete {\"op\":\"remove\",\"path\":\"<clip_id>\"}. "
@@ -1089,9 +1103,9 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
        "required":["project","patch"]})",
      &Impl::project_patch},
     {"guide.get", "core", false,
-     "How to write the project: the shapes of tracks and clips, text, dissolves, keyframe animation and times, with "
-     "examples ready to adapt. Read it before the first project.patch.",
-     R"({"type":"object","properties":{"topic":{"type":"string","enum":["clips","text","dissolves","keyframes","times"],
+     "How to write the project: the shapes of tracks and clips, text, dissolves, keyframe animation, sound and times, "
+     "with examples ready to adapt. Read it before the first project.patch.",
+     R"({"type":"object","properties":{"topic":{"type":"string","enum":["clips","text","dissolves","keyframes","audio","times"],
        "description":"Leave out to get every topic"}}})",
      &Impl::guide_get},
     {"project.undo", "core", true, "Undo the last edit (steps: N).",
