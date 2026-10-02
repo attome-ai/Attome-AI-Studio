@@ -267,7 +267,7 @@ scripts/     setup and update scripts (exists)
 
 ## Contributing
 
-Contributions are welcome once the first code lands. Until then, issues with ideas and bug reports about the setup scripts are the most useful.
+Contributions are welcome once the first code lands. Read [CONTRIBUTING.md](CONTRIBUTING.md) first: contributions need a one-time CLA so the project can keep offering a commercial license. Until then, issues with ideas and bug reports about the setup scripts are the most useful.
 
 - Open an issue before a large change so we can agree on the approach.
 - Sign off your commits with `git commit -s` (the [Developer Certificate of Origin](https://developercertificate.org)).
@@ -279,8 +279,11 @@ Please report vulnerabilities privately through GitHub's **Security → Report a
 
 ## License
 
-Apache License 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+Attome is dual licensed.
 
-Third-party libraries keep their own licenses. The core only links permissive libraries, and LGPL libraries only through dynamic linking.
+- **Everyone: [GNU AGPL-3.0-or-later](LICENSE).** Free forever for individuals, students, creators, teams and companies that use Attome to make videos. Your videos and projects are yours; the license covers the software, not what you make with it. If you modify Attome and distribute it, or offer it as a network service, you must share your changes under the same license.
+- **Companies that cannot or do not want to follow the AGPL** (embedding Attome in a closed product, keeping modifications private) can buy a commercial license. See [COMMERCIAL.md](COMMERCIAL.md).
 
-The name **Attome** and its logo are not covered by the Apache license. You may fork and build on the code, but please do not present a modified version as the official Attome.
+See also [NOTICE](NOTICE). Third-party libraries keep their own licenses. The core only links permissive libraries, and LGPL libraries only through dynamic linking.
+
+The name **Attome** and its logo are not covered by the AGPL. You may fork and build on the code, but please do not present a modified version as the official Attome.
