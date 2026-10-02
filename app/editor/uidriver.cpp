@@ -48,7 +48,7 @@ std::optional<ImGuiKey> key_named(const std::string &name) {
 } // namespace
 
 void ui_mark(const std::string &id) {
-  if (!g_enabled)
+  if (!g_enabled || ImGui::GetCurrentWindow()->SkipItems) // a hidden tab or a collapsed panel draws nothing
     return;
   g_marks[id] = {ImRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax()), ImGui::GetCurrentWindow(), ImGui::GetFrameCount()};
 }

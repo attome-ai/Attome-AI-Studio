@@ -108,7 +108,7 @@ TEST_CASE("mcp: handshake, tool list from the registry, and errors as tool resul
   for (const json &t : tools)
     CHECK(t["description"].get<std::string>().size() <= 1024);
   const std::string guide = json::parse(call_tool(mcp, "guide_get", json::object())["content"][0]["text"].get<std::string>())["text"];
-  for (const char *topic : {"## clips", "## text", "## dissolves", "## keyframes", "## audio", "## times", "in_offset", "ease_out_cubic"})
+  for (const char *topic : {"## clips", "## text", "## dissolves", "## keyframes", "## effects", "## audio", "## times", "in_offset", "ease_out_cubic"})
     CHECK(guide.find(topic) != std::string::npos);
   const std::string one = json::parse(call_tool(mcp, "guide_get", {{"topic", "keyframes"}})["content"][0]["text"].get<std::string>())["text"];
   CHECK(one.find("## dissolves") == std::string::npos);

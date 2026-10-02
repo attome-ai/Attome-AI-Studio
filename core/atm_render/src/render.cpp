@@ -247,7 +247,7 @@ Result<Composition> compile(const json &project, std::string_view sequence_id) {
         const auto ref = clip.find("media_ref");
         const auto timing = clip.find("timing");
         const std::string type = ref == clip.end() ? "" : ref->value("type", "");
-        if (timing == clip.end() || !(type == "text" || (type == "file" && ref->contains("path"))))
+        if (timing == clip.end() || !(type == "text" || type == "adjustment" || (type == "file" && ref->contains("path"))))
           continue;
         ATM_TRY(Rational in, rational_field(*timing, "record_in", "0"));
         ATM_TRY(Rational duration, rational_field(*timing, "duration", "0"));
@@ -265,6 +265,28 @@ Result<Composition> compile(const json &project, std::string_view sequence_id) {
             const std::string color = content->value("color", "#ffffff");
             if (color.size() == 7 && color[0] == '#')
               l.text_color = uint32_t(std::strtoul(color.c_str() + 1, nullptr, 16)) & 0xFFFFFF;
+          }
+        }
+        if (type == "adjustment") {
+          l.is_adjustment = true;
+          const auto fx = clip.find("effects");
+          if (fx != clip.end() && fx->is_object()) {
+            std::vector<std::string> fx_order; // effect_order, then any effect it misses
+            if (const auto o = clip.find("effect_order"); o != clip.end() && o->is_array())
+              for (const json &fx_id : *o)
+                if (fx_id.is_string() && fx->contains(fx_id.get<std::string>()))
+                  fx_order.push_back(fx_id.get<std::string>());
+            for (auto f = fx->begin(); f != fx->end(); ++f)
+              if (std::find(fx_order.begin(), fx_order.end(), f.key()) == fx_order.end())
+                fx_order.push_back(f.key());
+            for (const std::string &fx_id : fx_order) {
+              const json &e = (*fx)[fx_id];
+              if (!e.is_object() || !e.value("enabled", true))
+                continue;
+              const std::string name = e.value("effect", "");
+              if (name.rfind("attome.gaussian_blur", 0) == 0)
+                l.effects.push_back({"gaussian_blur", std::clamp(e.value("params", json::object()).value("radius", 0.0f), 0.0f, 0.25f)});
+            }
           }
         }
         l.track = track_index;
@@ -391,6 +413,80 @@ void Renderer::set_transform(const std::string &clip_id, float pos_x, float pos_
     }
 }
 
+namespace {
+
+// One box-blur pass along a line of n samples `step` bytes apart, edges clamped. src and dst must not overlap.
+void box_line(const uint8_t *src, uint8_t *dst, int n, int step, int r) {
+  const int w = 2 * r + 1;
+  const auto at = [&](int i) { return int(src[size_t(std::clamp(i, 0, n - 1)) * size_t(step)]); };
+  int sum = 0;
+  for (int k = -r; k <= r; ++k)
+    sum += at(k);
+  for (int i = 0; i < n; ++i) {
+    dst[size_t(i) * size_t(step)] = uint8_t((sum + w / 2) / w);
+    sum += at(i + r + 1) - at(i - r);
+  }
+}
+
+// One vertical box-blur pass over a plane of `rows` rows of `width` bytes, a running sum per column, so memory is read
+// row by row. Columns are split across threads.
+void box_vertical(const uint8_t *src, uint8_t *dst, int width, int rows, int r) {
+  const int w = 2 * r + 1;
+  parallel_for((width + 63) / 64, 1, [&](int64_t first, int64_t last) {
+    const int c0 = int(first) * 64, c1 = std::min(width, int(last) * 64);
+    std::vector<int> sum(size_t(c1 - c0), 0);
+    const auto row = [&](int y) { return src + size_t(std::clamp(y, 0, rows - 1)) * size_t(width); };
+    for (int k = -r; k <= r; ++k)
+      for (int c = c0; c < c1; ++c)
+        sum[size_t(c - c0)] += row(k)[c];
+    for (int y = 0; y < rows; ++y) {
+      uint8_t *out = dst + size_t(y) * size_t(width);
+      const uint8_t *add = row(y + r + 1), *sub = row(y - r);
+      for (int c = c0; c < c1; ++c) {
+        int &s = sum[size_t(c - c0)];
+        out[c] = uint8_t((s + w / 2) / w);
+        s += add[c] - sub[c];
+      }
+    }
+  });
+}
+
+// Gaussian blur of a packed NV12 picture in place, as three box passes each way (close to a Gaussian of `sigma`
+// pixels). The chroma plane has half the resolution, so it gets half the sigma, per channel (U and V interleave).
+void blur_nv12(uint8_t *nv12, int W, int H, float sigma, std::vector<uint8_t> &tmp) {
+  const auto box_radius = [](float s) { return int(std::lround((std::sqrt(1.0 + 4.0 * double(s) * double(s)) - 1.0) / 2.0)); };
+  tmp.resize(media::nv12_size(W, H));
+  const struct Plane {
+    uint8_t *data, *spare;
+    int width, rows, r;
+  } planes[2] = {{nv12, tmp.data(), W, H, box_radius(sigma)},
+                 {nv12 + size_t(W) * size_t(H), tmp.data() + size_t(W) * size_t(H), W, H / 2, box_radius(sigma * 0.5f)}};
+  for (int p = 0; p < 2; ++p) {
+    const Plane &pl = planes[p];
+    if (pl.r < 1)
+      continue;
+    const bool chroma = p == 1;
+    for (int pass = 0; pass < 3; ++pass) {
+      // Horizontal: data -> spare. Luma is one channel; chroma is two channels two bytes apart.
+      parallel_for(pl.rows, 16, [&](int64_t first, int64_t last) {
+        for (int64_t y = first; y < last; ++y) {
+          const uint8_t *src = pl.data + size_t(y) * size_t(pl.width);
+          uint8_t *dst = pl.spare + size_t(y) * size_t(pl.width);
+          if (chroma) {
+            box_line(src, dst, pl.width / 2, 2, pl.r);
+            box_line(src + 1, dst + 1, pl.width / 2, 2, pl.r);
+          } else {
+            box_line(src, dst, pl.width, 1, pl.r);
+          }
+        }
+      });
+      box_vertical(pl.spare, pl.data, pl.width, pl.rows, pl.r); // vertical: spare -> data
+    }
+  }
+}
+
+} // namespace
+
 Pose pose_at(const Layer &l, const Composition &comp, int64_t frame) {
   Pose p{l.opacity, l.pos_x, l.pos_y, l.scale_x, l.scale_y};
   if (l.opacity_keys.empty() && l.position_keys.empty() && l.scale_keys.empty())
@@ -420,6 +516,21 @@ void Renderer::draw(const Layer &l, int64_t frame, uint8_t *out, bool &cleared, 
   const Pose p = pose_at(l, comp_, frame);
   if (p.opacity <= 0.0f)
     return;
+  if (l.is_adjustment) { // change the picture so far, then mix by opacity
+    if (l.effects.empty())
+      return;
+    ATM_PROFILE_SCOPE("composite.adjustment");
+    if (!cleared)
+      media::fill_black(out, width_, height_);
+    cleared = true;
+    const size_t size = media::nv12_size(width_, height_);
+    adjust_.assign(out, out + size);
+    for (const Effect &e : l.effects)
+      if (e.kind == "gaussian_blur") // radius in canvas heights, about two standard deviations
+        blur_nv12(adjust_.data(), width_, height_, e.radius * float(height_) * 0.5f, scratch_);
+    put_rows(out, pitch, adjust_.data(), pitch, height_ * 3 / 2, width_, int(p.opacity * 256.0f + 0.5f));
+    return;
+  }
   if (l.is_text) {
     if (l.text.empty())
       return;
@@ -528,7 +639,7 @@ Result<std::vector<float>> mix_audio(const Composition &c) {
   const size_t total = size_t(c.frame_hns(c.frames) * media::kAudioRate / media::kHnsPerSecond);
   std::vector<float> mix(total * 2, 0.0f);
   for (const Layer &l : c.layers) {
-    if (l.volume <= 0.0f || l.gain <= 0.0f || l.is_text)
+    if (l.volume <= 0.0f || l.gain <= 0.0f || l.is_text || l.is_adjustment)
       continue;
     auto pcm = media::read_audio(l.path, l.source_in_hns, c.frame_hns(l.frames));
     if (!pcm)

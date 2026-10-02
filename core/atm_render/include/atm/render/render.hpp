@@ -19,6 +19,12 @@
 
 namespace atm::render {
 
+// An effect of an adjustment layer (ADR-004). Only the Gaussian blur so far; radius is a fraction of the canvas height.
+struct Effect {
+  std::string kind; // "gaussian_blur"
+  float radius = 0.0f;
+};
+
 struct Layer {
   std::string clip_id, path;
   int track = 0;
@@ -44,6 +50,10 @@ struct Layer {
   std::string text;
   float text_size = 0.08f;
   uint32_t text_color = 0xFFFFFF;
+  // Adjustment layers (media_ref.type "adjustment"): no picture of their own; their effects change everything below
+  // them, and opacity mixes the changed picture with the unchanged one.
+  bool is_adjustment = false;
+  std::vector<Effect> effects;
   // Dissolve (attome.dissolve) from this clip into the next one on its track. compile() lengthens both clips into the
   // media beyond the cut, so over [mix_start, mix_start + mix_frames) both are active; each is drawn over the layers
   // below and the two results are mixed by progress. Indices are into Composition::layers.
@@ -103,6 +113,7 @@ private:
   };
   std::unordered_map<std::string, TextEntry> text_; // by clip ID
   std::vector<uint8_t> mix_;                          // the incoming clip of a dissolve, drawn over the same background
+  std::vector<uint8_t> adjust_, scratch_;             // an adjustment layer's copy of the picture below it
   std::string warning_;
   void draw(const Layer &l, int64_t frame, uint8_t *out, bool &cleared, std::vector<const std::string *> &used);
 };

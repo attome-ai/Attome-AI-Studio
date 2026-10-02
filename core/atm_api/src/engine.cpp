@@ -737,6 +737,21 @@ struct Engine::Impl {
          "ease_in_expo, ease_out_expo, ease_in_out_expo or ease_out_back.\n"
          "Add one key to a clip that exists: {\"op\":\"add\",\"path\":\"<clip_id>/transform/keyframes/opacity/$new:k5\","
          "\"value\":{\"t\":\"2s\",\"v\":0.5}}. Keyframes replace the plain value while they exist."},
+        {"effects",
+         "Effects go on an adjustment layer: a clip with no picture of its own that changes everything on the tracks "
+         "below it while it plays. The one effect so far is a Gaussian blur. Blur the video under a title for its "
+         "first 2 s and let the blur fade out: put a track between the video and the title tracks (tracks stack in "
+         "order): {\"op\":\"add\",\"path\":\"<seq_id>/tracks/$new:fx\",\"anchor\":{\"before\":\"<title track id>\"},"
+         "\"value\":{\"kind\":\"video\",\"name\":\"Effects\"}} (an anchor of first, last, before or after places a new "
+         "track), then\n"
+         "{\"op\":\"add\",\"path\":\"<track_id>/clips/$new:adj\",\"value\":{\"name\":\"blur\",\"timing\":{\"record_in\":"
+         "\"0s\",\"duration\":\"2s\",\"source_in\":\"0s\"},\"media_ref\":{\"type\":\"adjustment\"},\"effects\":{"
+         "\"$new:fx1\":{\"effect\":\"attome.gaussian_blur@1.0.0\",\"enabled\":true,\"params\":{\"radius\":0.02}}},"
+         "\"transform\":{\"opacity\":1,\"keyframes\":{\"opacity\":{\"$new:b1\":{\"t\":\"1s\",\"v\":1},\"$new:b2\":{\"t\":"
+         "\"2s\",\"v\":0}}}}}}\n"
+         "radius is a fraction of the picture height (0.02 soft, 0.1 strong, at most 0.25). The layer's opacity mixes "
+         "the blurred picture with the sharp one, so opacity keyframes fade the effect in or out. Effects on ordinary "
+         "clips are not supported yet."},
         {"audio",
          "Sound. Music or a voice-over is a clip on an audio track (kind \"audio\"); files without video (mp3, wav, "
          "m4a) belong there. Video clips play their own sound too.\n"
@@ -761,7 +776,7 @@ struct Engine::Impl {
       if (want.empty() || want == name)
         text += std::string("## ") + name + "\n" + body + "\n\n";
     if (text.empty())
-      return bad_param("topic", "must be one of clips, text, dissolves, keyframes, audio, times");
+      return bad_param("topic", "must be one of clips, text, dissolves, keyframes, effects, audio, times");
     return json{{"text", std::move(text)}};
   }
 
@@ -1083,8 +1098,8 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
      &Impl::project_get},
     {"project.patch", "core", true,
      "Edit the project with an ID-addressed Patch; all ops apply or none do. Call guide.get first: it shows the "
-     "exact shapes of tracks, clips, text, dissolves, keyframes and sound (topics: clips, text, dissolves, keyframes, "
-     "audio, times).\n"
+     "exact shapes of tracks, clips, text, dissolves, keyframes, effects and sound (topics: clips, text, dissolves, "
+     "keyframes, effects, audio, times).\n"
      "Ops: add, remove, replace, move, insert_order, remove_order, test. A path is \"<StableID>/<field>[/…]\": add "
      "{\"op\":\"add\",\"path\":\"<track_id>/clips/$new:c1\",\"value\":{…}}, change {\"op\":\"replace\",\"path\":"
      "\"<clip_id>/timing/duration\",\"value\":\"3s\"}, delete {\"op\":\"remove\",\"path\":\"<clip_id>\"}. "
@@ -1103,9 +1118,9 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
        "required":["project","patch"]})",
      &Impl::project_patch},
     {"guide.get", "core", false,
-     "How to write the project: the shapes of tracks and clips, text, dissolves, keyframe animation, sound and times, "
-     "with examples ready to adapt. Read it before the first project.patch.",
-     R"({"type":"object","properties":{"topic":{"type":"string","enum":["clips","text","dissolves","keyframes","audio","times"],
+     "How to write the project: the shapes of tracks and clips, text, dissolves, keyframe animation, effects, sound "
+     "and times, with examples ready to adapt. Read it before the first project.patch.",
+     R"({"type":"object","properties":{"topic":{"type":"string","enum":["clips","text","dissolves","keyframes","effects","audio","times"],
        "description":"Leave out to get every topic"}}})",
      &Impl::guide_get},
     {"project.undo", "core", true, "Undo the last edit (steps: N).",

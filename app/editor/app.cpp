@@ -259,6 +259,15 @@ void App::refresh() {
           }
           c.media_w = ref.value("width", 0);
           c.media_h = ref.value("height", 0);
+          if (ref.value("type", "") == "adjustment") {
+            c.is_adjustment = true;
+            if (const auto fx = cit->find("effects"); fx != cit->end() && fx->is_object())
+              for (auto e = fx->begin(); e != fx->end(); ++e)
+                if (e->is_object() && e->value("effect", std::string()).rfind("attome.gaussian_blur", 0) == 0) {
+                  c.blur_id = e.key();
+                  c.blur_radius = e->value("params", json::object()).value("radius", 0.0f);
+                }
+          }
           if (ref.value("type", "") == "text") {
             c.is_text = true;
             const json &content = cit->contains("content") ? (*cit)["content"] : empty;
@@ -739,7 +748,7 @@ namespace look {
 constexpr uint32_t txt = 0xb5437a, bg = 0x0d0f15, rail = 0x0a0c11, panel = 0x141821, panel2 = 0x1a1f2b, raised = 0x232a39,
                    line = 0x242b3a, line2 = 0x333c50, fg = 0xeceff6, fg2 = 0x9ba4b9, fg3 = 0x636d85,
                    accent = 0xff7a3d, accent2 = 0xffb04a, accent_ink = 0x1d0b02, vid = 0x3a5bd9, aud = 0x1f8a70,
-                   ok = 0x3fd28a, stage_a = 0x171c28, stage_b = 0x0a0c11;
+                   adj = 0x7a5af8, ok = 0x3fd28a, stage_a = 0x171c28, stage_b = 0x0a0c11;
 }
 
 ImU32 hex(uint32_t rgb, int a = 255) { return IM_COL32((rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255, a); }
@@ -959,9 +968,9 @@ void App::build_layout(unsigned dock_id) {
   ImGui::DockBuilderDockWindow("Media", left);
   ImGui::DockBuilderDockWindow("Monitor", center);
   ImGui::DockBuilderDockWindow("Inspector", right);
-  ImGui::DockBuilderDockWindow("History", bottom); // the last window docked is the tab that opens first
-  ImGui::DockBuilderDockWindow("Profiler", bottom);
   ImGui::DockBuilderDockWindow("Timeline", bottom);
+  ImGui::DockBuilderDockWindow("History", bottom);
+  ImGui::DockBuilderDockWindow("Profiler", bottom);
   ImGui::DockBuilderFinish(dock_id);
   // Panels with one window draw their own header, as in the mockup, so their tab bars stay hidden.
   for (const ImGuiID id : {left, center, right})
@@ -1151,7 +1160,7 @@ void App::draw_rail() {
     };
     for (const Item &it : items) {
       const std::string name = it.label;
-      const int tab = name == "Media" ? 0 : name == "Text" ? 2 : -1; // the rail items that open a panel so far
+      const int tab = name == "Media" ? 0 : name == "Text" ? 2 : name == "Effects" ? 3 : -1; // panels so far
       if (place(it, tab >= 0 && rail_tab_ == tab, tab >= 0 ? nullptr : "Not built yet") && tab >= 0)
         rail_tab_ = tab;
     }
@@ -1177,8 +1186,11 @@ void App::draw_media() {
   ImGui::Begin("Media", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoScrollbar);
   ImGui::PopStyleVar();
   ImGui::PopStyleColor();
-  if (rail_tab_ == 2) {
-    draw_text_panel();
+  if (rail_tab_ == 2 || rail_tab_ == 3) {
+    if (rail_tab_ == 2)
+      draw_text_panel();
+    else
+      draw_effects_panel();
     ImGui::End();
     return;
   }
@@ -1331,6 +1343,134 @@ void App::draw_text_panel() {
     dl->AddText(ImVec2(p.x + 20.0f + label_w, q.y - 22.0f), hex(look::fg3), styles[i].hint);
     ImGui::Dummy(ImVec2(0, 4.0f));
   }
+}
+
+void App::draw_effects_panel() {
+  ImGui::PushFont(g_fonts.bold, 15.0f);
+  ImGui::TextUnformatted("Effects");
+  ImGui::PopFont();
+  ImGui::Spacing();
+  ImGui::PushTextWrapPos(0.0f);
+  ImGui::TextColored(hexv(look::fg3), "An effect goes on an adjustment layer: it changes every track below it while it "
+                                      "plays. Fade it in or out with its Fade card.");
+  ImGui::PopTextWrapPos();
+  ImGui::Spacing();
+  section_label("ADJUSTMENT LAYERS");
+  ImGui::Spacing();
+  const ImVec2 p = ImGui::GetCursorScreenPos();
+  ImGui::InvisibleButton("##blur", ImVec2(-1.0f, 78.0f));
+  ui_mark("effect:blur");
+  const bool hovered = ImGui::IsItemHovered();
+  if (ImGui::IsItemClicked())
+    add_adjustment();
+  const ImVec2 q(p.x + ImGui::GetItemRectSize().x, p.y + 78.0f);
+  ImDrawList *dl = ImGui::GetWindowDrawList();
+  dl->AddRectFilled(p, q, hex(hovered ? look::panel2 : look::bg), 12.0f);
+  dl->AddRect(p, q, hex(hovered ? look::accent : look::line), 12.0f, 0, 1.2f);
+  for (int i = 0; i < 5; ++i) // soft rings: a sign for blur
+    dl->AddCircle(ImVec2((p.x + q.x) * 0.5f, p.y + 30.0f), 6.0f + float(i) * 4.0f, hex(look::adj, 200 - i * 40), 0, 2.0f);
+  dl->AddText(ImVec2(p.x + 12.0f, q.y - 22.0f), hex(look::fg2), "Blur");
+  dl->AddText(ImVec2(p.x + 20.0f + text_size("Blur").x, q.y - 22.0f), hex(look::fg3), "Softens everything below");
+}
+
+// Adds a 3-second blur at the playhead on the "Effects" track, made when missing just under the titles, so it blurs
+// the video but not the text.
+void App::add_adjustment() {
+  const TrackUi *effects = nullptr, *titles = nullptr;
+  for (const TrackUi &t : tracks_) {
+    if (t.name == "Effects")
+      effects = &t;
+    if (t.name == "Titles" && !titles)
+      titles = &t;
+  }
+  const int64_t frames = std::max<int64_t>(1, std::llround(3.0 * fps()));
+  int64_t at = playhead_;
+  if (effects) { // clips on one track may not overlap: move past any in the way
+    std::vector<const ClipUi *> sorted;
+    for (const ClipUi &c : effects->clips)
+      sorted.push_back(&c);
+    std::sort(sorted.begin(), sorted.end(), [](const ClipUi *a, const ClipUi *b) { return a->start < b->start; });
+    for (const ClipUi *c : sorted)
+      if (at < c->start + c->frames && at + frames > c->start)
+        at = c->start + c->frames;
+  }
+  json ops = json::array();
+  const std::string track = effects ? effects->id : "$new:effects";
+  if (!effects) {
+    json add = {{"op", "add"}, {"path", seq_id_ + "/tracks/$new:effects"}, {"value", {{"kind", "video"}, {"name", "Effects"}}}};
+    if (titles)
+      add["anchor"] = {{"before", titles->id}};
+    ops.push_back(std::move(add));
+  }
+  ops.push_back({{"op", "add"},
+                 {"path", track + "/clips/$new:adj"},
+                 {"value",
+                  {{"name", "Blur"},
+                   {"timing", {{"record_in", frames_text(at)}, {"duration", frames_text(frames)}, {"source_in", "0"}}},
+                   {"media_ref", {{"type", "adjustment"}}},
+                   {"effects", {{"$new:blur", {{"effect", "attome.gaussian_blur@1.0.0"}, {"enabled", true}, {"params", {{"radius", 0.02}}}}}}},
+                   {"transform", {{"opacity", 1.0}}}}}});
+  json ids;
+  if (patch(std::move(ops), "Add blur", &ids)) {
+    selected_clip_ = ids.value("$new:adj", "");
+    seek(at + frames / 2);
+  }
+}
+
+// Radius and amount of an adjustment layer's blur. The amount is the layer's opacity: how much of the blurred picture
+// replaces the sharp one.
+void App::draw_blur_card(const ClipUi &c) {
+  if (!begin_card("##blur", "Blur")) {
+    end_card();
+    return;
+  }
+  const std::string id = c.id, fx = c.blur_id;
+  if (fx.empty()) {
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::TextColored(hexv(look::fg3), "This adjustment layer has no blur.");
+    ImGui::PopTextWrapPos();
+    if (soft_button("add_blur", "Add blur", ImVec2(-1.0f, 28.0f)))
+      pending_ = [this, id] {
+        patch(json::array({{{"op", "add"},
+                            {"path", id + "/effects/$new:blur"},
+                            {"value", {{"effect", "attome.gaussian_blur@1.0.0"}, {"enabled", true}, {"params", {{"radius", 0.02}}}}}}}),
+              "Add blur");
+      };
+    end_card();
+    return;
+  }
+  ImGui::TextColored(hexv(look::fg2), "Radius");
+  ImGui::SameLine(88.0f);
+  slim_slider("blur_radius", &blur_radius_, 0.0f, 0.1f, ImGui::GetContentRegionAvail().x - 60.0f, "");
+  if (ImGui::IsItemDeactivatedAfterEdit()) {
+    const float v = std::round(blur_radius_ * 1000.0f) / 1000.0f;
+    pending_ = [this, fx, v] {
+      patch(json::array({{{"op", "replace"}, {"path", fx + "/params/radius"}, {"value", v}}}), "Change blur");
+    };
+  }
+  ImGui::SameLine();
+  ImGui::PushFont(g_fonts.mono, 13.0f);
+  ImGui::TextColored(hexv(look::fg2), "%.3f", blur_radius_);
+  ImGui::PopFont();
+  ImGui::TextColored(hexv(look::fg2), "Amount");
+  ImGui::SameLine(88.0f);
+  slim_slider("blur_amount", &blur_amount_, 0.0f, 1.0f, ImGui::GetContentRegionAvail().x - 60.0f, "");
+  if (ImGui::IsItemDeactivatedAfterEdit()) {
+    const float v = std::round(blur_amount_ * 100.0f) / 100.0f;
+    const ClipUi clip = c;
+    pending_ = [this, clip, v] {
+      json ops = json::array({{{"op", "replace"}, {"path", clip.id + "/transform/opacity"}, {"value", v}}});
+      if (!clip.opacity_keys.empty() && clip.fades_only) // the fades rise to the new amount
+        for (json &op : fade_ops(clip, clip.fade_in, clip.fade_out, clip.frames, v))
+          ops.push_back(std::move(op));
+      patch(std::move(ops), "Change blur amount");
+    };
+  }
+  ImGui::SameLine();
+  ImGui::PushFont(g_fonts.mono, 13.0f);
+  ImGui::TextColored(hexv(look::fg2), "%3.0f%%", blur_amount_ * 100.0f);
+  ImGui::PopFont();
+  end_card();
 }
 
 void App::draw_viewer() {
@@ -1692,7 +1832,7 @@ void App::draw_timeline() {
       const float x0 = x_of(double(start)), x1 = std::max(x0 + 2.0f, x_of(double(start + frames)));
       const float cy = origin.y + ruler_h + float(row) * row_h + 4.0f, ch = row_h - 8.0f;
       const bool is_selected = c.id == selected_clip_;
-      const uint32_t base = c.is_text ? look::txt : track.kind == "audio" ? look::aud : look::vid;
+      const uint32_t base = c.is_adjustment ? look::adj : c.is_text ? look::txt : track.kind == "audio" ? look::aud : look::vid;
       const int alpha = int(120.0f + c.opacity * 135.0f);
       dl->AddRectFilled(ImVec2(x0, cy), ImVec2(x1 - 1.0f, cy + ch), hex(base, alpha), 5.0f);
       dl->AddRectFilled(ImVec2(x0, cy), ImVec2(x1 - 1.0f, cy + 3.0f), IM_COL32(255, 255, 255, 70), 5.0f, ImDrawFlags_RoundCornersTop);
@@ -2002,6 +2142,8 @@ void App::draw_inspector() {
     opacity_ = c->opacity;
     fade_in_s_ = float(double(c->fade_in) / fps());
     gain_db_ = c->gain_db;
+    blur_radius_ = c->blur_radius;
+    blur_amount_ = c->opacity;
     pan_ = c->pan;
     audio_fade_in_s_ = float(double(c->audio_fade_in) / fps());
     audio_fade_out_s_ = float(double(c->audio_fade_out) / fps());
@@ -2102,7 +2244,9 @@ void App::draw_inspector() {
     end_card();
   }
 
-  const bool picture = track->kind != "audio"; // clips on audio tracks are sound only
+  const bool picture = track->kind != "audio" && !c->is_adjustment; // sound clips and adjustment layers have no picture
+  if (c->is_adjustment)
+    draw_blur_card(*c);
   if (picture && begin_card("##look", "Transform")) {
     // Position is shown in canvas pixels from the centre; the document stores canvas fractions (ADR-021).
     ImGui::TextColored(hexv(look::fg2), "Position");
@@ -2175,13 +2319,13 @@ void App::draw_inspector() {
     }
     ImGui::EndDisabled();
   }
-  if (picture) {
+  if (picture)
     end_card();
+  if (picture || c->is_adjustment) // an adjustment layer's fades fade its effect
     draw_fade_card(*c);
-  }
   draw_transition_card(*track, *c);
 
-  const bool show_audio = !c->is_text; // text clips have no sound
+  const bool show_audio = !c->is_text && !c->is_adjustment; // text clips and adjustment layers have no sound
   if (show_audio && begin_card("##sound", "Audio")) {
     // One row: label, slider, value. The edit is sent when the slider is let go.
     const auto row = [&](const char *label, const char *slider, float *value, float lo, float hi, const char *fmt,
@@ -2273,7 +2417,9 @@ void App::draw_welcome() {
 }
 
 void App::draw_history() {
-  ImGui::Begin("History");
+  // History and Profiler share the Timeline's dock. Appearing must not bring them to the front: a click in the first
+  // frames, before they first appear, used to leave the Profiler in front of the Timeline.
+  ImGui::Begin("History", nullptr, ImGuiWindowFlags_NoFocusOnAppearing);
   const std::string head = history_.contains("head") && history_["head"].is_string() ? history_["head"].get<std::string>() : "";
   if (!history_.contains("changesets") || history_["changesets"].empty()) {
     ImGui::TextDisabled("No edits yet.");
@@ -2311,7 +2457,7 @@ void App::draw_profiler() {
     client_.call("profile.get", json::object(), daemon_profile_, error);
     local_profile_ = prof::snapshot();
   }
-  ImGui::Begin("Profiler", &show_profiler_);
+  ImGui::Begin("Profiler", &show_profiler_, ImGuiWindowFlags_NoFocusOnAppearing);
   ImGui::TextColored(kAccent, "UI %.2f ms of work per frame", frame_ms_);
   ImGui::SameLine();
   ImGui::TextDisabled("| last daemon call %.3f ms", client_.last_call_ms());

@@ -580,4 +580,54 @@ TEST_CASE("render: a sound file on an audio track, with gain in dB, pan, fades a
   std::error_code ec;
   fs::remove_all(dir, ec);
 }
+
+TEST_CASE("render: an adjustment layer blurs everything below it, mixed by its opacity", "[media]") {
+  const fs::path dir = fs::temp_directory_path() / atm::new_id("attome-blur");
+  fs::create_directories(dir);
+  const std::string clip = (dir / "clip.mp4").string();
+  write_clip(clip, 320, 240, 30); // red top half, blue bottom half: a sharp edge at y = 120
+
+  // The clip on the bottom track, the adjustment layer (blur 0.1 of the height) above it, with the given opacity.
+  const auto render_with = [&](double opacity, bool with_blur) {
+    json adjustment = {{"timing", {{"record_in", "0"}, {"duration", "1"}, {"source_in", "0"}}},
+                       {"media_ref", {{"type", "adjustment"}}},
+                       {"transform", {{"opacity", opacity}}}};
+    if (with_blur)
+      adjustment["effects"] = {{"fx_1", {{"effect", "attome.gaussian_blur@1.0.0"}, {"params", {{"radius", 0.1}}}}}};
+    const json doc = {
+        {"sequences",
+         {{"seq_1",
+           {{"rate", "30"},
+            {"canvas", {{"width", 320}, {"height", 240}}},
+            {"track_order", {"trk_v", "trk_fx"}},
+            {"tracks",
+             {{"trk_v", {{"clips", {{"clp_v", {{"timing", {{"record_in", "0"}, {"duration", "1"}, {"source_in", "0"}}},
+                                               {"media_ref", {{"type", "file"}, {"path", clip}}}}}}}}},
+              {"trk_fx", {{"clips", {{"clp_adj", adjustment}}}}}}}}}}},
+        {"sequence_order", {"seq_1"}}};
+    auto comp = atm::render::compile(doc);
+    REQUIRE(comp);
+    atm::render::Renderer renderer(*comp, 320, 240);
+    std::vector<uint8_t> nv12(media::nv12_size(320, 240)), rgb(320 * 240 * 4);
+    REQUIRE(renderer.render(10, nv12.data()));
+    media::nv12_to_bgrx(nv12.data(), 320, 240, rgb.data());
+    return rgb;
+  };
+  const auto red = [](const std::vector<uint8_t> &rgb, int y) { return int(rgb[(size_t(y) * 320 + 160) * 4 + 2]); };
+  const auto sharp = render_with(1.0, false);  // an adjustment layer without effects changes nothing
+  const auto blurred = render_with(1.0, true);
+  const auto half = render_with(0.5, true);
+  CHECK(red(sharp, 112) > 200);
+  CHECK(red(sharp, 128) < 50);
+  // Just above and below the edge, the blur mixes red and blue; far from it, the colours stay.
+  CHECK(red(blurred, 112) < 190);
+  CHECK(red(blurred, 128) > 60);
+  CHECK(red(blurred, 10) > 200);
+  CHECK(red(blurred, 230) < 50);
+  // Half opacity lands between the sharp and the blurred picture.
+  CHECK(red(half, 128) > red(sharp, 128));
+  CHECK(red(half, 128) < red(blurred, 128));
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}
 #endif

@@ -47,6 +47,9 @@ struct ClipUi {
   bool animated = false;                    // any transform keyframes: the static values are not what plays
   json keyframes;                           // the clip's transform.keyframes, for split
   float gain_db = 0.0f, pan = 0.0f;         // the clip's "audio" object
+  bool is_adjustment = false;               // an adjustment layer: its effects change the tracks below it
+  std::string blur_id;                      // its Gaussian blur effect, when it has one
+  float blur_radius = 0.0f;
   int64_t audio_fade_in = 0, audio_fade_out = 0; // frames
 };
 
@@ -89,6 +92,9 @@ private:
   void import_files(const std::vector<std::string> &paths);
   void add_track();
   void add_title(int preset);
+  void add_adjustment();
+  void draw_effects_panel();
+  void draw_blur_card(const ClipUi &clip);
   void draw_text_panel();
   void delete_selected();
   void split_at_playhead();
@@ -181,13 +187,14 @@ private:
   std::set<std::string> audio_only_; // media files without a picture
   char media_filter_[128] = {};
   int inspector_tab_ = 0;
-  int rail_tab_ = 0; // 0 Media, 2 Text
+  int rail_tab_ = 0; // 0 Media, 2 Text, 3 Effects
   char text_buf_[1024] = {};
   float text_size_ = 0.08f, text_col_[3] = {1.0f, 1.0f, 1.0f};
   bool text_bold_ = false;
   float dissolve_s_ = 1.0f; // length of a new dissolve, seconds
   float fade_in_s_ = 0.0f, fade_out_s_ = 0.0f;
   float gain_db_ = 0.0f, pan_ = 0.0f, audio_fade_in_s_ = 0.0f, audio_fade_out_s_ = 0.0f;
+  float blur_radius_ = 0.02f, blur_amount_ = 1.0f;
 
   // inspector
   std::string insp_for_;
