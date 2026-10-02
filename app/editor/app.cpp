@@ -1146,10 +1146,11 @@ void App::draw_timeline() {
   ImGui::Begin("Timeline", nullptr, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
   ImGui::PopStyleVar();
   ImGui::SetScrollY(0.0f); // the tool row stays in view; only the track area below it scrolls
+  const float y0 = ImGui::GetCursorPosY(); // where the content starts, below the panel's tab bar
   ImGui::PopStyleColor();
 
   // Tool row.
-  ImGui::SetCursorPos(ImVec2(12.0f, 6.0f));
+  ImGui::SetCursorPos(ImVec2(12.0f, y0 + 6.0f));
   ImGui::PushFont(g_fonts.ui, 16.0f);
   icon_button("tool_select", icon::pointer, true, true, 30.0f, "Select (drag clips, drag their edges to trim)");
   ImGui::SameLine(0, 2);
@@ -1173,26 +1174,26 @@ void App::draw_timeline() {
   ImGui::TextColored(hexv(look::fg3), "Main  -  %d:%d", canvas_w_ / std::max(1, std::gcd(canvas_w_, canvas_h_)),
                      canvas_h_ / std::max(1, std::gcd(canvas_w_, canvas_h_)));
   ImGui::SameLine(ImGui::GetWindowWidth() - 190.0f);
-  ImGui::SetCursorPosY(6.0f);
+  ImGui::SetCursorPosY(y0 + 6.0f);
   ImGui::PushFont(g_fonts.ui, 16.0f);
   const std::string zo = glyph(icon::zoom_out), zi = glyph(icon::zoom_in);
-  ImGui::SetCursorPosY(12.0f);
+  ImGui::SetCursorPosY(y0 + 12.0f);
   ImGui::TextColored(hexv(look::fg3), "%s", zo.c_str());
   ImGui::SameLine();
   ImGui::PopFont();
-  ImGui::SetCursorPosY(7.0f);
+  ImGui::SetCursorPosY(y0 + 7.0f);
   float zoom = std::log(pps_ / 4.0f) / std::log(200.0f); // 0..1 on a logarithmic scale of 4..800 px/s
   if (slim_slider("zoom", &zoom, 0.0f, 1.0f, 110.0f, ""))
     pps_ = 4.0f * std::pow(200.0f, std::clamp(zoom, 0.0f, 1.0f));
   ImGui::SameLine();
   ImGui::PushFont(g_fonts.ui, 16.0f);
-  ImGui::SetCursorPosY(12.0f);
+  ImGui::SetCursorPosY(y0 + 12.0f);
   ImGui::TextColored(hexv(look::fg3), "%s", zi.c_str());
   ImGui::PopFont();
 
   const double rate = fps();
   const float header_w = 168.0f, ruler_h = 28.0f, row_h = 44.0f;
-  ImGui::SetCursorPos(ImVec2(0, 42.0f));
+  ImGui::SetCursorPos(ImVec2(0, y0 + 42.0f));
   ImGui::PushStyleColor(ImGuiCol_ChildBg, hexv(look::bg));
   ImGui::BeginChild("tracks", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_HorizontalScrollbar);
   ImGui::PopStyleColor();
