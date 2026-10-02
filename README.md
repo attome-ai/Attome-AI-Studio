@@ -211,6 +211,7 @@ Zones nest into a tree per thread. Each zone keeps its calls, total, mean, minim
 | Compile it out completely | `cmake --preset <preset> -DATTOME_PROFILING=OFF` |
 | Check the engine against its speed targets | `build/<preset>/bin/atm_bench` |
 | Check export speed (the plan's F1 scenes) | `build/<preset>/bin/atm_bench --export` |
+| Check the editor with real mouse input (Windows) | `powershell -File tools/uitest/drag_clip.ps1` |
 
 `atm_bench` prints each measured number next to its target from the plan, then the zone profile of the run, so a slow number comes with the place the time went. New engine code should add zones around its stages and a case to the benchmark.
 
