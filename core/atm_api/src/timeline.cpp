@@ -349,7 +349,7 @@ private:
       value["audio"]["gain_db"] = op_["gain_db"];
     if (has_video) {
       value["transform"] = {{"opacity", op_.value("opacity", 1.0)}};
-      for (const char *k : {"position", "scale"})
+      for (const char *k : {"position", "scale", "rotation", "anchor", "crop"})
         if (op_.contains(k))
           value["transform"][k] = op_[k];
       ATM_TRY(json keys, fade_keys(duration, op_.value("opacity", 1.0)));
@@ -441,6 +441,9 @@ private:
                    {{"text", text}, {"size", op_.value("size", 0.08)}, {"color", op_.value("color", std::string("#ffffff"))},
                     {"bold", op_.value("bold", true)}}},
                   {"transform", {{"position", position}, {"opacity", op_.value("opacity", 1.0)}}}};
+    for (const char *k : {"scale", "rotation", "anchor", "crop"})
+      if (op_.contains(k))
+        value["transform"][k] = op_[k];
     ATM_TRY(json keys, fade_keys(duration, op_.value("opacity", 1.0)));
     if (!keys.is_null())
       value["transform"]["keyframes"]["opacity"] = std::move(keys);
@@ -940,8 +943,9 @@ private:
     std::replace(path.begin(), path.end(), '.', '/');
     if (const auto keys = op_.find("keyframes"); keys != op_.end()) {
       const std::string prop = path.rfind("transform/", 0) == 0 ? path.substr(10) : std::string();
-      if (prop != "opacity" && prop != "position" && prop != "scale")
-        return fail("E_PARAM", "Keyframes go on transform.opacity, transform.position or transform.scale.");
+      if (prop != "opacity" && prop != "position" && prop != "scale" && prop != "rotation" && prop != "anchor")
+        return fail("E_PARAM", "Keyframes go on transform.opacity, position, scale, rotation or anchor.",
+                    "Crop cannot be animated yet; set it with path \"transform.crop\" and a value.");
       if (!keys->is_array())
         return fail("E_PARAM", "\"keyframes\" must be an array of {t, v, interp?, ease?}.");
       // The new keys replace the old ones of this property.

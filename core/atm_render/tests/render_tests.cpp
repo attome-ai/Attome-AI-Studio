@@ -165,10 +165,10 @@ TEST_CASE("render: position and scale move and resize a clip on the canvas", "[m
     l.clip_id = "clp_test";
     l.path = clip;
     l.frames = 1;
-    l.pos_x = px;
-    l.pos_y = py;
-    l.scale_x = sx;
-    l.scale_y = sy;
+    l.xf.pos_x = px;
+    l.xf.pos_y = py;
+    l.xf.scale_x = sx;
+    l.xf.scale_y = sy;
     l.opacity = opacity;
     comp.layers.push_back(l);
     atm::render::Renderer renderer(comp, 320, 240);
@@ -212,6 +212,159 @@ TEST_CASE("render: position and scale move and resize a clip on the canvas", "[m
   fs::remove_all(dir, ec);
 }
 
+TEST_CASE("render: rotation, anchor and crop turn, pin and cut a clip", "[media]") {
+  const fs::path dir = fs::temp_directory_path() / atm::new_id("attome-rotate");
+  fs::create_directories(dir);
+  const std::string clip = (dir / "clip.mp4").string();
+  write_clip(clip, 320, 240, 30); // red top half, blue bottom half
+
+  const auto render_with = [&](const atm::render::Transform &xf) {
+    atm::render::Composition comp;
+    comp.width = 320;
+    comp.height = 240;
+    comp.frames = 1;
+    atm::render::Layer l;
+    l.clip_id = "clp_test";
+    l.path = clip;
+    l.frames = 1;
+    l.xf = xf;
+    comp.layers.push_back(l);
+    atm::render::Renderer renderer(comp, 320, 240);
+    std::vector<uint8_t> nv12(media::nv12_size(320, 240)), rgb(320 * 240 * 4);
+    REQUIRE(renderer.render(0, nv12.data()));
+    media::nv12_to_bgrx(nv12.data(), 320, 240, rgb.data());
+    return rgb;
+  };
+  const auto at = [](const std::vector<uint8_t> &rgb, int x, int y) { return rgb.data() + (size_t(y) * 320 + size_t(x)) * 4; };
+  const auto is_red = [](const uint8_t *p) { return p[2] > 180 && p[0] < 90 && p[1] < 90; };
+  const auto is_blue = [](const uint8_t *p) { return p[0] > 180 && p[2] < 90 && p[1] < 90; };
+  const auto is_black = [](const uint8_t *p) { return p[0] < 30 && p[1] < 30 && p[2] < 30; };
+  atm::render::Transform half;
+  half.scale_x = half.scale_y = 0.5f; // the picture is 160 x 120, centred: x 80..240, y 60..180
+
+  { // upside down: blue on top, red below
+    auto xf = half;
+    xf.rotation = 180.0f;
+    const auto rgb = render_with(xf);
+    CHECK(is_blue(at(rgb, 160, 80)));
+    CHECK(is_red(at(rgb, 160, 160)));
+    CHECK(is_black(at(rgb, 160, 40)));
+  }
+  { // a quarter turn clockwise: the picture stands 120 wide and 160 tall (x 100..220, y 40..200), its top on the right
+    auto xf = half;
+    xf.rotation = 90.0f;
+    const auto rgb = render_with(xf);
+    CHECK(is_red(at(rgb, 200, 120)));
+    CHECK(is_blue(at(rgb, 120, 120)));
+    CHECK(is_black(at(rgb, 80, 120)));
+    CHECK(is_black(at(rgb, 240, 120)));
+    CHECK(is_red(at(rgb, 200, 50))); // taller than before the turn
+    CHECK(is_black(at(rgb, 200, 30)));
+  }
+  { // turning less than a quarter clears the corners and keeps the middle; the edges are smooth, not stepped
+    auto xf = half;
+    xf.rotation = 30.0f;
+    const auto rgb = render_with(xf);
+    CHECK(is_black(at(rgb, 84, 64)));   // the old top-left corner
+    CHECK(is_black(at(rgb, 236, 176))); // the old bottom-right corner
+    CHECK(is_red(at(rgb, 160, 100)));
+    CHECK(is_blue(at(rgb, 160, 140)));
+    int partial = 0; // pixels between black and full red down the middle column, which crosses the turned top edge
+    for (int y = 20; y < 100; ++y)
+      if (const int r = at(rgb, 160, y)[2]; r > 40 && r < 160)
+        ++partial;
+    CHECK(partial >= 1);
+    CHECK(partial <= 4);
+  }
+  { // anchor at the picture's top-left corner, placed at the canvas's top-left: x 0..160, y 0..120
+    auto xf = half;
+    xf.anchor_x = xf.anchor_y = 0.0f;
+    xf.pos_x = xf.pos_y = 0.0f;
+    const auto rgb = render_with(xf);
+    CHECK(is_red(at(rgb, 80, 30)));
+    CHECK(is_blue(at(rgb, 80, 100)));
+    CHECK(is_black(at(rgb, 240, 180)));
+    CHECK(is_black(at(rgb, 200, 60)));
+  }
+  { // turning around the top-left anchor swings the picture down and to the left of it
+    auto xf = half;
+    xf.anchor_x = xf.anchor_y = 0.0f;
+    xf.pos_x = xf.pos_y = 0.5f;
+    xf.rotation = 90.0f; // the picture now lies at x 40..160, y 120..280
+    const auto rgb = render_with(xf);
+    CHECK(is_red(at(rgb, 140, 180)));
+    CHECK(is_blue(at(rgb, 60, 180)));
+    CHECK(is_black(at(rgb, 200, 180)));
+    CHECK(is_black(at(rgb, 100, 100)));
+  }
+  { // crop: the top half and the left quarter are cut away, the rest stays in place
+    atm::render::Transform xf;
+    xf.crop_top = 0.5f;
+    xf.crop_left = 0.25f;
+    const auto rgb = render_with(xf);
+    CHECK(is_black(at(rgb, 160, 60)));
+    CHECK(is_black(at(rgb, 40, 180)));
+    CHECK(is_blue(at(rgb, 200, 180)));
+    CHECK(is_blue(at(rgb, 100, 180)));
+  }
+  { // crop and turn together: the cut side turns with the picture
+    auto xf = half;
+    xf.crop_bottom = 0.5f; // only the red half is left
+    xf.rotation = 180.0f;  // and it is now below the centre
+    const auto rgb = render_with(xf);
+    CHECK(is_black(at(rgb, 160, 80)));
+    CHECK(is_red(at(rgb, 160, 160)));
+  }
+
+  // Through the document: rotation and anchor are read and animate, crop is read, and bad values are refused.
+  atm::api::Engine engine;
+  const std::string project = (dir / "R.attome").string();
+  const json created = ok(engine, "project.create", {{"path", project}, {"canvas", {{"width", 320}, {"height", 240}}}});
+  const std::string seq = created["sequence"];
+  const json value = {
+      {"name", "c"},
+      {"timing", {{"record_in", "0s"}, {"duration", "1s"}, {"source_in", "0s"}}},
+      {"media_ref", {{"type", "file"}, {"path", clip}, {"duration", "1s"}, {"width", 320}, {"height", 240}}},
+      {"transform",
+       {{"anchor", {0.25, 0.75}},
+        {"crop", {{"left", 0.1}, {"top", 0.0}, {"right", 0.2}, {"bottom", 0.3}}},
+        {"keyframes", {{"rotation", {{"$new:r1", {{"t", "0s"}, {"v", 0}}}, {"$new:r2", {{"t", "1s"}, {"v", 90}}}}}}}}}};
+  ok(engine, "project.patch",
+     {{"project", project},
+      {"patch",
+       {{"ops", json::array({{{"op", "add"}, {"path", seq + "/tracks/$new:t"}, {"value", {{"kind", "video"}}}},
+                             {{"op", "add"}, {"path", "$new:t/clips/$new:c"}, {"value", value}}})}}}});
+  const json doc = ok(engine, "project.get", {{"project", project}, {"id", created["project"]}})["object"];
+  auto comp = atm::render::compile(doc);
+  REQUIRE(comp);
+  REQUIRE(comp->layers.size() == 1);
+  const auto &layer = comp->layers[0];
+  CHECK(layer.xf.anchor_x == Catch::Approx(0.25f));
+  CHECK(layer.xf.anchor_y == Catch::Approx(0.75f));
+  CHECK(layer.xf.crop_left == Catch::Approx(0.1f));
+  CHECK(layer.xf.crop_bottom == Catch::Approx(0.3f));
+  CHECK(atm::render::pose_at(layer, *comp, 15).xf.rotation == Catch::Approx(45.0f)); // half way
+  CHECK(atm::render::pose_at(layer, *comp, 0).xf.rotation == Catch::Approx(0.0f));
+
+  const auto refused = [&](const json &transform) {
+    json bad = value;
+    bad["transform"] = transform;
+    const auto r = engine.call(
+        "project.patch", {{"project", project},
+                          {"patch", {{"ops", json::array({{{"op", "add"}, {"path", seq + "/tracks/$new:t"}, {"value", {{"kind", "video"}}}},
+                                                          {{"op", "add"}, {"path", "$new:t/clips/$new:c"}, {"value", bad}}})}}}});
+    REQUIRE_FALSE(r);
+    return r.error().rule + " " + r.error().errors.dump();
+  };
+  CHECK(refused({{"rotation", "90"}}).find("TRANSFORM_TYPE_MISMATCH") != std::string::npos);
+  CHECK(refused({{"anchor", 0.5}}).find("TRANSFORM_TYPE_MISMATCH") != std::string::npos);
+  CHECK(refused({{"crop", {{"left", 0.6}, {"right", 0.5}}}}).find("TRANSFORM_CROP") != std::string::npos);
+  CHECK(refused({{"crop", {{"middle", 0.1}}}}).find("TRANSFORM_CROP") != std::string::npos);
+  CHECK(refused({{"crop", {{"top", -0.1}}}}).find("TRANSFORM_CROP") != std::string::npos);
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}
+
 TEST_CASE("render: text clips draw in a colour, move and scale, and shape Arabic", "[media]") {
   const auto render_text_layer = [&](const std::string &text, float px, float py, float size, uint32_t color) {
     atm::render::Composition comp;
@@ -225,8 +378,8 @@ TEST_CASE("render: text clips draw in a colour, move and scale, and shape Arabic
     l.text = text;
     l.text_size = size;
     l.text_color = color;
-    l.pos_x = px;
-    l.pos_y = py;
+    l.xf.pos_x = px;
+    l.xf.pos_y = py;
     comp.layers.push_back(l);
     atm::render::Renderer renderer(comp, 320, 240);
     std::vector<uint8_t> nv12(media::nv12_size(320, 240)), rgb(320 * 240 * 4);
@@ -361,8 +514,8 @@ TEST_CASE("render: keyframes fade a title in and move it, in clip-local time", "
   const auto pose = atm::render::pose_at(comp->layers[0], *comp, 45);
   CHECK(pose.opacity > 0.45f);
   CHECK(pose.opacity < 0.55f);
-  CHECK(pose.pos_x > 0.35f);
-  CHECK(pose.pos_x < 0.40f); // 0.25 + 0.5 * 0.25
+  CHECK(pose.xf.pos_x > 0.35f);
+  CHECK(pose.xf.pos_x < 0.40f); // 0.25 + 0.5 * 0.25
   std::error_code ec;
   fs::remove_all(dir, ec);
 }

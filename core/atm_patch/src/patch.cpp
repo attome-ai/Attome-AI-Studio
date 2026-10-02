@@ -221,25 +221,54 @@ void check_transitions(const json &track, const std::string &track_id, const std
   }
 }
 
-// Animated properties so far (F1 §5.4): transform opacity (a number), position and scale ([x, y]).
+// Transform values (F1 §3.1 item 4): opacity and rotation (numbers), position and anchor ([x, y]), scale (a number or
+// [x, y]) and crop ({left, top, right, bottom}, fractions of the picture). All but crop can be animated (F1 §5.4).
 void check_keyframes(const json &clip, const std::string &clip_id, json &problems) {
   const auto tr = clip.find("transform");
   if (tr == clip.end() || !tr->is_object())
     return;
   // Static values first: an animation written in their place would otherwise be stored and quietly ignored.
   const auto is_pair = [](const json &v) { return v.is_array() && v.size() == 2 && v[0].is_number() && v[1].is_number(); };
-  for (const char *key : {"opacity", "position", "scale"})
+  for (const char *key : {"opacity", "rotation", "position", "anchor", "scale"})
     if (const auto v = tr->find(key); v != tr->end()) {
       const std::string k = key;
-      const bool ok = k == "opacity" ? v->is_number() : k == "position" ? is_pair(*v) : (v->is_number() || is_pair(*v));
+      const bool number = k == "opacity" || k == "rotation", pair = k == "position" || k == "anchor";
+      const bool ok = number ? v->is_number() : pair ? is_pair(*v) : (v->is_number() || is_pair(*v));
       if (!ok)
         problems.push_back(problem("TRANSFORM_TYPE_MISMATCH", clip_id + "/transform/" + k, clip_id,
                                    "transform." + k + " of clip " + clip_id + " must be " +
-                                       (k == "opacity" ? "a number" : k == "position" ? "[x, y]" : "a number or [x, y]") +
-                                       ".",
+                                       (number ? "a number" : pair ? "[x, y]" : "a number or [x, y]") + ".",
                                    "To animate it, put keys in transform.keyframes." + k +
                                        " (guide.get topic \"keyframes\") and leave a plain value here."));
     }
+  if (const auto crop = tr->find("crop"); crop != tr->end()) {
+    const std::string path = clip_id + "/transform/crop";
+    const auto bad = [&](const std::string &what) {
+      problems.push_back(problem("TRANSFORM_CROP", path, clip_id, "transform.crop of clip " + clip_id + " " + what,
+                                 "Write {\"left\": 0.1, \"right\": 0.1}: each side a fraction of the picture from 0 to 1, "
+                                 "left + right and top + bottom below 1."));
+    };
+    if (!crop->is_object()) {
+      bad("must be an object.");
+    } else {
+      bool sides_ok = true;
+      for (auto it = crop->begin(); it != crop->end() && sides_ok; ++it) {
+        const std::string &side = it.key();
+        if (side != "left" && side != "top" && side != "right" && side != "bottom") {
+          bad("has \"" + side + "\"; the sides are left, top, right and bottom.");
+          sides_ok = false;
+        } else if (!it->is_number() || it->get<double>() < 0.0 || it->get<double>() >= 1.0) {
+          bad("has " + side + " " + it->dump() + "; it must be a number from 0 to below 1.");
+          sides_ok = false;
+        }
+      }
+      const auto side = [&](const char *key) { return crop->value(key, 0.0); };
+      if (sides_ok && side("left") + side("right") >= 1.0)
+        bad("cuts away the whole width: left + right must be below 1.");
+      else if (sides_ok && side("top") + side("bottom") >= 1.0)
+        bad("cuts away the whole height: top + bottom must be below 1.");
+    }
+  }
   const auto kfs = tr->find("keyframes");
   if (kfs == tr->end())
     return;
@@ -252,11 +281,13 @@ void check_keyframes(const json &clip, const std::string &clip_id, json &problem
   for (auto it = kfs->begin(); it != kfs->end() && problems.size() < kMaxProblems; ++it) {
     const std::string &prop = it.key();
     const std::string path = clip_id + "/transform/keyframes/" + prop;
-    const int dims = prop == "opacity" ? 1 : (prop == "position" || prop == "scale") ? 2 : 0;
+    const int dims = (prop == "opacity" || prop == "rotation") ? 1
+                     : (prop == "position" || prop == "scale" || prop == "anchor") ? 2
+                                                                                    : 0;
     if (dims == 0) {
       problems.push_back(problem("KEYFRAME_PROPERTY_UNSUPPORTED", path, clip_id,
                                  "The property \"" + prop + "\" of clip " + clip_id + " cannot be animated yet.",
-                                 "Animate opacity, position or scale."));
+                                 "Animate opacity, position, scale, rotation or anchor (crop stays fixed for now)."));
       continue;
     }
     if (auto curve = eval::parse_curve(*it, dims); !curve)

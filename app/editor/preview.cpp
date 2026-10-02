@@ -39,11 +39,11 @@ void Preview::request(int64_t frame) {
   wake_.notify_all();
 }
 
-void Preview::set_transform(const std::string &clip_id, float pos_x, float pos_y, float scale_x, float scale_y) {
+void Preview::set_transform(const std::string &clip_id, const render::Transform &xf) {
   {
     std::lock_guard lock(mutex_);
     std::erase_if(xf_, [&](const Xf &x) { return x.id == clip_id; });
-    xf_.push_back({clip_id, pos_x, pos_y, scale_x, scale_y});
+    xf_.push_back({clip_id, xf});
     dirty_ = true;
   }
   wake_.notify_all();
@@ -87,7 +87,7 @@ void Preview::run() {
       }
       if (renderer)
         for (const Xf &x : xf_)
-          renderer->set_transform(x.id, x.px, x.py, x.sx, x.sy);
+          renderer->set_transform(x.id, x.xf);
       xf_.clear();
       frame = wanted_;
     }

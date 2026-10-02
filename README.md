@@ -29,7 +29,8 @@ What exists today:
 - the same export for scripts and agents: `attome render Demo.attome -o out.mp4`
 - text clips (titles, lower thirds, captions) with a size, colour and position, with Arabic and other right-to-left text shaped correctly in the preview and the export (DirectWrite on Windows; FreeType, HarfBuzz and SheenBidi with the bundled Noto fonts elsewhere)
 - dissolves between clips, with the sound cross-faded at equal power; a dissolve uses media beyond the cut, and an edit that leaves too little is refused with the largest length that fits
-- keyframes on opacity, position and scale (linear, hold and easing presets); the Inspector's Fade card fades a clip in and out, and the timeline draws the opacity curve on the clip
+- rotation around an anchor point and cropping of each side, for clips and titles (a quarter turn stands a sideways phone video up)
+- keyframes on opacity, position, scale, rotation and anchor (linear, hold and easing presets); the Inspector's Fade card fades a clip in and out, and the timeline draws the opacity curve on the clip
 - sound: music and other sound files on audio tracks, clip gain in dB, pan and fades (equal power or linear), track volume and pan, and mute; the Inspector's Audio card sets them
 - a Gaussian blur on one clip (its edges soften into what is below it) or on an adjustment layer, which changes everything on the tracks below it; the Effects panel and each clip's Blur card add them
 - linked picture and sound: a video with sound comes in as two linked clips, the picture and its sound on an audio track, so the sound can be cut, faded and mixed on its own while moving, trimming, splitting and deleting keep them together; Unlink separates them
@@ -44,7 +45,7 @@ attome-editor                              # asks for a project folder, then: Fi
 attome-editor Demo.attome a.mp4 b.mp4      # open (or create) a project and import two files
 ```
 
-Drag a clip on the timeline to move it (also between tracks), drag its edges to trim, drag the picture in the Monitor to reposition a clip (position and scale are also in the Inspector), add a dissolve into the next clip from the Inspector's Transition card, `S` splits at the playhead, `Space` plays, `Ctrl+Z` / `Ctrl+Y` undo and redo, `Ctrl+E` exports. The editor is a client of the daemon: an edit made by `attome patch` or an agent while it is open shows up by itself. View > Profiler shows the daemon's zones live.
+Drag a clip on the timeline to move it (also between tracks), drag its edges to trim, drag the picture in the Monitor to reposition a clip (position, scale, rotation and crop are in the Inspector's Transform card), add a dissolve into the next clip from the Inspector's Transition card, `S` splits at the playhead, `Space` plays, `Ctrl+Z` / `Ctrl+Y` undo and redo, `Ctrl+E` exports. The editor is a client of the daemon: an edit made by `attome patch` or an agent while it is open shows up by itself. View > Profiler shows the daemon's zones live.
 
 ### Try it
 

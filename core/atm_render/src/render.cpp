@@ -58,14 +58,137 @@ void put_rows(uint8_t *dst, size_t dst_pitch, const uint8_t *src, size_t src_pit
   });
 }
 
-// Draws the NV12 picture `v` into the NV12 canvas `out` with its centre at (cx, cy) and scaled by (sx, sy), blending
-// with `alpha` (0..256). Bilinear sampling; the part outside the canvas is cut off. Rows run in parallel.
-void draw_transformed(uint8_t *out, int W, int H, const media::FrameView &v, float cx, float cy, float sx, float sy,
-                      int alpha) {
-  const float dw = float(v.width) * sx, dh = float(v.height) * sy;
-  const float fx0 = cx - dw * 0.5f, fy0 = cy - dh * 0.5f;
-  const int ix0 = std::max(0, int(std::ceil(fx0))), ix1 = std::min(W, int(std::floor(fx0 + dw)));
-  const int iy0 = std::max(0, int(std::ceil(fy0))), iy1 = std::min(H, int(std::floor(fy0 + dh)));
+// Where a picture of w x h pixels lands on the output (ADR-021 Transform): its anchor at (px, py), scaled by (sx, sy)
+// and turned around the anchor. Only the crop rectangle [u0, u1) x [v0, v1) of the picture is drawn. Picture
+// coordinates have pixel edges at whole numbers, as do output coordinates.
+struct Placement {
+  float px, py, sx, sy, cos_r = 1.0f, sin_r = 0.0f, ax, ay, u0, v0, u1, v1;
+  bool rotated = false;
+
+  Placement(const Transform &t, int W, int H, float w, float h)
+      : px(t.pos_x * float(W)), py(t.pos_y * float(H)), sx(t.scale_x), sy(t.scale_y), ax(t.anchor_x * w),
+        ay(t.anchor_y * h), u0(t.crop_left * w), v0(t.crop_top * h), u1((1.0f - t.crop_right) * w),
+        v1((1.0f - t.crop_bottom) * h) {
+    const double turn = std::fmod(double(t.rotation), 360.0);
+    if (turn != 0.0) {
+      rotated = true;
+      const double r = turn * 3.14159265358979323846 / 180.0;
+      cos_r = float(std::cos(r));
+      sin_r = float(std::sin(r));
+    }
+  }
+  // The picture point under an output point.
+  void source(float x, float y, float &u, float &v) const {
+    const float dx = x - px, dy = y - py;
+    u = (dx * cos_r + dy * sin_r) / sx + ax;
+    v = (dy * cos_r - dx * sin_r) / sy + ay;
+  }
+  // The output point of a picture point.
+  void output(float u, float v, float &x, float &y) const {
+    const float a = (u - ax) * sx, b = (v - ay) * sy;
+    x = px + a * cos_r - b * sin_r;
+    y = py + a * sin_r + b * cos_r;
+  }
+  // The output pixels that can show the visible picture, cut to the canvas. False when there are none.
+  bool box(int W, int H, int &x0, int &y0, int &x1, int &y1) const {
+    if (u1 <= u0 || v1 <= v0 || sx <= 0.0f || sy <= 0.0f)
+      return false;
+    float lo_x = 1e30f, lo_y = 1e30f, hi_x = -1e30f, hi_y = -1e30f;
+    for (const auto &[u, v] : {std::pair{u0, v0}, std::pair{u1, v0}, std::pair{u0, v1}, std::pair{u1, v1}}) {
+      float x = 0.0f, y = 0.0f;
+      output(u, v, x, y);
+      lo_x = std::min(lo_x, x);
+      lo_y = std::min(lo_y, y);
+      hi_x = std::max(hi_x, x);
+      hi_y = std::max(hi_y, y);
+    }
+    x0 = std::max(0, int(std::floor(lo_x)));
+    y0 = std::max(0, int(std::floor(lo_y)));
+    x1 = std::min(W, int(std::ceil(hi_x)));
+    y1 = std::min(H, int(std::ceil(hi_y)));
+    return x1 > x0 && y1 > y0;
+  }
+  // How much of the visible picture covers a picture point, 0..1: the edges fade over one output pixel, so turned
+  // pictures have smooth sides.
+  float coverage(float u, float v) const {
+    const float cx = std::min(u - u0, u1 - u) * sx + 0.5f, cy = std::min(v - v0, v1 - v) * sy + 0.5f;
+    return std::clamp(cx, 0.0f, 1.0f) * std::clamp(cy, 0.0f, 1.0f);
+  }
+};
+
+// Bilinear sample of a plane with `channels` interleaved bytes per sample, at a sample-centred position (0 = the centre
+// of the first sample), clamped to the plane.
+int sample(const uint8_t *plane, int pitch, int w, int h, int channels, int k, float x, float y) {
+  x = std::clamp(x, 0.0f, float(w - 1));
+  y = std::clamp(y, 0.0f, float(h - 1));
+  const int x0 = int(x), y0 = int(y), x1 = std::min(x0 + 1, w - 1), y1 = std::min(y0 + 1, h - 1);
+  const int wx = int((x - float(x0)) * 256.0f), wy = int((y - float(y0)) * 256.0f);
+  const uint8_t *r0 = plane + std::ptrdiff_t(pitch) * y0, *r1 = plane + std::ptrdiff_t(pitch) * y1;
+  const int top = (r0[x0 * channels + k] * (256 - wx) + r0[x1 * channels + k] * wx) >> 8;
+  const int bottom = (r1[x0 * channels + k] * (256 - wx) + r1[x1 * channels + k] * wx) >> 8;
+  return (top * (256 - wy) + bottom * wy) >> 8;
+}
+
+// A turned picture: every output pixel looks up its picture point (stepping along the row), samples it bilinearly and
+// blends by `alpha` times the edge coverage.
+void draw_rotated(uint8_t *out, int W, int H, const media::FrameView &v, const Placement &pl, int alpha) {
+  int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+  if (!pl.box(W, H, x0, y0, x1, y1))
+    return;
+  const float du = pl.cos_r / pl.sx, dv = -pl.sin_r / pl.sy; // picture step per output pixel along a row
+  uint8_t *out_y = out, *out_uv = out + size_t(W) * size_t(H);
+  parallel_for(y1 - y0, 8, [&](int64_t first, int64_t last) {
+    for (int64_t r = first; r < last; ++r) {
+      const int y = y0 + int(r);
+      float u = 0.0f, vv = 0.0f;
+      pl.source(float(x0) + 0.5f, float(y) + 0.5f, u, vv);
+      uint8_t *dst = out_y + size_t(y) * size_t(W);
+      for (int x = x0; x < x1; ++x, u += du, vv += dv) {
+        const float cover = pl.coverage(u, vv);
+        if (cover <= 0.0f)
+          continue;
+        const int a = int(float(alpha) * cover + 0.5f);
+        const int s = sample(v.y, v.y_pitch, v.width, v.height, 1, 0, u - 0.5f, vv - 0.5f);
+        dst[x] = uint8_t((s * a + dst[x] * (256 - a)) >> 8);
+      }
+    }
+  });
+  // Chroma: one U/V pair per 2 x 2 output pixels, looked up at the centre of the four.
+  const int cw = v.width / 2, ch = v.height / 2;
+  const int cx0 = x0 / 2, cx1 = (x1 + 1) / 2, cy0 = y0 / 2, cy1 = (y1 + 1) / 2;
+  parallel_for(cy1 - cy0, 8, [&](int64_t first, int64_t last) {
+    for (int64_t r = first; r < last; ++r) {
+      const int c = cy0 + int(r);
+      float u = 0.0f, vv = 0.0f;
+      pl.source(float(2 * cx0) + 1.0f, float(2 * c) + 1.0f, u, vv);
+      uint8_t *dst = out_uv + size_t(c) * size_t(W);
+      for (int x = cx0; x < cx1; ++x, u += 2.0f * du, vv += 2.0f * dv) {
+        const float cover = pl.coverage(u, vv);
+        if (cover <= 0.0f)
+          continue;
+        const int a = int(float(alpha) * cover + 0.5f);
+        for (int k = 0; k < 2; ++k) { // U then V
+          const int s = sample(v.uv, v.uv_pitch, cw, ch, 2, k, u * 0.5f - 0.5f, vv * 0.5f - 0.5f);
+          uint8_t &d = dst[x * 2 + k];
+          d = uint8_t((s * a + d * (256 - a)) >> 8);
+        }
+      }
+    }
+  });
+}
+
+// Draws the NV12 picture `v` into the NV12 canvas `out` as `pl` places it, blending with `alpha` (0..256). Bilinear
+// sampling; the part outside the canvas is cut off. Rows run in parallel. A turned picture goes to draw_rotated; an
+// upright one keeps this simpler path, with its crop cut at whole pixels.
+void draw_transformed(uint8_t *out, int W, int H, const media::FrameView &v, const Placement &pl, int alpha) {
+  if (pl.rotated) {
+    draw_rotated(out, W, H, v, pl, alpha);
+    return;
+  }
+  const float sx = pl.sx, sy = pl.sy;
+  const float fx0 = pl.px - pl.ax * sx, fy0 = pl.py - pl.ay * sy; // where the picture's top-left corner lands
+  const int ix0 = std::max(0, int(std::ceil(fx0 + pl.u0 * sx))), ix1 = std::min(W, int(std::floor(fx0 + pl.u1 * sx)));
+  const int iy0 = std::max(0, int(std::ceil(fy0 + pl.v0 * sy))), iy1 = std::min(H, int(std::floor(fy0 + pl.v1 * sy)));
   if (ix1 <= ix0 || iy1 <= iy0)
     return;
   const float inv_x = 1.0f / sx, inv_y = 1.0f / sy;
@@ -126,10 +249,9 @@ void draw_transformed(uint8_t *out, int W, int H, const media::FrameView &v, flo
   });
 }
 
-// Draws a coverage mask in `rgb` into the NV12 canvas, centred at (cx, cy) and scaled by (sx, sy). Same sampling as
-// draw_transformed; the colour is converted to Y, U and V once.
-void draw_text(uint8_t *out, int W, int H, const media::TextBitmap &m, float cx, float cy, float sx, float sy, int alpha,
-               uint32_t rgb) {
+// Draws a coverage mask in `rgb` into the NV12 canvas as `pl` places it, turned and cropped like a picture. The colour
+// is converted to Y, U and V once.
+void draw_text(uint8_t *out, int W, int H, const media::TextBitmap &m, const Placement &pl, int alpha, uint32_t rgb) {
   uint8_t bgrx[2 * 2 * 4], yuv[6];
   for (int i = 0; i < 4; ++i) {
     bgrx[i * 4 + 0] = uint8_t(rgb & 255);
@@ -140,16 +262,19 @@ void draw_text(uint8_t *out, int W, int H, const media::TextBitmap &m, float cx,
   media::bgrx_to_nv12(bgrx, 2, 2, yuv);
   const int cy_ = yuv[0], cu = yuv[4], cv = yuv[5];
 
-  const float dw = float(m.width) * sx, dh = float(m.height) * sy;
-  const float fx0 = cx - dw * 0.5f, fy0 = cy - dh * 0.5f;
-  const int ix0 = std::max(0, int(std::floor(fx0))), ix1 = std::min(W, int(std::ceil(fx0 + dw)));
-  const int iy0 = std::max(0, int(std::floor(fy0))), iy1 = std::min(H, int(std::ceil(fy0 + dh)));
-  if (ix1 <= ix0 || iy1 <= iy0 || sx <= 0.0f || sy <= 0.0f)
+  int ix0 = 0, iy0 = 0, ix1 = 0, iy1 = 0;
+  if (!pl.box(W, H, ix0, iy0, ix1, iy1))
     return;
-  const float inv_x = 1.0f / sx, inv_y = 1.0f / sy;
-  // Coverage at a destination position, bilinear, 0..255.
+  const bool cropped = pl.u0 > 0.0f || pl.v0 > 0.0f || pl.u1 < float(m.width) || pl.v1 < float(m.height);
+  // Coverage at an output position, bilinear, 0..255.
   const auto coverage = [&](float dx, float dy) {
-    const float u = (dx - fx0) * inv_x - 0.5f, v = (dy - fy0) * inv_y - 0.5f;
+    float u = 0.0f, v = 0.0f;
+    pl.source(dx, dy, u, v);
+    const float edge = cropped ? pl.coverage(u, v) : 1.0f;
+    if (edge <= 0.0f)
+      return 0.0f;
+    u -= 0.5f;
+    v -= 0.5f;
     const int x0 = int(std::floor(u)), y0 = int(std::floor(v));
     const float fx = u - float(x0), fy = v - float(y0);
     const auto at = [&](int x, int y) -> float {
@@ -157,7 +282,7 @@ void draw_text(uint8_t *out, int W, int H, const media::TextBitmap &m, float cx,
     };
     const float top = at(x0, y0) * (1.0f - fx) + at(x0 + 1, y0) * fx;
     const float bottom = at(x0, y0 + 1) * (1.0f - fx) + at(x0 + 1, y0 + 1) * fx;
-    return top * (1.0f - fy) + bottom * fy;
+    return (top * (1.0f - fy) + bottom * fy) * edge;
   };
   uint8_t *out_y = out, *out_uv = out + size_t(W) * size_t(H);
   parallel_for(iy1 - iy0, 8, [&](int64_t first, int64_t last) {
@@ -330,12 +455,28 @@ Result<Composition> compile(const json &project, std::string_view sequence_id) {
               a = b = f->get<float>();
             }
           };
-          pair("position", l.pos_x, l.pos_y);
-          pair("scale", l.scale_x, l.scale_y);
-          l.pos_x = std::clamp(l.pos_x, -4.0f, 5.0f);
-          l.pos_y = std::clamp(l.pos_y, -4.0f, 5.0f);
-          l.scale_x = std::clamp(l.scale_x, 0.01f, 16.0f);
-          l.scale_y = std::clamp(l.scale_y, 0.01f, 16.0f);
+          Transform &xf = l.xf;
+          pair("position", xf.pos_x, xf.pos_y);
+          pair("scale", xf.scale_x, xf.scale_y);
+          pair("anchor", xf.anchor_x, xf.anchor_y);
+          xf.pos_x = std::clamp(xf.pos_x, -4.0f, 5.0f);
+          xf.pos_y = std::clamp(xf.pos_y, -4.0f, 5.0f);
+          xf.scale_x = std::clamp(xf.scale_x, 0.01f, 16.0f);
+          xf.scale_y = std::clamp(xf.scale_y, 0.01f, 16.0f);
+          xf.anchor_x = std::clamp(xf.anchor_x, -4.0f, 5.0f);
+          xf.anchor_y = std::clamp(xf.anchor_y, -4.0f, 5.0f);
+          if (const auto rot = tr->find("rotation"); rot != tr->end() && rot->is_number())
+            xf.rotation = std::isfinite(rot->get<float>()) ? rot->get<float>() : 0.0f;
+          if (const auto crop = tr->find("crop"); crop != tr->end() && crop->is_object()) {
+            const auto side = [&](const char *key) {
+              const auto f = crop->find(key);
+              return f != crop->end() && f->is_number() ? std::clamp(f->get<float>(), 0.0f, 1.0f) : 0.0f;
+            };
+            xf.crop_left = side("left");
+            xf.crop_top = side("top");
+            xf.crop_right = side("right");
+            xf.crop_bottom = side("bottom");
+          }
         }
         if (const auto tr = clip.find("transform"); tr != clip.end() && tr->is_object())
           if (const auto kfs = tr->find("keyframes"); kfs != tr->end() && kfs->is_object()) {
@@ -348,6 +489,8 @@ Result<Composition> compile(const json &project, std::string_view sequence_id) {
             curve("opacity", 1, l.opacity_keys);
             curve("position", 2, l.position_keys);
             curve("scale", 2, l.scale_keys);
+            curve("rotation", 1, l.rotation_keys);
+            curve("anchor", 2, l.anchor_keys);
           }
         if (const auto vol = clip.find("volume"); vol != clip.end() && vol->is_number())
           l.volume = std::clamp(vol->get<float>(), 0.0f, 4.0f);
@@ -405,14 +548,10 @@ std::pair<int, int> Renderer::text_extent(const std::string &clip_id) const {
   return it == text_.end() ? std::pair<int, int>{0, 0} : std::pair<int, int>{it->second.bitmap.width, it->second.bitmap.height};
 }
 
-void Renderer::set_transform(const std::string &clip_id, float pos_x, float pos_y, float scale_x, float scale_y) {
+void Renderer::set_transform(const std::string &clip_id, const Transform &xf) {
   for (Layer &l : comp_.layers)
-    if (l.clip_id == clip_id) {
-      l.pos_x = pos_x;
-      l.pos_y = pos_y;
-      l.scale_x = scale_x;
-      l.scale_y = scale_y;
-    }
+    if (l.clip_id == clip_id)
+      l.xf = xf;
 }
 
 namespace {
@@ -490,8 +629,9 @@ void blur_nv12(uint8_t *nv12, int W, int H, float sigma, std::vector<uint8_t> &t
 } // namespace
 
 Pose pose_at(const Layer &l, const Composition &comp, int64_t frame) {
-  Pose p{l.opacity, l.pos_x, l.pos_y, l.scale_x, l.scale_y};
-  if (l.opacity_keys.empty() && l.position_keys.empty() && l.scale_keys.empty())
+  Pose p{l.opacity, l.xf};
+  if (l.opacity_keys.empty() && l.position_keys.empty() && l.scale_keys.empty() && l.rotation_keys.empty() &&
+      l.anchor_keys.empty())
     return p;
   const auto local = Rational::make(int64_t(frame - l.origin_frame) * comp.rate_den, comp.rate_num);
   if (!local)
@@ -500,13 +640,20 @@ Pose pose_at(const Layer &l, const Composition &comp, int64_t frame) {
     p.opacity = std::clamp(float(l.opacity_keys.at(*local)[0]), 0.0f, 1.0f);
   if (!l.position_keys.empty()) {
     const auto v = l.position_keys.at(*local);
-    p.pos_x = std::clamp(float(v[0]), -4.0f, 5.0f);
-    p.pos_y = std::clamp(float(v[1]), -4.0f, 5.0f);
+    p.xf.pos_x = std::clamp(float(v[0]), -4.0f, 5.0f);
+    p.xf.pos_y = std::clamp(float(v[1]), -4.0f, 5.0f);
   }
   if (!l.scale_keys.empty()) {
     const auto v = l.scale_keys.at(*local);
-    p.scale_x = std::clamp(float(v[0]), 0.01f, 16.0f);
-    p.scale_y = std::clamp(float(v[1]), 0.01f, 16.0f);
+    p.xf.scale_x = std::clamp(float(v[0]), 0.01f, 16.0f);
+    p.xf.scale_y = std::clamp(float(v[1]), 0.01f, 16.0f);
+  }
+  if (!l.rotation_keys.empty())
+    p.xf.rotation = float(l.rotation_keys.at(*local)[0]);
+  if (!l.anchor_keys.empty()) {
+    const auto v = l.anchor_keys.at(*local);
+    p.xf.anchor_x = std::clamp(float(v[0]), -4.0f, 5.0f);
+    p.xf.anchor_y = std::clamp(float(v[1]), -4.0f, 5.0f);
   }
   return p;
 }
@@ -562,8 +709,8 @@ void Renderer::draw(const Layer &l, int64_t frame, uint8_t *out, bool &cleared, 
       media::fill_black(out, width_, height_);
     cleared = true;
     ATM_PROFILE_SCOPE("composite.text");
-    draw_text(out, width_, height_, entry.bitmap, p.pos_x * float(width_), p.pos_y * float(height_), p.scale_x,
-              p.scale_y, int(p.opacity * 256.0f + 0.5f), l.text_color);
+    const Placement pl(p.xf, width_, height_, float(entry.bitmap.width), float(entry.bitmap.height));
+    draw_text(out, width_, height_, entry.bitmap, pl, int(p.opacity * 256.0f + 0.5f), l.text_color);
     return;
   }
   if (failed_.count(l.clip_id))
@@ -590,7 +737,10 @@ void Renderer::draw(const Layer &l, int64_t frame, uint8_t *out, bool &cleared, 
   const int w = std::min(view->width, width_), h = std::min(view->height, height_);
   const int alpha = int(p.opacity * 256.0f + 0.5f);
   // The common case, a clip fitted and centred, stays on the plain copy path.
-  const bool plain = p.scale_x == 1.0f && p.scale_y == 1.0f && p.pos_x == 0.5f && p.pos_y == 0.5f;
+  const Transform &xf = p.xf;
+  const Placement pl(xf, width_, height_, float(view->width), float(view->height));
+  const bool plain = xf.scale_x == 1.0f && xf.scale_y == 1.0f && xf.pos_x == 0.5f && xf.pos_y == 0.5f &&
+                     xf.anchor_x == 0.5f && xf.anchor_y == 0.5f && !pl.rotated && !xf.cropped();
   const bool covers = plain ? (w >= width_ && h >= height_) : false;
   if (!cleared && (alpha < 256 || !covers))
     media::fill_black(out, width_, height_);
@@ -602,8 +752,7 @@ void Renderer::draw(const Layer &l, int64_t frame, uint8_t *out, bool &cleared, 
     put_rows(out_uv + pitch * size_t(y0 / 2) + size_t(x0), pitch, view->uv, size_t(view->uv_pitch), h / 2, w, alpha);
   } else {
     ATM_PROFILE_SCOPE("composite.transform");
-    draw_transformed(out, width_, height_, *view, p.pos_x * float(width_), p.pos_y * float(height_), p.scale_x,
-                     p.scale_y, alpha);
+    draw_transformed(out, width_, height_, *view, pl, alpha);
   }
 }
 

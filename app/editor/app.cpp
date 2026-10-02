@@ -257,6 +257,16 @@ void App::refresh() {
               c.scale_x = tr["scale"][0].get<float>();
               c.scale_y = tr["scale"][1].get<float>();
             }
+            c.rotation = tr.value("rotation", 0.0f);
+            if (tr.contains("anchor") && tr["anchor"].is_array() && tr["anchor"].size() == 2) {
+              c.anchor_x = tr["anchor"][0].get<float>();
+              c.anchor_y = tr["anchor"][1].get<float>();
+            }
+            if (const auto crop = tr.find("crop"); crop != tr.end() && crop->is_object()) {
+              const char *sides[4] = {"left", "top", "right", "bottom"};
+              for (int i = 0; i < 4; ++i)
+                c.crop[i] = crop->value(sides[i], 0.0f);
+            }
           }
           c.media_w = ref.value("width", 0);
           c.media_h = ref.value("height", 0);
@@ -813,6 +823,45 @@ constexpr Icon play{0xE768, 0xE13C}, pause{0xE769, 0xE12E}, prev{0xE892, 0xE15F}
 }
 
 ImVec2 text_size(const char *t) { return ImGui::CalcTextSize(t); }
+
+// The static transform of a clip, as the renderer takes it.
+render::Transform transform_of(const ClipUi &c) {
+  render::Transform xf;
+  xf.pos_x = c.pos_x;
+  xf.pos_y = c.pos_y;
+  xf.scale_x = c.scale_x;
+  xf.scale_y = c.scale_y;
+  xf.rotation = c.rotation;
+  xf.anchor_x = c.anchor_x;
+  xf.anchor_y = c.anchor_y;
+  xf.crop_left = c.crop[0];
+  xf.crop_top = c.crop[1];
+  xf.crop_right = c.crop[2];
+  xf.crop_bottom = c.crop[3];
+  return xf;
+}
+
+// Where a picture of w x h canvas pixels (at scale 1) lies on a canvas of cw x ch pixels, placed like the renderer
+// places it: the anchor at the position, scaled and turned around it, cropped.
+struct Footprint {
+  float px, py, sx, sy, cos_r, sin_r, ax, ay, u0, v0, u1, v1;
+  Footprint(const render::Transform &xf, float w, float h, float cw, float ch)
+      : px(xf.pos_x * cw), py(xf.pos_y * ch), sx(xf.scale_x), sy(xf.scale_y),
+        cos_r(std::cos(xf.rotation * 3.14159265f / 180.0f)), sin_r(std::sin(xf.rotation * 3.14159265f / 180.0f)),
+        ax(xf.anchor_x * w), ay(xf.anchor_y * h), u0(xf.crop_left * w), v0(xf.crop_top * h),
+        u1((1.0f - xf.crop_right) * w), v1((1.0f - xf.crop_bottom) * h) {}
+  ImVec2 at(float u, float v) const { // canvas point of a picture point
+    const float a = (u - ax) * sx, b = (v - ay) * sy;
+    return ImVec2(px + a * cos_r - b * sin_r, py + a * sin_r + b * cos_r);
+  }
+  bool contains(float x, float y) const { // is a canvas point on the visible picture?
+    if (sx <= 0.0f || sy <= 0.0f)
+      return false;
+    const float dx = x - px, dy = y - py;
+    const float u = (dx * cos_r + dy * sin_r) / sx + ax, v = (dy * cos_r - dx * sin_r) / sy + ay;
+    return u >= u0 && u <= u1 && v >= v0 && v <= v1;
+  }
+};
 
 // A button drawn in the mockup's style. Returns true when clicked.
 bool soft_button(const char *id, const char *label, ImVec2 size, bool enabled = true, bool primary = false,
@@ -1592,18 +1641,20 @@ void App::draw_viewer() {
   // The picture is also a handle: click a clip in it to select it, drag it to move it.
   if (total_frames_ > 0) {
     const float k = size.x / float(std::max(1, canvas_w_)); // Monitor pixels per canvas pixel
-    const auto rect_of = [&](const ClipUi &c, float px, float py) { // in canvas pixels: x0, y0, x1, y1
+    const auto footprint_of = [&](const ClipUi &c, float px, float py) { // in canvas pixels
       const float mw = c.media_w > 0 ? float(c.media_w) : float(canvas_w_), mh = c.media_h > 0 ? float(c.media_h) : float(canvas_h_);
       const float fit = std::min(float(canvas_w_) / mw, float(canvas_h_) / mh);
-      float w = mw * fit * c.scale_x, h = mh * fit * c.scale_y;
+      float w = mw * fit, h = mh * fit;
       if (c.is_text) { // the size of the drawn text, from the preview renderer
         const auto e = preview_.extent(c.id);
         const float to_canvas = tex_w_ > 0 ? float(canvas_w_) / float(tex_w_) : 1.0f;
-        w = float(e.first) * to_canvas * c.scale_x;
-        h = float(e.second) * to_canvas * c.scale_y;
+        w = float(e.first) * to_canvas;
+        h = float(e.second) * to_canvas;
       }
-      const float cx = px * float(canvas_w_), cy = py * float(canvas_h_);
-      return ImVec4(cx - w * 0.5f, cy - h * 0.5f, cx + w * 0.5f, cy + h * 0.5f);
+      render::Transform xf = transform_of(c);
+      xf.pos_x = px;
+      xf.pos_y = py;
+      return Footprint(xf, w, h, float(canvas_w_), float(canvas_h_));
     };
     const auto active_at_playhead = [&](const ClipUi &c) { return playhead_ >= c.start && playhead_ < c.start + c.frames; };
 
@@ -1617,10 +1668,7 @@ void App::draw_viewer() {
       const TrackUi *hit_track = nullptr;
       const TrackUi *sel_track = nullptr;
       const ClipUi *sel = selected(&sel_track);
-      const auto inside = [&](const ClipUi &c) {
-        const ImVec4 r = rect_of(c, c.pos_x, c.pos_y);
-        return mx >= r.x && mx <= r.z && my >= r.y && my <= r.w;
-      };
+      const auto inside = [&](const ClipUi &c) { return footprint_of(c, c.pos_x, c.pos_y).contains(mx, my); };
       if (sel && sel_track->kind != "audio" && active_at_playhead(*sel) && inside(*sel)) {
         hit = sel;
         hit_track = sel_track;
@@ -1651,7 +1699,10 @@ void App::draw_viewer() {
       if (dc && dc->id == mon_clip_) {
         mon_x_ = mon_x0_ + (mouse.x - mon_start_.x) / k / float(canvas_w_);
         mon_y_ = mon_y0_ + (mouse.y - mon_start_.y) / k / float(canvas_h_);
-        preview_.set_transform(dc->id, mon_x_, mon_y_, dc->scale_x, dc->scale_y);
+        render::Transform xf = transform_of(*dc);
+        xf.pos_x = mon_x_;
+        xf.pos_y = mon_y_;
+        preview_.set_transform(dc->id, xf);
       }
     }
     if (mon_drag_ && ImGui::IsItemDeactivated()) {
@@ -1669,10 +1720,13 @@ void App::draw_viewer() {
     const TrackUi *ot = nullptr;
     if (const ClipUi *oc = selected(&ot); oc && ot->kind != "audio" && active_at_playhead(*oc)) {
       const bool dragging = mon_drag_ && mon_clip_ == oc->id;
-      const ImVec4 r = rect_of(*oc, dragging ? mon_x_ : oc->pos_x, dragging ? mon_y_ : oc->pos_y);
+      const Footprint f = footprint_of(*oc, dragging ? mon_x_ : oc->pos_x, dragging ? mon_y_ : oc->pos_y);
+      const auto to_monitor = [&](ImVec2 q) { return ImVec2(p0.x + q.x * k, p0.y + q.y * k); };
+      const ImVec2 corners[4] = {to_monitor(f.at(f.u0, f.v0)), to_monitor(f.at(f.u1, f.v0)), to_monitor(f.at(f.u1, f.v1)),
+                                 to_monitor(f.at(f.u0, f.v1))};
       dl->PushClipRect(p0, p1, true);
-      dl->AddRect(ImVec2(p0.x + r.x * k, p0.y + r.y * k), ImVec2(p0.x + r.z * k, p0.y + r.w * k), hex(look::accent), 0.0f, 0, 2.0f);
-      dl->AddCircleFilled(ImVec2(p0.x + (r.x + r.z) * 0.5f * k, p0.y + (r.y + r.w) * 0.5f * k), 3.5f, hex(look::accent));
+      dl->AddPolyline(corners, 4, hex(look::accent), ImDrawFlags_Closed, 2.0f);
+      dl->AddCircleFilled(to_monitor(f.at(f.ax, f.ay)), 3.5f, hex(look::accent)); // the anchor
       dl->PopClipRect();
     }
   }
@@ -2202,6 +2256,9 @@ void App::draw_inspector() {
     audio_fade_out_s_ = float(double(c->audio_fade_out) / fps());
     fade_out_s_ = float(double(c->fade_out) / fps());
     scale_ = c->scale_x;
+    rotation_ = c->rotation;
+    for (int i = 0; i < 4; ++i)
+      crop_pct_[i] = c->crop[i] * 100.0f;
     if (c->is_text) {
       copy_to(text_buf_, sizeof text_buf_, c->text);
       text_size_ = c->text_size;
@@ -2337,9 +2394,12 @@ void App::draw_inspector() {
     moved = ImGui::DragFloat("##py", &pos_px_[1], 1.0f, -20000.0f, 20000.0f, "Y  %.0f") || moved;
     moved_done = ImGui::IsItemDeactivatedAfterEdit() || moved_done;
     ImGui::PopStyleColor();
-    if (moved && !moved_done) // live: the Monitor follows while the number is dragged
-      preview_.set_transform(id, pos_px_[0] / float(canvas_w_) + 0.5f, pos_px_[1] / float(canvas_h_) + 0.5f,
-                             c->scale_x, c->scale_y);
+    if (moved && !moved_done) { // live: the Monitor follows while the number is dragged
+      render::Transform xf = transform_of(*c);
+      xf.pos_x = pos_px_[0] / float(canvas_w_) + 0.5f;
+      xf.pos_y = pos_px_[1] / float(canvas_h_) + 0.5f;
+      preview_.set_transform(id, xf);
+    }
     if (moved_done) {
       const float x = std::round((pos_px_[0] / float(canvas_w_) + 0.5f) * 10000.0f) / 10000.0f;
       const float y = std::round((pos_px_[1] / float(canvas_h_) + 0.5f) * 10000.0f) / 10000.0f;
@@ -2351,8 +2411,11 @@ void App::draw_inspector() {
     ImGui::TextColored(hexv(look::fg2), "Scale");
     ImGui::SameLine(88.0f);
     const float sw = ImGui::GetContentRegionAvail().x - 52.0f;
-    if (slim_slider("scale", &scale_, 0.1f, 4.0f, sw, ""))
-      preview_.set_transform(id, c->pos_x, c->pos_y, scale_, scale_);
+    if (slim_slider("scale", &scale_, 0.1f, 4.0f, sw, "")) {
+      render::Transform xf = transform_of(*c);
+      xf.scale_x = xf.scale_y = scale_;
+      preview_.set_transform(id, xf);
+    }
     if (ImGui::IsItemDeactivatedAfterEdit()) {
       const float v = std::round(scale_ * 100.0f) / 100.0f;
       pending_ = [this, id, v] {
@@ -2364,6 +2427,76 @@ void App::draw_inspector() {
     ImGui::PushFont(g_fonts.mono, 13.0f);
     ImGui::TextColored(hexv(look::fg2), "%3.0f%%", scale_ * 100.0f);
     ImGui::PopFont();
+
+    // Rotation, clockwise, around the anchor. The quarter-turn buttons stand a sideways phone video up.
+    const auto commit_rotation = [&](float degrees) {
+      const float v = std::round(degrees * 10.0f) / 10.0f;
+      pending_ = [this, id, v] {
+        patch(json::array({{{"op", "replace"}, {"path", id + "/transform/rotation"}, {"value", v}}}), "Rotate clip");
+      };
+    };
+    ImGui::TextColored(hexv(look::fg2), "Rotation");
+    ImGui::SameLine(88.0f);
+    if (slim_slider("rotation", &rotation_, -180.0f, 180.0f, sw, "")) {
+      render::Transform xf = transform_of(*c);
+      xf.rotation = rotation_;
+      preview_.set_transform(id, xf);
+    }
+    if (ImGui::IsItemDeactivatedAfterEdit())
+      commit_rotation(rotation_);
+    ImGui::SameLine();
+    ImGui::PushFont(g_fonts.mono, 13.0f);
+    ImGui::TextColored(hexv(look::fg2), "%4.0f\xC2\xB0", rotation_);
+    ImGui::PopFont();
+    {
+      ImGui::Dummy(ImVec2(80.0f, 0.0f));
+      ImGui::SameLine(88.0f);
+      const auto wrap = [](float d) { return d > 180.0f ? d - 360.0f : d <= -180.0f ? d + 360.0f : d; };
+      if (soft_button("rotate_left", "-90\xC2\xB0", ImVec2(56.0f, 24.0f)))
+        commit_rotation(wrap(c->rotation - 90.0f));
+      ImGui::SameLine(0.0f, 6.0f);
+      if (soft_button("rotate_right", "+90\xC2\xB0", ImVec2(56.0f, 24.0f)))
+        commit_rotation(wrap(c->rotation + 90.0f));
+    }
+
+    // Crop: percent of the picture cut off each side; what is left stays in place.
+    ImGui::TextColored(hexv(look::fg2), "Crop");
+    ImGui::SameLine(88.0f);
+    {
+      static const char *const names[4] = {"##crop_l", "##crop_t", "##crop_r", "##crop_b"};
+      static const char *const formats[4] = {"L %.0f%%", "T %.0f%%", "R %.0f%%", "B %.0f%%"};
+      static const char *const marks[4] = {"crop:left", "crop:top", "crop:right", "crop:bottom"};
+      const float cell = (ImGui::GetContentRegionAvail().x - 3.0f * 4.0f) / 4.0f;
+      bool crop_moved = false, crop_done = false;
+      ImGui::PushStyleColor(ImGuiCol_FrameBg, hexv(look::raised));
+      for (int i = 0; i < 4; ++i) {
+        if (i > 0)
+          ImGui::SameLine(0.0f, 4.0f);
+        ImGui::SetNextItemWidth(cell);
+        const int across = i < 2 ? i + 2 : i - 2; // left pairs with right, top with bottom
+        const float most = std::max(0.0f, 95.0f - crop_pct_[across]);
+        crop_moved = ImGui::DragFloat(names[i], &crop_pct_[i], 0.25f, 0.0f, most, formats[i],
+                                      ImGuiSliderFlags_AlwaysClamp) || crop_moved;
+        ui_mark(marks[i]);
+        crop_done = ImGui::IsItemDeactivatedAfterEdit() || crop_done;
+      }
+      ImGui::PopStyleColor();
+      render::Transform xf = transform_of(*c);
+      xf.crop_left = crop_pct_[0] / 100.0f;
+      xf.crop_top = crop_pct_[1] / 100.0f;
+      xf.crop_right = crop_pct_[2] / 100.0f;
+      xf.crop_bottom = crop_pct_[3] / 100.0f;
+      if (crop_moved && !crop_done)
+        preview_.set_transform(id, xf);
+      if (crop_done) {
+        const auto r = [](float v) { return std::round(double(v) * 1000.0) / 1000.0; }; // stored as doubles
+        const json crop = {{"left", r(xf.crop_left)}, {"top", r(xf.crop_top)}, {"right", r(xf.crop_right)},
+                           {"bottom", r(xf.crop_bottom)}};
+        pending_ = [this, id, crop] {
+          patch(json::array({{{"op", "replace"}, {"path", id + "/transform/crop"}, {"value", crop}}}), "Crop clip");
+        };
+      }
+    }
     ImGui::TextColored(hexv(look::fg2), "Opacity");
     ImGui::SameLine(88.0f);
     const float avail = ImGui::GetContentRegionAvail().x - 52.0f;
@@ -2383,12 +2516,17 @@ void App::draw_inspector() {
     ImGui::PushFont(g_fonts.mono, 13.0f);
     ImGui::TextColored(hexv(look::fg2), "%3.0f%%", opacity_ * 100.0f);
     ImGui::PopFont();
-    const bool changed = c->pos_x != 0.5f || c->pos_y != 0.5f || c->scale_x != 1.0f || c->scale_y != 1.0f;
+    const bool changed = c->pos_x != 0.5f || c->pos_y != 0.5f || c->scale_x != 1.0f || c->scale_y != 1.0f ||
+                         c->rotation != 0.0f || c->anchor_x != 0.5f || c->anchor_y != 0.5f || c->crop[0] != 0.0f ||
+                         c->crop[1] != 0.0f || c->crop[2] != 0.0f || c->crop[3] != 0.0f;
     ImGui::BeginDisabled(!changed);
-    if (soft_button("reset_transform", "Reset position and scale", ImVec2(-1.0f, 28.0f), changed)) {
+    if (soft_button("reset_transform", "Reset transform", ImVec2(-1.0f, 28.0f), changed)) {
       pending_ = [this, id] {
         patch(json::array({{{"op", "replace"}, {"path", id + "/transform/position"}, {"value", json::array({0.5, 0.5})}},
-                           {{"op", "replace"}, {"path", id + "/transform/scale"}, {"value", json::array({1.0, 1.0})}}}),
+                           {{"op", "replace"}, {"path", id + "/transform/scale"}, {"value", json::array({1.0, 1.0})}},
+                           {{"op", "replace"}, {"path", id + "/transform/rotation"}, {"value", 0.0}},
+                           {{"op", "replace"}, {"path", id + "/transform/anchor"}, {"value", json::array({0.5, 0.5})}},
+                           {{"op", "replace"}, {"path", id + "/transform/crop"}, {"value", json::object()}}}),
               "Reset transform");
         insp_rev_ = 0;
       };

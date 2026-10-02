@@ -25,6 +25,18 @@ struct Effect {
   float radius = 0.0f;
 };
 
+// The static transform of a clip (ADR-021 canvas fractions). Position is where the anchor sits on the canvas, top-left
+// origin, so [0.5, 0.5] is the middle. The anchor is a point of the clip's own picture (fractions, [0.5, 0.5] its
+// centre); scale and rotation turn around it. Scale 1 is "fitted inside the canvas"; 2 is twice that size. Rotation is
+// in degrees, clockwise. Crop cuts fractions of the picture off each side; what is left stays where it was.
+struct Transform {
+  float pos_x = 0.5f, pos_y = 0.5f, scale_x = 1.0f, scale_y = 1.0f;
+  float rotation = 0.0f;
+  float anchor_x = 0.5f, anchor_y = 0.5f;
+  float crop_left = 0.0f, crop_top = 0.0f, crop_right = 0.0f, crop_bottom = 0.0f;
+  bool cropped() const { return crop_left > 0.0f || crop_top > 0.0f || crop_right > 0.0f || crop_bottom > 0.0f; }
+};
+
 struct Layer {
   std::string clip_id, path;
   int track = 0;
@@ -44,9 +56,7 @@ struct Layer {
   int64_t fade_in_hns = 0, fade_out_hns = 0;
   bool fade_linear = false; // false: equal power (a quarter sine), the default
   int64_t clip_end_frame = 0;
-  // Transform (ADR-021 canvas fractions): position is where the clip's centre sits on the canvas, top-left origin,
-  // so [0.5, 0.5] is the middle. Scale 1 is "fitted inside the canvas"; 2 is twice that size.
-  float pos_x = 0.5f, pos_y = 0.5f, scale_x = 1.0f, scale_y = 1.0f;
+  Transform xf;
   // Text clips (media_ref.type "text"): no file, the picture is the text. `text_size` is the font height as a
   // fraction of the canvas height; the colour is 0xRRGGBB.
   bool is_text = false, text_bold = false;
@@ -68,12 +78,13 @@ struct Layer {
   // Keyframes (transform.keyframes) replace the static values above while they exist. Their times are clip-local:
   // 0 is `origin_frame`, the clip's record_in (start_frame moves earlier when a dissolve leads into the clip).
   int64_t origin_frame = 0;
-  eval::Curve opacity_keys, position_keys, scale_keys;
+  eval::Curve opacity_keys, position_keys, scale_keys, rotation_keys, anchor_keys;
 };
 
 // The transform of a layer at one frame, keyframes applied.
 struct Pose {
-  float opacity = 1.0f, pos_x = 0.5f, pos_y = 0.5f, scale_x = 1.0f, scale_y = 1.0f;
+  float opacity = 1.0f;
+  Transform xf;
 };
 
 struct Composition;
@@ -101,10 +112,10 @@ public:
   // left out; the first such problem is returned by take_warning().
   Result<void> render(int64_t frame, uint8_t *nv12);
   std::string take_warning();
-  // Changes the transform of one clip in place; decoders stay open, so this is cheap enough to do on every mouse move.
   // Pixel size of the last drawn text of a clip at this renderer's output size, or {0, 0}.
   std::pair<int, int> text_extent(const std::string &clip_id) const;
-  void set_transform(const std::string &clip_id, float pos_x, float pos_y, float scale_x, float scale_y);
+  // Changes the transform of one clip in place; decoders stay open, so this is cheap enough to do on every mouse move.
+  void set_transform(const std::string &clip_id, const Transform &xf);
 
 private:
   Composition comp_;

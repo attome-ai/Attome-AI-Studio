@@ -132,7 +132,7 @@ TEST_CASE("keyframes: transform keys are stored in canonical time and checked on
         "KEYFRAME_TYPE_MISMATCH");
   CHECK(f.rule_of(json::array({{{"op", "replace"}, {"path", k2 + "/ease"}, {"value", "wobble"}}})) == "KEYFRAME_INTERP");
   CHECK(f.rule_of(json::array({{{"op", "add"},
-                                {"path", f.a + "/transform/keyframes/rotation/$new:r1"},
+                                {"path", f.a + "/transform/keyframes/crop/$new:r1"},
                                 {"value", {{"t", "0s"}, {"v", 0}}}}})) == "KEYFRAME_PROPERTY_UNSUPPORTED");
   // An animation written over the plain value is refused, not stored and ignored.
   CHECK(f.rule_of(json::array({{{"op", "replace"},

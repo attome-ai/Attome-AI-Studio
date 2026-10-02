@@ -37,6 +37,8 @@ struct ClipUi {
   int64_t media_frames = 0;      // length of the file; 0 when unknown
   float opacity = 1.0f, volume = 1.0f;
   float pos_x = 0.5f, pos_y = 0.5f, scale_x = 1.0f, scale_y = 1.0f; // transform, canvas fractions
+  float rotation = 0.0f, anchor_x = 0.5f, anchor_y = 0.5f;            // degrees clockwise; picture fractions
+  float crop[4] = {0.0f, 0.0f, 0.0f, 0.0f};                            // left, top, right, bottom: picture fractions
   int media_w = 0, media_h = 0;                                        // size of the file
   bool is_text = false, text_bold = false;                             // text clips have no file
   std::string text, text_color = "#ffffff";
@@ -204,6 +206,7 @@ private:
   uint64_t insp_rev_ = 0;
   char name_buf_[256] = {}, in_buf_[64] = {}, dur_buf_[64] = {};
   float opacity_ = 1.0f, scale_ = 1.0f, pos_px_[2] = {0.0f, 0.0f};
+  float rotation_ = 0.0f, crop_pct_[4] = {0.0f, 0.0f, 0.0f, 0.0f}; // the Transform card's rotation and crop
 
   // export
   std::string job_id_;
