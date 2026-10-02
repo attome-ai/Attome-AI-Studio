@@ -713,7 +713,9 @@ struct Engine::Impl {
          "the clips must touch, and center needs half the duration of spare media on each side of the cut\n"
          "- add_track {kind (video | audio), name?, position? (top | bottom), below? / above? (track ID)}\n"
          "- delete {clip} or {transition}; ripple_delete {clip} (closes the gap); move {clip, to?, track?}; trim {clip, edge (in | out), to or delta}; "
-         "split {clip, at}\n"
+         "split {clip, at}; slip {clip, delta} (shows another part of its file, stays in place); roll {between: "
+         "[first, second], delta} (moves the cut between them); slide {clip, delta} (moves the clip between its "
+         "neighbours, which give and take the time)\n"
          "- set_property {target (clip, track or fx ID), path (e.g. \"audio.gain_db\", \"transform.opacity\", "
          "\"content.text\", \"volume\", \"params.radius\"), value} or {target, path \"transform.opacity|position|"
          "scale\", keyframes: [{t, v, interp?, ease?}]}\n"
@@ -1266,14 +1268,15 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
      &Impl::project_patch},
     {"timeline.edit", "core", true,
      "Edit the timeline with high-level ops, all applied together as one undoable step: add_track, add_clip, add_text, "
-     "add_adjustment, add_transition, delete, ripple_delete, move, trim, split, set_property. Clip defaults are "
+     "add_adjustment, add_transition, delete, ripple_delete, move, trim, split, slip, roll, slide, set_property. "
+     "Clip defaults are "
      "worked out for you (append to the track, the rest of the file, a Titles track for text, an Effects track under "
      "it for blur). Give an op \"id\": \"$new:name\" and later ops can use that name. guide.get topic \"timeline\" "
      "has every op's fields and a complete example. Times accept \"2.5s\", \"75@30\" or timecode.",
      R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},
        "ops":{"type":"array","items":{"type":"object","properties":{
          "op":{"type":"string","enum":["add_track","add_clip","add_text","add_adjustment","add_transition","delete",
-                                       "ripple_delete","move","trim","split","set_property"]},
+                                       "ripple_delete","move","trim","split","slip","roll","slide","set_property"]},
          "id":{"type":"string","description":"$new:name for what this op creates"}},"required":["op"]}},
        "sequence":{"type":"string"},"label":{"type":"string"},"dry_run":{"type":"boolean"},
        "task_id":{"type":"string","description":"Groups several calls into one task"}},

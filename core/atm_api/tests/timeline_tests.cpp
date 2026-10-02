@@ -159,9 +159,14 @@ TEST_CASE("timeline.edit + media.import: clips, dissolves, music and edits by na
 
   // The engine's own rules still apply: a 3 s dissolve needs 1.5 s of spare media on each side, and b starts only 1 s
   // into its file (the F1 demo's "make the dissolves 3 seconds" moment).
-  CHECK(f.fail_rule(json::array({{{"op", "delete"}, {"transition", r["id_map"]["$new:d"]}},
-                                 {{"op", "add_transition"}, {"between", {ca, cb}}, {"duration", "3s"}}})) ==
-        "TRANSITION_INSUFFICIENT_HANDLES");
+  {
+    auto refused = f.edit(json::array({{{"op", "delete"}, {"transition", r["id_map"]["$new:d"]}},
+                                       {{"op", "add_transition"}, {"between", {ca, cb}}, {"duration", "3s"}}}));
+    REQUIRE_FALSE(refused);
+    CHECK(refused.error().rule == "TRANSITION_INSUFFICIENT_HANDLES");
+    // The hint names the longest dissolve that fits, in plain seconds: 1 s of spare media on each side.
+    CHECK(refused.error().hint.find("centred dissolve of at most 2 s") != std::string::npos);
+  }
   CHECK(f.fail_rule(json::array({{{"op", "add_clip"}, {"asset", ast_a}, {"source_in", "1s"}, {"duration", "9s"}}})) ==
         "E_MEDIA_RANGE");
 
@@ -182,5 +187,45 @@ TEST_CASE("timeline.edit + media.import: clips, dissolves, music and edits by na
   CHECK(f.get(music)["audio"]["gain_db"] == -6);
   CHECK(f.get(cb)["transform"]["keyframes"]["opacity"].size() == 2);
   CHECK(e["notes"].size() >= 1); // the dissolve on a was dropped, and said so
+}
+TEST_CASE("timeline.edit: slip, roll and slide change timing the way editors expect", "[timeline][media]") {
+  Fixture f;
+  const std::string file = (f.dir / "a.mp4").string();
+  write_video(file, 6);
+  const auto clip = [&](const char *id) {
+    return json{{"op", "add_clip"}, {"id", id}, {"path", file}, {"source_in", "1s"}, {"duration", "2s"}};
+  };
+  const json r = f.ok(json::array({clip("$new:c1"), clip("$new:c2"), clip("$new:c3")})); // 0-2, 2-4, 4-6 s
+  const std::string c1 = r["id_map"]["$new:c1"], c2 = r["id_map"]["$new:c2"], c3 = r["id_map"]["$new:c3"];
+  const auto timing = [&](const std::string &id) {
+    const json t = f.get(id)["timing"];
+    return t["record_in"].get<std::string>() + " " + t["duration"].get<std::string>() + " " + t["source_in"].get<std::string>();
+  };
+
+  // slip: same place on the timeline, another part of the file.
+  f.ok(json::array({{{"op", "slip"}, {"clip", c1}, {"delta", "1s"}}}));
+  CHECK(timing(c1) == "0 2 2");
+  CHECK(f.fail_rule(json::array({{{"op", "slip"}, {"clip", c1}, {"delta", "3s"}}})) == "E_MEDIA_RANGE"); // 5 + 2 > 6
+
+  // roll: the cut between c1 and c2 moves half a second later.
+  f.ok(json::array({{{"op", "roll"}, {"between", {c1, c2}}, {"delta", "0.5s"}}}));
+  CHECK(timing(c1) == "0 5/2 2");
+  CHECK(timing(c2) == "5/2 3/2 3/2");
+
+  // slide: c2 moves half a second later; c1 grows, c3 shrinks, and the end of the timeline stays put.
+  f.ok(json::array({{{"op", "slide"}, {"clip", c2}, {"delta", "0.5s"}}}));
+  CHECK(timing(c1) == "0 3 2");
+  CHECK(timing(c2) == "3 3/2 3/2");
+  CHECK(timing(c3) == "9/2 3/2 3/2");
+  CHECK(f.engine.call("project.validate", {{"project", f.project}})->at("ok") == true);
+
+  // Readable numbers in refusals: c1 would run past the end of its file (about 6 s; encoders pad a little).
+  auto too_far = f.edit(json::array({{{"op", "roll"}, {"between", {c1, c2}}, {"delta", "1.25s"}}}));
+  REQUIRE_FALSE(too_far);
+  INFO(too_far.error().message + " | " + too_far.error().hint);
+  CHECK(too_far.error().rule == "E_MEDIA_RANGE");
+  CHECK(too_far.error().message.find("0.2") != std::string::npos);   // "0.234 s past the end", not "117/500 s"
+  CHECK(too_far.error().message.find('/') == std::string::npos);
+  CHECK(too_far.error().hint.find('/') == std::string::npos);
 }
 #endif

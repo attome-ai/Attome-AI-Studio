@@ -29,4 +29,8 @@ nlohmann::json to_json(const TimeView &v);
 
 std::string utc_now_iso8601(); // "2026-10-02T10:00:00Z"
 
+// Seconds for people and agents to read: "1.016" for 127/125, at most 3 decimals, rounded down so that a limit quoted
+// in a hint ("at most 1.016 s") always fits when used as given. Never for storage; times are stored exactly.
+std::string seconds_text(Rational t);
+
 } // namespace atm

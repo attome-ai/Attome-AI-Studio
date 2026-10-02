@@ -185,8 +185,8 @@ void check_transitions(const json &track, const std::string &track_id, const std
     if (compare(*in_off, a_room) > 0 || compare(*out_off, b_room) > 0) {
       problems.push_back(problem("TRANSITION_TOO_LONG", id, id,
                                  "Transition " + id + " is longer than the clips it joins.",
-                                 "Keep in_offset at most " + a_room.to_string() + " s and out_offset at most " +
-                                     b_room.to_string() + " s."));
+                                 "Keep in_offset at most " + seconds_text(a_room) + " s and out_offset at most " +
+                                     seconds_text(b_room) + " s."));
       continue;
     }
     used[from] = *add(a_used, *in_off);
@@ -196,15 +196,24 @@ void check_transitions(const json &track, const std::string &track_id, const std
     const bool in_short = hb.before && compare(*in_off, *hb.before) > 0;
     if (out_short || in_short) {
       json p = problem("TRANSITION_INSUFFICIENT_HANDLES", id + (out_short ? "/out_offset" : "/in_offset"), id,
-                          out_short ? "Clip " + from + " has only " + ha.after->to_string() +
+                          out_short ? "Clip " + from + " has only " + seconds_text(*ha.after) +
                                           " s of media after its out point, less than out_offset " +
-                                          out_off->to_string() + " s."
-                                    : "Clip " + to + " has only " + hb.before->to_string() +
+                                          seconds_text(*out_off) + " s."
+                                    : "Clip " + to + " has only " + seconds_text(*hb.before) +
                                           " s of media before its in point, less than in_offset " +
-                                          in_off->to_string() + " s.",
-                          "Use in_offset at most " + (hb.before ? hb.before->to_string() : std::string("any")) +
-                              " s and out_offset at most " + (ha.after ? ha.after->to_string() : std::string("any")) +
-                              " s, or trim the clips to leave more media beyond the cut.");
+                                          seconds_text(*in_off) + " s.",
+                          [&] {
+                            // The longest dissolve centred on the cut: twice the smaller of the two spares.
+                            std::string hint = "Use in_offset at most " +
+                                               (hb.before ? seconds_text(*hb.before) : std::string("any")) +
+                                               " s and out_offset at most " +
+                                               (ha.after ? seconds_text(*ha.after) : std::string("any")) + " s";
+                            if (ha.after && hb.before) {
+                              const Rational spare = compare(*ha.after, *hb.before) < 0 ? *ha.after : *hb.before;
+                              hint += " (a centred dissolve of at most " + seconds_text(add(spare, spare).value_or(spare)) + " s)";
+                            }
+                            return hint + ", or move the clips' source_in to leave more media beyond the cut.";
+                          }());
       p["details"] = {{"max_in_offset", hb.before ? json(hb.before->to_string()) : json(nullptr)},
                       {"max_out_offset", ha.after ? json(ha.after->to_string()) : json(nullptr)}};
       problems.push_back(std::move(p));
@@ -306,8 +315,8 @@ void check_audio(const json &clip, const std::string &clip_id, const Rational &d
   }
   if (compare(total, duration) > 0)
     problems.push_back(problem("AUDIO_FADE_TOO_LONG", path, clip_id,
-                               "The fades of clip " + clip_id + " (" + total.to_string() + " s together) are longer than the clip (" +
-                                   duration.to_string() + " s).",
+                               "The fades of clip " + clip_id + " (" + seconds_text(total) + " s together) are longer than the clip (" +
+                                   seconds_text(duration) + " s).",
                                "Keep fade_in + fade_out at most the clip's duration."));
 }
 
@@ -403,8 +412,8 @@ void check_track(const doc::Document &doc, const std::string &track_id, json &pr
       continue;
     problems.push_back(problem(
         "R_TRACK_OVERLAP", *b.id + "/timing", track_id,
-        "Clip " + *b.id + " (" + b.in.to_string() + " to " + b.end.to_string() + ") overlaps clip " + *a.id + " (" +
-            a.in.to_string() + " to " + a.end.to_string() + ") on track " + track_id + ".",
+        "Clip " + *b.id + " (" + seconds_text(b.in) + " to " + seconds_text(b.end) + " s) overlaps clip " + *a.id + " (" +
+            seconds_text(a.in) + " to " + seconds_text(a.end) + " s) on track " + track_id + ".",
         "Set " + *b.id + "/timing/record_in to \"" + a.end.to_string() + "\", or shorten " + *a.id + " first."));
   }
   check_transitions(*ref->node, track_id, spans, problems);

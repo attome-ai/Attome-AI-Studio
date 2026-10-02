@@ -1,6 +1,7 @@
 #include "atm/base/time.hpp"
 
 #include <charconv>
+#include <cstdint>
 #include <cstdio>
 #include <ctime>
 
@@ -176,6 +177,25 @@ nlohmann::json to_json(const TimeView &v) {
   if (!v.timecode.empty())
     j["timecode"] = v.timecode;
   return j;
+}
+
+std::string seconds_text(Rational t) {
+  const bool negative = t.num() < 0;
+  // Whole seconds and thousandths, both rounded toward zero; the remainder is below the denominator, so only a
+  // denominator above 2^63 / 1000 needs the floating-point fallback.
+  const uint64_t n = negative ? uint64_t(0) - uint64_t(t.num()) : uint64_t(t.num()), den = uint64_t(t.den());
+  const uint64_t whole = n / den, rem = n % den;
+  const int frac = rem <= UINT64_MAX / 1000 ? int(rem * 1000 / den) : int(double(rem) / double(den) * 1000.0);
+  std::string out = (negative && (whole != 0 || frac != 0) ? "-" : "") + std::to_string(whole);
+  if (frac != 0) {
+    char digits[4];
+    std::snprintf(digits, sizeof digits, "%03d", frac);
+    std::string d = digits;
+    while (!d.empty() && d.back() == '0')
+      d.pop_back();
+    out += "." + d;
+  }
+  return out;
 }
 
 std::string utc_now_iso8601() {

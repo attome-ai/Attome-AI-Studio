@@ -58,9 +58,15 @@ public:
       return wrap(split());
     if (name == "set_property")
       return wrap(set_property());
+    if (name == "slip")
+      return wrap(slip());
+    if (name == "roll")
+      return wrap(roll());
+    if (name == "slide")
+      return wrap(slide());
     return fail("E_OP", "\"" + name + "\" is not a timeline op.",
                 "Use add_track, add_clip, add_text, add_adjustment, add_transition, delete, ripple_delete, move, trim, "
-                "split or set_property (guide.get topic \"timeline\").");
+                "split, slip, roll, slide or set_property (guide.get topic \"timeline\").");
   }
 
 private:
@@ -219,7 +225,7 @@ private:
     const Rational in = fin ? *fin : Rational(), out = fout ? *fout : Rational();
     if (compare(plus(in, out), duration) > 0)
       return fail("E_FADE_TOO_LONG", "fade_in + fade_out is longer than the clip.",
-                  "Keep them together at most " + duration.to_string() + " s.");
+                  "Keep them together at most " + seconds_text(duration) + " s.");
     json keys = json::object();
     const std::string base = placeholder() + ".fade";
     const auto key = [&](int n, Rational t, double v) {
@@ -285,13 +291,13 @@ private:
     ATM_TRY(auto dur, time("duration"));
     const Rational duration = dur ? *dur : rest;
     if (duration.num() <= 0)
-      return fail("E_MEDIA_RANGE", "The clip would be empty: the file has " + rest.to_string() + " s after source_in.",
+      return fail("E_MEDIA_RANGE", "The clip would be empty: the file has " + seconds_text(rest) + " s after source_in.",
                   "Use a smaller source_in or give a positive duration.");
     if (media_duration && compare(plus(source_in, duration), *media_duration) > 0)
       return fail("E_MEDIA_RANGE",
-                  "The file is " + media_duration->to_string() + " s long; source_in " + source_in.to_string() +
-                      " + duration " + duration.to_string() + " goes past its end.",
-                  "Use a duration of at most " + at_most_zero(rest).to_string() + " s, or a smaller source_in.");
+                  "The file is " + seconds_text(*media_duration) + " s long; source_in " + seconds_text(source_in) +
+                      " s + duration " + seconds_text(duration) + " s goes past its end.",
+                  "Use a duration of at most " + seconds_text(at_most_zero(rest)) + " s, or a smaller source_in.");
 
     ATM_TRY(std::string track_id, track_for(kind, [&]() -> Result<std::string> {
       for (const std::string &id : track_order()) // the bottom-most track of the right kind
@@ -432,8 +438,8 @@ private:
     const Span sa = span_of(*ra->node), sb = span_of(*rb->node);
     if (compare(sa.end(), sb.in) != 0)
       return fail("TRANSITION_NOT_ADJACENT",
-                  "The first clip ends at " + sa.end().to_string() + " s but the second starts at " + sb.in.to_string() + " s.",
-                  "Put the second clip at the first one's end (append, or \"at\": \"" + sa.end().to_string() + "s\").");
+                  "The first clip ends at " + seconds_text(sa.end()) + " s but the second starts at " + seconds_text(sb.in) + " s.",
+                  "Put the second clip at the first one's end (append, or \"at\": \"" + sa.end().to_string() + "\").");
     const std::string type = op_.value("type", std::string("attome.dissolve"));
     if (type != "attome.dissolve" && type != "dissolve")
       return fail("TRANSITION_UNSUPPORTED", "The transition \"" + type + "\" is not available.", "Use \"dissolve\".");
@@ -527,14 +533,14 @@ private:
       return fail("E_PARAM", "\"edge\" must be \"in\" or \"out\".");
     }
     if (n.duration.num() <= 0)
-      return fail("E_MEDIA_RANGE", "The clip would be empty.", "Trim by less than its duration, " + s.duration.to_string() + " s.");
+      return fail("E_MEDIA_RANGE", "The clip would be empty.", "Trim by less than its duration, " + seconds_text(s.duration) + " s.");
     const json ref = c.first->value("media_ref", json::object());
     if (ref.value("type", "") == "file") {
       if (n.source_in.num() < 0)
-        return fail("E_MEDIA_RANGE", "The file starts " + s.source_in.to_string() + " s before this clip's start; the in edge cannot go earlier.");
+        return fail("E_MEDIA_RANGE", "The file starts " + seconds_text(s.source_in) + " s before this clip's start; the in edge cannot go earlier.");
       if (const auto total = Rational::parse(ref.value("duration", std::string()));
           total && total->num() > 0 && compare(plus(n.source_in, n.duration), *total) > 0)
-        return fail("E_MEDIA_RANGE", "The file ends " + minus(*total, plus(s.source_in, s.duration)).to_string() +
+        return fail("E_MEDIA_RANGE", "The file ends " + seconds_text(minus(*total, plus(s.source_in, s.duration))) +
                                          " s after this clip's end; the out edge cannot go later.");
     }
     drop_transitions(id, c.second);
@@ -550,7 +556,7 @@ private:
     ATM_TRY(auto at, time("at"));
     const Span s = span_of(*c.first);
     if (!at || compare(*at, s.in) <= 0 || compare(*at, s.end()) >= 0)
-      return fail("E_PARAM", "\"at\" must be a time inside the clip, between " + s.in.to_string() + " and " + s.end().to_string() + " s.");
+      return fail("E_PARAM", "\"at\" must be a time inside the clip, between " + seconds_text(s.in) + " and " + seconds_text(s.end()) + " s.");
     const Rational left = minus(*at, s.in);
     json right = *c.first;
     right["timing"] = {{"record_in", at->to_string()}, {"duration", minus(s.duration, left).to_string()},
@@ -582,6 +588,124 @@ private:
       for (auto it = (*t)["transitions"].begin(); it != (*t)["transitions"].end(); ++it)
         if (it->value("from", "") == id)
           push({{"op", "replace"}, {"path", it.key() + "/from"}, {"value", base}});
+    return {};
+  }
+
+  // The media a clip may use: source_in >= 0 and source_in + duration <= the file's length (unknown or text: no limit).
+  Result<void> check_media(const json &clip, const std::string &id, const Span &s) const {
+    const json ref = clip.value("media_ref", json::object());
+    if (ref.value("type", "") != "file")
+      return {};
+    if (s.source_in.num() < 0)
+      return fail("E_MEDIA_RANGE", "Clip " + id + " would start " + seconds_text(minus(Rational(), s.source_in)) +
+                                       " s before the beginning of its file.",
+                  "Move by less; source_in cannot go below 0.");
+    if (const auto total = Rational::parse(ref.value("duration", std::string()));
+        total && total->num() > 0 && compare(plus(s.source_in, s.duration), *total) > 0)
+      return fail("E_MEDIA_RANGE", "Clip " + id + " would run " + seconds_text(minus(plus(s.source_in, s.duration), *total)) +
+                                       " s past the end of its file.",
+                  "Move by less; the file is " + seconds_text(*total) + " s long.");
+    return {};
+  }
+
+  void put_span(const std::string &id, const Span &before, const Span &after) {
+    if (compare(after.in, before.in) != 0)
+      push({{"op", "replace"}, {"path", id + "/timing/record_in"}, {"value", after.in.to_string()}});
+    if (compare(after.duration, before.duration) != 0)
+      push({{"op", "replace"}, {"path", id + "/timing/duration"}, {"value", after.duration.to_string()}});
+    if (compare(after.source_in, before.source_in) != 0)
+      push({{"op", "replace"}, {"path", id + "/timing/source_in"}, {"value", after.source_in.to_string()}});
+  }
+
+  // A clip on the same track that ends (ending = true) or starts exactly at `t`.
+  std::string neighbour(const std::string &track_id, const std::string &self, Rational t, bool ending) const {
+    if (const json *tr = track(track_id); tr && tr->contains("clips"))
+      for (auto it = (*tr)["clips"].begin(); it != (*tr)["clips"].end(); ++it)
+        if (it.key() != self && compare(ending ? span_of(*it).end() : span_of(*it).in, t) == 0)
+          return it.key();
+    return {};
+  }
+
+  // slip: the clip stays where it is on the timeline and shows another part of its file.
+  Result<void> slip() {
+    ATM_TRY(auto c, clip("clip"));
+    const std::string id = op_.value("clip", std::string());
+    const Span s = span_of(*c.first);
+    ATM_TRY(auto to, time("source_in"));
+    ATM_TRY(auto delta, time("delta"));
+    if (!to && !delta)
+      return fail("E_PARAM", "slip needs \"delta\" (how far into the file to move) or \"source_in\".");
+    Span n = s;
+    n.source_in = to ? *to : plus(s.source_in, *delta);
+    ATM_CHECK(check_media(*c.first, id, n));
+    put_span(id, s, n);
+    return {};
+  }
+
+  // roll: the cut between two touching clips moves; the first gets longer as the second gets shorter, or the reverse.
+  Result<void> roll() {
+    const auto between = op_.find("between");
+    if (between == op_.end() || !between->is_array() || between->size() != 2 || !(*between)[0].is_string() ||
+        !(*between)[1].is_string())
+      return fail("E_PARAM", "roll needs \"between\": [first clip, second clip] and \"delta\" (or \"to\", the new cut).");
+    const std::string a = (*between)[0], b = (*between)[1];
+    const doc::NodeRef *ra = doc_.find(a), *rb = doc_.find(b);
+    if (!ra || !rb || ra->parent != rb->parent)
+      return fail("E_UNKNOWN_CLIP", "\"between\" must name two clips on one track.");
+    const Span sa = span_of(*ra->node), sb = span_of(*rb->node);
+    if (compare(sa.end(), sb.in) != 0)
+      return fail("E_NOT_ADJACENT", "The clips do not touch: the first ends at " + seconds_text(sa.end()) +
+                                        " s, the second starts at " + seconds_text(sb.in) + " s.");
+    ATM_TRY(auto to, time("to"));
+    ATM_TRY(auto delta, time("delta"));
+    if (!to && !delta)
+      return fail("E_PARAM", "roll needs \"delta\" or \"to\".");
+    const Rational d = to ? minus(*to, sb.in) : *delta;
+    Span na = sa;
+    na.duration = plus(sa.duration, d);
+    const Span nb = {plus(sb.in, d), minus(sb.duration, d), plus(sb.source_in, d)};
+    if (na.duration.num() <= 0 || nb.duration.num() <= 0)
+      return fail("E_MEDIA_RANGE", "The cut would move past the start of the first clip or the end of the second.",
+                  "Move it by less than " + seconds_text(d.num() < 0 ? sa.duration : sb.duration) + " s.");
+    ATM_CHECK(check_media(*ra->node, a, na));
+    ATM_CHECK(check_media(*rb->node, b, nb));
+    put_span(a, sa, na);
+    put_span(b, sb, nb);
+    return {};
+  }
+
+  // slide: the clip moves along the track between its neighbours; the one before gets longer (or shorter) and the
+  // one after gives up (or gains) the same time, so the rest of the timeline stays put.
+  Result<void> slide() {
+    ATM_TRY(auto c, clip("clip"));
+    const std::string id = op_.value("clip", std::string());
+    ATM_TRY(auto delta, time("delta"));
+    if (!delta)
+      return fail("E_PARAM", "slide needs \"delta\".");
+    const Span s = span_of(*c.first);
+    const std::string before = neighbour(c.second, id, s.in, true), after = neighbour(c.second, id, s.end(), false);
+    Span n = s;
+    n.in = plus(s.in, *delta);
+    if (!before.empty()) {
+      const json &node = (*track(c.second))["clips"][before];
+      const Span sp = span_of(node);
+      Span np = sp;
+      np.duration = plus(sp.duration, *delta);
+      if (np.duration.num() <= 0)
+        return fail("E_MEDIA_RANGE", "Sliding by " + seconds_text(*delta) + " s would empty the clip before it.");
+      ATM_CHECK(check_media(node, before, np));
+      put_span(before, sp, np);
+    }
+    if (!after.empty()) {
+      const json &node = (*track(c.second))["clips"][after];
+      const Span sn = span_of(node);
+      const Span nn = {plus(sn.in, *delta), minus(sn.duration, *delta), plus(sn.source_in, *delta)};
+      if (nn.duration.num() <= 0)
+        return fail("E_MEDIA_RANGE", "Sliding by " + seconds_text(*delta) + " s would empty the clip after it.");
+      ATM_CHECK(check_media(node, after, nn));
+      put_span(after, sn, nn);
+    }
+    put_span(id, s, n);
     return {};
   }
 

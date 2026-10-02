@@ -23,6 +23,17 @@ std::string T(const char *text, const char *rate = nullptr) {
 }
 } // namespace
 
+TEST_CASE("seconds_text: readable seconds, rounded down so a quoted limit always fits", "[time]") {
+  const auto r = [](int64_t n, int64_t d) { return *atm::Rational::make(n, d); };
+  CHECK(atm::seconds_text(r(127, 125)) == "1.016");
+  CHECK(atm::seconds_text(r(2, 3)) == "0.666"); // not 0.667, which is more than 2/3
+  CHECK(atm::seconds_text(r(1, 1)) == "1");
+  CHECK(atm::seconds_text(r(5, 2)) == "2.5");
+  CHECK(atm::seconds_text(r(-1, 2)) == "-0.5");
+  CHECK(atm::seconds_text(r(0, 1)) == "0");
+  CHECK(atm::seconds_text(r(1, 3000)) == "0");
+}
+
 TEST_CASE("rational: normalized and exact", "[base]") {
   CHECK(R(2, 4).to_string() == "1/2");
   CHECK(R(3, -6).to_string() == "-1/2");
