@@ -96,6 +96,10 @@ struct TextBitmap {
 };
 Result<TextBitmap> render_text(const std::string &utf8, float size_px, bool bold, int max_width);
 
+// The folder holding the bundled fonts (Noto, Lucide icons), as UTF-8, or empty when it is missing: ATTOME_FONTS,
+// then fonts/ next to the program, then ../share/attome/fonts.
+std::string font_dir();
+
 // A packed BGRX picture as a JPEG file (quality 0..1). For agents and thumbnails, not for delivery.
 Result<void> write_jpeg(const std::string &path, const uint8_t *bgrx, int width, int height, float quality = 0.85f);
 

@@ -6,21 +6,12 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <mutex>
 #include <string>
 #include <vector>
-
-#if defined(_WIN32)
-#include <windows.h>
-#elif defined(__APPLE__)
-#include <mach-o/dyld.h>
-#else
-#include <unistd.h>
-#endif
 
 #include <ft2build.h>
 #include FT_FREETYPE_H
@@ -40,47 +31,6 @@ enum FaceIndex { Sans, SansBold, Arabic, ArabicBold, FaceCount };
 constexpr const char *kFontFiles[FaceCount] = {"NotoSans-Regular.ttf", "NotoSans-Bold.ttf", "NotoNaskhArabic-Regular.ttf",
                                                "NotoNaskhArabic-Bold.ttf"};
 
-fs::path exe_dir() {
-#if defined(_WIN32)
-  wchar_t self[MAX_PATH * 4];
-  const DWORD n = GetModuleFileNameW(nullptr, self, DWORD(std::size(self)));
-  if (n == 0 || n >= std::size(self))
-    return {};
-  return fs::path(self).parent_path();
-#else
-  char self[4096] = {};
-#if defined(__APPLE__)
-  uint32_t size = sizeof self;
-  if (_NSGetExecutablePath(self, &size) != 0)
-    return {};
-#else
-  if (::readlink("/proc/self/exe", self, sizeof self - 1) <= 0)
-    return {};
-#endif
-  return fs::path(self).parent_path();
-#endif
-}
-
-// The font folder: ATTOME_FONTS, then fonts/ next to the program, then the installed share/attome/fonts.
-fs::path find_font_dir() {
-  std::vector<fs::path> dirs;
-  if (const char *env = std::getenv("ATTOME_FONTS"); env && *env)
-    dirs.emplace_back(env);
-  if (const fs::path exe = exe_dir(); !exe.empty()) {
-    dirs.push_back(exe / "fonts");
-    dirs.push_back(exe.parent_path() / "share" / "attome" / "fonts");
-  }
-  for (const fs::path &dir : dirs) {
-    std::error_code ec;
-    bool all = true;
-    for (const char *file : kFontFiles)
-      all = all && fs::is_regular_file(dir / file, ec);
-    if (all)
-      return dir;
-  }
-  return {};
-}
-
 // Loaded once and kept: the font files live in memory (FT_New_Memory_Face) so non-ASCII paths work everywhere.
 struct Fonts {
   FT_Library library = nullptr;
@@ -92,8 +42,9 @@ struct Fonts {
 Fonts &fonts() {
   static Fonts *f = [] {
     auto *out = new Fonts;
-    const fs::path dir = find_font_dir();
-    if (dir.empty() || FT_Init_FreeType(&out->library) != 0)
+    const std::string found = font_dir();
+    const fs::path dir(std::u8string(found.begin(), found.end()));
+    if (found.empty() || FT_Init_FreeType(&out->library) != 0)
       return out;
     for (int i = 0; i < FaceCount; ++i) {
       std::ifstream in(dir / kFontFiles[i], std::ios::binary);

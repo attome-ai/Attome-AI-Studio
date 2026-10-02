@@ -26,6 +26,7 @@ namespace atm::editor {
 
 struct Fonts {
   ImFont *ui = nullptr, *bold = nullptr, *mono = nullptr;
+  bool lucide = false; // icons from the bundled Lucide font rather than Segoe Fluent Icons
 };
 inline Fonts g_fonts;
 

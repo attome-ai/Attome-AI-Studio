@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <memory>
 #include <string>
 
@@ -17,8 +18,60 @@
 #include "app.hpp"
 #include "uidriver.hpp"
 #include "atm/base/profiler.hpp"
+#include "atm/media/media.hpp"
 
 namespace {
+
+// Interface fonts: Segoe UI, Consolas and Segoe Fluent Icons on Windows; the bundled Noto fonts and Lucide icons
+// everywhere else, when those are missing, or with ATTOME_UI_FONTS=bundled (to try the portable look on Windows).
+void load_fonts(ImGuiIO &io) {
+  struct Files {
+    std::string ui, bold, mono, icons;
+    bool lucide;
+  };
+  const auto exists = [](const std::string &utf8) {
+    std::error_code ec;
+    return !utf8.empty() && std::filesystem::is_regular_file(std::u8string(utf8.begin(), utf8.end()), ec);
+  };
+  const char *choice = std::getenv("ATTOME_UI_FONTS");
+  const bool bundled_only = choice && std::string(choice) == "bundled";
+  const std::string dir = atm::media::font_dir();
+  const Files bundled{dir + "/NotoSans-Regular.ttf", dir + "/NotoSans-Bold.ttf", dir + "/NotoSansMono-Regular.ttf",
+                      dir + "/lucide.ttf", true};
+  Files files = bundled;
+#if defined(_WIN32)
+  const char *windir = std::getenv("WINDIR");
+  const std::string sys = std::string(windir ? windir : "C:/Windows") + "/Fonts/";
+  const Files segoe{sys + "segoeui.ttf", sys + "segoeuib.ttf", sys + "consola.ttf", sys + "SegoeIcons.ttf", false};
+  if (!bundled_only && exists(segoe.ui))
+    files = segoe;
+#else
+  (void)bundled_only;
+#endif
+  const auto add = [&](const std::string &file, const ImFontConfig *config = nullptr) -> ImFont * {
+    return exists(file) ? io.Fonts->AddFontFromFileTTF(file.c_str(), 15.0f, config) : nullptr;
+  };
+  atm::editor::Fonts &fonts = atm::editor::g_fonts;
+  fonts.ui = add(files.ui);
+  if (fonts.ui) { // icons are merged into the UI font
+    ImFontConfig merge;
+    merge.MergeMode = true;
+    if (files.lucide) { // Lucide's line icons sit on a 24-unit grid: a touch larger, centred on the text
+      merge.ExtraSizeScale = 16.0f / 15.0f;
+      merge.GlyphOffset = ImVec2(0.0f, 1.0f);
+    }
+    const bool icons = add(files.icons, &merge) != nullptr;
+    fonts.lucide = files.lucide && icons;
+  } else {
+    fonts.ui = io.Fonts->AddFontDefault();
+  }
+  fonts.bold = add(files.bold);
+  fonts.mono = add(files.mono);
+  if (!fonts.bold)
+    fonts.bold = fonts.ui;
+  if (!fonts.mono)
+    fonts.mono = fonts.ui;
+}
 
 ImVec4 rgb(uint32_t v, float a = 1.0f) {
   return ImVec4(float((v >> 16) & 255) / 255.0f, float((v >> 8) & 255) / 255.0f, float(v & 255) / 255.0f, a);
@@ -117,21 +170,7 @@ int main(int argc, char **argv) {
   ImGuiIO &io = ImGui::GetIO();
   io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_DockingEnable;
   io.IniFilename = driver ? nullptr : ini.c_str(); // tests always start from the default layout
-  atm::editor::Fonts &fonts = atm::editor::g_fonts;
-  fonts.ui = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\segoeui.ttf", 15.0f);
-  if (fonts.ui) { // icons are merged into the UI font
-    ImFontConfig merge;
-    merge.MergeMode = true;
-    io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\SegoeIcons.ttf", 15.0f, &merge);
-  } else {
-    fonts.ui = io.Fonts->AddFontDefault();
-  }
-  fonts.bold = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\segoeuib.ttf", 15.0f);
-  fonts.mono = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\consola.ttf", 15.0f);
-  if (!fonts.bold)
-    fonts.bold = fonts.ui;
-  if (!fonts.mono)
-    fonts.mono = fonts.ui;
+  load_fonts(io);
   apply_theme();
   ImGui_ImplSDL3_InitForSDLRenderer(window, renderer);
   ImGui_ImplSDLRenderer3_Init(renderer);

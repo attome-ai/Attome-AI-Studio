@@ -211,6 +211,7 @@ cmake --build --preset <preset>
 ```
 
 `win-portable-release` builds on Windows with the code the Linux and macOS builds use (FFmpeg for media, FreeType for text, stb for still images), so the portable path can be tested without those systems.
+The editor uses Segoe UI and its icons on Windows and the bundled Noto fonts with [Lucide](https://lucide.dev) icons elsewhere; set `ATTOME_UI_FONTS=bundled` to see that look on Windows.
 
 Libraries come from [vcpkg](https://github.com/microsoft/vcpkg) in manifest mode. Set `VCPKG_ROOT` to the vcpkg folder (setup uses `.deps/vcpkg`).
 

@@ -788,8 +788,14 @@ constexpr uint32_t txt = 0xb5437a, bg = 0x0d0f15, rail = 0x0a0c11, panel = 0x141
 ImU32 hex(uint32_t rgb, int a = 255) { return IM_COL32((rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255, a); }
 ImVec4 hexv(uint32_t rgb, float a = 1.0f) { return ImGui::ColorConvertU32ToFloat4(hex(rgb, int(a * 255.0f))); }
 
-// A Segoe Fluent Icons code point as UTF-8.
-std::string glyph(uint32_t cp) {
+// An icon in both icon fonts: Segoe Fluent Icons on Windows, the bundled Lucide (ISC) elsewhere or when it is missing.
+struct Icon {
+  uint32_t segoe, lucide;
+};
+
+// The icon's code point in the loaded font, as UTF-8 (both fonts use the private-use area, three bytes).
+std::string glyph(Icon icon) {
+  const uint32_t cp = g_fonts.lucide ? icon.lucide : icon.segoe;
   std::string s;
   s += char(0xE0 | (cp >> 12));
   s += char(0x80 | ((cp >> 6) & 0x3F));
@@ -798,10 +804,12 @@ std::string glyph(uint32_t cp) {
 }
 
 namespace icon {
-constexpr uint32_t play = 0xE768, pause = 0xE769, prev = 0xE892, next = 0xE893, undo = 0xE7A7, redo = 0xE7A6,
-                   del = 0xE74D, cut = 0xE8C6, add = 0xE710, search = 0xE721, video = 0xE714, audio = 0xE8D6,
-                   text = 0xE8D2, star = 0xE734, bolt = 0xE945, share = 0xE72D, models = 0xE950, chat = 0xE8BD,
-                   zoom_out = 0xE71F, zoom_in = 0xE8A3, eye = 0xE7B3, import_ = 0xE896, pointer = 0xE8B0;
+constexpr Icon play{0xE768, 0xE13C}, pause{0xE769, 0xE12E}, prev{0xE892, 0xE15F}, next{0xE893, 0xE160},
+    undo{0xE7A7, 0xE2A1}, redo{0xE7A6, 0xE2A0}, del{0xE74D, 0xE18E}, cut{0xE8C6, 0xE14E}, add{0xE710, 0xE13D},
+    search{0xE721, 0xE151}, video{0xE714, 0xE29B}, audio{0xE8D6, 0xE122}, text{0xE8D2, 0xE198}, star{0xE734, 0xE412},
+    bolt{0xE945, 0xE1B4}, share{0xE72D, 0xE207}, models{0xE950, 0xE061}, chat{0xE8BD, 0xE117},
+    zoom_out{0xE71F, 0xE1B7}, zoom_in{0xE8A3, 0xE1B6}, eye{0xE7B3, 0xE0BA}, import_{0xE896, 0xE22F},
+    pointer{0xE8B0, 0xE1C3};
 }
 
 ImVec2 text_size(const char *t) { return ImGui::CalcTextSize(t); }
@@ -831,7 +839,7 @@ bool soft_button(const char *id, const char *label, ImVec2 size, bool enabled = 
 }
 
 // A glyph button. `active` draws the orange tint of a selected tool.
-bool icon_button(const char *id, uint32_t cp, bool enabled = true, bool active = false, float size = 30.0f,
+bool icon_button(const char *id, Icon cp, bool enabled = true, bool active = false, float size = 30.0f,
                  const char *tip = nullptr) {
   ImGui::PushID(id);
   const ImVec2 p = ImGui::GetCursorScreenPos();
@@ -1156,7 +1164,7 @@ void App::draw_rail() {
   if (open) {
     struct Item {
       const char *label;
-      uint32_t cp;
+      Icon cp;
     };
     static const Item items[] = {{"Media", icon::video}, {"Audio", icon::audio}, {"Text", icon::text},
                                  {"Effects", icon::star}, {"Generate", icon::bolt}, {"Templates", icon::share},
