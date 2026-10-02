@@ -1,0 +1,18 @@
+{
+  "name": "attome",
+  "version-string": "0.1.0-dev",
+  "description": "Attome engine. Only permissive dependencies (ADR-025).",
+  "builtin-baseline": "10541e317a660f4165ba4ac2851ab54a8d4577b1",
+  "dependencies": [
+    "nlohmann-json",
+    "tl-expected",
+    "blake3",
+    "cli11",
+    "catch2",
+    "sdl3",
+    {
+      "name": "imgui",
+      "features": ["docking-experimental", "sdl3-binding", "sdl3-renderer-binding"]
+    }
+  ]
+}

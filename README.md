@@ -15,7 +15,40 @@ Local-first. Scriptable. Open source.
 
 **Pre-alpha. Not usable for real projects yet.**
 
-The design is settled and the engine is being built in phases. This repository already contains the one-command setup and update scripts, so the toolchain is ready the day code lands. Watch the repository (Releases only) to hear about the first build.
+The design is settled and the engine is being built in phases. Watch the repository (Releases only) to hear about the first build.
+
+What exists today:
+
+- the project document with Stable IDs and the git-friendly file format
+- exact rational time, with every time spelling accepted at the boundary (`12.5s`, `375@30`, `00:00:12;15`)
+- ID-addressed patches that apply all-or-nothing, with dry run, undo and redo
+- a crash-safe journal: an edit that was acknowledged survives a kill
+- the `attomed` daemon (JSON-RPC over a per-user pipe or socket) and the `attome` command line
+- a zone profiler built into the engine, see [Profiling](#profiling)
+- a first editor, `attome-editor` (Windows only for now): import video files, arrange them on a multi-track timeline (move, trim, split, opacity, volume), preview, and export an H.264 + AAC `.mp4`
+- the same export for scripts and agents: `attome render Demo.attome -o out.mp4`
+
+Not built yet: AI generation, the MCP server, text, effects and transitions, audio playback in the preview, the GPU compositor, JSON Schema validation, Suggested Edits and per-task undo. Decode and encode use the Windows media stack today, so import and export work on Windows only; the macOS and Linux code paths of the rest are written but have only been built and tested on Windows.
+
+### The editor
+
+```bash
+attome-editor                              # asks for a project folder, then: File > Import media, or drop files on the window
+attome-editor Demo.attome a.mp4 b.mp4      # open (or create) a project and import two files
+```
+
+Drag a clip to move it (also between tracks), drag its edges to trim, `S` splits at the playhead, `Space` plays, `Ctrl+Z` / `Ctrl+Y` undo and redo, `Ctrl+E` exports. The editor is a client of the daemon: an edit made by `attome patch` or an agent while it is open shows up by itself. View > Profiler shows the daemon's zones live.
+
+### Try it
+
+```bash
+attome new Demo.attome --rate 30000/1001
+attome inspect Demo.attome --json          # shows the sequence ID to use below
+attome patch Demo.attome edits.json        # {"ops": [{"op": "add", "path": "<seq id>/tracks/$new:v1", "value": {"kind": "video", "name": "V1"}}]}
+attome undo Demo.attome
+attome tools                               # every command is also a Tool of the daemon
+attome daemon start                        # optional: keeps projects open between commands
+```
 
 ## What is Attome?
 
@@ -158,6 +191,29 @@ cmake --build --preset <preset>
 
 Libraries come from [vcpkg](https://github.com/microsoft/vcpkg) in manifest mode. Set `VCPKG_ROOT` to the vcpkg folder (setup uses `.deps/vcpkg`).
 
+## Profiling
+
+Speed is a design goal, so the profiler is part of the engine from the first module. Code marks its work with zones:
+
+```cpp
+ATM_PROFILE_SCOPE("patch.apply");   // times the enclosing block
+```
+
+Zones nest into a tree per thread. Each zone keeps its calls, total, mean, minimum and maximum, plus a smoothed per-request average and a one-second peak. A zone takes no lock and allocates nothing, and uses the CPU timestamp counter as its clock. `atm_bench` measures the cost: about 14 ns per zone on the development machine, and under 1 ns when the profiler is switched off at run time.
+
+| What | How |
+|---|---|
+| See where the running daemon spends its time | `attome profile` (add `--watch` to refresh every second, `--reset` to zero the numbers) |
+| The same data for a script or an agent | `attome profile --json`, or the Tool `profile.get` |
+| Profile one command | `attome --profile patch Demo.attome edits.json` |
+| Print a report every 10 s on the daemon's own output | `attomed --profile-interval 10` |
+| Switch it off or on while running | `attome profile --off` / `--on` |
+| Compile it out completely | `cmake --preset <preset> -DATTOME_PROFILING=OFF` |
+| Check the engine against its speed targets | `build/<preset>/bin/atm_bench` |
+| Check export speed (the plan's F1 scenes) | `build/<preset>/bin/atm_bench --export` |
+
+`atm_bench` prints each measured number next to its target from the plan, then the zone profile of the run, so a slow number comes with the place the time went. New engine code should add zones around its stages and a case to the benchmark.
+
 ## AI models
 
 Attome does not ship models. You choose them:
@@ -172,11 +228,14 @@ Models have their own licenses, and some forbid commercial use. Attome records e
 Planned layout; folders appear as each part lands.
 
 ```
-core/        engine in C++ (document model, render graph, GPU compositor)
+core/        engine in C++, one folder per module (exists: atm_base, atm_storage, atm_doc, atm_patch, atm_media,
+             atm_render, atm_api, daemon)
+cli/         the attome command line (exists)
+tests/       benchmarks and cross-module tests (exists: bench)
 ai-host/     Python process that runs models and agents
-app/         the editor (Qt 6)
+app/         the editor (SDL3 + Dear ImGui) (exists: app/editor)
 schema/      the project file schema
-scripts/     setup and update scripts
+scripts/     setup and update scripts (exists)
 ```
 
 ## Contributing

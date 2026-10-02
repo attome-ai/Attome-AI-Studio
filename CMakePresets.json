@@ -1,0 +1,56 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "toolchainFile": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake"
+    },
+    {
+      "name": "win",
+      "hidden": true,
+      "inherits": "base",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" },
+      "cacheVariables": {
+        "CMAKE_CXX_COMPILER": "cl",
+        "VCPKG_TARGET_TRIPLET": "x64-windows-static-md"
+      }
+    },
+    {
+      "name": "linux",
+      "hidden": true,
+      "inherits": "base",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" },
+      "cacheVariables": { "CMAKE_CXX_COMPILER": "clang++", "VCPKG_TARGET_TRIPLET": "x64-linux" }
+    },
+    {
+      "name": "mac",
+      "hidden": true,
+      "inherits": "base",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Darwin" },
+      "cacheVariables": { "CMAKE_CXX_COMPILER": "clang++", "VCPKG_TARGET_TRIPLET": "arm64-osx" }
+    },
+    { "name": "win-msvc-release", "inherits": "win", "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" } },
+    { "name": "win-msvc-debug", "inherits": "win", "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" } },
+    { "name": "linux-clang-release", "inherits": "linux", "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" } },
+    { "name": "linux-clang-debug", "inherits": "linux", "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" } },
+    { "name": "mac-clang-release", "inherits": "mac", "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" } },
+    { "name": "mac-clang-debug", "inherits": "mac", "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" } }
+  ],
+  "buildPresets": [
+    { "name": "win-msvc-release", "configurePreset": "win-msvc-release" },
+    { "name": "win-msvc-debug", "configurePreset": "win-msvc-debug" },
+    { "name": "linux-clang-release", "configurePreset": "linux-clang-release" },
+    { "name": "linux-clang-debug", "configurePreset": "linux-clang-debug" },
+    { "name": "mac-clang-release", "configurePreset": "mac-clang-release" },
+    { "name": "mac-clang-debug", "configurePreset": "mac-clang-debug" }
+  ],
+  "testPresets": [
+    { "name": "win-msvc-release", "configurePreset": "win-msvc-release", "output": { "outputOnFailure": true } },
+    { "name": "win-msvc-debug", "configurePreset": "win-msvc-debug", "output": { "outputOnFailure": true } },
+    { "name": "linux-clang-release", "configurePreset": "linux-clang-release", "output": { "outputOnFailure": true } },
+    { "name": "mac-clang-release", "configurePreset": "mac-clang-release", "output": { "outputOnFailure": true } }
+  ]
+}

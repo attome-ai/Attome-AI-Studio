@@ -1,0 +1,65 @@
+#pragma once
+// M12 render, first slice: a Sequence compiled into a flat list of layers, composited on the CPU.
+// Tracks stack in track_order: the first track is the bottom layer. Every clip is fitted inside the canvas
+// (aspect kept, centred) and blended with its opacity, in NV12: blending Y, U and V gives the same result as blending
+// R, G and B, because the conversion between them is linear. The GPU compositor of the plan replaces the blit, not
+// this interface.
+
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <string_view>
+#include <unordered_map>
+#include <vector>
+
+#include "atm/base/error.hpp"
+#include "atm/media/media.hpp"
+
+namespace atm::render {
+
+struct Layer {
+  std::string clip_id, path;
+  int track = 0;
+  bool video = true;          // false for clips on audio tracks
+  int64_t start_frame = 0;    // on the sequence
+  int64_t frames = 0;
+  int64_t source_in_hns = 0;  // where in the file the clip starts
+  float opacity = 1.0f;
+  float volume = 1.0f;
+};
+
+struct Composition {
+  int width = 1920, height = 1080;
+  int64_t rate_num = 30, rate_den = 1;
+  int64_t frames = 0; // length of the sequence
+  std::vector<Layer> layers; // bottom track first
+  int64_t frame_hns(int64_t frame) const { return frame * rate_den * media::kHnsPerSecond / rate_num; }
+};
+
+// Reads a Sequence of a Project Document (the first one when `sequence_id` is empty).
+Result<Composition> compile(const nlohmann::json &project, std::string_view sequence_id = {});
+
+class Renderer {
+public:
+  Renderer(Composition composition, int width, int height); // output size; the canvas is scaled to it
+  ~Renderer();
+  const Composition &composition() const { return comp_; }
+  int width() const { return width_; }
+  int height() const { return height_; }
+  // Writes a packed NV12 picture of media::nv12_size(width(), height()) bytes. A clip whose file cannot be read is
+  // left out; the first such problem is returned by take_warning().
+  Result<void> render(int64_t frame, uint8_t *nv12);
+  std::string take_warning();
+
+private:
+  Composition comp_;
+  int width_, height_;
+  std::unordered_map<std::string, std::unique_ptr<media::VideoReader>> readers_; // by clip ID
+  std::unordered_map<std::string, bool> failed_;
+  std::string warning_;
+};
+
+// The whole sequence as 48 kHz stereo float.
+Result<std::vector<float>> mix_audio(const Composition &composition);
+
+} // namespace atm::render
