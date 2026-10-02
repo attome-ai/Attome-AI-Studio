@@ -37,7 +37,7 @@ attome-editor                              # asks for a project folder, then: Fi
 attome-editor Demo.attome a.mp4 b.mp4      # open (or create) a project and import two files
 ```
 
-Drag a clip to move it (also between tracks), drag its edges to trim, `S` splits at the playhead, `Space` plays, `Ctrl+Z` / `Ctrl+Y` undo and redo, `Ctrl+E` exports. The editor is a client of the daemon: an edit made by `attome patch` or an agent while it is open shows up by itself. View > Profiler shows the daemon's zones live.
+Drag a clip on the timeline to move it (also between tracks), drag its edges to trim, drag the picture in the Monitor to reposition a clip (position and scale are also in the Inspector), `S` splits at the playhead, `Space` plays, `Ctrl+Z` / `Ctrl+Y` undo and redo, `Ctrl+E` exports. The editor is a client of the daemon: an edit made by `attome patch` or an agent while it is open shows up by itself. View > Profiler shows the daemon's zones live.
 
 ### Try it
 

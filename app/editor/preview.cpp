@@ -39,6 +39,16 @@ void Preview::request(int64_t frame) {
   wake_.notify_all();
 }
 
+void Preview::set_transform(const std::string &clip_id, float pos_x, float pos_y, float scale_x, float scale_y) {
+  {
+    std::lock_guard lock(mutex_);
+    std::erase_if(xf_, [&](const Xf &x) { return x.id == clip_id; });
+    xf_.push_back({clip_id, pos_x, pos_y, scale_x, scale_y});
+    dirty_ = true;
+  }
+  wake_.notify_all();
+}
+
 bool Preview::take(std::vector<uint8_t> &bgrx, int &width, int &height, int64_t &frame, std::string &warning) {
   std::lock_guard lock(mutex_);
   if (!fresh_)
@@ -67,7 +77,12 @@ void Preview::run() {
       if (new_comp_) {
         renderer = std::make_unique<render::Renderer>(std::move(*new_comp_), new_width_, new_height_);
         new_comp_.reset();
+        xf_.clear(); // a rebuilt composition already holds the saved transforms
       }
+      if (renderer)
+        for (const Xf &x : xf_)
+          renderer->set_transform(x.id, x.px, x.py, x.sx, x.sy);
+      xf_.clear();
       frame = wanted_;
     }
     if (!renderer || frame < 0)

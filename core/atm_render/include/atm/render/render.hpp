@@ -26,6 +26,9 @@ struct Layer {
   int64_t source_in_hns = 0;  // where in the file the clip starts
   float opacity = 1.0f;
   float volume = 1.0f;
+  // Transform (ADR-021 canvas fractions): position is where the clip's centre sits on the canvas, top-left origin,
+  // so [0.5, 0.5] is the middle. Scale 1 is "fitted inside the canvas"; 2 is twice that size.
+  float pos_x = 0.5f, pos_y = 0.5f, scale_x = 1.0f, scale_y = 1.0f;
 };
 
 struct Composition {
@@ -50,6 +53,8 @@ public:
   // left out; the first such problem is returned by take_warning().
   Result<void> render(int64_t frame, uint8_t *nv12);
   std::string take_warning();
+  // Changes the transform of one clip in place; decoders stay open, so this is cheap enough to do on every mouse move.
+  void set_transform(const std::string &clip_id, float pos_x, float pos_y, float scale_x, float scale_y);
 
 private:
   Composition comp_;

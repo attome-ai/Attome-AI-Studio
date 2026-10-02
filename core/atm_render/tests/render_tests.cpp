@@ -145,4 +145,66 @@ TEST_CASE("media: encode, probe, decode and export a sequence", "[media]") {
   reader->reset();
   fs::remove_all(dir, ec);
 }
+
+TEST_CASE("render: position and scale move and resize a clip on the canvas", "[media]") {
+  const fs::path dir = fs::temp_directory_path() / atm::new_id("attome-xform");
+  fs::create_directories(dir);
+  const std::string clip = (dir / "clip.mp4").string();
+  write_clip(clip, 320, 240, 30); // red top half, blue bottom half
+
+  const auto render_with = [&](float px, float py, float sx, float sy, float opacity) {
+    atm::render::Composition comp;
+    comp.width = 320;
+    comp.height = 240;
+    comp.frames = 1;
+    atm::render::Layer l;
+    l.clip_id = "clp_test";
+    l.path = clip;
+    l.frames = 1;
+    l.pos_x = px;
+    l.pos_y = py;
+    l.scale_x = sx;
+    l.scale_y = sy;
+    l.opacity = opacity;
+    comp.layers.push_back(l);
+    atm::render::Renderer renderer(comp, 320, 240);
+    std::vector<uint8_t> nv12(media::nv12_size(320, 240)), rgb(320 * 240 * 4);
+    REQUIRE(renderer.render(0, nv12.data()));
+    media::nv12_to_bgrx(nv12.data(), 320, 240, rgb.data());
+    return rgb;
+  };
+  const auto at = [](const std::vector<uint8_t> &rgb, int x, int y) { return rgb.data() + (size_t(y) * 320 + size_t(x)) * 4; };
+  const auto is_red = [](const uint8_t *p) { return p[2] > 180 && p[0] < 90 && p[1] < 90; };
+  const auto is_blue = [](const uint8_t *p) { return p[0] > 180 && p[2] < 90 && p[1] < 90; };
+  const auto is_black = [](const uint8_t *p) { return p[0] < 30 && p[1] < 30 && p[2] < 30; };
+
+  { // half size in the middle: the picture occupies x 80..240, y 60..180
+    const auto rgb = render_with(0.5f, 0.5f, 0.5f, 0.5f, 1.0f);
+    CHECK(is_black(at(rgb, 20, 20)));
+    CHECK(is_black(at(rgb, 300, 220)));
+    CHECK(is_red(at(rgb, 160, 80)));    // top half of the picture
+    CHECK(is_blue(at(rgb, 160, 160)));  // bottom half
+    CHECK(is_black(at(rgb, 160, 40)));  // above the picture
+  }
+  { // half size, centre moved to the upper left quarter: x 0..160, y 0..120
+    const auto rgb = render_with(0.25f, 0.25f, 0.5f, 0.5f, 1.0f);
+    CHECK(is_red(at(rgb, 80, 30)));
+    CHECK(is_blue(at(rgb, 80, 100)));
+    CHECK(is_black(at(rgb, 240, 180)));
+    CHECK(is_black(at(rgb, 200, 60)));
+  }
+  { // twice the size, centre at the canvas centre: only the middle of the picture is visible, red above and blue below
+    const auto rgb = render_with(0.5f, 0.5f, 2.0f, 2.0f, 1.0f);
+    CHECK(is_red(at(rgb, 160, 20)));
+    CHECK(is_blue(at(rgb, 160, 220)));
+  }
+  { // half opacity over black: red becomes about half as bright
+    const auto rgb = render_with(0.5f, 0.5f, 1.0f, 1.0f, 0.5f);
+    const uint8_t *p = at(rgb, 160, 60);
+    CHECK(p[2] > 90);
+    CHECK(p[2] < 170);
+  }
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}
 #endif

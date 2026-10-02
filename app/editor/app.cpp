@@ -74,6 +74,16 @@ void App::shutdown() {
 
 bool App::busy() const { return playing_ || !drag_id_.empty() || !job_id_.empty() || audio_mixer_.busy(); }
 
+void App::select_first_clip() {
+  for (const TrackUi &t : tracks_)
+    if (!t.clips.empty()) {
+      selected_track_ = t.id;
+      selected_clip_ = t.clips.front().id;
+      playhead_ = t.clips.front().start + t.clips.front().frames / 2;
+      return;
+    }
+}
+
 void App::play(bool on) {
   on = on && total_frames_ > 0;
   if (on == playing_)
@@ -198,8 +208,20 @@ void App::refresh() {
           c.frames = std::max<int64_t>(1, frames_of(timing, "duration", rate_));
           c.source_frames = frames_of(timing, "source_in", rate_);
           c.media_frames = frames_of(ref, "duration", rate_);
-          if (cit->contains("transform"))
-            c.opacity = (*cit)["transform"].value("opacity", 1.0f);
+          if (cit->contains("transform")) {
+            const json &tr = (*cit)["transform"];
+            c.opacity = tr.value("opacity", 1.0f);
+            if (tr.contains("position") && tr["position"].is_array() && tr["position"].size() == 2) {
+              c.pos_x = tr["position"][0].get<float>();
+              c.pos_y = tr["position"][1].get<float>();
+            }
+            if (tr.contains("scale") && tr["scale"].is_array() && tr["scale"].size() == 2) {
+              c.scale_x = tr["scale"][0].get<float>();
+              c.scale_y = tr["scale"][1].get<float>();
+            }
+          }
+          c.media_w = ref.value("width", 0);
+          c.media_h = ref.value("height", 0);
           c.volume = cit->value("volume", 1.0f);
           total_frames_ = std::max(total_frames_, c.start + c.frames);
           track.clips.push_back(std::move(c));
@@ -1116,6 +1138,86 @@ void App::draw_viewer() {
   if (!preview_warning_.empty())
     dl->AddText(ImVec2(s0.x + 14.0f, s1.y - 24.0f), hex(0xef5f5f), preview_warning_.c_str());
 
+  // The picture is also a handle: click a clip in it to select it, drag it to move it.
+  if (total_frames_ > 0) {
+    const float k = size.x / float(std::max(1, canvas_w_)); // Monitor pixels per canvas pixel
+    const auto rect_of = [&](const ClipUi &c, float px, float py) { // in canvas pixels: x0, y0, x1, y1
+      const float mw = c.media_w > 0 ? float(c.media_w) : float(canvas_w_), mh = c.media_h > 0 ? float(c.media_h) : float(canvas_h_);
+      const float fit = std::min(float(canvas_w_) / mw, float(canvas_h_) / mh);
+      const float w = mw * fit * c.scale_x, h = mh * fit * c.scale_y, cx = px * float(canvas_w_), cy = py * float(canvas_h_);
+      return ImVec4(cx - w * 0.5f, cy - h * 0.5f, cx + w * 0.5f, cy + h * 0.5f);
+    };
+    const auto active_at_playhead = [&](const ClipUi &c) { return playhead_ >= c.start && playhead_ < c.start + c.frames; };
+
+    ImGui::SetCursorScreenPos(p0);
+    ImGui::InvisibleButton("##picture", size);
+    const ImVec2 mouse = ImGui::GetIO().MousePos;
+    if (ImGui::IsItemActivated()) {
+      const float mx = (mouse.x - p0.x) / k, my = (mouse.y - p0.y) / k; // canvas pixels
+      const ClipUi *hit = nullptr;
+      const TrackUi *hit_track = nullptr;
+      const TrackUi *sel_track = nullptr;
+      const ClipUi *sel = selected(&sel_track);
+      const auto inside = [&](const ClipUi &c) {
+        const ImVec4 r = rect_of(c, c.pos_x, c.pos_y);
+        return mx >= r.x && mx <= r.z && my >= r.y && my <= r.w;
+      };
+      if (sel && sel_track->kind != "audio" && active_at_playhead(*sel) && inside(*sel)) {
+        hit = sel;
+        hit_track = sel_track;
+      } else {
+        for (auto t = tracks_.rbegin(); t != tracks_.rend() && !hit; ++t) // the top-most track first
+          if (t->kind != "audio")
+            for (const ClipUi &c : t->clips)
+              if (active_at_playhead(c) && inside(c)) {
+                hit = &c;
+                hit_track = &*t;
+              }
+      }
+      if (hit) {
+        selected_clip_ = hit->id;
+        selected_track_ = hit_track->id;
+        mon_drag_ = true;
+        mon_clip_ = hit->id;
+        mon_start_ = mouse;
+        mon_x0_ = mon_x_ = hit->pos_x;
+        mon_y0_ = mon_y_ = hit->pos_y;
+      } else {
+        selected_clip_.clear();
+      }
+    }
+    if (mon_drag_ && ImGui::IsItemActive()) {
+      const TrackUi *dt = nullptr;
+      const ClipUi *dc = selected(&dt);
+      if (dc && dc->id == mon_clip_) {
+        mon_x_ = mon_x0_ + (mouse.x - mon_start_.x) / k / float(canvas_w_);
+        mon_y_ = mon_y0_ + (mouse.y - mon_start_.y) / k / float(canvas_h_);
+        preview_.set_transform(dc->id, mon_x_, mon_y_, dc->scale_x, dc->scale_y);
+      }
+    }
+    if (mon_drag_ && ImGui::IsItemDeactivated()) {
+      mon_drag_ = false;
+      if (std::fabs(mon_x_ - mon_x0_) * float(canvas_w_) * k > 1.0f || std::fabs(mon_y_ - mon_y0_) * float(canvas_h_) * k > 1.0f) {
+        const std::string id = mon_clip_;
+        const float x = std::round(mon_x_ * 10000.0f) / 10000.0f, y = std::round(mon_y_ * 10000.0f) / 10000.0f;
+        pending_ = [this, id, x, y] {
+          patch(json::array({{{"op", "replace"}, {"path", id + "/transform/position"}, {"value", json::array({x, y})}}}),
+                "Move clip");
+        };
+      }
+    }
+    // The outline of the selected clip.
+    const TrackUi *ot = nullptr;
+    if (const ClipUi *oc = selected(&ot); oc && ot->kind != "audio" && active_at_playhead(*oc)) {
+      const bool dragging = mon_drag_ && mon_clip_ == oc->id;
+      const ImVec4 r = rect_of(*oc, dragging ? mon_x_ : oc->pos_x, dragging ? mon_y_ : oc->pos_y);
+      dl->PushClipRect(p0, p1, true);
+      dl->AddRect(ImVec2(p0.x + r.x * k, p0.y + r.y * k), ImVec2(p0.x + r.z * k, p0.y + r.w * k), hex(look::accent), 0.0f, 0, 2.0f);
+      dl->AddCircleFilled(ImVec2(p0.x + (r.x + r.z) * 0.5f * k, p0.y + (r.y + r.w) * 0.5f * k), 3.5f, hex(look::accent));
+      dl->PopClipRect();
+    }
+  }
+
   // Transport: timecode on the left, the controls centred.
   const float ty = origin.y + height - foot;
   dl->AddLine(ImVec2(origin.x, ty), ImVec2(origin.x + width, ty), hex(look::line));
@@ -1471,6 +1573,9 @@ void App::draw_inspector() {
     copy_to(dur_buf_, sizeof dur_buf_, timecode(c->frames));
     opacity_ = c->opacity;
     volume_ = c->volume;
+    scale_ = c->scale_x;
+    pos_px_[0] = (c->pos_x - 0.5f) * float(canvas_w_);
+    pos_px_[1] = (c->pos_y - 0.5f) * float(canvas_h_);
   }
   const std::string id = c->id;
   ImGui::PushStyleColor(ImGuiCol_FrameBg, hexv(look::raised));
@@ -1502,6 +1607,46 @@ void App::draw_inspector() {
   ImGui::PopStyleColor();
 
   if (begin_card("##look", "Transform")) {
+    // Position is shown in canvas pixels from the centre; the document stores canvas fractions (ADR-021).
+    ImGui::TextColored(hexv(look::fg2), "Position");
+    ImGui::SameLine(88.0f);
+    const float half = (ImGui::GetContentRegionAvail().x - 8.0f) * 0.5f;
+    ImGui::PushStyleColor(ImGuiCol_FrameBg, hexv(look::raised));
+    ImGui::SetNextItemWidth(half);
+    bool moved = ImGui::DragFloat("##px", &pos_px_[0], 1.0f, -20000.0f, 20000.0f, "X  %.0f");
+    bool moved_done = ImGui::IsItemDeactivatedAfterEdit();
+    ImGui::SameLine(0.0f, 8.0f);
+    ImGui::SetNextItemWidth(-1.0f);
+    moved = ImGui::DragFloat("##py", &pos_px_[1], 1.0f, -20000.0f, 20000.0f, "Y  %.0f") || moved;
+    moved_done = ImGui::IsItemDeactivatedAfterEdit() || moved_done;
+    ImGui::PopStyleColor();
+    if (moved && !moved_done) // live: the Monitor follows while the number is dragged
+      preview_.set_transform(id, pos_px_[0] / float(canvas_w_) + 0.5f, pos_px_[1] / float(canvas_h_) + 0.5f,
+                             c->scale_x, c->scale_y);
+    if (moved_done) {
+      const float x = std::round((pos_px_[0] / float(canvas_w_) + 0.5f) * 10000.0f) / 10000.0f;
+      const float y = std::round((pos_px_[1] / float(canvas_h_) + 0.5f) * 10000.0f) / 10000.0f;
+      pending_ = [this, id, x, y] {
+        patch(json::array({{{"op", "replace"}, {"path", id + "/transform/position"}, {"value", json::array({x, y})}}}),
+              "Move clip");
+      };
+    }
+    ImGui::TextColored(hexv(look::fg2), "Scale");
+    ImGui::SameLine(88.0f);
+    const float sw = ImGui::GetContentRegionAvail().x - 52.0f;
+    if (slim_slider("scale", &scale_, 0.1f, 4.0f, sw, ""))
+      preview_.set_transform(id, c->pos_x, c->pos_y, scale_, scale_);
+    if (ImGui::IsItemDeactivatedAfterEdit()) {
+      const float v = std::round(scale_ * 100.0f) / 100.0f;
+      pending_ = [this, id, v] {
+        patch(json::array({{{"op", "replace"}, {"path", id + "/transform/scale"}, {"value", json::array({v, v})}}}),
+              "Scale clip");
+      };
+    }
+    ImGui::SameLine();
+    ImGui::PushFont(g_fonts.mono, 13.0f);
+    ImGui::TextColored(hexv(look::fg2), "%3.0f%%", scale_ * 100.0f);
+    ImGui::PopFont();
     ImGui::TextColored(hexv(look::fg2), "Opacity");
     ImGui::SameLine(88.0f);
     const float avail = ImGui::GetContentRegionAvail().x - 52.0f;
@@ -1516,6 +1661,17 @@ void App::draw_inspector() {
     ImGui::PushFont(g_fonts.mono, 13.0f);
     ImGui::TextColored(hexv(look::fg2), "%3.0f%%", opacity_ * 100.0f);
     ImGui::PopFont();
+    const bool changed = c->pos_x != 0.5f || c->pos_y != 0.5f || c->scale_x != 1.0f || c->scale_y != 1.0f;
+    ImGui::BeginDisabled(!changed);
+    if (soft_button("reset_transform", "Reset position and scale", ImVec2(-1.0f, 28.0f), changed)) {
+      pending_ = [this, id] {
+        patch(json::array({{{"op", "replace"}, {"path", id + "/transform/position"}, {"value", json::array({0.5, 0.5})}},
+                           {{"op", "replace"}, {"path", id + "/transform/scale"}, {"value", json::array({1.0, 1.0})}}}),
+              "Reset transform");
+        insp_rev_ = 0;
+      };
+    }
+    ImGui::EndDisabled();
   }
   end_card();
 

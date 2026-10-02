@@ -22,6 +22,8 @@ public:
 
   void set_composition(render::Composition composition, int width, int height); // after every document change
   void request(int64_t frame); // the newest request wins; older ones are skipped
+  // Shows a clip with another transform right away, before the edit is saved (live drag in the Monitor).
+  void set_transform(const std::string &clip_id, float pos_x, float pos_y, float scale_x, float scale_y);
 
   // Hands over the newest finished NV12 picture when there is one the caller has not seen. Returns false otherwise.
   bool take(std::vector<uint8_t> &nv12, int &width, int &height, int64_t &frame, std::string &warning);
@@ -38,6 +40,11 @@ private:
   int new_width_ = 0, new_height_ = 0;
   int64_t wanted_ = -1;
   bool dirty_ = false;
+  struct Xf {
+    std::string id;
+    float px, py, sx, sy;
+  };
+  std::vector<Xf> xf_;
   // Finished.
   std::vector<uint8_t> done_;
   int done_width_ = 0, done_height_ = 0;

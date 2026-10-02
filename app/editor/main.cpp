@@ -137,6 +137,8 @@ int main(int argc, char **argv) {
       app.open_project(argv[1]);
     for (int i = 2; i < argc; ++i) // further arguments are media files to import
       app.on_drop(argv[i]);
+    if (std::getenv("ATTOME_EDITOR_SELECT"))
+      app.select_first_clip();
     // ATTOME_EDITOR_SELFTEST=1: play for two seconds, print where the sound and the playhead are, and quit.
     const bool selftest = std::getenv("ATTOME_EDITOR_SELFTEST") != nullptr;
     const auto started = std::chrono::steady_clock::now();

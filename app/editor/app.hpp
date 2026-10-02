@@ -10,6 +10,7 @@
 #include <vector>
 
 #include <SDL3/SDL.h>
+#include <imgui.h>
 
 #include "atm/base/rational.hpp"
 #include "audio.hpp"
@@ -32,6 +33,8 @@ struct ClipUi {
   int64_t source_frames = 0;     // frames of the file before the clip's first frame
   int64_t media_frames = 0;      // length of the file; 0 when unknown
   float opacity = 1.0f, volume = 1.0f;
+  float pos_x = 0.5f, pos_y = 0.5f, scale_x = 1.0f, scale_y = 1.0f; // transform, canvas fractions
+  int media_w = 0, media_h = 0;                                        // size of the file
 };
 
 struct TrackUi {
@@ -48,6 +51,7 @@ public:
   void on_drop(const char *path) { dropped_.emplace_back(path); }
   void frame(double dt); // one UI frame
   bool busy() const;     // true while something animates, so the main loop should not sleep
+  void select_first_clip(); // used by the self-test to show the Inspector without a mouse click
   void seek(int64_t frame); // move the playhead; the sound follows when playing
   void play(bool on);    // start or stop playback; the sound follows the playhead
   std::string audio_report() const; // one line about the audio state, for the self-test
@@ -139,6 +143,12 @@ private:
   std::vector<uint8_t> picture_;
   std::string preview_warning_;
 
+  // moving a clip by dragging the picture in the Monitor
+  bool mon_drag_ = false;
+  ImVec2 mon_start_{};
+  float mon_x0_ = 0.5f, mon_y0_ = 0.5f, mon_x_ = 0.5f, mon_y_ = 0.5f;
+  std::string mon_clip_;
+
   // media panel
   Thumbs thumbs_;
   std::map<std::string, SDL_Texture *> thumb_tex_;
@@ -150,7 +160,7 @@ private:
   std::string insp_for_;
   uint64_t insp_rev_ = 0;
   char name_buf_[256] = {}, in_buf_[64] = {}, dur_buf_[64] = {};
-  float opacity_ = 1.0f, volume_ = 1.0f;
+  float opacity_ = 1.0f, volume_ = 1.0f, scale_ = 1.0f, pos_px_[2] = {0.0f, 0.0f};
 
   // export
   std::string job_id_;
