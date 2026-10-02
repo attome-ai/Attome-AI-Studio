@@ -1,4 +1,4 @@
-#if defined(_WIN32)
+#if defined(_WIN32) && !defined(ATM_TEXT_FREETYPE)
 // Text rasterizing with DirectWrite: shaping, bidirectional text (Arabic, Hebrew) and font fallback come from the
 // operating system. The plan's portable path (FreeType + HarfBuzz + SheenBidi) replaces this file on other systems.
 

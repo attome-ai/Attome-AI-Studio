@@ -27,7 +27,7 @@ What exists today:
 - a zone profiler built into the engine, see [Profiling](#profiling)
 - a first editor, `attome-editor` (Windows only for now): import video and sound files, arrange them on a multi-track timeline (move, trim, split, opacity, volume), preview, and export an H.264 + AAC `.mp4`
 - the same export for scripts and agents: `attome render Demo.attome -o out.mp4`
-- text clips (titles, lower thirds, captions) with a size, colour and position, drawn with DirectWrite so Arabic and other right-to-left text are shaped correctly in the preview and the export
+- text clips (titles, lower thirds, captions) with a size, colour and position, with Arabic and other right-to-left text shaped correctly in the preview and the export (DirectWrite on Windows; FreeType, HarfBuzz and SheenBidi with the bundled Noto fonts elsewhere)
 - dissolves between clips, with the sound cross-faded at equal power; a dissolve uses media beyond the cut, and an edit that leaves too little is refused with the largest length that fits
 - keyframes on opacity, position and scale (linear, hold and easing presets); the Inspector's Fade card fades a clip in and out, and the timeline draws the opacity curve on the clip
 - sound: music and other sound files on audio tracks, clip gain in dB, pan and fades (equal power or linear), track volume and pan, and mute; the Inspector's Audio card sets them
@@ -206,9 +206,11 @@ By default you follow the newest tagged release. Until the first release is tagg
 If you prefer to run the steps yourself, install the tools listed above, then:
 
 ```bash
-cmake --preset <preset>            # win-msvc-release | mac-clang-release | linux-clang-release
+cmake --preset <preset>            # win-msvc-release | win-portable-release | mac-clang-release | linux-clang-release
 cmake --build --preset <preset>
 ```
+
+`win-portable-release` builds on Windows with the code the Linux and macOS builds use (FFmpeg for media, FreeType for text), so the portable path can be tested without those systems.
 
 Libraries come from [vcpkg](https://github.com/microsoft/vcpkg) in manifest mode. Set `VCPKG_ROOT` to the vcpkg folder (setup uses `.deps/vcpkg`).
 

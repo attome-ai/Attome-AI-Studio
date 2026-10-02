@@ -1,5 +1,5 @@
 // What a system lacks so far reports Unsupported: media decode and encode without a backend (neither Media Foundation
-// nor FFmpeg), and text and stills outside Windows until their portable versions land (F1 plan).
+// nor FFmpeg), text without FreeType, and stills outside Windows until their portable version lands (F1 plan).
 
 #include "atm/media/media.hpp"
 
@@ -33,7 +33,9 @@ const std::string &Encoder::name() const {
 }
 #endif
 
+#if !defined(ATM_TEXT_FREETYPE)
 Result<TextBitmap> render_text(const std::string &, float, bool, int) { return unsupported("Text rendering"); }
+#endif
 Result<void> write_jpeg(const std::string &, const uint8_t *, int, int, float) { return unsupported("Still image output"); }
 
 } // namespace atm::media

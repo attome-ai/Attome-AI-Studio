@@ -88,7 +88,8 @@ private:
 };
 
 // A line or paragraph of text as a coverage mask (0..255 per pixel), drawn in white. Text wraps at `max_width` pixels
-// and is centred. Handles right-to-left and shaped scripts (Arabic). The Windows backend uses DirectWrite.
+// and is centred. Handles right-to-left and shaped scripts (Arabic). DirectWrite on Windows by default; FreeType,
+// HarfBuzz and SheenBidi with the bundled Noto fonts everywhere else (ATM_TEXT_BACKEND).
 struct TextBitmap {
   int width = 0, height = 0;
   std::vector<uint8_t> alpha; // width * height

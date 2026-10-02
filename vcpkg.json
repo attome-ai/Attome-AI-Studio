@@ -43,6 +43,26 @@
           ]
         }
       ]
+    },
+    "portable-text": {
+      "description": "Portable text: FreeType rasterizing, HarfBuzz shaping and SheenBidi for right-to-left text.",
+      "dependencies": [
+        {
+          "name": "freetype",
+          "default-features": false,
+          "features": [
+            "zlib"
+          ]
+        },
+        {
+          "name": "harfbuzz",
+          "default-features": false,
+          "features": [
+            "freetype"
+          ]
+        },
+        "sheenbidi"
+      ]
     }
   }
 }
