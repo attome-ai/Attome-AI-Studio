@@ -44,7 +44,43 @@ int64_t frames_of(const json &obj, const char *key, Rational rate) {
   return to_frames(*t, rate, Round::nearest_even).value_or(0);
 }
 
+// The frame a clip ends on: record_in + duration, rounded once, as the renderer does.
+int64_t end_frame_of(const json &timing, Rational rate) {
+  const auto in = Rational::parse(timing.value("record_in", std::string("0")));
+  const auto dur = Rational::parse(timing.value("duration", std::string("0")));
+  if (!in || !dur)
+    return 0;
+  const auto end = add(*in, *dur);
+  return end ? to_frames(*end, rate, Round::nearest_even).value_or(0) : 0;
+}
+
 void copy_to(char *buffer, size_t size, const std::string &text) { std::snprintf(buffer, size, "%s", text.c_str()); }
+
+// Opacity keys that are fades: 0 at the clip's start rising to a plateau, and/or a plateau falling to 0 at its end.
+void detect_fades(ClipUi &c, Rational rate) {
+  const auto &keys = c.opacity_keys.keys;
+  const auto at = [&](size_t i) { return to_frames(keys[i].t, rate, Round::nearest_even).value_or(-1); };
+  c.fade_in = c.fade_out = 0;
+  c.fades_only = keys.empty();
+  if (keys.size() < 2)
+    return;
+  const size_t n = keys.size();
+  size_t used = 0;
+  if (keys[0].v[0] == 0.0 && at(0) == 0) {
+    c.fade_in = at(1);
+    used = 2;
+  }
+  if (keys[n - 1].v[0] == 0.0 && at(n - 1) == c.frames) {
+    if (n >= used + 2) {
+      c.fade_out = c.frames - at(n - 2);
+      used += 2;
+    } else if (used == 2 && n == 3) { // fade in and out meet at one plateau key
+      c.fade_out = c.frames - at(1);
+      used = 3;
+    }
+  }
+  c.fades_only = used == n;
+}
 
 } // namespace
 
@@ -205,7 +241,7 @@ void App::refresh() {
           c.name = cit->value("name", "");
           c.path = ref.value("path", "");
           c.start = frames_of(timing, "record_in", rate_);
-          c.frames = std::max<int64_t>(1, frames_of(timing, "duration", rate_));
+          c.frames = std::max<int64_t>(1, end_frame_of(timing, rate_) - c.start); // the renderer's rounding
           c.source_frames = frames_of(timing, "source_in", rate_);
           c.media_frames = frames_of(ref, "duration", rate_);
           if (cit->contains("transform")) {
@@ -230,6 +266,19 @@ void App::refresh() {
             c.text_color = content.value("color", "#ffffff");
             c.text_bold = content.value("bold", false);
           }
+          if (cit->contains("transform") && (*cit)["transform"].is_object())
+            if (const auto kfs = (*cit)["transform"].find("keyframes"); kfs != (*cit)["transform"].end() && kfs->is_object()) {
+              c.keyframes = *kfs;
+              for (auto k = kfs->begin(); k != kfs->end(); ++k)
+                c.animated = c.animated || (k->is_object() && !k->empty());
+              if (const auto op = kfs->find("opacity"); op != kfs->end() && op->is_object()) {
+                if (auto curve = eval::parse_curve(*op, 1))
+                  c.opacity_keys = std::move(*curve);
+                for (auto k = op->begin(); k != op->end(); ++k)
+                  c.opacity_key_ids.push_back(k.key());
+              }
+            }
+          detect_fades(c, rate_);
           c.volume = cit->value("volume", 1.0f);
           total_frames_ = std::max(total_frames_, c.start + c.frames);
           track.clips.push_back(std::move(c));
@@ -450,6 +499,35 @@ void App::split_at_playhead() {
   right["timing"]["record_in"] = frames_text(playhead_);
   right["timing"]["duration"] = frames_text(c->frames - left);
   right["timing"]["source_in"] = frames_text(c->source_frames + left);
+  json split_ops = json::array();
+  const bool fades = !c->opacity_keys.empty() && c->fades_only;
+  if (right.contains("transform") && right["transform"].contains("keyframes")) {
+    // Keyframe IDs must be new, and times are local to the right half: shift them by the left part.
+    json &kfs = right["transform"]["keyframes"];
+    const Rational shift = from_frames(left, rate_).value_or(Rational());
+    int n = 0;
+    for (auto prop = kfs.begin(); prop != kfs.end(); ++prop) {
+      if (!prop->is_object())
+        continue;
+      json moved = json::object();
+      if (!(fades && prop.key() == "opacity"))
+        for (auto k = prop->begin(); k != prop->end(); ++k) {
+          json key = *k;
+          if (const auto t = Rational::parse(key.value("t", std::string("0"))))
+            key["t"] = sub(*t, shift).value_or(*t).to_string();
+          moved["$new:split" + std::to_string(n++)] = std::move(key);
+        }
+      *prop = std::move(moved);
+    }
+  }
+  if (fades) { // the fade in stays on the left half, the fade out goes with the right half
+    const int64_t rlen = c->frames - left, fo = std::min(c->fade_out, rlen);
+    if (fo > 0)
+      right["transform"]["keyframes"]["opacity"] = {
+          {"$new:split_fo0", {{"t", frames_text(rlen - fo)}, {"v", c->opacity}}},
+          {"$new:split_fo1", {{"t", frames_text(rlen)}, {"v", 0.0}}}};
+    split_ops = fade_ops(*c, std::min(c->fade_in, left), 0, left, c->opacity);
+  }
   json ops = json::array({{{"op", "replace"}, {"path", c->id + "/timing/duration"}, {"value", frames_text(left)}},
                           {{"op", "add"},
                            {"path", track->id + "/clips/$new:right"},
@@ -458,6 +536,8 @@ void App::split_at_playhead() {
   for (const TransitionUi &tr : track->transitions) // a dissolve out of the clip now leaves from its right half
     if (tr.from == c->id)
       ops.push_back({{"op", "replace"}, {"path", tr.id + "/from"}, {"value", "$new:right"}});
+  for (json &op : split_ops)
+    ops.push_back(std::move(op));
   json ids;
   if (patch(std::move(ops), "Split clip", &ids))
     selected_clip_ = ids.value("$new:right", "");
@@ -499,6 +579,15 @@ void App::commit_drag(const TrackUi &track, const ClipUi &c, int mode, int64_t d
   }
   if (ops.empty())
     return;
+  if (mode != 1 && !c.opacity_keys.empty() && c.fades_only) { // fades stay at the clip's ends
+    int64_t frames = c.frames;
+    for (const json &op : ops)
+      if (op["path"] == c.id + "/timing/duration")
+        if (const auto t = Rational::parse(op["value"].get<std::string>()))
+          frames = to_frames(*t, rate_, Round::nearest_even).value_or(frames);
+    for (json &op : fade_ops(c, c.fade_in, c.fade_out, frames, c.opacity))
+      ops.push_back(std::move(op));
+  }
   drop_transitions(c.id, ops); // the cut moves, so a dissolve on it would no longer fit
   patch(std::move(ops), label);
 }
@@ -1559,6 +1648,18 @@ void App::draw_timeline() {
       dl->AddRectFilled(ImVec2(x0, cy), ImVec2(x1 - 1.0f, cy + 3.0f), IM_COL32(255, 255, 255, 70), 5.0f, ImDrawFlags_RoundCornersTop);
       if (is_selected)
         dl->AddRect(ImVec2(x0, cy), ImVec2(x1 - 1.0f, cy + ch), hex(look::accent), 5.0f, 0, 2.0f);
+      if (!c.opacity_keys.empty() && drag_id_ != c.id) { // opacity over time, like an automation lane
+        const int steps = std::clamp(int((x1 - x0) / 4.0f), 2, 400);
+        std::vector<ImVec2> pts;
+        pts.reserve(size_t(steps) + 1);
+        for (int i = 0; i <= steps; ++i) {
+          const double local = double(frames) * double(i) / double(steps); // frames from the clip's start
+          const auto t = Rational::make(std::llround(local * 1000.0) * rate_.den(), rate_.num() * 1000);
+          const double v = t ? std::clamp(c.opacity_keys.at(*t)[0], 0.0, 1.0) : 1.0;
+          pts.push_back(ImVec2(x0 + (x1 - x0 - 1.0f) * float(i) / float(steps), cy + ch - 3.0f - float(v) * (ch - 6.0f)));
+        }
+        dl->AddPolyline(pts.data(), int(pts.size()), IM_COL32(255, 255, 255, 200), 0, 1.5f);
+      }
       float label_x = x0 + 9.0f; // past the dissolve band when one leads into this clip
       for (const TransitionUi &tr : track.transitions)
         if (tr.to == c.id && drag_id_.empty())
@@ -1718,6 +1819,64 @@ void App::draw_transition_card(const TrackUi &track, const ClipUi &c) {
   end_card();
 }
 
+// Ops that replace a clip's opacity keys with fades over `duration` frames, rising to and falling from `full`.
+json App::fade_ops(const ClipUi &c, int64_t fade_in, int64_t fade_out, int64_t duration, double full) const {
+  json ops = json::array();
+  for (const std::string &id : c.opacity_key_ids)
+    ops.push_back({{"op", "remove"}, {"path", id}});
+  fade_in = std::clamp<int64_t>(fade_in, 0, duration);
+  fade_out = std::clamp<int64_t>(fade_out, 0, duration - fade_in);
+  const std::string base = c.id + "/transform/keyframes/opacity/$new:";
+  const auto key = [&](const char *name, int64_t at, double v) {
+    ops.push_back({{"op", "add"}, {"path", base + name}, {"value", {{"t", frames_text(at)}, {"v", v}}}});
+  };
+  if (fade_in > 0) {
+    key("fade_in_0", 0, 0.0);
+    key("fade_in_1", fade_in, full);
+  }
+  if (fade_out > 0) {
+    if (fade_in == 0 || duration - fade_out != fade_in) // one plateau key when the fades meet
+      key("fade_out_0", duration - fade_out, full);
+    key("fade_out_1", duration, 0.0);
+  }
+  return ops;
+}
+
+void App::draw_fade_card(const ClipUi &c) {
+  if (!begin_card("##fade", "Fade")) {
+    end_card();
+    return;
+  }
+  const float max_s = float(std::min(5.0, double(c.frames) / fps()));
+  const auto row = [&](const char *label, const char *slider_id, float *value, bool is_in) {
+    ImGui::TextColored(hexv(look::fg2), "%s", label);
+    ImGui::SameLine(88.0f);
+    slim_slider(slider_id, value, 0.0f, max_s, ImGui::GetContentRegionAvail().x - 52.0f, "");
+    if (ImGui::IsItemDeactivatedAfterEdit()) {
+      const int64_t frames = std::llround(double(*value) * fps());
+      const ClipUi clip = c;
+      pending_ = [this, clip, frames, is_in] {
+        patch(fade_ops(clip, is_in ? frames : clip.fade_in, is_in ? clip.fade_out : frames, clip.frames, clip.opacity),
+              is_in ? "Fade in" : "Fade out");
+        insp_rev_ = 0;
+      };
+    }
+    ImGui::SameLine();
+    ImGui::PushFont(g_fonts.mono, 13.0f);
+    ImGui::TextColored(hexv(look::fg2), "%.2fs", *value);
+    ImGui::PopFont();
+  };
+  row("Fade in", "fadein", &fade_in_s_, true);
+  row("Fade out", "fadeout", &fade_out_s_, false);
+  if (!c.fades_only) {
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::TextColored(hexv(look::fg3), "Opacity has %zu keyframes from an agent or a script; changing a fade replaces them.",
+                       c.opacity_keys.keys.size());
+    ImGui::PopTextWrapPos();
+  }
+  end_card();
+}
+
 void App::draw_inspector() {
   ATM_PROFILE_SCOPE("ui.inspector");
   ImGui::PushStyleColor(ImGuiCol_WindowBg, hexv(look::panel));
@@ -1780,6 +1939,8 @@ void App::draw_inspector() {
     copy_to(dur_buf_, sizeof dur_buf_, timecode(c->frames));
     opacity_ = c->opacity;
     volume_ = c->volume;
+    fade_in_s_ = float(double(c->fade_in) / fps());
+    fade_out_s_ = float(double(c->fade_out) / fps());
     scale_ = c->scale_x;
     if (c->is_text) {
       copy_to(text_buf_, sizeof text_buf_, c->text);
@@ -1921,8 +2082,13 @@ void App::draw_inspector() {
     slim_slider("opacity", &opacity_, 0.0f, 1.0f, avail, "");
     if (ImGui::IsItemDeactivatedAfterEdit()) {
       const float v = std::round(opacity_ * 100.0f) / 100.0f;
-      pending_ = [this, id, v] {
-        patch(json::array({{{"op", "replace"}, {"path", id + "/transform/opacity"}, {"value", v}}}), "Change opacity");
+      const ClipUi clip = *c;
+      pending_ = [this, clip, v] {
+        json ops = json::array({{{"op", "replace"}, {"path", clip.id + "/transform/opacity"}, {"value", v}}});
+        if (!clip.opacity_keys.empty() && clip.fades_only) // the fades rise to the new level
+          for (json &op : fade_ops(clip, clip.fade_in, clip.fade_out, clip.frames, v))
+            ops.push_back(std::move(op));
+        patch(std::move(ops), "Change opacity");
       };
     }
     ImGui::SameLine();
@@ -1943,6 +2109,7 @@ void App::draw_inspector() {
   }
   end_card();
 
+  draw_fade_card(*c);
   draw_transition_card(*track, *c);
 
   const bool show_audio = !c->is_text; // text clips have no sound

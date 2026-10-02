@@ -13,6 +13,7 @@
 #include <imgui.h>
 
 #include "atm/base/rational.hpp"
+#include "atm/eval/keyframes.hpp"
 #include "audio.hpp"
 #include "client.hpp"
 #include "preview.hpp"
@@ -38,6 +39,12 @@ struct ClipUi {
   bool is_text = false, text_bold = false;                             // text clips have no file
   std::string text, text_color = "#ffffff";
   float text_size = 0.08f;                                              // font height, fraction of the canvas
+  eval::Curve opacity_keys;                 // transform.keyframes.opacity, clip-local
+  std::vector<std::string> opacity_key_ids; // its keyframe IDs, to replace them
+  int64_t fade_in = 0, fade_out = 0;        // frames, when the keys form fades (0 at the ends, plateau between)
+  bool fades_only = true;                   // false when the opacity keys are something other than fades
+  bool animated = false;                    // any transform keyframes: the static values are not what plays
+  json keyframes;                           // the clip's transform.keyframes, for split
 };
 
 struct TransitionUi { // a dissolve over [cut - in, cut + out), where `to` starts
@@ -91,6 +98,8 @@ private:
   void commit_drag(const TrackUi &track, const ClipUi &clip, int mode, int64_t delta, int target_track);
   void drop_transitions(const std::string &clip_id, json &ops) const; // ops that remove the clip's dissolves
   void draw_transition_card(const TrackUi &track, const ClipUi &clip);
+  json fade_ops(const ClipUi &clip, int64_t fade_in, int64_t fade_out, int64_t duration, double full) const;
+  void draw_fade_card(const ClipUi &clip);
 
   // panels
   void draw_menu();
@@ -173,6 +182,7 @@ private:
   float text_size_ = 0.08f, text_col_[3] = {1.0f, 1.0f, 1.0f};
   bool text_bold_ = false;
   float dissolve_s_ = 1.0f; // length of a new dissolve, seconds
+  float fade_in_s_ = 0.0f, fade_out_s_ = 0.0f;
 
   // inspector
   std::string insp_for_;

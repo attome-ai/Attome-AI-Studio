@@ -9,6 +9,7 @@
 #include "atm/base/id.hpp"
 #include "atm/base/profiler.hpp"
 #include "atm/base/time.hpp"
+#include "atm/eval/keyframes.hpp"
 
 namespace atm::patch {
 namespace {
@@ -210,6 +211,50 @@ void check_transitions(const json &track, const std::string &track_id, const std
   }
 }
 
+// Animated properties so far (F1 §5.4): transform opacity (a number), position and scale ([x, y]).
+void check_keyframes(const json &clip, const std::string &clip_id, json &problems) {
+  const auto tr = clip.find("transform");
+  if (tr == clip.end() || !tr->is_object())
+    return;
+  // Static values first: an animation written in their place would otherwise be stored and quietly ignored.
+  const auto is_pair = [](const json &v) { return v.is_array() && v.size() == 2 && v[0].is_number() && v[1].is_number(); };
+  for (const char *key : {"opacity", "position", "scale"})
+    if (const auto v = tr->find(key); v != tr->end()) {
+      const std::string k = key;
+      const bool ok = k == "opacity" ? v->is_number() : k == "position" ? is_pair(*v) : (v->is_number() || is_pair(*v));
+      if (!ok)
+        problems.push_back(problem("TRANSFORM_TYPE_MISMATCH", clip_id + "/transform/" + k, clip_id,
+                                   "transform." + k + " of clip " + clip_id + " must be " +
+                                       (k == "opacity" ? "a number" : k == "position" ? "[x, y]" : "a number or [x, y]") +
+                                       ".",
+                                   "To animate it, put keys in transform.keyframes." + k +
+                                       " (guide.get topic \"keyframes\") and leave a plain value here."));
+    }
+  const auto kfs = tr->find("keyframes");
+  if (kfs == tr->end())
+    return;
+  if (!kfs->is_object()) {
+    problems.push_back(problem("KEYFRAME_TYPE_MISMATCH", clip_id + "/transform/keyframes", clip_id,
+                               "transform.keyframes of clip " + clip_id + " must be a map of properties.",
+                               "Write {\"opacity\": {\"$new:k1\": {\"t\": \"0s\", \"v\": 0}, …}}."));
+    return;
+  }
+  for (auto it = kfs->begin(); it != kfs->end() && problems.size() < kMaxProblems; ++it) {
+    const std::string &prop = it.key();
+    const std::string path = clip_id + "/transform/keyframes/" + prop;
+    const int dims = prop == "opacity" ? 1 : (prop == "position" || prop == "scale") ? 2 : 0;
+    if (dims == 0) {
+      problems.push_back(problem("KEYFRAME_PROPERTY_UNSUPPORTED", path, clip_id,
+                                 "The property \"" + prop + "\" of clip " + clip_id + " cannot be animated yet.",
+                                 "Animate opacity, position or scale."));
+      continue;
+    }
+    if (auto curve = eval::parse_curve(*it, dims); !curve)
+      problems.push_back(problem(curve.error().rule, curve.error().path.empty() ? path : path + "/" + curve.error().path,
+                                 clip_id, curve.error().message, curve.error().hint));
+  }
+}
+
 // Timing rules of one track: every clip has a valid timing, clips do not overlap, and transitions fit.
 void check_track(const doc::Document &doc, const std::string &track_id, json &problems) {
   const NodeRef *ref = doc.find(track_id);
@@ -222,6 +267,7 @@ void check_track(const doc::Document &doc, const std::string &track_id, json &pr
   spans.reserve(clips->size());
   for (auto it = clips->begin(); it != clips->end() && problems.size() < kMaxProblems; ++it) {
     const std::string &id = it.key();
+    check_keyframes(*it, id, problems);
     const auto timing = it->find("timing");
     const json *in = nullptr, *dur = nullptr;
     if (timing != it->end() && timing->is_object()) {
@@ -322,9 +368,12 @@ public:
     for (const std::string &id : left_tracks_)
       if (doc_.find(id))
         tracks.insert(id);
-    for (const std::string &id : timing_clips_)
-      if (const NodeRef *ref = doc_.find(id); ref && id_prefix(ref->parent) == "trk")
-        tracks.insert(ref->parent);
+    for (const std::string &id : timing_clips_) // clips, transitions and keyframes: check the track that holds them
+      for (const NodeRef *ref = doc_.find(id); ref && !ref->parent.empty(); ref = doc_.find(ref->parent))
+        if (id_prefix(ref->parent) == "trk") {
+          tracks.insert(ref->parent);
+          break;
+        }
     for (const std::string &id : res_.created) {
       const string_view prefix = id_prefix(id);
       if (prefix == "trk") {
@@ -621,7 +670,8 @@ private:
 
   void note_timing(const std::string &id, const Path &p) {
     const string_view prefix = id_prefix(id);
-    if ((prefix == "clp" && p.n >= 2 && (p.seg[1] == "timing" || p.seg[1] == "media_ref")) || prefix == "trn")
+    if ((prefix == "clp" && p.n >= 2 && (p.seg[1] == "timing" || p.seg[1] == "media_ref" || p.seg[1] == "transform")) ||
+        prefix == "trn" || prefix == "kf")
       timing_clips_.insert(id);
   }
 
@@ -687,7 +737,7 @@ private:
     doc_.index_subtree(*it, id, parent.id, coll);
     if (pos != kNone)
       insert_at(*container, order_key, pos, id, container_path);
-    if (prefix == "clp" || prefix == "trn")
+    if (prefix == "clp" || prefix == "trn" || prefix == "kf")
       timing_clips_.insert(id);
     res_.created.push_back(id);
     done(std::move(forward), {{"op", "remove"}, {"path", id}});

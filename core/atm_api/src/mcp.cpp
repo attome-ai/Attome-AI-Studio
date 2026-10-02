@@ -17,8 +17,9 @@ constexpr const char *kProtocols[] = {"2025-06-18", "2025-03-26", "2024-11-05"};
 
 constexpr const char *kInstructions =
     "Attome edits video projects (.attome folders) and renders them to MP4.\n"
-    "Workflow: project_create (or use an existing .attome folder) -> media_probe each file for its duration -> "
-    "project_patch to add tracks and clips (its description shows the clip shape) -> project_inspect with level "
+    "Workflow: guide_get (the shapes of clips, text, dissolves and keyframes) -> project_create (or use an existing "
+    ".attome folder) -> media_probe each file for its duration -> project_patch to add tracks and clips -> "
+    "project_inspect with level "
     "\"tracks\" to read the IDs -> see_contact_sheet or see_frames to check the result by eye -> render_sequence -> "
     "jobs_wait until the job is done.\n"
     "Always pass absolute paths. Times accept \"12.5s\", \"375@30\" (frames@rate) and SMPTE timecode. Every edit can "

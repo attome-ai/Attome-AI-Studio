@@ -110,6 +110,40 @@ TEST_CASE("transitions: the rules refuse what cannot be rendered, with the limit
   }
 }
 
+TEST_CASE("keyframes: transform keys are stored in canonical time and checked on every edit", "[keyframe]") {
+  Fixture f;
+  auto r = f.patch(json::array(
+      {{{"op", "add"}, {"path", f.a + "/transform"}, {"value", json::object()}},
+       {{"op", "add"}, {"path", f.a + "/transform/keyframes/opacity/$new:k1"}, {"value", {{"t", "0s"}, {"v", 0}}}},
+       {{"op", "add"},
+        {"path", f.a + "/transform/keyframes/opacity/$new:k2"},
+        {"value", {{"t", "15@30"}, {"v", 1}, {"interp", "easing"}, {"ease", "ease_out_cubic"}}}}}));
+  INFO((r ? "" : r.error().message));
+  REQUIRE(r);
+  const std::string k2 = (*r)["id_map"]["$new:k2"];
+  CHECK(k2.rfind("kf_", 0) == 0);
+  CHECK(f.engine.call("project.get", {{"project", f.project}, {"id", k2}})->at("object")["t"] == "1/2");
+
+  // A second key at the same time, a value of the wrong shape, an unknown ease, an unknown property: all refused.
+  CHECK(f.rule_of(json::array({{{"op", "add"},
+                                {"path", f.a + "/transform/keyframes/opacity/$new:k3"},
+                                {"value", {{"t", "0.5s"}, {"v", 0.2}}}}})) == "KEYFRAMES_UNSORTED");
+  CHECK(f.rule_of(json::array({{{"op", "replace"}, {"path", k2 + "/v"}, {"value", json::array({1, 2})}}})) ==
+        "KEYFRAME_TYPE_MISMATCH");
+  CHECK(f.rule_of(json::array({{{"op", "replace"}, {"path", k2 + "/ease"}, {"value", "wobble"}}})) == "KEYFRAME_INTERP");
+  CHECK(f.rule_of(json::array({{{"op", "add"},
+                                {"path", f.a + "/transform/keyframes/rotation/$new:r1"},
+                                {"value", {{"t", "0s"}, {"v", 0}}}}})) == "KEYFRAME_PROPERTY_UNSUPPORTED");
+  // An animation written over the plain value is refused, not stored and ignored.
+  CHECK(f.rule_of(json::array({{{"op", "replace"},
+                                {"path", f.a + "/transform/opacity"},
+                                {"value", {{"t", "0s"}, {"v", 0}}}}})) == "TRANSFORM_TYPE_MISMATCH");
+  // Position takes [x, y].
+  CHECK(f.patch(json::array({{{"op", "add"},
+                              {"path", f.a + "/transform/keyframes/position/$new:p1"},
+                              {"value", {{"t", "0s"}, {"v", json::array({0.2, 0.5})}}}}})));
+}
+
 TEST_CASE("transitions: splitting the outgoing clip moves its dissolve to the right half (the editor's split)",
           "[transition]") {
   Fixture f;

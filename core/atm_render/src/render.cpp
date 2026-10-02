@@ -264,10 +264,14 @@ Result<Composition> compile(const json &project, std::string_view sequence_id) {
         }
         l.track = track_index;
         l.video = video;
+        // The end is rounded, not the length: clips that touch in time then touch in frames too, even when a cut
+        // falls between two frames (3.75 s at 30 fps), so no gap opens and a dissolve still finds its pair.
         ATM_TRY(int64_t start, to_frames(in, rate, Round::nearest_even));
-        ATM_TRY(int64_t length, to_frames(duration, rate, Round::nearest_even));
+        ATM_TRY(Rational out, add(in, duration));
+        ATM_TRY(int64_t end, to_frames(out, rate, Round::nearest_even));
         l.start_frame = start;
-        l.frames = std::max<int64_t>(1, length);
+        l.origin_frame = start;
+        l.frames = std::max<int64_t>(1, end - start);
         l.source_in_hns = int64_t(source_in.to_seconds_lossy() * double(media::kHnsPerSecond) + 0.5);
         if (const auto tr = clip.find("transform"); tr != clip.end() && tr->is_object()) {
           if (const auto op = tr->find("opacity"); op != tr->end() && op->is_number())
@@ -290,6 +294,18 @@ Result<Composition> compile(const json &project, std::string_view sequence_id) {
           l.scale_x = std::clamp(l.scale_x, 0.01f, 16.0f);
           l.scale_y = std::clamp(l.scale_y, 0.01f, 16.0f);
         }
+        if (const auto tr = clip.find("transform"); tr != clip.end() && tr->is_object())
+          if (const auto kfs = tr->find("keyframes"); kfs != tr->end() && kfs->is_object()) {
+            // The validator refuses bad keyframes; anything that still fails to read is left static.
+            const auto curve = [&](const char *key, int dims, eval::Curve &out) {
+              if (const auto m = kfs->find(key); m != kfs->end())
+                if (auto c = eval::parse_curve(*m, dims))
+                  out = std::move(*c);
+            };
+            curve("opacity", 1, l.opacity_keys);
+            curve("position", 2, l.position_keys);
+            curve("scale", 2, l.scale_keys);
+          }
         if (const auto vol = clip.find("volume"); vol != clip.end() && vol->is_number())
           l.volume = std::clamp(vol->get<float>(), 0.0f, 4.0f);
         c.frames = std::max(c.frames, l.start_frame + l.frames);
@@ -356,11 +372,34 @@ void Renderer::set_transform(const std::string &clip_id, float pos_x, float pos_
     }
 }
 
+Pose pose_at(const Layer &l, const Composition &comp, int64_t frame) {
+  Pose p{l.opacity, l.pos_x, l.pos_y, l.scale_x, l.scale_y};
+  if (l.opacity_keys.empty() && l.position_keys.empty() && l.scale_keys.empty())
+    return p;
+  const auto local = Rational::make(int64_t(frame - l.origin_frame) * comp.rate_den, comp.rate_num);
+  if (!local)
+    return p;
+  if (!l.opacity_keys.empty())
+    p.opacity = std::clamp(float(l.opacity_keys.at(*local)[0]), 0.0f, 1.0f);
+  if (!l.position_keys.empty()) {
+    const auto v = l.position_keys.at(*local);
+    p.pos_x = std::clamp(float(v[0]), -4.0f, 5.0f);
+    p.pos_y = std::clamp(float(v[1]), -4.0f, 5.0f);
+  }
+  if (!l.scale_keys.empty()) {
+    const auto v = l.scale_keys.at(*local);
+    p.scale_x = std::clamp(float(v[0]), 0.01f, 16.0f);
+    p.scale_y = std::clamp(float(v[1]), 0.01f, 16.0f);
+  }
+  return p;
+}
+
 // Draws one layer into `out`. The black background is drawn first only when the layer does not cover it.
 void Renderer::draw(const Layer &l, int64_t frame, uint8_t *out, bool &cleared, std::vector<const std::string *> &used) {
   const size_t pitch = size_t(width_); // Y and UV rows of the packed NV12 output
   uint8_t *out_uv = out + pitch * size_t(height_);
-  if (l.opacity <= 0.0f)
+  const Pose p = pose_at(l, comp_, frame);
+  if (p.opacity <= 0.0f)
     return;
   if (l.is_text) {
     if (l.text.empty())
@@ -384,8 +423,8 @@ void Renderer::draw(const Layer &l, int64_t frame, uint8_t *out, bool &cleared, 
       media::fill_black(out, width_, height_);
     cleared = true;
     ATM_PROFILE_SCOPE("composite.text");
-    draw_text(out, width_, height_, entry.bitmap, l.pos_x * float(width_), l.pos_y * float(height_), l.scale_x,
-              l.scale_y, int(l.opacity * 256.0f + 0.5f), l.text_color);
+    draw_text(out, width_, height_, entry.bitmap, p.pos_x * float(width_), p.pos_y * float(height_), p.scale_x,
+              p.scale_y, int(p.opacity * 256.0f + 0.5f), l.text_color);
     return;
   }
   if (failed_.count(l.clip_id))
@@ -410,9 +449,9 @@ void Renderer::draw(const Layer &l, int64_t frame, uint8_t *out, bool &cleared, 
     return;
   }
   const int w = std::min(view->width, width_), h = std::min(view->height, height_);
-  const int alpha = int(l.opacity * 256.0f + 0.5f);
+  const int alpha = int(p.opacity * 256.0f + 0.5f);
   // The common case, a clip fitted and centred, stays on the plain copy path.
-  const bool plain = l.scale_x == 1.0f && l.scale_y == 1.0f && l.pos_x == 0.5f && l.pos_y == 0.5f;
+  const bool plain = p.scale_x == 1.0f && p.scale_y == 1.0f && p.pos_x == 0.5f && p.pos_y == 0.5f;
   const bool covers = plain ? (w >= width_ && h >= height_) : false;
   if (!cleared && (alpha < 256 || !covers))
     media::fill_black(out, width_, height_);
@@ -424,8 +463,8 @@ void Renderer::draw(const Layer &l, int64_t frame, uint8_t *out, bool &cleared, 
     put_rows(out_uv + pitch * size_t(y0 / 2) + size_t(x0), pitch, view->uv, size_t(view->uv_pitch), h / 2, w, alpha);
   } else {
     ATM_PROFILE_SCOPE("composite.transform");
-    draw_transformed(out, width_, height_, *view, l.pos_x * float(width_), l.pos_y * float(height_), l.scale_x,
-                     l.scale_y, alpha);
+    draw_transformed(out, width_, height_, *view, p.pos_x * float(width_), p.pos_y * float(height_), p.scale_x,
+                     p.scale_y, alpha);
   }
 }
 
@@ -478,21 +517,35 @@ Result<std::vector<float>> mix_audio(const Composition &c) {
     const size_t offset = size_t(c.frame_hns(l.start_frame) * media::kAudioRate / media::kHnsPerSecond) * 2;
     const size_t n = offset < mix.size() ? std::min(pcm->size(), mix.size() - offset) : 0;
     // Under a dissolve the two clips cross-fade with equal power: cos and sin of the progress keep the loudness level.
-    const Layer *fade = l.mix_with >= 0 ? &l : l.mixed_by >= 0 ? &c.layers[size_t(l.mixed_by)] : nullptr;
-    size_t fade_from = 0, fade_len = 0; // in interleaved samples of the mix
-    if (fade && fade->mix_frames > 0) {
-      fade_from = size_t(c.frame_hns(fade->mix_start) * media::kAudioRate / media::kHnsPerSecond) * 2;
-      fade_len = size_t(c.frame_hns(fade->mix_start + fade->mix_frames) * media::kAudioRate / media::kHnsPerSecond) * 2 -
-                 fade_from;
-    }
-    const bool outgoing = l.mix_with >= 0;
+    // A clip can have one at each end: it rises under the dissolve into it and falls under the one out of it.
+    struct Fade {
+      size_t from = 0, len = 0; // in interleaved samples of the mix
+      bool out = false;
+    };
+    const auto fade_of = [&](const Layer &owner, bool out) {
+      Fade f;
+      f.out = out;
+      if (owner.mix_frames > 0) {
+        f.from = size_t(c.frame_hns(owner.mix_start) * media::kAudioRate / media::kHnsPerSecond) * 2;
+        f.len = size_t(c.frame_hns(owner.mix_start + owner.mix_frames) * media::kAudioRate / media::kHnsPerSecond) * 2 -
+                f.from;
+      }
+      return f;
+    };
+    Fade fades[2];
+    int nfades = 0;
+    if (l.mixed_by >= 0)
+      fades[nfades++] = fade_of(c.layers[size_t(l.mixed_by)], false);
+    if (l.mix_with >= 0)
+      fades[nfades++] = fade_of(l, true);
     for (size_t i = 0; i < n; ++i) {
       const size_t at = offset + i;
       float gain = l.volume;
-      if (at >= fade_from && at < fade_from + fade_len) {
-        const double p = double((at - fade_from) / 2) / double(fade_len / 2);
-        gain *= float(outgoing ? std::cos(p * 1.5707963267948966) : std::sin(p * 1.5707963267948966));
-      }
+      for (int k = 0; k < nfades; ++k)
+        if (const Fade &f = fades[k]; f.len > 0 && at >= f.from && at < f.from + f.len) {
+          const double p = double((at - f.from) / 2) / double(f.len / 2);
+          gain *= float(f.out ? std::cos(p * 1.5707963267948966) : std::sin(p * 1.5707963267948966));
+        }
       mix[at] += (*pcm)[i] * gain;
     }
   }

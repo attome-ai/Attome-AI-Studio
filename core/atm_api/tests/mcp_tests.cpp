@@ -103,6 +103,17 @@ TEST_CASE("mcp: handshake, tool list from the registry, and errors as tool resul
   CHECK(by_name["project_inspect"]["annotations"]["readOnlyHint"] == true);
   CHECK(by_name["project_patch"]["annotations"]["readOnlyHint"] == false);
 
+  // MCP clients cut long descriptions (an agent once missed the keyframe format that way), so keep them short and
+  // put the recipes in guide_get.
+  for (const json &t : tools)
+    CHECK(t["description"].get<std::string>().size() <= 1024);
+  const std::string guide = json::parse(call_tool(mcp, "guide_get", json::object())["content"][0]["text"].get<std::string>())["text"];
+  for (const char *topic : {"## clips", "## text", "## dissolves", "## keyframes", "## times", "in_offset", "ease_out_cubic"})
+    CHECK(guide.find(topic) != std::string::npos);
+  const std::string one = json::parse(call_tool(mcp, "guide_get", {{"topic", "keyframes"}})["content"][0]["text"].get<std::string>())["text"];
+  CHECK(one.find("## dissolves") == std::string::npos);
+  CHECK(call_tool(mcp, "guide_get", {{"topic", "music"}})["isError"] == true);
+
   const json missing = call_tool(mcp, "project_inspect", {{"project", "C:/no/such/place.attome"}});
   CHECK(missing["isError"] == true);
   CHECK(missing["content"][0]["text"].get<std::string>().find("Hint:") != std::string::npos);

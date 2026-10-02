@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "atm/base/error.hpp"
+#include "atm/eval/keyframes.hpp"
 #include "atm/media/media.hpp"
 
 namespace atm::render {
@@ -43,7 +44,19 @@ struct Layer {
   int mixed_by = -1; // on the incoming clip: the outgoing one
   int64_t mix_start = 0, mix_frames = 0; // on the outgoing clip
   bool mixing_at(int64_t frame) const { return frame >= mix_start && frame < mix_start + mix_frames; }
+  // Keyframes (transform.keyframes) replace the static values above while they exist. Their times are clip-local:
+  // 0 is `origin_frame`, the clip's record_in (start_frame moves earlier when a dissolve leads into the clip).
+  int64_t origin_frame = 0;
+  eval::Curve opacity_keys, position_keys, scale_keys;
 };
+
+// The transform of a layer at one frame, keyframes applied.
+struct Pose {
+  float opacity = 1.0f, pos_x = 0.5f, pos_y = 0.5f, scale_x = 1.0f, scale_y = 1.0f;
+};
+
+struct Composition;
+Pose pose_at(const Layer &layer, const Composition &comp, int64_t frame);
 
 struct Composition {
   int width = 1920, height = 1080;

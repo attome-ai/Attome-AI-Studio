@@ -308,6 +308,61 @@ double rms(const std::vector<float> &stereo, double from_s, double to_s) {
 
 } // namespace
 
+TEST_CASE("render: keyframes fade a title in and move it, in clip-local time", "[media]") {
+  const fs::path dir = fs::temp_directory_path() / atm::new_id("attome-kf");
+  fs::create_directories(dir);
+  atm::api::Engine engine;
+  const std::string project = (dir / "K.attome").string();
+  const json created = ok(engine, "project.create", {{"path", project}, {"canvas", {{"width", 320}, {"height", 240}}}});
+  const std::string seq = created["sequence"];
+  // A white block of text from 1 s to 3 s: opacity 0 -> 1 over its first second, x 0.25 -> 0.75 over two seconds.
+  const json title = {
+      {"name", "t"},
+      {"timing", {{"record_in", "1s"}, {"duration", "2s"}, {"source_in", "0s"}}},
+      {"media_ref", {{"type", "text"}}},
+      {"content", {{"text", "MMMM"}, {"size", 0.25}, {"color", "#ffffff"}, {"bold", true}}},
+      {"transform",
+       {{"position", {0.5, 0.5}},
+        {"keyframes",
+         {{"opacity", {{"$new:o1", {{"t", "0s"}, {"v", 0}}}, {"$new:o2", {{"t", "1s"}, {"v", 1}}}}},
+          {"position", {{"$new:p1", {{"t", "0s"}, {"v", {0.25, 0.5}}}}, {"$new:p2", {{"t", "2s"}, {"v", {0.75, 0.5}}}}}}}}}}};
+  ok(engine, "project.patch",
+     {{"project", project},
+      {"patch",
+       {{"ops", json::array({{{"op", "add"}, {"path", seq + "/tracks/$new:t"}, {"value", {{"kind", "video"}}}},
+                             {{"op", "add"}, {"path", "$new:t/clips/$new:c"}, {"value", title}}})}}}});
+  const json doc = ok(engine, "project.get", {{"project", project}, {"id", created["project"]}})["object"];
+  auto comp = atm::render::compile(doc);
+  REQUIRE(comp);
+  atm::render::Renderer renderer(*comp, 320, 240);
+  std::vector<uint8_t> nv12(media::nv12_size(320, 240)), rgb(320 * 240 * 4);
+  // Brightness summed over the left and right halves of the frame.
+  const auto halves = [&](int64_t frame) {
+    REQUIRE(renderer.render(frame, nv12.data()));
+    media::nv12_to_bgrx(nv12.data(), 320, 240, rgb.data());
+    std::pair<double, double> sum{0.0, 0.0};
+    for (int y = 0; y < 240; ++y)
+      for (int x = 0; x < 320; ++x)
+        (x < 160 ? sum.first : sum.second) += rgb[(size_t(y) * 320 + size_t(x)) * 4 + 1];
+    return sum;
+  };
+  const auto start = halves(30);  // clip-local 0 s: invisible
+  const auto quarter = halves(45); // 0.5 s: half faded in, left of centre
+  const auto later = halves(75);   // 1.5 s: fully in, right of centre
+  CHECK(start.first + start.second < 1000.0);
+  CHECK(quarter.first > quarter.second);
+  CHECK(later.second > later.first);
+  CHECK(later.first + later.second > 1.5 * (quarter.first + quarter.second)); // brighter once fully faded in
+  // The pose follows the same rules: half way through the fade, half the opacity.
+  const auto pose = atm::render::pose_at(comp->layers[0], *comp, 45);
+  CHECK(pose.opacity > 0.45f);
+  CHECK(pose.opacity < 0.55f);
+  CHECK(pose.pos_x > 0.35f);
+  CHECK(pose.pos_x < 0.40f); // 0.25 + 0.5 * 0.25
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}
+
 TEST_CASE("render: a dissolve mixes the two clips over the cut and cross-fades their sound", "[media]") {
   const fs::path dir = fs::temp_directory_path() / atm::new_id("attome-dissolve");
   fs::create_directories(dir);
@@ -369,6 +424,63 @@ TEST_CASE("render: a dissolve mixes the two clips over the cut and cross-fades t
   CHECK(level_mid / level_a < 1.15);
   CHECK(level_b / level_a > 0.85);
 
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}
+
+TEST_CASE("render: clips that touch between two frames still touch, and keep their dissolve", "[media]") {
+  // An agent cut at 1/4 s and 15/4 s on 30 fps (7.5 and 112.5 frames). Rounding the length separately from the
+  // start left a one-frame mismatch, and the dissolve was dropped.
+  json doc = {{"sequences", {{"seq_1", {{"rate", "30"}, {"canvas", {{"width", 320}, {"height", 240}}},
+                                        {"track_order", {"trk_1"}}, {"tracks", {{"trk_1", json::object()}}}}}}},
+              {"sequence_order", {"seq_1"}}};
+  const auto text = [](const char *in, const char *dur) {
+    return json{{"timing", {{"record_in", in}, {"duration", dur}, {"source_in", "0"}}},
+                {"media_ref", {{"type", "text"}}},
+                {"content", {{"text", "x"}}}};
+  };
+  json &track = doc["sequences"]["seq_1"]["tracks"]["trk_1"];
+  track["clips"] = {{"clp_a", text("1/4", "7/2")}, {"clp_b", text("15/4", "1/4")}};
+  track["transitions"] = {{"trn_1", {{"type", "attome.dissolve"}, {"from", "clp_a"}, {"to", "clp_b"},
+                                     {"in_offset", "1/4"}, {"out_offset", "1/4"}}}};
+  auto comp = atm::render::compile(doc);
+  REQUIRE(comp);
+  REQUIRE(comp->layers.size() == 2);
+  const auto &a = comp->layers[0].clip_id == "clp_a" ? comp->layers[0] : comp->layers[1];
+  CHECK(a.mix_with >= 0);
+  CHECK(a.mix_frames > 0);
+}
+
+TEST_CASE("render: a clip between two dissolves fades its sound in and out", "[media]") {
+  const fs::path dir = fs::temp_directory_path() / atm::new_id("attome-xfade3");
+  fs::create_directories(dir);
+  const std::string a = (dir / "a.mp4").string(), b = (dir / "b.mp4").string(), c = (dir / "c.mp4").string();
+  write_solid(a, 0x00C000, 440.0, 3);
+  write_solid(b, 0xF0F0F0, 660.0, 3);
+  write_solid(c, 0x0000C0, 880.0, 3);
+  const auto clip = [](const std::string &path, const char *in) {
+    return json{{"timing", {{"record_in", in}, {"duration", "1"}, {"source_in", "1"}}},
+                {"media_ref", {{"type", "file"}, {"path", path}, {"duration", "3"}}}};
+  };
+  json doc = {{"sequences", {{"seq_1", {{"rate", "30"}, {"canvas", {{"width", 320}, {"height", 240}}},
+                                        {"track_order", {"trk_1"}}, {"tracks", {{"trk_1", json::object()}}}}}}},
+              {"sequence_order", {"seq_1"}}};
+  json &track = doc["sequences"]["seq_1"]["tracks"]["trk_1"];
+  track["clips"] = {{"clp_a", clip(a, "0")}, {"clp_b", clip(b, "1")}, {"clp_c", clip(c, "2")}};
+  const auto dissolve = [](const char *from, const char *to) {
+    return json{{"type", "attome.dissolve"}, {"from", from}, {"to", to}, {"in_offset", "1/4"}, {"out_offset", "1/4"}};
+  };
+  track["transitions"] = {{"trn_1", dissolve("clp_a", "clp_b")}, {"trn_2", dissolve("clp_b", "clp_c")}};
+  auto comp = atm::render::compile(doc);
+  REQUIRE(comp);
+  auto audio = atm::render::mix_audio(*comp);
+  REQUIRE(audio);
+  const double level = rms(*audio, 0.3, 0.6);
+  // Both cuts keep the level; before the fix b came in at full volume under the first dissolve.
+  CHECK(rms(*audio, 0.9, 1.1) / level < 1.12);
+  CHECK(rms(*audio, 0.9, 1.1) / level > 0.88);
+  CHECK(rms(*audio, 1.9, 2.1) / level < 1.12);
+  CHECK(rms(*audio, 1.9, 2.1) / level > 0.88);
   std::error_code ec;
   fs::remove_all(dir, ec);
 }

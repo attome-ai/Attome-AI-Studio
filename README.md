@@ -29,9 +29,10 @@ What exists today:
 - the same export for scripts and agents: `attome render Demo.attome -o out.mp4`
 - text clips (titles, lower thirds, captions) with a size, colour and position, drawn with DirectWrite so Arabic and other right-to-left text are shaped correctly in the preview and the export
 - dissolves between clips, with the sound cross-faded at equal power; a dissolve uses media beyond the cut, and an edit that leaves too little is refused with the largest length that fits
+- keyframes on opacity, position and scale (linear, hold and easing presets); the Inspector's Fade card fades a clip in and out, and the timeline draws the opacity curve on the clip
 - an MCP server, `attome mcp --stdio`: an AI agent such as Claude can build a project, look at frames and a contact sheet of it, and render it, see [Connect an AI agent](#connect-an-ai-agent)
 
-Not built yet: AI generation, effects, keyframes and fades, transitions other than the dissolve, the GPU compositor, JSON Schema validation, Suggested Edits and per-task undo. Decode and encode use the Windows media stack today, so import and export work on Windows only; the macOS and Linux code paths of the rest are written but have only been built and tested on Windows.
+Not built yet: AI generation, effects, audio fades and gain in dB, transitions other than the dissolve, the GPU compositor, JSON Schema validation, Suggested Edits and per-task undo. Decode and encode use the Windows media stack today, so import and export work on Windows only; the macOS and Linux code paths of the rest are written but have only been built and tested on Windows.
 
 ### The editor
 
@@ -61,7 +62,7 @@ attome daemon start                        # optional: keeps projects open betwe
 { "mcpServers": { "attome": { "command": "C:\\path\\to\\build\\win-msvc-release\\bin\\attome.exe", "args": ["mcp", "--stdio"] } } }
 ```
 
-For Claude Code: `claude mcp add attome -- C:\path\to\attome.exe mcp --stdio`. The agent gets `project_create`, `project_inspect`, `project_patch`, `project_undo`, `media_probe`, `see_frames` and `see_contact_sheet` (rendered frames attached as images, so it can check its edit by eye), `render_sequence` and `jobs_wait`. Names, descriptions and parameter schemas come from the engine (`attome tools --json`), so they match the CLI. Try:
+For Claude Code: `claude mcp add attome -- C:\path\to\attome.exe mcp --stdio`. The agent gets `guide_get` (how to write clips, text, dissolves and keyframes), `project_create`, `project_inspect`, `project_patch`, `project_undo`, `media_probe`, `see_frames` and `see_contact_sheet` (rendered frames attached as images, so it can check its edit by eye), `render_sequence` and `jobs_wait`. Names, descriptions and parameter schemas come from the engine (`attome tools --json`), so they match the CLI. Try:
 
 > Using the Attome tools, create a 1280x720 project at C:\demo\summer.attome. Put C:\demo\a.mp4 and C:\demo\b.mp4 one after the other, 3 seconds each, muted. Add the title "Summer in the City" over the first 2 seconds in the lower third. Show me a contact sheet, then render to C:\demo\summer.mp4.
 

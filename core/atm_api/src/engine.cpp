@@ -693,6 +693,65 @@ struct Engine::Impl {
     return to_json(format_time(t, ctx.rate));
   }
 
+  // Recipes for agents. Tool descriptions are short because MCP clients cut long ones; the details live here.
+  Result<json> guide_get(const json &params) {
+    static const std::pair<const char *, const char *> kTopics[] = {
+        {"clips",
+         "Tracks and clips.\n"
+         "Add a track: {\"op\":\"add\",\"path\":\"<seq_id>/tracks/$new:v1\",\"value\":{\"kind\":\"video\",\"name\":\"V1\"}} "
+         "(kind \"audio\" for sound only). Tracks stack in order: the first is the bottom layer. The sequence ID comes "
+         "from project.create or project.inspect.\n"
+         "Add a clip from a file: {\"op\":\"add\",\"path\":\"<track_id or $new:v1>/clips/$new:c1\",\"value\":{\"name\":"
+         "\"beach\",\"timing\":{\"record_in\":\"0s\",\"duration\":\"4s\",\"source_in\":\"1s\"},\"media_ref\":{\"type\":"
+         "\"file\",\"path\":\"C:/media/beach.mp4\",\"duration\":\"<file duration from media.probe>\"},\"transform\":"
+         "{\"position\":[0.5,0.5],\"scale\":[1,1],\"opacity\":1},\"volume\":1}}\n"
+         "record_in = where the clip starts on the timeline; duration = how long it plays; source_in = where it starts "
+         "in the file. Clips on one track may not overlap. position is the clip centre in canvas fractions from the "
+         "top-left ([0.5,0.5] = centre); scale 1 fits the canvas; opacity 0..1; volume 0 mutes the clip's sound, 1 "
+         "leaves it unchanged. Always give media_ref.duration: dissolves need it to check the media."},
+        {"text",
+         "Text clips (titles, lower thirds, captions) have no file: \"media_ref\":{\"type\":\"text\"},\"content\":"
+         "{\"text\":\"Summer in the City\\nصيف في المدينة\",\"size\":0.08,\"color\":\"#ffffff\",\"bold\":true}. size is "
+         "the font height as a fraction of the canvas height; \\n starts a new line; lines are centred. Arabic and "
+         "other right-to-left text is shaped correctly. Put text on its own track after (above) the video tracks. "
+         "A lower third: \"transform\":{\"position\":[0.5,0.84]}. To fade it, see the topic \"keyframes\"."},
+        {"dissolves",
+         "A dissolve mixes two clips that touch on one track (the first ends exactly where the second starts):\n"
+         "{\"op\":\"add\",\"path\":\"<track_id>/transitions/$new:d1\",\"value\":{\"type\":\"attome.dissolve\",\"from\":"
+         "\"<first clip>\",\"to\":\"<second clip>\",\"in_offset\":\"0.5s\",\"out_offset\":\"0.5s\"}}\n"
+         "The mix runs from cut - in_offset to cut + out_offset, and uses media beyond the cut: the first clip's file "
+         "must go on for out_offset past its end (source_in + duration + out_offset <= file duration), and the "
+         "second clip must have source_in >= in_offset. So leave handles: do not use a file up to its very end, and "
+         "start the next clip a little into its file. The sound cross-fades with the picture. A refused dissolve "
+         "names the largest offsets that fit. To fade one clip to or from black, use opacity keyframes instead."},
+        {"keyframes",
+         "Animate opacity, position or scale with keyframes inside the clip's transform. t is the time from the "
+         "clip's start. Fade a 4-second title in over 0.5 s and out over its last 0.5 s:\n"
+         "\"transform\":{\"position\":[0.5,0.84],\"opacity\":1,\"keyframes\":{\"opacity\":{"
+         "\"$new:k1\":{\"t\":\"0s\",\"v\":0},\"$new:k2\":{\"t\":\"0.5s\",\"v\":1},"
+         "\"$new:k3\":{\"t\":\"3.5s\",\"v\":1},\"$new:k4\":{\"t\":\"4s\",\"v\":0}}}}\n"
+         "Each property is a map of keys {t, v}; give every key its own $new: name. v is a number for opacity and "
+         "[x, y] for position and scale. Before the first key the value is the first key's, after the last the last "
+         "key's. A segment uses the interp of its left key: \"linear\" (default), \"hold\", or \"easing\" with "
+         "\"ease\": ease_in_quad, ease_out_quad, ease_in_out_quad, ease_in_cubic, ease_out_cubic, ease_in_out_cubic, "
+         "ease_in_expo, ease_out_expo, ease_in_out_expo or ease_out_back.\n"
+         "Add one key to a clip that exists: {\"op\":\"add\",\"path\":\"<clip_id>/transform/keyframes/opacity/$new:k5\","
+         "\"value\":{\"t\":\"2s\",\"v\":0.5}}. Keyframes replace the plain value while they exist."},
+        {"times",
+         "Times accept \"12.5s\", \"375@30\" (frames at a rate), SMPTE \"00:00:12:15\" (needs the sequence rate) or "
+         "{\"num\":25,\"den\":2} seconds. They are stored as exact rationals of seconds, such as \"25/2\". Cuts between "
+         "two frames are allowed; rendering rounds to the nearest frame."},
+    };
+    const std::string want = params.value("topic", std::string());
+    std::string text;
+    for (const auto &[name, body] : kTopics)
+      if (want.empty() || want == name)
+        text += std::string("## ") + name + "\n" + body + "\n\n";
+    if (text.empty())
+      return bad_param("topic", "must be one of clips, text, dissolves, keyframes, times");
+    return json{{"text", std::move(text)}};
+  }
+
   Result<json> tools_list(const json &); // defined after the table
 
   Result<json> daemon_hello(const json &) {
@@ -1010,32 +1069,13 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
      R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},"id":{"type":"string"}},"required":["project","id"]})",
      &Impl::project_get},
     {"project.patch", "core", true,
-     "Edit the project with an ID-addressed Patch; all ops apply or none do. Ops: add, remove, replace, move, "
-     "insert_order, remove_order, test. A path is \"<StableID>/<field>[/<field>…]\".\n"
-     "- Add a track: {\"op\":\"add\",\"path\":\"<seq_id>/tracks/$new:v1\",\"value\":{\"kind\":\"video\"|\"audio\","
-     "\"name\":\"V1\"}}. Tracks stack in order: the first is the bottom layer.\n"
-     "- Add a clip: {\"op\":\"add\",\"path\":\"<track_id or $new:v1>/clips/$new:c1\",\"value\":{\"name\":\"…\","
-     "\"timing\":{\"record_in\":\"0s\",\"duration\":\"5s\",\"source_in\":\"0s\"},\"media_ref\":{\"type\":\"file\","
-     "\"path\":\"<absolute path>\",\"duration\":\"<file duration from media.probe>\"},\"transform\":{\"position\":"
-     "[0.5,0.5],\"scale\":[1,1],\"opacity\":1},\"volume\":1}}. record_in is where the clip starts on the timeline, "
-     "source_in where it starts in the file. Clips on one track may not overlap.\n"
-     "- Dissolve between two clips that touch on one track (the first ends where the second starts): {\"op\":\"add\","
-     "\"path\":\"<track_id>/transitions/$new:d1\",\"value\":{\"type\":\"attome.dissolve\",\"from\":\"<first clip>\","
-     "\"to\":\"<second clip>\",\"in_offset\":\"0.5s\",\"out_offset\":\"0.5s\"}}. The mix runs from cut - in_offset "
-     "to cut + out_offset, using media beyond the cut: the first clip's file must go on out_offset past its end "
-     "(source_in + duration + out_offset <= file duration) and the second must have source_in >= in_offset. So "
-     "leave handles: do not use a file to its very end, and start the next clip a little into its file. Sound "
-     "cross-fades with the picture.\n"
-     "- Text clip (title, lower third, caption): \"media_ref\":{\"type\":\"text\"},\"content\":{\"text\":\"…\","
-     "\"size\":0.08,\"color\":\"#ffffff\",\"bold\":true} with size a fraction of the canvas height; put it on a track "
-     "above the video. Arabic and other right-to-left text is shaped correctly.\n"
-     "- position is the clip centre in canvas fractions from the top-left ([0.5,0.84] = lower third); scale 1 fits "
-     "the canvas; volume 0 mutes a clip's sound, 1 leaves it unchanged.\n"
-     "- Change a field: {\"op\":\"replace\",\"path\":\"<clip_id>/timing/duration\",\"value\":\"3s\"}; delete: "
-     "{\"op\":\"remove\",\"path\":\"<clip_id>\"}.\n"
+     "Edit the project with an ID-addressed Patch; all ops apply or none do. Call guide.get first: it shows the "
+     "exact shapes of tracks, clips, text, dissolves and keyframes (topics: clips, text, dissolves, keyframes, times).\n"
+     "Ops: add, remove, replace, move, insert_order, remove_order, test. A path is \"<StableID>/<field>[/…]\": add "
+     "{\"op\":\"add\",\"path\":\"<track_id>/clips/$new:c1\",\"value\":{…}}, change {\"op\":\"replace\",\"path\":"
+     "\"<clip_id>/timing/duration\",\"value\":\"3s\"}, delete {\"op\":\"remove\",\"path\":\"<clip_id>\"}. "
      "$new:<name> placeholders become Stable IDs (returned in id_map) and later ops of the same patch may use them. "
-     "Use media.probe for a file's duration. dry_run checks without changing anything. Not supported yet: "
-     "keyframes, fades, effects.",
+     "A refused patch says which rule failed and how to fix it. dry_run checks without changing anything.",
      R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},
        "patch":{"type":"object","properties":{
          "ops":{"type":"array","items":{"type":"object","properties":{
@@ -1048,6 +1088,12 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
        "task_id":{"type":"string","description":"Groups several edits into one task"}},
        "required":["project","patch"]})",
      &Impl::project_patch},
+    {"guide.get", "core", false,
+     "How to write the project: the shapes of tracks and clips, text, dissolves, keyframe animation and times, with "
+     "examples ready to adapt. Read it before the first project.patch.",
+     R"({"type":"object","properties":{"topic":{"type":"string","enum":["clips","text","dissolves","keyframes","times"],
+       "description":"Leave out to get every topic"}}})",
+     &Impl::guide_get},
     {"project.undo", "core", true, "Undo the last edit (steps: N).",
      R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},"steps":{"type":"integer"}},"required":["project"]})",
      &Impl::project_undo},
