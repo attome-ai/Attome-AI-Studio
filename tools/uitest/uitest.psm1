@@ -70,6 +70,14 @@ function Show-Window($Editor) {
   [UiT]::SetWindowPos($h, [IntPtr](-1), 0, 0, 0, 0, 3) | Out-Null   # topmost, so nothing covers it
   [UiT]::SetForegroundWindow($h) | Out-Null
   Start-Sleep -Milliseconds 800
+  # The editor opens maximized; the scripts' coordinates are for the restored 1600 x 960 window, so wait for it.
+  for ($i = 0; $i -lt 25; $i++) {
+    $r = Get-Rect $Editor
+    if (($r.Rr - $r.L) -ge 1500 -and ($r.Rr - $r.L) -le 1700) { break }
+    [UiT]::ShowWindow($Editor.Process.MainWindowHandle, 9) | Out-Null
+    Start-Sleep -Milliseconds 200
+  }
+  Start-Sleep -Milliseconds 300
 }
 
 function Save-Shot($Editor, [string]$Path) {
@@ -114,6 +122,13 @@ function Move-Drag($Editor, $x0, $y0, $x1, $y1, [int]$Steps = 15, [switch]$HoldA
 }
 function Release-Mouse { [UiT]::mouse_event(4, 0, 0, 0, [IntPtr]::Zero); Start-Sleep -Milliseconds 800 }
 
+# Mouse wheel over a point; positive notches scroll down.
+function Scroll-At($Editor, $x, $y, [int]$Notches) {
+  Move-Mouse $Editor $x $y; Start-Sleep -Milliseconds 300
+  [UiT]::mouse_event(0x0800, 0, 0, [BitConverter]::ToUInt32([BitConverter]::GetBytes([int32]($Notches * -120)), 0), [IntPtr]::Zero)
+  Start-Sleep -Milliseconds 600
+}
+
 # Virtual-key codes, e.g. 0x20 space, 0x2E delete, 0x53 S. Add 'ctrl' for Ctrl+key.
 function Send-Key($Editor, [byte]$Vk, [switch]$Ctrl) {
   if ($Ctrl) { [UiT]::keybd_event(0x11, 0, 0, [IntPtr]::Zero) }
@@ -133,4 +148,4 @@ function Stop-Editor($Editor) {
   Invoke-Attome $Editor daemon stop 2>&1 | Out-Null
 }
 
-Export-ModuleMember -Function Start-Editor, Show-Window, Save-Shot, Move-Mouse, Click-At, Move-Drag, Release-Mouse, Send-Key, Invoke-Attome, Stop-Editor
+Export-ModuleMember -Function Start-Editor, Show-Window, Save-Shot, Move-Mouse, Click-At, Move-Drag, Release-Mouse, Scroll-At, Send-Key, Invoke-Attome, Stop-Editor

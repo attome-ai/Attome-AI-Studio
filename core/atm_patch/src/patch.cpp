@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <array>
+#include <map>
+#include <optional>
 #include <set>
 
 #include "atm/base/id.hpp"
@@ -54,7 +56,8 @@ std::string join(const Path &p, size_t from, size_t to) {
 bool ends_with_order(string_view key) { return key.size() > 6 && key.substr(key.size() - 6) == "_order"; }
 
 bool is_time_key(string_view k) {
-  return k == "record_in" || k == "duration" || k == "source_in" || k == "t" || k == "start";
+  return k == "record_in" || k == "duration" || k == "source_in" || k == "t" || k == "start" || k == "in_offset" ||
+         k == "out_offset";
 }
 
 bool is_time_like(const json &v) {
@@ -102,7 +105,112 @@ json problem(string_view rule, std::string path, string_view target, std::string
           {"hint", std::move(hint)}};
 }
 
-// Timing rules of one track: every clip has a valid timing, and clips do not overlap.
+struct Span {
+  Rational in, end;
+  const std::string *id;
+};
+
+// Media on either side of a clip's used range, or nullopt when unlimited (text) or unknown (no media_ref.duration).
+struct Handles {
+  std::optional<Rational> before, after;
+};
+
+Handles handles_of(const json &clip, const Rational &duration) {
+  Handles h;
+  const json ref = clip.value("media_ref", json::object());
+  if (ref.value("type", "") == "text")
+    return h;
+  const json timing = clip.value("timing", json::object());
+  const auto source_in = Rational::parse(timing.value("source_in", std::string("0")));
+  if (!source_in)
+    return h;
+  h.before = *source_in;
+  if (const auto media = ref.find("duration"); media != ref.end() && media->is_string())
+    if (const auto total = Rational::parse(media->get_ref<const std::string &>()))
+      if (const auto used = add(*source_in, duration))
+        if (const auto rest = sub(*total, *used))
+          h.after = *rest;
+  return h;
+}
+
+// Transition rules (F1 §4.1): a dissolve joins two clips that touch on this track, and each clip has enough media
+// beyond the cut for the overlap: `from` plays out_offset past its out point, `to` starts in_offset before its in point.
+void check_transitions(const json &track, const std::string &track_id, const std::vector<Span> &spans, json &problems) {
+  const auto transitions = track.find("transitions");
+  if (transitions == track.end() || !transitions->is_object())
+    return;
+  const json &clips = track["clips"];
+  std::map<std::string, Rational> used; // per clip: the part of its duration that transitions already overlap
+  for (auto it = transitions->begin(); it != transitions->end() && problems.size() < kMaxProblems; ++it) {
+    const std::string &id = it.key();
+    const json &t = *it;
+    if (t.value("type", "") != "attome.dissolve") {
+      problems.push_back(problem("TRANSITION_UNSUPPORTED", id + "/type", id,
+                                 "Transition " + id + " has the type \"" + t.value("type", "") + "\".",
+                                 "Use \"type\": \"attome.dissolve\", the one transition so far."));
+      continue;
+    }
+    const std::string from = t.value("from", ""), to = t.value("to", "");
+    const auto find = [&](const std::string &clip) -> const Span * {
+      for (const Span &s : spans)
+        if (*s.id == clip)
+          return &s;
+      return nullptr;
+    };
+    const Span *a = find(from), *b = find(to);
+    if (!a || !b || compare(a->end, b->in) != 0) {
+      problems.push_back(problem(
+          "TRANSITION_NOT_ADJACENT", id, id,
+          "Transition " + id + " needs \"from\" and \"to\" to be clips on track " + track_id +
+              " where \"from\" ends exactly where \"to\" starts.",
+          !a || !b ? "Remove the transition (op remove, path " + id + ") or point it at clips of this track."
+                   : "Set " + to + "/timing/record_in to \"" + a->end.to_string() + "\", or remove the transition."));
+      continue;
+    }
+    const auto in_off = Rational::parse(t.value("in_offset", std::string("0")));
+    const auto out_off = Rational::parse(t.value("out_offset", std::string("0")));
+    if (!in_off || !out_off || in_off->num() < 0 || out_off->num() < 0 || (in_off->num() == 0 && out_off->num() == 0)) {
+      problems.push_back(problem("TRANSITION_DURATION", id, id,
+                                 "Transition " + id + " needs in_offset and out_offset of zero or more, not both zero.",
+                                 "For a 1-second dissolve centred on the cut use in_offset \"0.5s\", out_offset \"0.5s\"."));
+      continue;
+    }
+    // The dissolve covers [cut - in_offset, cut + out_offset): `from` must still be on screen at its start, `to` at
+    // its end, and a clip with transitions at both ends must be long enough for both.
+    const Rational a_dur = *sub(a->end, a->in), b_dur = *sub(b->end, b->in);
+    const Rational a_used = used.count(from) ? used.at(from) : Rational(), b_used = used.count(to) ? used.at(to) : Rational();
+    const Rational a_room = *sub(a_dur, a_used), b_room = *sub(b_dur, b_used);
+    if (compare(*in_off, a_room) > 0 || compare(*out_off, b_room) > 0) {
+      problems.push_back(problem("TRANSITION_TOO_LONG", id, id,
+                                 "Transition " + id + " is longer than the clips it joins.",
+                                 "Keep in_offset at most " + a_room.to_string() + " s and out_offset at most " +
+                                     b_room.to_string() + " s."));
+      continue;
+    }
+    used[from] = *add(a_used, *in_off);
+    used[to] = *add(b_used, *out_off);
+    const Handles ha = handles_of(clips[from], a_dur), hb = handles_of(clips[to], b_dur);
+    const bool out_short = ha.after && compare(*out_off, *ha.after) > 0;
+    const bool in_short = hb.before && compare(*in_off, *hb.before) > 0;
+    if (out_short || in_short) {
+      json p = problem("TRANSITION_INSUFFICIENT_HANDLES", id + (out_short ? "/out_offset" : "/in_offset"), id,
+                          out_short ? "Clip " + from + " has only " + ha.after->to_string() +
+                                          " s of media after its out point, less than out_offset " +
+                                          out_off->to_string() + " s."
+                                    : "Clip " + to + " has only " + hb.before->to_string() +
+                                          " s of media before its in point, less than in_offset " +
+                                          in_off->to_string() + " s.",
+                          "Use in_offset at most " + (hb.before ? hb.before->to_string() : std::string("any")) +
+                              " s and out_offset at most " + (ha.after ? ha.after->to_string() : std::string("any")) +
+                              " s, or trim the clips to leave more media beyond the cut.");
+      p["details"] = {{"max_in_offset", hb.before ? json(hb.before->to_string()) : json(nullptr)},
+                      {"max_out_offset", ha.after ? json(ha.after->to_string()) : json(nullptr)}};
+      problems.push_back(std::move(p));
+    }
+  }
+}
+
+// Timing rules of one track: every clip has a valid timing, clips do not overlap, and transitions fit.
 void check_track(const doc::Document &doc, const std::string &track_id, json &problems) {
   const NodeRef *ref = doc.find(track_id);
   if (!ref)
@@ -110,10 +218,6 @@ void check_track(const doc::Document &doc, const std::string &track_id, json &pr
   const auto clips = ref->node->find("clips");
   if (clips == ref->node->end() || !clips->is_object())
     return;
-  struct Span {
-    Rational in, end;
-    const std::string *id;
-  };
   std::vector<Span> spans;
   spans.reserve(clips->size());
   for (auto it = clips->begin(); it != clips->end() && problems.size() < kMaxProblems; ++it) {
@@ -164,6 +268,7 @@ void check_track(const doc::Document &doc, const std::string &track_id, json &pr
             a.in.to_string() + " to " + a.end.to_string() + ") on track " + track_id + ".",
         "Set " + *b.id + "/timing/record_in to \"" + a.end.to_string() + "\", or shorten " + *a.id + " first."));
   }
+  check_transitions(*ref->node, track_id, spans, problems);
 }
 
 tl::unexpected<Error> rejected(json problems) {
@@ -214,6 +319,9 @@ public:
 
   Result<void> validate() {
     std::set<std::string> tracks;
+    for (const std::string &id : left_tracks_)
+      if (doc_.find(id))
+        tracks.insert(id);
     for (const std::string &id : timing_clips_)
       if (const NodeRef *ref = doc_.find(id); ref && id_prefix(ref->parent) == "trk")
         tracks.insert(ref->parent);
@@ -512,7 +620,8 @@ private:
   }
 
   void note_timing(const std::string &id, const Path &p) {
-    if (p.n >= 2 && p.seg[1] == "timing" && id_prefix(id) == "clp")
+    const string_view prefix = id_prefix(id);
+    if ((prefix == "clp" && p.n >= 2 && (p.seg[1] == "timing" || p.seg[1] == "media_ref")) || prefix == "trn")
       timing_clips_.insert(id);
   }
 
@@ -578,7 +687,7 @@ private:
     doc_.index_subtree(*it, id, parent.id, coll);
     if (pos != kNone)
       insert_at(*container, order_key, pos, id, container_path);
-    if (prefix == "clp")
+    if (prefix == "clp" || prefix == "trn")
       timing_clips_.insert(id);
     res_.created.push_back(id);
     done(std::move(forward), {{"op", "remove"}, {"path", id}});
@@ -681,6 +790,8 @@ private:
   Result<void> remove_object(const Path &p) {
     ATM_TRY(Target t, resolve(p.last()));
     ATM_TRY(Home h, home_of(t.id));
+    if (id_prefix(h.parent) == "trk") // a removed clip may leave a transition without its clip
+      left_tracks_.insert(h.parent);
     json inverse = {{"op", "add"}, {"path", h.parent + "/" + h.collection + "/" + t.id}};
     if (json a = old_anchor(h); !a.is_null())
       inverse["anchor"] = std::move(a);
@@ -730,6 +841,8 @@ private:
       if (cur == t.id)
         return fail(ErrorCode::CycleDetected, "P_CYCLE", "An object cannot be moved into itself.");
     ATM_TRY(Home h, home_of(t.id));
+    if (id_prefix(h.parent) == "trk")
+      left_tracks_.insert(h.parent);
 
     json *container = ensure(np.node, tp, 1, tp.n - 1, np.id);
     if (!container || !container->is_object())
@@ -854,6 +967,7 @@ private:
   ApplyResult res_;
   std::vector<json> inv_;
   std::set<std::string> timing_clips_;
+  std::set<std::string> left_tracks_; // tracks an object was removed or moved from
 };
 
 } // namespace

@@ -1016,9 +1016,16 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
      "\"name\":\"V1\"}}. Tracks stack in order: the first is the bottom layer.\n"
      "- Add a clip: {\"op\":\"add\",\"path\":\"<track_id or $new:v1>/clips/$new:c1\",\"value\":{\"name\":\"…\","
      "\"timing\":{\"record_in\":\"0s\",\"duration\":\"5s\",\"source_in\":\"0s\"},\"media_ref\":{\"type\":\"file\","
-     "\"path\":\"<absolute path>\"},\"transform\":{\"position\":[0.5,0.5],\"scale\":[1,1],\"opacity\":1},"
-     "\"volume\":1}}. record_in is where the clip starts on the timeline, source_in where it starts in the file. "
-     "Clips on one track may not overlap.\n"
+     "\"path\":\"<absolute path>\",\"duration\":\"<file duration from media.probe>\"},\"transform\":{\"position\":"
+     "[0.5,0.5],\"scale\":[1,1],\"opacity\":1},\"volume\":1}}. record_in is where the clip starts on the timeline, "
+     "source_in where it starts in the file. Clips on one track may not overlap.\n"
+     "- Dissolve between two clips that touch on one track (the first ends where the second starts): {\"op\":\"add\","
+     "\"path\":\"<track_id>/transitions/$new:d1\",\"value\":{\"type\":\"attome.dissolve\",\"from\":\"<first clip>\","
+     "\"to\":\"<second clip>\",\"in_offset\":\"0.5s\",\"out_offset\":\"0.5s\"}}. The mix runs from cut - in_offset "
+     "to cut + out_offset, using media beyond the cut: the first clip's file must go on out_offset past its end "
+     "(source_in + duration + out_offset <= file duration) and the second must have source_in >= in_offset. So "
+     "leave handles: do not use a file to its very end, and start the next clip a little into its file. Sound "
+     "cross-fades with the picture.\n"
      "- Text clip (title, lower third, caption): \"media_ref\":{\"type\":\"text\"},\"content\":{\"text\":\"…\","
      "\"size\":0.08,\"color\":\"#ffffff\",\"bold\":true} with size a fraction of the canvas height; put it on a track "
      "above the video. Arabic and other right-to-left text is shaped correctly.\n"
@@ -1028,7 +1035,7 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
      "{\"op\":\"remove\",\"path\":\"<clip_id>\"}.\n"
      "$new:<name> placeholders become Stable IDs (returned in id_map) and later ops of the same patch may use them. "
      "Use media.probe for a file's duration. dry_run checks without changing anything. Not supported yet: "
-     "transitions, keyframes, effects.",
+     "keyframes, fades, effects.",
      R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},
        "patch":{"type":"object","properties":{
          "ops":{"type":"array","items":{"type":"object","properties":{

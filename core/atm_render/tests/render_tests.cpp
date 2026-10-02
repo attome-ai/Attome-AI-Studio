@@ -272,4 +272,104 @@ TEST_CASE("render: text clips draw in a colour, move and scale, and shape Arabic
     CHECK(lit(empty, 0, 0, 320, 240, 1) == 0);
   }
 }
+
+namespace {
+
+// A clip of one colour (0xRRGGBB) with a sine tone, `seconds` long at 30 fps.
+void write_solid(const std::string &path, uint32_t rgb, double tone_hz, int seconds) {
+  const int w = 320, h = 240;
+  auto encoder = media::Encoder::create({path, w, h, 30, 1, 2'000'000, true});
+  REQUIRE(encoder);
+  std::vector<uint8_t> picture(size_t(w) * size_t(h) * 4), nv12(media::nv12_size(w, h));
+  for (size_t i = 0; i < picture.size(); i += 4) {
+    picture[i] = uint8_t(rgb & 255);
+    picture[i + 1] = uint8_t((rgb >> 8) & 255);
+    picture[i + 2] = uint8_t((rgb >> 16) & 255);
+    picture[i + 3] = 255;
+  }
+  media::bgrx_to_nv12(picture.data(), w, h, nv12.data());
+  std::vector<float> audio(1600 * 2);
+  for (int f = 0; f < seconds * 30; ++f) {
+    for (size_t i = 0; i < 1600; ++i)
+      audio[i * 2] = audio[i * 2 + 1] = float(0.3 * std::sin(6.283185307179586 * tone_hz * double(f * 1600 + int(i)) / 48000.0));
+    REQUIRE((*encoder)->video(nv12.data(), f));
+    REQUIRE((*encoder)->audio(audio.data(), 1600));
+  }
+  REQUIRE((*encoder)->finish());
+}
+
+double rms(const std::vector<float> &stereo, double from_s, double to_s) {
+  const size_t a = size_t(from_s * 48000.0) * 2, b = size_t(to_s * 48000.0) * 2;
+  double sum = 0.0;
+  for (size_t i = a; i < b; ++i)
+    sum += double(stereo[i]) * double(stereo[i]);
+  return std::sqrt(sum / double(b - a));
+}
+
+} // namespace
+
+TEST_CASE("render: a dissolve mixes the two clips over the cut and cross-fades their sound", "[media]") {
+  const fs::path dir = fs::temp_directory_path() / atm::new_id("attome-dissolve");
+  fs::create_directories(dir);
+  const std::string green = (dir / "green.mp4").string(), white = (dir / "white.mp4").string();
+  write_solid(green, 0x00C000, 440.0, 3);
+  write_solid(white, 0xF0F0F0, 660.0, 3);
+
+  atm::api::Engine engine;
+  const std::string project = (dir / "D.attome").string();
+  const json created = ok(engine, "project.create", {{"path", project}, {"canvas", {{"width", 320}, {"height", 240}}}});
+  const std::string seq = created["sequence"];
+  const auto clip = [](const std::string &path, const char *in, const char *source_in) {
+    return json{{"name", "c"},
+                {"timing", {{"record_in", in}, {"duration", "1s"}, {"source_in", source_in}}},
+                {"media_ref", {{"type", "file"}, {"path", path}, {"duration", "3s"}}}};
+  };
+  // green 0..1 s from its file's start, white 1..2 s from 1 s into its file; a 1 s dissolve centred on the cut.
+  ok(engine, "project.patch",
+     {{"project", project},
+      {"patch",
+       {{"ops", json::array({{{"op", "add"}, {"path", seq + "/tracks/$new:t"}, {"value", {{"kind", "video"}}}},
+                             {{"op", "add"}, {"path", "$new:t/clips/$new:a"}, {"value", clip(green, "0s", "0s")}},
+                             {{"op", "add"}, {"path", "$new:t/clips/$new:b"}, {"value", clip(white, "1s", "1s")}},
+                             {{"op", "add"},
+                              {"path", "$new:t/transitions/$new:d"},
+                              {"value", {{"type", "attome.dissolve"}, {"from", "$new:a"}, {"to", "$new:b"},
+                                         {"in_offset", "0.5s"}, {"out_offset", "0.5s"}}}}})}}}});
+  const json doc = ok(engine, "project.get", {{"project", project}, {"id", created["project"]}})["object"];
+  auto comp = atm::render::compile(doc);
+  REQUIRE(comp);
+  REQUIRE(comp->frames == 60);
+  REQUIRE(comp->layers.size() == 2);
+  CHECK(comp->layers[0].frames == 45);      // green plays on 15 frames past the cut
+  CHECK(comp->layers[1].start_frame == 15); // white starts 15 frames before it
+  CHECK(comp->layers[0].mix_start == 15);
+  CHECK(comp->layers[0].mix_frames == 30);
+
+  atm::render::Renderer renderer(*comp, 320, 240);
+  std::vector<uint8_t> nv12(media::nv12_size(320, 240)), rgb(320 * 240 * 4);
+  const auto red_at = [&](int64_t frame) {
+    REQUIRE(renderer.render(frame, nv12.data()));
+    media::nv12_to_bgrx(nv12.data(), 320, 240, rgb.data());
+    return int(rgb[(120 * 320 + 160) * 4 + 2]); // green has no red, white has a lot: red follows the mix
+  };
+  const int before = red_at(10), start = red_at(15), middle = red_at(30), end = red_at(44), after = red_at(50);
+  CHECK(before < 30);
+  CHECK(after > 210);
+  CHECK(start < middle);
+  CHECK(middle < end);
+  CHECK(middle > 90);
+  CHECK(middle < 160);
+
+  // Equal power: two unrelated tones keep about the same level through the cross-fade.
+  auto audio = atm::render::mix_audio(*comp);
+  REQUIRE(audio);
+  const double level_a = rms(*audio, 0.1, 0.4), level_mid = rms(*audio, 0.9, 1.1), level_b = rms(*audio, 1.6, 1.9);
+  CHECK(level_a > 0.15);
+  CHECK(level_mid / level_a > 0.85);
+  CHECK(level_mid / level_a < 1.15);
+  CHECK(level_b / level_a > 0.85);
+
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}
 #endif

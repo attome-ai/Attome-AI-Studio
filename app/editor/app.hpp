@@ -40,9 +40,15 @@ struct ClipUi {
   float text_size = 0.08f;                                              // font height, fraction of the canvas
 };
 
+struct TransitionUi { // a dissolve over [cut - in, cut + out), where `to` starts
+  std::string id, from, to;
+  int64_t in = 0, out = 0; // frames
+};
+
 struct TrackUi {
   std::string id, name, kind;
   std::vector<ClipUi> clips;
+  std::vector<TransitionUi> transitions;
 };
 
 class App {
@@ -83,6 +89,8 @@ private:
   void ask_project();
   void take_dialog_results();
   void commit_drag(const TrackUi &track, const ClipUi &clip, int mode, int64_t delta, int target_track);
+  void drop_transitions(const std::string &clip_id, json &ops) const; // ops that remove the clip's dissolves
+  void draw_transition_card(const TrackUi &track, const ClipUi &clip);
 
   // panels
   void draw_menu();
@@ -164,6 +172,7 @@ private:
   char text_buf_[1024] = {};
   float text_size_ = 0.08f, text_col_[3] = {1.0f, 1.0f, 1.0f};
   bool text_bold_ = false;
+  float dissolve_s_ = 1.0f; // length of a new dissolve, seconds
 
   // inspector
   std::string insp_for_;

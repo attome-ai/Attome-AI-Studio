@@ -36,6 +36,13 @@ struct Layer {
   std::string text;
   float text_size = 0.08f;
   uint32_t text_color = 0xFFFFFF;
+  // Dissolve (attome.dissolve) from this clip into the next one on its track. compile() lengthens both clips into the
+  // media beyond the cut, so over [mix_start, mix_start + mix_frames) both are active; each is drawn over the layers
+  // below and the two results are mixed by progress. Indices are into Composition::layers.
+  int mix_with = -1; // on the outgoing clip: the incoming one
+  int mixed_by = -1; // on the incoming clip: the outgoing one
+  int64_t mix_start = 0, mix_frames = 0; // on the outgoing clip
+  bool mixing_at(int64_t frame) const { return frame >= mix_start && frame < mix_start + mix_frames; }
 };
 
 struct Composition {
@@ -75,7 +82,9 @@ private:
     media::TextBitmap bitmap;
   };
   std::unordered_map<std::string, TextEntry> text_; // by clip ID
+  std::vector<uint8_t> mix_;                          // the incoming clip of a dissolve, drawn over the same background
   std::string warning_;
+  void draw(const Layer &l, int64_t frame, uint8_t *out, bool &cleared, std::vector<const std::string *> &used);
 };
 
 // The whole sequence as 48 kHz stereo float.

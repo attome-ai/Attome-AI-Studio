@@ -20,7 +20,7 @@ constexpr CollectionInfo kCollections[] = {
     {"effects", "fx", true},        {"takes", "tak", true},         {"deliverables", "dlv", true},
     {"pipelines", "pip", true},     {"replies", "cmt", true},       {"markers", "mrk", false},
     {"comments", "cmt", false},     {"variables", "var", false},    {"bindings", "bnd", false},
-    {"assets", "ast", false},       {"consent_records", "con", false},
+    {"assets", "ast", false},       {"consent_records", "con", false}, {"transitions", "trn", false},
 };
 
 const CollectionInfo *collection_info(std::string_view name) {

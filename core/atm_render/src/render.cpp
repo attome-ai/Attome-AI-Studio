@@ -224,6 +224,11 @@ Result<Composition> compile(const json &project, std::string_view sequence_id) {
   const auto order = seq.find("track_order");
   if (tracks == seq.end() || order == seq.end() || !order->is_array())
     return c;
+  struct Dissolve {
+    std::string from, to;
+    int64_t in, out; // frames before and after the cut
+  };
+  std::vector<Dissolve> dissolves;
   int track_index = 0;
   for (const json &track_id : *order) {
     const auto tit = track_id.is_string() ? tracks->find(track_id.get_ref<const std::string &>()) : tracks->end();
@@ -290,9 +295,42 @@ Result<Composition> compile(const json &project, std::string_view sequence_id) {
         c.frames = std::max(c.frames, l.start_frame + l.frames);
         c.layers.push_back(std::move(l));
       }
+    if (const auto trs = tit->find("transitions"); trs != tit->end() && trs->is_object())
+      for (const json &t : *trs) {
+        ATM_TRY(Rational in_off, rational_field(t, "in_offset", "0"));
+        ATM_TRY(Rational out_off, rational_field(t, "out_offset", "0"));
+        ATM_TRY(int64_t in_frames, to_frames(in_off, rate, Round::nearest_even));
+        ATM_TRY(int64_t out_frames, to_frames(out_off, rate, Round::nearest_even));
+        dissolves.push_back({t.value("from", ""), t.value("to", ""), in_frames, out_frames});
+      }
     ++track_index;
   }
   std::stable_sort(c.layers.begin(), c.layers.end(), [](const Layer &a, const Layer &b) { return a.track < b.track; });
+  // Dissolves the validator refuses (clips missing, not touching, too long) are left out rather than guessed at.
+  const auto index_of = [&](const std::string &id) {
+    for (size_t i = 0; i < c.layers.size(); ++i)
+      if (c.layers[i].clip_id == id)
+        return int(i);
+    return -1;
+  };
+  for (const Dissolve &d : dissolves) {
+    const int ia = index_of(d.from), ib = index_of(d.to);
+    if (ia < 0 || ib < 0 || ia == ib)
+      continue;
+    Layer &a = c.layers[size_t(ia)], &b = c.layers[size_t(ib)];
+    const int64_t cut = b.start_frame;
+    if (a.track != b.track || a.start_frame + a.frames != cut || a.mix_with >= 0 || b.mixed_by >= 0 || d.in < 0 ||
+        d.out < 0 || d.in + d.out <= 0 || d.in > a.frames || d.out > b.frames)
+      continue;
+    a.frames += d.out; // `from` plays on into its media after the cut ...
+    b.source_in_hns -= c.frame_hns(cut) - c.frame_hns(cut - d.in); // ... and `to` starts before it
+    b.start_frame -= d.in;
+    b.frames += d.in;
+    a.mix_with = ib;
+    b.mixed_by = ia;
+    a.mix_start = cut - d.in;
+    a.mix_frames = d.in + d.out;
+  }
   return c;
 }
 
@@ -318,80 +356,105 @@ void Renderer::set_transform(const std::string &clip_id, float pos_x, float pos_
     }
 }
 
-Result<void> Renderer::render(int64_t frame, uint8_t *out) {
-  ATM_PROFILE_SCOPE("render.frame");
+// Draws one layer into `out`. The black background is drawn first only when the layer does not cover it.
+void Renderer::draw(const Layer &l, int64_t frame, uint8_t *out, bool &cleared, std::vector<const std::string *> &used) {
   const size_t pitch = size_t(width_); // Y and UV rows of the packed NV12 output
   uint8_t *out_uv = out + pitch * size_t(height_);
-  bool cleared = false; // the black background is drawn only when a layer does not cover it
-  std::vector<const std::string *> used;
-  for (const Layer &l : comp_.layers) {
-    if (!l.video || frame < l.start_frame || frame >= l.start_frame + l.frames || l.opacity <= 0.0f)
-      continue;
-    if (l.is_text) {
-      if (l.text.empty())
-        continue;
-      const int px_size = std::max(1, int(std::lround(l.text_size * float(height_))));
-      const std::string key = l.text + "\x1f" + std::to_string(px_size) + (l.text_bold ? "b" : "n") + std::to_string(width_);
-      TextEntry &entry = text_[l.clip_id];
-      if (entry.key != key) {
-        auto bitmap = media::render_text(l.text, float(px_size), l.text_bold, int(float(width_) * 0.9f));
-        if (!bitmap) {
-          if (warning_.empty())
-            warning_ = bitmap.error().message;
-          continue;
-        }
-        entry.key = key;
-        entry.bitmap = std::move(*bitmap);
-      }
-      if (entry.bitmap.width == 0)
-        continue;
-      if (!cleared)
-        media::fill_black(out, width_, height_);
-      cleared = true;
-      ATM_PROFILE_SCOPE("composite.text");
-      draw_text(out, width_, height_, entry.bitmap, l.pos_x * float(width_), l.pos_y * float(height_), l.scale_x,
-                l.scale_y, int(l.opacity * 256.0f + 0.5f), l.text_color);
-      continue;
-    }
-    if (failed_.count(l.clip_id))
-      continue;
-    auto it = readers_.find(l.clip_id);
-    if (it == readers_.end()) {
-      auto reader = media::VideoReader::open(l.path, width_, height_);
-      if (!reader) {
-        failed_[l.clip_id] = true;
+  if (l.opacity <= 0.0f)
+    return;
+  if (l.is_text) {
+    if (l.text.empty())
+      return;
+    const int px_size = std::max(1, int(std::lround(l.text_size * float(height_))));
+    const std::string key = l.text + "\x1f" + std::to_string(px_size) + (l.text_bold ? "b" : "n") + std::to_string(width_);
+    TextEntry &entry = text_[l.clip_id];
+    if (entry.key != key) {
+      auto bitmap = media::render_text(l.text, float(px_size), l.text_bold, int(float(width_) * 0.9f));
+      if (!bitmap) {
         if (warning_.empty())
-          warning_ = reader.error().message;
-        continue;
+          warning_ = bitmap.error().message;
+        return;
       }
-      it = readers_.emplace(l.clip_id, std::move(*reader)).first;
+      entry.key = key;
+      entry.bitmap = std::move(*bitmap);
     }
-    used.push_back(&l.clip_id);
-    const int64_t source_time = l.source_in_hns + comp_.frame_hns(frame - l.start_frame);
-    auto view = it->second->frame_at(source_time);
-    if (!view) {
-      if (warning_.empty() && view.error().rule != "M_NO_FRAME")
-        warning_ = view.error().message;
-      continue;
-    }
-    const int w = std::min(view->width, width_), h = std::min(view->height, height_);
-    const int alpha = int(l.opacity * 256.0f + 0.5f);
-    // The common case, a clip fitted and centred, stays on the plain copy path.
-    const bool plain = l.scale_x == 1.0f && l.scale_y == 1.0f && l.pos_x == 0.5f && l.pos_y == 0.5f;
-    const bool covers = plain ? (w >= width_ && h >= height_) : false;
-    if (!cleared && (alpha < 256 || !covers))
+    if (entry.bitmap.width == 0)
+      return;
+    if (!cleared)
       media::fill_black(out, width_, height_);
     cleared = true;
-    if (plain) {
-      const int x0 = ((width_ - w) / 2) & ~1, y0 = ((height_ - h) / 2) & ~1; // chroma is shared by 2 x 2 pixels
-      ATM_PROFILE_SCOPE("composite.blit");
-      put_rows(out + pitch * size_t(y0) + size_t(x0), pitch, view->y, size_t(view->y_pitch), h, w, alpha);
-      put_rows(out_uv + pitch * size_t(y0 / 2) + size_t(x0), pitch, view->uv, size_t(view->uv_pitch), h / 2, w, alpha);
-    } else {
-      ATM_PROFILE_SCOPE("composite.transform");
-      draw_transformed(out, width_, height_, *view, l.pos_x * float(width_), l.pos_y * float(height_), l.scale_x,
-                       l.scale_y, alpha);
+    ATM_PROFILE_SCOPE("composite.text");
+    draw_text(out, width_, height_, entry.bitmap, l.pos_x * float(width_), l.pos_y * float(height_), l.scale_x,
+              l.scale_y, int(l.opacity * 256.0f + 0.5f), l.text_color);
+    return;
+  }
+  if (failed_.count(l.clip_id))
+    return;
+  auto it = readers_.find(l.clip_id);
+  if (it == readers_.end()) {
+    auto reader = media::VideoReader::open(l.path, width_, height_);
+    if (!reader) {
+      failed_[l.clip_id] = true;
+      if (warning_.empty())
+        warning_ = reader.error().message;
+      return;
     }
+    it = readers_.emplace(l.clip_id, std::move(*reader)).first;
+  }
+  used.push_back(&l.clip_id);
+  const int64_t source_time = l.source_in_hns + comp_.frame_hns(frame - l.start_frame);
+  auto view = it->second->frame_at(std::max<int64_t>(0, source_time));
+  if (!view) {
+    if (warning_.empty() && view.error().rule != "M_NO_FRAME")
+      warning_ = view.error().message;
+    return;
+  }
+  const int w = std::min(view->width, width_), h = std::min(view->height, height_);
+  const int alpha = int(l.opacity * 256.0f + 0.5f);
+  // The common case, a clip fitted and centred, stays on the plain copy path.
+  const bool plain = l.scale_x == 1.0f && l.scale_y == 1.0f && l.pos_x == 0.5f && l.pos_y == 0.5f;
+  const bool covers = plain ? (w >= width_ && h >= height_) : false;
+  if (!cleared && (alpha < 256 || !covers))
+    media::fill_black(out, width_, height_);
+  cleared = true;
+  if (plain) {
+    const int x0 = ((width_ - w) / 2) & ~1, y0 = ((height_ - h) / 2) & ~1; // chroma is shared by 2 x 2 pixels
+    ATM_PROFILE_SCOPE("composite.blit");
+    put_rows(out + pitch * size_t(y0) + size_t(x0), pitch, view->y, size_t(view->y_pitch), h, w, alpha);
+    put_rows(out_uv + pitch * size_t(y0 / 2) + size_t(x0), pitch, view->uv, size_t(view->uv_pitch), h / 2, w, alpha);
+  } else {
+    ATM_PROFILE_SCOPE("composite.transform");
+    draw_transformed(out, width_, height_, *view, l.pos_x * float(width_), l.pos_y * float(height_), l.scale_x,
+                     l.scale_y, alpha);
+  }
+}
+
+Result<void> Renderer::render(int64_t frame, uint8_t *out) {
+  ATM_PROFILE_SCOPE("render.frame");
+  bool cleared = false;
+  std::vector<const std::string *> used;
+  for (const Layer &l : comp_.layers) {
+    if (!l.video || frame < l.start_frame || frame >= l.start_frame + l.frames)
+      continue;
+    if (l.mixed_by >= 0 && comp_.layers[size_t(l.mixed_by)].mixing_at(frame))
+      continue; // drawn together with the outgoing clip
+    if (l.mix_with < 0 || !l.mixing_at(frame)) {
+      draw(l, frame, out, cleared, used);
+      continue;
+    }
+    // Dissolve: both clips over the same background, then mixed. Mixing the two composites equals compositing the
+    // mix of the two clips, so clips that do not fill the frame (scaled, text) dissolve correctly too.
+    ATM_PROFILE_SCOPE("composite.dissolve");
+    if (!cleared)
+      media::fill_black(out, width_, height_);
+    cleared = true;
+    mix_.assign(out, out + media::nv12_size(width_, height_));
+    draw(l, frame, out, cleared, used);
+    draw(comp_.layers[size_t(l.mix_with)], frame, mix_.data(), cleared, used);
+    // Progress at the frame centre, so a 1-frame dissolve shows the 50 % mix.
+    const double progress = (double(frame - l.mix_start) + 0.5) / double(l.mix_frames);
+    put_rows(out, size_t(width_), mix_.data(), size_t(width_), height_ * 3 / 2, width_,
+             std::clamp(int(progress * 256.0 + 0.5), 0, 256));
   }
   if (!cleared)
     media::fill_black(out, width_, height_);
@@ -414,8 +477,24 @@ Result<std::vector<float>> mix_audio(const Composition &c) {
       continue; // a clip without readable audio is silent
     const size_t offset = size_t(c.frame_hns(l.start_frame) * media::kAudioRate / media::kHnsPerSecond) * 2;
     const size_t n = offset < mix.size() ? std::min(pcm->size(), mix.size() - offset) : 0;
-    for (size_t i = 0; i < n; ++i)
-      mix[offset + i] += (*pcm)[i] * l.volume;
+    // Under a dissolve the two clips cross-fade with equal power: cos and sin of the progress keep the loudness level.
+    const Layer *fade = l.mix_with >= 0 ? &l : l.mixed_by >= 0 ? &c.layers[size_t(l.mixed_by)] : nullptr;
+    size_t fade_from = 0, fade_len = 0; // in interleaved samples of the mix
+    if (fade && fade->mix_frames > 0) {
+      fade_from = size_t(c.frame_hns(fade->mix_start) * media::kAudioRate / media::kHnsPerSecond) * 2;
+      fade_len = size_t(c.frame_hns(fade->mix_start + fade->mix_frames) * media::kAudioRate / media::kHnsPerSecond) * 2 -
+                 fade_from;
+    }
+    const bool outgoing = l.mix_with >= 0;
+    for (size_t i = 0; i < n; ++i) {
+      const size_t at = offset + i;
+      float gain = l.volume;
+      if (at >= fade_from && at < fade_from + fade_len) {
+        const double p = double((at - fade_from) / 2) / double(fade_len / 2);
+        gain *= float(outgoing ? std::cos(p * 1.5707963267948966) : std::sin(p * 1.5707963267948966));
+      }
+      mix[at] += (*pcm)[i] * gain;
+    }
   }
   return mix;
 }

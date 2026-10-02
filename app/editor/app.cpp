@@ -234,6 +234,10 @@ void App::refresh() {
           total_frames_ = std::max(total_frames_, c.start + c.frames);
           track.clips.push_back(std::move(c));
         }
+      if (const auto trs = tit->find("transitions"); trs != tit->end() && trs->is_object())
+        for (auto t = trs->begin(); t != trs->end(); ++t)
+          track.transitions.push_back({t.key(), t->value("from", ""), t->value("to", ""),
+                                       frames_of(*t, "in_offset", rate_), frames_of(*t, "out_offset", rate_)});
       tracks_.push_back(std::move(track));
     }
   playhead_ = std::clamp<int64_t>(playhead_, 0, std::max<int64_t>(0, total_frames_));
@@ -413,7 +417,17 @@ void App::delete_selected() {
   if (selected_clip_.empty())
     return;
   const std::string id = std::exchange(selected_clip_, {});
-  patch(json::array({{{"op", "remove"}, {"path", id}}}), "Delete clip");
+  json ops = json::array();
+  drop_transitions(id, ops);
+  ops.push_back({{"op", "remove"}, {"path", id}});
+  patch(std::move(ops), "Delete clip");
+}
+
+void App::drop_transitions(const std::string &clip_id, json &ops) const {
+  for (const TrackUi &t : tracks_)
+    for (const TransitionUi &tr : t.transitions)
+      if (tr.from == clip_id || tr.to == clip_id)
+        ops.push_back({{"op", "remove"}, {"path", tr.id}});
 }
 
 void App::split_at_playhead() {
@@ -436,13 +450,16 @@ void App::split_at_playhead() {
   right["timing"]["record_in"] = frames_text(playhead_);
   right["timing"]["duration"] = frames_text(c->frames - left);
   right["timing"]["source_in"] = frames_text(c->source_frames + left);
+  json ops = json::array({{{"op", "replace"}, {"path", c->id + "/timing/duration"}, {"value", frames_text(left)}},
+                          {{"op", "add"},
+                           {"path", track->id + "/clips/$new:right"},
+                           {"anchor", {{"after", c->id}}},
+                           {"value", std::move(right)}}});
+  for (const TransitionUi &tr : track->transitions) // a dissolve out of the clip now leaves from its right half
+    if (tr.from == c->id)
+      ops.push_back({{"op", "replace"}, {"path", tr.id + "/from"}, {"value", "$new:right"}});
   json ids;
-  if (patch(json::array({{{"op", "replace"}, {"path", c->id + "/timing/duration"}, {"value", frames_text(left)}},
-                         {{"op", "add"},
-                          {"path", track->id + "/clips/$new:right"},
-                          {"anchor", {{"after", c->id}}},
-                          {"value", std::move(right)}}}),
-            "Split clip", &ids))
+  if (patch(std::move(ops), "Split clip", &ids))
     selected_clip_ = ids.value("$new:right", "");
 }
 
@@ -480,8 +497,10 @@ void App::commit_drag(const TrackUi &track, const ClipUi &c, int mode, int64_t d
       ops.push_back({{"op", "replace"}, {"path", c.id + "/timing/source_in"}, {"value", frames_text(c.source_frames + d)}});
     }
   }
-  if (!ops.empty())
-    patch(std::move(ops), label);
+  if (ops.empty())
+    return;
+  drop_transitions(c.id, ops); // the cut moves, so a dissolve on it would no longer fit
+  patch(std::move(ops), label);
 }
 
 void App::start_export(const std::string &path) {
@@ -1540,8 +1559,12 @@ void App::draw_timeline() {
       dl->AddRectFilled(ImVec2(x0, cy), ImVec2(x1 - 1.0f, cy + 3.0f), IM_COL32(255, 255, 255, 70), 5.0f, ImDrawFlags_RoundCornersTop);
       if (is_selected)
         dl->AddRect(ImVec2(x0, cy), ImVec2(x1 - 1.0f, cy + ch), hex(look::accent), 5.0f, 0, 2.0f);
+      float label_x = x0 + 9.0f; // past the dissolve band when one leads into this clip
+      for (const TransitionUi &tr : track.transitions)
+        if (tr.to == c.id && drag_id_.empty())
+          label_x = x_of(double(c.start + tr.out)) + 7.0f;
       dl->PushClipRect(ImVec2(std::max(x0, win.x + header_w), cy), ImVec2(x1 - 4.0f, cy + ch), true);
-      dl->AddText(ImVec2(x0 + 9.0f, cy + (ch - ImGui::GetFontSize()) * 0.5f), IM_COL32(255, 255, 255, 235),
+      dl->AddText(ImVec2(label_x, cy + (ch - ImGui::GetFontSize()) * 0.5f), IM_COL32(255, 255, 255, 235),
                   (c.is_text && !c.text.empty() ? c.text : c.name).c_str());
       dl->PopClipRect();
 
@@ -1581,6 +1604,18 @@ void App::draw_timeline() {
       handle("", x0 + edge, x1 - x0 - 2.0f * edge, 1);
       handle("#l", x0, edge, 3);
       handle("#r", x1 - edge, edge, 2);
+    }
+    // Dissolves: a band over the cut with a cross, the usual sign for a mix of two clips.
+    for (const TransitionUi &tr : track.transitions) {
+      const auto to = std::find_if(track.clips.begin(), track.clips.end(), [&](const ClipUi &k) { return k.id == tr.to; });
+      if (to == track.clips.end() || drag_id_ == tr.to || drag_id_ == tr.from)
+        continue;
+      const float bx0 = x_of(double(to->start - tr.in)), bx1 = std::max(bx0 + 4.0f, x_of(double(to->start + tr.out)));
+      const float by0 = origin.y + ruler_h + float(ti) * row_h + 4.0f, by1 = by0 + row_h - 8.0f;
+      dl->AddRectFilled(ImVec2(bx0, by0), ImVec2(bx1, by1), IM_COL32(10, 12, 18, 150), 4.0f);
+      dl->AddLine(ImVec2(bx0, by0), ImVec2(bx1, by1), IM_COL32(255, 255, 255, 170), 1.5f);
+      dl->AddLine(ImVec2(bx0, by1), ImVec2(bx1, by0), IM_COL32(255, 255, 255, 170), 1.5f);
+      dl->AddRect(ImVec2(bx0, by0), ImVec2(bx1, by1), IM_COL32(255, 255, 255, 120), 4.0f);
     }
   }
   dl->PopClipRect();
@@ -1623,6 +1658,64 @@ void App::draw_timeline() {
   ImGui::Dummy(ImVec2(content_w, content_h));
   ImGui::EndChild();
   ImGui::End();
+}
+
+// The dissolve out of a clip into the one that starts where it ends. A new dissolve is centred on the cut, so each
+// clip needs media for half its length beyond the cut; the slider stops at what the media allows.
+void App::draw_transition_card(const TrackUi &track, const ClipUi &c) {
+  const auto next = std::find_if(track.clips.begin(), track.clips.end(),
+                                 [&](const ClipUi &k) { return k.id != c.id && k.start == c.start + c.frames; });
+  const auto current = std::find_if(track.transitions.begin(), track.transitions.end(),
+                                    [&](const TransitionUi &t) { return t.from == c.id; });
+  if (!begin_card("##transition", "Transition")) {
+    end_card();
+    return;
+  }
+  ImGui::PushTextWrapPos(0.0f);
+  if (current != track.transitions.end()) {
+    ImGui::TextColored(hexv(look::fg2), "Dissolve into the next clip, %.2f s", double(current->in + current->out) / fps());
+    const std::string tid = current->id;
+    if (soft_button("remove_dissolve", "Remove dissolve", ImVec2(-1.0f, 28.0f)))
+      pending_ = [this, tid] { patch(json::array({{{"op", "remove"}, {"path", tid}}}), "Remove dissolve"); };
+  } else if (next == track.clips.end()) {
+    ImGui::TextColored(hexv(look::fg3), "No clip starts where this one ends, so there is nothing to dissolve into.");
+  } else {
+    // Media left after this clip's out point, and before the next clip's in point (text: unlimited).
+    const int64_t unlimited = INT64_MAX / 4;
+    const int64_t after = c.is_text || c.media_frames <= 0 ? unlimited : c.media_frames - c.source_frames - c.frames;
+    const int64_t before = next->is_text ? unlimited : next->source_frames;
+    const int64_t half = std::max<int64_t>(0, std::min({after, before, c.frames, next->frames}));
+    const float max_s = float(double(2 * half) / fps());
+    if (half < 1) {
+      ImGui::TextColored(hexv(look::fg3),
+                         "A dissolve needs media beyond the cut: trim the end of this clip or the start of the next "
+                         "one to leave some.");
+    } else {
+      dissolve_s_ = std::clamp(dissolve_s_, float(1.0 / fps()), max_s);
+      ImGui::TextColored(hexv(look::fg2), "Length");
+      ImGui::SameLine(88.0f);
+      slim_slider("dissolve", &dissolve_s_, float(1.0 / fps()), max_s, ImGui::GetContentRegionAvail().x - 52.0f, "");
+      ImGui::SameLine();
+      ImGui::PushFont(g_fonts.mono, 13.0f);
+      ImGui::TextColored(hexv(look::fg2), "%.2fs", dissolve_s_);
+      ImGui::PopFont();
+      if (soft_button("add_dissolve", "Dissolve into next clip", ImVec2(-1.0f, 28.0f))) {
+        const int64_t total = std::clamp<int64_t>(std::llround(dissolve_s_ * fps()), 1, 2 * half);
+        const int64_t in = total / 2, out = total - in;
+        const std::string from = c.id, to = next->id, track_id = track.id;
+        pending_ = [this, from, to, track_id, in, out] {
+          patch(json::array({{{"op", "add"},
+                              {"path", track_id + "/transitions/$new:dissolve"},
+                              {"value",
+                               {{"type", "attome.dissolve"}, {"from", from}, {"to", to},
+                                {"in_offset", frames_text(in)}, {"out_offset", frames_text(out)}}}}}),
+                "Add dissolve");
+        };
+      }
+    }
+  }
+  ImGui::PopTextWrapPos();
+  end_card();
 }
 
 void App::draw_inspector() {
@@ -1849,6 +1942,8 @@ void App::draw_inspector() {
     ImGui::EndDisabled();
   }
   end_card();
+
+  draw_transition_card(*track, *c);
 
   const bool show_audio = !c->is_text; // text clips have no sound
   if (show_audio && begin_card("##sound", "Audio")) {

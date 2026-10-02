@@ -28,9 +28,10 @@ What exists today:
 - a first editor, `attome-editor` (Windows only for now): import video files, arrange them on a multi-track timeline (move, trim, split, opacity, volume), preview, and export an H.264 + AAC `.mp4`
 - the same export for scripts and agents: `attome render Demo.attome -o out.mp4`
 - text clips (titles, lower thirds, captions) with a size, colour and position, drawn with DirectWrite so Arabic and other right-to-left text are shaped correctly in the preview and the export
+- dissolves between clips, with the sound cross-faded at equal power; a dissolve uses media beyond the cut, and an edit that leaves too little is refused with the largest length that fits
 - an MCP server, `attome mcp --stdio`: an AI agent such as Claude can build a project, look at frames and a contact sheet of it, and render it, see [Connect an AI agent](#connect-an-ai-agent)
 
-Not built yet: AI generation, effects and transitions, the GPU compositor, JSON Schema validation, Suggested Edits and per-task undo. Decode and encode use the Windows media stack today, so import and export work on Windows only; the macOS and Linux code paths of the rest are written but have only been built and tested on Windows.
+Not built yet: AI generation, effects, keyframes and fades, transitions other than the dissolve, the GPU compositor, JSON Schema validation, Suggested Edits and per-task undo. Decode and encode use the Windows media stack today, so import and export work on Windows only; the macOS and Linux code paths of the rest are written but have only been built and tested on Windows.
 
 ### The editor
 
@@ -39,7 +40,7 @@ attome-editor                              # asks for a project folder, then: Fi
 attome-editor Demo.attome a.mp4 b.mp4      # open (or create) a project and import two files
 ```
 
-Drag a clip on the timeline to move it (also between tracks), drag its edges to trim, drag the picture in the Monitor to reposition a clip (position and scale are also in the Inspector), `S` splits at the playhead, `Space` plays, `Ctrl+Z` / `Ctrl+Y` undo and redo, `Ctrl+E` exports. The editor is a client of the daemon: an edit made by `attome patch` or an agent while it is open shows up by itself. View > Profiler shows the daemon's zones live.
+Drag a clip on the timeline to move it (also between tracks), drag its edges to trim, drag the picture in the Monitor to reposition a clip (position and scale are also in the Inspector), add a dissolve into the next clip from the Inspector's Transition card, `S` splits at the playhead, `Space` plays, `Ctrl+Z` / `Ctrl+Y` undo and redo, `Ctrl+E` exports. The editor is a client of the daemon: an edit made by `attome patch` or an agent while it is open shows up by itself. View > Profiler shows the daemon's zones live.
 
 ### Try it
 
