@@ -9,6 +9,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <unordered_map>
 #include <vector>
 
@@ -29,6 +30,12 @@ struct Layer {
   // Transform (ADR-021 canvas fractions): position is where the clip's centre sits on the canvas, top-left origin,
   // so [0.5, 0.5] is the middle. Scale 1 is "fitted inside the canvas"; 2 is twice that size.
   float pos_x = 0.5f, pos_y = 0.5f, scale_x = 1.0f, scale_y = 1.0f;
+  // Text clips (media_ref.type "text"): no file, the picture is the text. `text_size` is the font height as a
+  // fraction of the canvas height; the colour is 0xRRGGBB.
+  bool is_text = false, text_bold = false;
+  std::string text;
+  float text_size = 0.08f;
+  uint32_t text_color = 0xFFFFFF;
 };
 
 struct Composition {
@@ -54,6 +61,8 @@ public:
   Result<void> render(int64_t frame, uint8_t *nv12);
   std::string take_warning();
   // Changes the transform of one clip in place; decoders stay open, so this is cheap enough to do on every mouse move.
+  // Pixel size of the last drawn text of a clip at this renderer's output size, or {0, 0}.
+  std::pair<int, int> text_extent(const std::string &clip_id) const;
   void set_transform(const std::string &clip_id, float pos_x, float pos_y, float scale_x, float scale_y);
 
 private:
@@ -61,6 +70,11 @@ private:
   int width_, height_;
   std::unordered_map<std::string, std::unique_ptr<media::VideoReader>> readers_; // by clip ID
   std::unordered_map<std::string, bool> failed_;
+  struct TextEntry {
+    std::string key;
+    media::TextBitmap bitmap;
+  };
+  std::unordered_map<std::string, TextEntry> text_; // by clip ID
   std::string warning_;
 };
 

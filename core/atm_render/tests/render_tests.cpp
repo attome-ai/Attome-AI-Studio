@@ -207,4 +207,69 @@ TEST_CASE("render: position and scale move and resize a clip on the canvas", "[m
   std::error_code ec;
   fs::remove_all(dir, ec);
 }
+
+TEST_CASE("render: text clips draw in a colour, move and scale, and shape Arabic", "[media]") {
+  const auto render_text_layer = [&](const std::string &text, float px, float py, float size, uint32_t color) {
+    atm::render::Composition comp;
+    comp.width = 320;
+    comp.height = 240;
+    comp.frames = 1;
+    atm::render::Layer l;
+    l.clip_id = "clp_text";
+    l.frames = 1;
+    l.is_text = true;
+    l.text = text;
+    l.text_size = size;
+    l.text_color = color;
+    l.pos_x = px;
+    l.pos_y = py;
+    comp.layers.push_back(l);
+    atm::render::Renderer renderer(comp, 320, 240);
+    std::vector<uint8_t> nv12(media::nv12_size(320, 240)), rgb(320 * 240 * 4);
+    REQUIRE(renderer.render(0, nv12.data()));
+    media::nv12_to_bgrx(nv12.data(), 320, 240, rgb.data());
+    return rgb;
+  };
+  // Number of clearly lit pixels in a region (x0..x1, y0..y1) with the given dominant channel (0 = B, 1 = G, 2 = R).
+  const auto lit = [](const std::vector<uint8_t> &rgb, int x0, int y0, int x1, int y1, int channel) {
+    int n = 0;
+    for (int y = y0; y < y1; ++y)
+      for (int x = x0; x < x1; ++x)
+        if (rgb[(size_t(y) * 320 + size_t(x)) * 4 + size_t(channel)] > 150)
+          ++n;
+    return n;
+  };
+
+  { // white text in the middle: lit pixels around the centre, none in the corners
+    const auto rgb = render_text_layer("HELLO", 0.5f, 0.5f, 0.2f, 0xFFFFFF);
+    CHECK(lit(rgb, 80, 80, 240, 160, 1) > 200);
+    CHECK(lit(rgb, 0, 0, 60, 60, 1) == 0);
+    CHECK(lit(rgb, 260, 190, 320, 240, 1) == 0);
+  }
+  { // moved to the upper left quarter
+    const auto rgb = render_text_layer("HELLO", 0.25f, 0.25f, 0.2f, 0xFFFFFF);
+    CHECK(lit(rgb, 0, 0, 160, 120, 1) > 150);
+    CHECK(lit(rgb, 160, 120, 320, 240, 1) == 0);
+  }
+  { // colour: pure red text is lit in the red channel and not in the blue one
+    const auto rgb = render_text_layer("HELLO", 0.5f, 0.5f, 0.2f, 0xFF0000);
+    CHECK(lit(rgb, 80, 80, 240, 160, 2) > 150);
+    CHECK(lit(rgb, 80, 80, 240, 160, 0) == 0);
+  }
+  { // bigger text lights more pixels than smaller text
+    const int small = lit(render_text_layer("HELLO", 0.5f, 0.5f, 0.10f, 0xFFFFFF), 0, 0, 320, 240, 1);
+    const int big = lit(render_text_layer("HELLO", 0.5f, 0.5f, 0.20f, 0xFFFFFF), 0, 0, 320, 240, 1);
+    CHECK(big > small * 2);
+  }
+  { // Arabic is shaped and drawn, not left as empty boxes or nothing
+    const std::string arabic = "\xD9\x85\xD8\xB1\xD8\xAD\xD8\xA8\xD8\xA7 \xD8\xA8\xD8\xA7\xD9\x84\xD8\xB9\xD8\xA7\xD9\x84\xD9\x85";
+    const auto rgb = render_text_layer(arabic, 0.5f, 0.5f, 0.2f, 0xFFFFFF);
+    CHECK(lit(rgb, 40, 70, 280, 170, 1) > 200);
+    CHECK(lit(rgb, 0, 0, 40, 40, 1) == 0);
+  }
+  { // text over a clip: only text pixels change
+    const auto empty = render_text_layer("", 0.5f, 0.5f, 0.2f, 0xFFFFFF);
+    CHECK(lit(empty, 0, 0, 320, 240, 1) == 0);
+  }
+}
 #endif

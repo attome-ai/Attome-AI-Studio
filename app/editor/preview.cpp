@@ -49,6 +49,12 @@ void Preview::set_transform(const std::string &clip_id, float pos_x, float pos_y
   wake_.notify_all();
 }
 
+std::pair<int, int> Preview::extent(const std::string &clip_id) const {
+  std::lock_guard lock(extent_mutex_);
+  const auto it = extents_.find(clip_id);
+  return it == extents_.end() ? std::pair<int, int>{0, 0} : it->second;
+}
+
 bool Preview::take(std::vector<uint8_t> &bgrx, int &width, int &height, int64_t &frame, std::string &warning) {
   std::lock_guard lock(mutex_);
   if (!fresh_)
@@ -92,6 +98,12 @@ void Preview::run() {
     buffer.resize(media::nv12_size(renderer->width(), renderer->height()));
     const auto rendered = renderer->render(frame, buffer.data());
     std::string warning = rendered ? renderer->take_warning() : rendered.error().message;
+    {
+      std::lock_guard lock(extent_mutex_);
+      for (const render::Layer &l : renderer->composition().layers)
+        if (l.is_text)
+          extents_[l.clip_id] = renderer->text_extent(l.clip_id);
+    }
     const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     std::lock_guard lock(mutex_);
     done_.swap(buffer);

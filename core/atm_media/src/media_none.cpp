@@ -24,6 +24,8 @@ Result<std::unique_ptr<Encoder>> Encoder::create(const EncodeSettings &) { retur
 Result<void> Encoder::video(const uint8_t *, int64_t) { return unsupported(); }
 Result<void> Encoder::audio(const float *, size_t) { return unsupported(); }
 Result<void> Encoder::finish() { return unsupported(); }
+Result<TextBitmap> render_text(const std::string &, float, bool, int) { return unsupported(); }
+
 const std::string &Encoder::name() const {
   static const std::string none;
   return none;

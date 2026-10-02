@@ -87,4 +87,12 @@ private:
   std::unique_ptr<Impl> impl_;
 };
 
+// A line or paragraph of text as a coverage mask (0..255 per pixel), drawn in white. Text wraps at `max_width` pixels
+// and is centred. Handles right-to-left and shaped scripts (Arabic). The Windows backend uses DirectWrite.
+struct TextBitmap {
+  int width = 0, height = 0;
+  std::vector<uint8_t> alpha; // width * height
+};
+Result<TextBitmap> render_text(const std::string &utf8, float size_px, bool bold, int max_width);
+
 } // namespace atm::media

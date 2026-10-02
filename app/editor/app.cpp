@@ -222,6 +222,14 @@ void App::refresh() {
           }
           c.media_w = ref.value("width", 0);
           c.media_h = ref.value("height", 0);
+          if (ref.value("type", "") == "text") {
+            c.is_text = true;
+            const json &content = cit->contains("content") ? (*cit)["content"] : empty;
+            c.text = content.value("text", "");
+            c.text_size = content.value("size", 0.08f);
+            c.text_color = content.value("color", "#ffffff");
+            c.text_bold = content.value("bold", false);
+          }
           c.volume = cit->value("volume", 1.0f);
           total_frames_ = std::max(total_frames_, c.start + c.frames);
           track.clips.push_back(std::move(c));
@@ -286,6 +294,51 @@ void App::add_track() {
                           {"value", {{"kind", "video"}, {"name", name}}}}}),
             "Add track", &ids))
     selected_track_ = ids.value("$new:t", "");
+}
+
+// Adds a text clip at the playhead on the "Titles" track (made when missing), on the first free spot.
+void App::add_title(int preset) {
+  struct Preset {
+    const char *name, *text;
+    float size, y;
+    bool bold;
+  };
+  static const Preset presets[] = {{"Title", "Your title", 0.12f, 0.5f, true},
+                                   {"Lower third", "Name Surname", 0.06f, 0.84f, true},
+                                   {"Caption", "Caption text", 0.05f, 0.9f, false}};
+  const Preset &p = presets[std::clamp(preset, 0, 2)];
+  const TrackUi *titles = nullptr;
+  for (const TrackUi &t : tracks_)
+    if (t.name == "Titles")
+      titles = &t;
+  const int64_t frames = std::max<int64_t>(1, std::llround(3.0 * fps()));
+  int64_t at = playhead_;
+  if (titles) { // clips on one track may not overlap: move past any title in the way
+    std::vector<const ClipUi *> sorted;
+    for (const ClipUi &c : titles->clips)
+      sorted.push_back(&c);
+    std::sort(sorted.begin(), sorted.end(), [](const ClipUi *a, const ClipUi *b) { return a->start < b->start; });
+    for (const ClipUi *c : sorted)
+      if (at < c->start + c->frames && at + frames > c->start)
+        at = c->start + c->frames;
+  }
+  json ops = json::array();
+  std::string track = titles ? titles->id : "$new:titles";
+  if (!titles)
+    ops.push_back({{"op", "add"}, {"path", seq_id_ + "/tracks/$new:titles"}, {"value", {{"kind", "video"}, {"name", "Titles"}}}});
+  ops.push_back({{"op", "add"},
+                 {"path", track + "/clips/$new:t"},
+                 {"value",
+                  {{"name", p.name},
+                   {"timing", {{"record_in", frames_text(at)}, {"duration", frames_text(frames)}, {"source_in", "0"}}},
+                   {"media_ref", {{"type", "text"}}},
+                   {"content", {{"text", p.text}, {"size", p.size}, {"color", "#ffffff"}, {"bold", p.bold}}},
+                   {"transform", {{"position", json::array({0.5, double(p.y)})}, {"opacity", 1.0}}}}}});
+  json ids;
+  if (patch(std::move(ops), (std::string("Add ") + p.name).c_str(), &ids)) {
+    selected_clip_ = ids.value("$new:t", "");
+    seek(at + frames / 2);
+  }
 }
 
 void App::import_files(const std::vector<std::string> &paths) {
@@ -540,7 +593,7 @@ namespace {
 // ===== look of the Editor: the tokens of docs/ATTOME_EDITOR_MOCKUP_V2.html =====================================
 
 namespace look {
-constexpr uint32_t bg = 0x0d0f15, rail = 0x0a0c11, panel = 0x141821, panel2 = 0x1a1f2b, raised = 0x232a39,
+constexpr uint32_t txt = 0xb5437a, bg = 0x0d0f15, rail = 0x0a0c11, panel = 0x141821, panel2 = 0x1a1f2b, raised = 0x232a39,
                    line = 0x242b3a, line2 = 0x333c50, fg = 0xeceff6, fg2 = 0x9ba4b9, fg3 = 0x636d85,
                    accent = 0xff7a3d, accent2 = 0xffb04a, accent_ink = 0x1d0b02, vid = 0x3a5bd9, aud = 0x1f8a70,
                    ok = 0x3fd28a, stage_a = 0x171c28, stage_b = 0x0a0c11;
@@ -921,11 +974,12 @@ void App::draw_rail() {
     const ImVec2 origin = ImGui::GetWindowPos();
     ImDrawList *dl = ImGui::GetWindowDrawList();
     float y = 8.0f;
-    const auto place = [&](const Item &it, bool active, const char *tip) {
+    const auto place = [&](const Item &it, bool active, const char *tip) -> bool {
       ImGui::SetCursorPos(ImVec2(6.0f, y));
       ImGui::PushID(it.label);
       ImGui::InvisibleButton("##r", ImVec2(56.0f, 50.0f));
       const bool hovered = ImGui::IsItemHovered();
+      const bool clicked = ImGui::IsItemClicked();
       ImGui::PopID();
       const ImVec2 p(origin.x + 6.0f, origin.y + y);
       if (active)
@@ -945,9 +999,14 @@ void App::draw_rail() {
       if (hovered && tip)
         ImGui::SetTooltip("%s", tip);
       y += 52.0f;
+      return clicked;
     };
-    for (const Item &it : items)
-      place(it, std::string(it.label) == "Media", std::string(it.label) == "Media" ? nullptr : "Not built yet");
+    for (const Item &it : items) {
+      const std::string name = it.label;
+      const int tab = name == "Media" ? 0 : name == "Text" ? 2 : -1; // the rail items that open a panel so far
+      if (place(it, tab >= 0 && rail_tab_ == tab, tab >= 0 ? nullptr : "Not built yet") && tab >= 0)
+        rail_tab_ = tab;
+    }
     y = ImGui::GetWindowHeight() - 62.0f;
     place({"Agent", icon::chat}, false, "The agent panel arrives with the MCP server");
   }
@@ -960,7 +1019,7 @@ void App::draw_media() {
   std::vector<std::string> paths = media_paths_;
   for (const TrackUi &t : tracks_)
     for (const ClipUi &c : t.clips)
-      if (std::find(paths.begin(), paths.end(), c.path) == paths.end())
+      if (!c.path.empty() && std::find(paths.begin(), paths.end(), c.path) == paths.end())
         paths.push_back(c.path);
   for (const std::string &p : paths)
     thumbs_.request(p);
@@ -970,6 +1029,11 @@ void App::draw_media() {
   ImGui::Begin("Media", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoScrollbar);
   ImGui::PopStyleVar();
   ImGui::PopStyleColor();
+  if (rail_tab_ == 2) {
+    draw_text_panel();
+    ImGui::End();
+    return;
+  }
   const float width = ImGui::GetContentRegionAvail().x;
   ImGui::PushFont(g_fonts.bold, 15.0f);
   ImGui::TextUnformatted("Media");
@@ -1071,6 +1135,48 @@ void App::draw_media() {
   ImGui::End();
 }
 
+void App::draw_text_panel() {
+  ImGui::PushFont(g_fonts.bold, 15.0f);
+  ImGui::TextUnformatted("Text");
+  ImGui::PopFont();
+  ImGui::Spacing();
+  ImGui::PushTextWrapPos(0.0f);
+  ImGui::TextColored(hexv(look::fg3), "Click a style to add it at the playhead. Edit the words, size and colour in the Inspector; Arabic and other right-to-left text work.");
+  ImGui::PopTextWrapPos();
+  ImGui::Spacing();
+  section_label("TITLES");
+  ImGui::Spacing();
+  struct Style {
+    const char *name, *sample, *hint;
+    float size;
+    bool bold;
+  };
+  static const Style styles[] = {{"Title", "Your title", "Large, centred", 30.0f, true},
+                                 {"Lower third", "Name Surname", "Near the bottom", 20.0f, true},
+                                 {"Caption", "Caption text", "Small, bottom", 16.0f, false}};
+  for (int i = 0; i < 3; ++i) {
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    ImGui::PushID(i);
+    ImGui::InvisibleButton("##style", ImVec2(-1.0f, 78.0f));
+    const bool hovered = ImGui::IsItemHovered();
+    if (ImGui::IsItemClicked())
+      add_title(i);
+    ImGui::PopID();
+    const ImVec2 q(p.x + ImGui::GetItemRectSize().x, p.y + 78.0f);
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(p, q, hex(hovered ? look::panel2 : look::bg), 12.0f);
+    dl->AddRect(p, q, hex(hovered ? look::accent : look::line), 12.0f, 0, 1.2f);
+    ImGui::PushFont(styles[i].bold ? g_fonts.bold : g_fonts.ui, styles[i].size);
+    const ImVec2 ss = text_size(styles[i].sample);
+    dl->AddText(ImVec2(p.x + (q.x - p.x - ss.x) * 0.5f, p.y + 12.0f), hex(look::fg), styles[i].sample);
+    ImGui::PopFont();
+    const float label_w = text_size(styles[i].name).x;
+    dl->AddText(ImVec2(p.x + 12.0f, q.y - 22.0f), hex(look::fg2), styles[i].name);
+    dl->AddText(ImVec2(p.x + 20.0f + label_w, q.y - 22.0f), hex(look::fg3), styles[i].hint);
+    ImGui::Dummy(ImVec2(0, 4.0f));
+  }
+}
+
 void App::draw_viewer() {
   ATM_PROFILE_SCOPE("ui.viewer");
   preview_.request(std::min(playhead_, std::max<int64_t>(0, total_frames_ - 1)));
@@ -1144,7 +1250,14 @@ void App::draw_viewer() {
     const auto rect_of = [&](const ClipUi &c, float px, float py) { // in canvas pixels: x0, y0, x1, y1
       const float mw = c.media_w > 0 ? float(c.media_w) : float(canvas_w_), mh = c.media_h > 0 ? float(c.media_h) : float(canvas_h_);
       const float fit = std::min(float(canvas_w_) / mw, float(canvas_h_) / mh);
-      const float w = mw * fit * c.scale_x, h = mh * fit * c.scale_y, cx = px * float(canvas_w_), cy = py * float(canvas_h_);
+      float w = mw * fit * c.scale_x, h = mh * fit * c.scale_y;
+      if (c.is_text) { // the size of the drawn text, from the preview renderer
+        const auto e = preview_.extent(c.id);
+        const float to_canvas = tex_w_ > 0 ? float(canvas_w_) / float(tex_w_) : 1.0f;
+        w = float(e.first) * to_canvas * c.scale_x;
+        h = float(e.second) * to_canvas * c.scale_y;
+      }
+      const float cx = px * float(canvas_w_), cy = py * float(canvas_h_);
       return ImVec4(cx - w * 0.5f, cy - h * 0.5f, cx + w * 0.5f, cy + h * 0.5f);
     };
     const auto active_at_playhead = [&](const ClipUi &c) { return playhead_ >= c.start && playhead_ < c.start + c.frames; };
@@ -1421,14 +1534,15 @@ void App::draw_timeline() {
       const float x0 = x_of(double(start)), x1 = std::max(x0 + 2.0f, x_of(double(start + frames)));
       const float cy = origin.y + ruler_h + float(row) * row_h + 4.0f, ch = row_h - 8.0f;
       const bool is_selected = c.id == selected_clip_;
-      const uint32_t base = track.kind == "audio" ? look::aud : look::vid;
+      const uint32_t base = c.is_text ? look::txt : track.kind == "audio" ? look::aud : look::vid;
       const int alpha = int(120.0f + c.opacity * 135.0f);
       dl->AddRectFilled(ImVec2(x0, cy), ImVec2(x1 - 1.0f, cy + ch), hex(base, alpha), 5.0f);
       dl->AddRectFilled(ImVec2(x0, cy), ImVec2(x1 - 1.0f, cy + 3.0f), IM_COL32(255, 255, 255, 70), 5.0f, ImDrawFlags_RoundCornersTop);
       if (is_selected)
         dl->AddRect(ImVec2(x0, cy), ImVec2(x1 - 1.0f, cy + ch), hex(look::accent), 5.0f, 0, 2.0f);
       dl->PushClipRect(ImVec2(std::max(x0, win.x + header_w), cy), ImVec2(x1 - 4.0f, cy + ch), true);
-      dl->AddText(ImVec2(x0 + 9.0f, cy + (ch - ImGui::GetFontSize()) * 0.5f), IM_COL32(255, 255, 255, 235), c.name.c_str());
+      dl->AddText(ImVec2(x0 + 9.0f, cy + (ch - ImGui::GetFontSize()) * 0.5f), IM_COL32(255, 255, 255, 235),
+                  (c.is_text && !c.text.empty() ? c.text : c.name).c_str());
       dl->PopClipRect();
 
       const float edge = std::min(8.0f, (x1 - x0) / 3.0f);
@@ -1574,6 +1688,17 @@ void App::draw_inspector() {
     opacity_ = c->opacity;
     volume_ = c->volume;
     scale_ = c->scale_x;
+    if (c->is_text) {
+      copy_to(text_buf_, sizeof text_buf_, c->text);
+      text_size_ = c->text_size;
+      text_bold_ = c->text_bold;
+      unsigned rgb = 0xFFFFFF;
+      if (c->text_color.size() == 7 && c->text_color[0] == '#')
+        rgb = unsigned(std::strtoul(c->text_color.c_str() + 1, nullptr, 16));
+      text_col_[0] = float((rgb >> 16) & 255) / 255.0f;
+      text_col_[1] = float((rgb >> 8) & 255) / 255.0f;
+      text_col_[2] = float(rgb & 255) / 255.0f;
+    }
     pos_px_[0] = (c->pos_x - 0.5f) * float(canvas_w_);
     pos_px_[1] = (c->pos_y - 0.5f) * float(canvas_h_);
   }
@@ -1605,6 +1730,56 @@ void App::draw_inspector() {
   }
   end_card();
   ImGui::PopStyleColor();
+
+  if (c->is_text) {
+    if (begin_card("##text", "Text")) {
+      ImGui::PushStyleColor(ImGuiCol_FrameBg, hexv(look::raised));
+      ImGui::SetNextItemWidth(-1.0f);
+      ImGui::InputTextMultiline("##text", text_buf_, sizeof text_buf_, ImVec2(-1.0f, 78.0f));
+      ImGui::PopStyleColor();
+      if (ImGui::IsItemDeactivatedAfterEdit()) {
+        const std::string value = text_buf_;
+        pending_ = [this, id, value] {
+          if (!patch(json::array({{{"op", "replace"}, {"path", id + "/content/text"}, {"value", value}}}), "Edit text"))
+            insp_rev_ = 0;
+        };
+      }
+      ImGui::TextColored(hexv(look::fg2), "Size");
+      ImGui::SameLine(88.0f);
+      const float sw = ImGui::GetContentRegionAvail().x - 52.0f;
+      slim_slider("textsize", &text_size_, 0.02f, 0.30f, sw, "");
+      if (ImGui::IsItemDeactivatedAfterEdit()) {
+        const float v = std::round(text_size_ * 1000.0f) / 1000.0f;
+        pending_ = [this, id, v] {
+          patch(json::array({{{"op", "replace"}, {"path", id + "/content/size"}, {"value", v}}}), "Change text size");
+        };
+      }
+      ImGui::SameLine();
+      ImGui::PushFont(g_fonts.mono, 13.0f);
+      ImGui::TextColored(hexv(look::fg2), "%3.0f", text_size_ * 1000.0f);
+      ImGui::PopFont();
+      ImGui::TextColored(hexv(look::fg2), "Color");
+      ImGui::SameLine(88.0f);
+      ImGui::ColorEdit3("##textcolor", text_col_, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel);
+      if (ImGui::IsItemDeactivatedAfterEdit()) {
+        char hexs[8];
+        std::snprintf(hexs, sizeof hexs, "#%02x%02x%02x", int(std::lround(text_col_[0] * 255.0f)),
+                      int(std::lround(text_col_[1] * 255.0f)), int(std::lround(text_col_[2] * 255.0f)));
+        const std::string value = hexs;
+        pending_ = [this, id, value] {
+          patch(json::array({{{"op", "replace"}, {"path", id + "/content/color"}, {"value", value}}}), "Change text color");
+        };
+      }
+      ImGui::SameLine(0.0f, 24.0f);
+      if (ImGui::Checkbox("Bold", &text_bold_)) {
+        const bool value = text_bold_;
+        pending_ = [this, id, value] {
+          patch(json::array({{{"op", "replace"}, {"path", id + "/content/bold"}, {"value", value}}}), "Change text weight");
+        };
+      }
+    }
+    end_card();
+  }
 
   if (begin_card("##look", "Transform")) {
     // Position is shown in canvas pixels from the centre; the document stores canvas fractions (ADR-021).
@@ -1675,7 +1850,8 @@ void App::draw_inspector() {
   }
   end_card();
 
-  if (begin_card("##sound", "Audio")) {
+  const bool show_audio = !c->is_text; // text clips have no sound
+  if (show_audio && begin_card("##sound", "Audio")) {
     ImGui::TextColored(hexv(look::fg2), "Volume");
     ImGui::SameLine(88.0f);
     const float avail = ImGui::GetContentRegionAvail().x - 52.0f;
@@ -1691,7 +1867,8 @@ void App::draw_inspector() {
     ImGui::TextColored(hexv(look::fg2), "%3.0f%%", volume_ * 100.0f);
     ImGui::PopFont();
   }
-  end_card();
+  if (show_audio)
+    end_card();
 
   ImGui::PushTextWrapPos(0.0f);
   ImGui::TextColored(hexv(look::fg3), "Source starts at %s", timecode(c->source_frames).c_str());

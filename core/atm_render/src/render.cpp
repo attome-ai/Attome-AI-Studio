@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <utility>
 
@@ -125,6 +126,67 @@ void draw_transformed(uint8_t *out, int W, int H, const media::FrameView &v, flo
   });
 }
 
+// Draws a coverage mask in `rgb` into the NV12 canvas, centred at (cx, cy) and scaled by (sx, sy). Same sampling as
+// draw_transformed; the colour is converted to Y, U and V once.
+void draw_text(uint8_t *out, int W, int H, const media::TextBitmap &m, float cx, float cy, float sx, float sy, int alpha,
+               uint32_t rgb) {
+  uint8_t bgrx[2 * 2 * 4], yuv[6];
+  for (int i = 0; i < 4; ++i) {
+    bgrx[i * 4 + 0] = uint8_t(rgb & 255);
+    bgrx[i * 4 + 1] = uint8_t((rgb >> 8) & 255);
+    bgrx[i * 4 + 2] = uint8_t((rgb >> 16) & 255);
+    bgrx[i * 4 + 3] = 255;
+  }
+  media::bgrx_to_nv12(bgrx, 2, 2, yuv);
+  const int cy_ = yuv[0], cu = yuv[4], cv = yuv[5];
+
+  const float dw = float(m.width) * sx, dh = float(m.height) * sy;
+  const float fx0 = cx - dw * 0.5f, fy0 = cy - dh * 0.5f;
+  const int ix0 = std::max(0, int(std::floor(fx0))), ix1 = std::min(W, int(std::ceil(fx0 + dw)));
+  const int iy0 = std::max(0, int(std::floor(fy0))), iy1 = std::min(H, int(std::ceil(fy0 + dh)));
+  if (ix1 <= ix0 || iy1 <= iy0 || sx <= 0.0f || sy <= 0.0f)
+    return;
+  const float inv_x = 1.0f / sx, inv_y = 1.0f / sy;
+  // Coverage at a destination position, bilinear, 0..255.
+  const auto coverage = [&](float dx, float dy) {
+    const float u = (dx - fx0) * inv_x - 0.5f, v = (dy - fy0) * inv_y - 0.5f;
+    const int x0 = int(std::floor(u)), y0 = int(std::floor(v));
+    const float fx = u - float(x0), fy = v - float(y0);
+    const auto at = [&](int x, int y) -> float {
+      return (x < 0 || y < 0 || x >= m.width || y >= m.height) ? 0.0f : float(m.alpha[size_t(y) * size_t(m.width) + size_t(x)]);
+    };
+    const float top = at(x0, y0) * (1.0f - fx) + at(x0 + 1, y0) * fx;
+    const float bottom = at(x0, y0 + 1) * (1.0f - fx) + at(x0 + 1, y0 + 1) * fx;
+    return top * (1.0f - fy) + bottom * fy;
+  };
+  uint8_t *out_y = out, *out_uv = out + size_t(W) * size_t(H);
+  parallel_for(iy1 - iy0, 8, [&](int64_t first, int64_t last) {
+    for (int64_t r = first; r < last; ++r) {
+      const int y = iy0 + int(r);
+      uint8_t *dst = out_y + size_t(y) * size_t(W);
+      for (int x = ix0; x < ix1; ++x) {
+        const int a = int(coverage(float(x) + 0.5f, float(y) + 0.5f) * float(alpha) / 256.0f + 0.5f);
+        if (a > 0)
+          dst[x] = uint8_t((cy_ * a + dst[x] * (256 - a)) >> 8);
+      }
+    }
+  });
+  const int cx0 = ix0 / 2, cx1 = (ix1 + 1) / 2, cy0 = iy0 / 2, cy1 = (iy1 + 1) / 2;
+  parallel_for(cy1 - cy0, 8, [&](int64_t first, int64_t last) {
+    for (int64_t r = first; r < last; ++r) {
+      const int c = cy0 + int(r);
+      uint8_t *dst = out_uv + size_t(c) * size_t(W);
+      for (int x = cx0; x < cx1; ++x) {
+        const int a = int(coverage(float(2 * x) + 1.0f, float(2 * c) + 1.0f) * float(alpha) / 256.0f + 0.5f);
+        if (a > 0) {
+          dst[x * 2] = uint8_t((cu * a + dst[x * 2] * (256 - a)) >> 8);
+          dst[x * 2 + 1] = uint8_t((cv * a + dst[x * 2 + 1] * (256 - a)) >> 8);
+        }
+      }
+    }
+  });
+}
+
 } // namespace
 
 Result<Composition> compile(const json &project, std::string_view sequence_id) {
@@ -174,14 +236,27 @@ Result<Composition> compile(const json &project, std::string_view sequence_id) {
         const json &clip = *it;
         const auto ref = clip.find("media_ref");
         const auto timing = clip.find("timing");
-        if (ref == clip.end() || timing == clip.end() || ref->value("type", "") != "file" || !ref->contains("path"))
+        const std::string type = ref == clip.end() ? "" : ref->value("type", "");
+        if (timing == clip.end() || !(type == "text" || (type == "file" && ref->contains("path"))))
           continue;
         ATM_TRY(Rational in, rational_field(*timing, "record_in", "0"));
         ATM_TRY(Rational duration, rational_field(*timing, "duration", "0"));
         ATM_TRY(Rational source_in, rational_field(*timing, "source_in", "0"));
         Layer l;
         l.clip_id = it.key();
-        l.path = (*ref)["path"].get<std::string>();
+        if (type == "file")
+          l.path = (*ref)["path"].get<std::string>();
+        if (type == "text") {
+          l.is_text = true;
+          if (const auto content = clip.find("content"); content != clip.end() && content->is_object()) {
+            l.text = content->value("text", "");
+            l.text_size = std::clamp(content->value("size", 0.08f), 0.005f, 1.0f);
+            l.text_bold = content->value("bold", false);
+            const std::string color = content->value("color", "#ffffff");
+            if (color.size() == 7 && color[0] == '#')
+              l.text_color = uint32_t(std::strtoul(color.c_str() + 1, nullptr, 16)) & 0xFFFFFF;
+          }
+        }
         l.track = track_index;
         l.video = video;
         ATM_TRY(int64_t start, to_frames(in, rate, Round::nearest_even));
@@ -228,6 +303,11 @@ Renderer::~Renderer() = default;
 
 std::string Renderer::take_warning() { return std::exchange(warning_, {}); }
 
+std::pair<int, int> Renderer::text_extent(const std::string &clip_id) const {
+  const auto it = text_.find(clip_id);
+  return it == text_.end() ? std::pair<int, int>{0, 0} : std::pair<int, int>{it->second.bitmap.width, it->second.bitmap.height};
+}
+
 void Renderer::set_transform(const std::string &clip_id, float pos_x, float pos_y, float scale_x, float scale_y) {
   for (Layer &l : comp_.layers)
     if (l.clip_id == clip_id) {
@@ -247,6 +327,32 @@ Result<void> Renderer::render(int64_t frame, uint8_t *out) {
   for (const Layer &l : comp_.layers) {
     if (!l.video || frame < l.start_frame || frame >= l.start_frame + l.frames || l.opacity <= 0.0f)
       continue;
+    if (l.is_text) {
+      if (l.text.empty())
+        continue;
+      const int px_size = std::max(1, int(std::lround(l.text_size * float(height_))));
+      const std::string key = l.text + "\x1f" + std::to_string(px_size) + (l.text_bold ? "b" : "n") + std::to_string(width_);
+      TextEntry &entry = text_[l.clip_id];
+      if (entry.key != key) {
+        auto bitmap = media::render_text(l.text, float(px_size), l.text_bold, int(float(width_) * 0.9f));
+        if (!bitmap) {
+          if (warning_.empty())
+            warning_ = bitmap.error().message;
+          continue;
+        }
+        entry.key = key;
+        entry.bitmap = std::move(*bitmap);
+      }
+      if (entry.bitmap.width == 0)
+        continue;
+      if (!cleared)
+        media::fill_black(out, width_, height_);
+      cleared = true;
+      ATM_PROFILE_SCOPE("composite.text");
+      draw_text(out, width_, height_, entry.bitmap, l.pos_x * float(width_), l.pos_y * float(height_), l.scale_x,
+                l.scale_y, int(l.opacity * 256.0f + 0.5f), l.text_color);
+      continue;
+    }
     if (failed_.count(l.clip_id))
       continue;
     auto it = readers_.find(l.clip_id);
@@ -301,7 +407,7 @@ Result<std::vector<float>> mix_audio(const Composition &c) {
   const size_t total = size_t(c.frame_hns(c.frames) * media::kAudioRate / media::kHnsPerSecond);
   std::vector<float> mix(total * 2, 0.0f);
   for (const Layer &l : c.layers) {
-    if (l.volume <= 0.0f)
+    if (l.volume <= 0.0f || l.is_text)
       continue;
     auto pcm = media::read_audio(l.path, l.source_in_hns, c.frame_hns(l.frames));
     if (!pcm)

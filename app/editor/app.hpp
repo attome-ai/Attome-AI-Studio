@@ -35,6 +35,9 @@ struct ClipUi {
   float opacity = 1.0f, volume = 1.0f;
   float pos_x = 0.5f, pos_y = 0.5f, scale_x = 1.0f, scale_y = 1.0f; // transform, canvas fractions
   int media_w = 0, media_h = 0;                                        // size of the file
+  bool is_text = false, text_bold = false;                             // text clips have no file
+  std::string text, text_color = "#ffffff";
+  float text_size = 0.08f;                                              // font height, fraction of the canvas
 };
 
 struct TrackUi {
@@ -69,6 +72,8 @@ private:
   // actions
   void import_files(const std::vector<std::string> &paths);
   void add_track();
+  void add_title(int preset);
+  void draw_text_panel();
   void delete_selected();
   void split_at_playhead();
   void history_step(bool undo);
@@ -155,6 +160,10 @@ private:
   std::vector<std::string> media_paths_;
   char media_filter_[128] = {};
   int inspector_tab_ = 0;
+  int rail_tab_ = 0; // 0 Media, 2 Text
+  char text_buf_[1024] = {};
+  float text_size_ = 0.08f, text_col_[3] = {1.0f, 1.0f, 1.0f};
+  bool text_bold_ = false;
 
   // inspector
   std::string insp_for_;
