@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <atomic>
 #include <condition_variable>
+#include <cstring>
 #include <deque>
 #include <filesystem>
 #include <map>
@@ -244,6 +245,7 @@ struct Engine::Impl {
     const char *group;
     bool mutating;
     const char *summary;
+    const char *params; // JSON Schema of the params object (MCP inputSchema); "" = takes none
     Handler fn;
   };
   static const Tool kTools[];
@@ -777,6 +779,151 @@ struct Engine::Impl {
                 {"width", settings.width & ~1}, {"height", settings.height & ~1}};
   }
 
+  // ---- see.* (agent feedback, MODULES §M12): rendered frames as JPEG files in <project>/.attome/see/ --------------
+
+  struct Still {
+    std::string path;
+    int64_t frame = 0;
+  };
+
+  // Renders `frames` at width x height as packed BGRX pictures.
+  static Result<std::vector<std::vector<uint8_t>>> render_stills(render::Composition comp, const std::vector<int64_t> &frames,
+                                                                 int width, int height, std::string *warning) {
+    render::Renderer renderer(std::move(comp), width, height);
+    std::vector<uint8_t> nv12(media::nv12_size(renderer.width(), renderer.height()));
+    std::vector<std::vector<uint8_t>> out;
+    for (const int64_t f : frames) {
+      ATM_CHECK(renderer.render(f, nv12.data()));
+      std::vector<uint8_t> &bgrx = out.emplace_back(size_t(renderer.width()) * size_t(renderer.height()) * 4);
+      media::nv12_to_bgrx(nv12.data(), renderer.width(), renderer.height(), bgrx.data());
+    }
+    *warning = renderer.take_warning();
+    return out;
+  }
+
+  // Shared set-up: the compiled sequence and an emptied output folder. Earlier pictures are removed, so the folder
+  // never grows; a client reads the files before its next see.* call.
+  Result<std::pair<render::Composition, fs::path>> see_setup(Project &pr, const json &params) {
+    ATM_TRY(render::Composition comp, render::compile(pr.doc.root(), params.value("sequence", std::string())));
+    if (comp.frames <= 0)
+      return fail(ErrorCode::InvalidArgument, "R_EMPTY", "The sequence is empty, so there is nothing to see.", {},
+                  "Add clips with project.patch first.");
+    const fs::path dir = pr.dir / ".attome" / "see";
+    ATM_CHECK(storage::make_dirs(dir));
+    std::error_code ec;
+    for (const auto &entry : fs::directory_iterator(dir, ec))
+      if (entry.path().extension() == ".jpg")
+        fs::remove(entry.path(), ec);
+    return std::pair{std::move(comp), dir};
+  }
+
+  static json time_of(int64_t frame, const render::Composition &comp) {
+    const Rational rate = *Rational::make(comp.rate_num, comp.rate_den);
+    const auto t = from_frames(frame, rate);
+    json out = t ? to_json(format_time(*t, rate)) : json::object();
+    out["frame"] = frame;
+    return out;
+  }
+
+  Result<json> see_frames(const json &params) {
+    ATM_TRY(Project *pr, project(params));
+    const auto times = params.find("times");
+    if (times == params.end() || !times->is_array() || times->empty() || times->size() > 16)
+      return bad_param("times", "is required: 1 to 16 times such as \"2.5s\", \"75@30\" or \"00:00:02:15\"");
+    const int height = params.value("height", 540);
+    if (height < 64 || height > 2160)
+      return bad_param("height", "must be between 64 and 2160 pixels");
+    ATM_TRY(auto setup, see_setup(*pr, params));
+    auto &[comp, dir] = setup;
+    const Rational rate = *Rational::make(comp.rate_num, comp.rate_den);
+    std::vector<int64_t> frames;
+    for (const json &value : *times) {
+      ATM_TRY(RationalTime t, parse_time(value, {.rate = rate}));
+      ATM_TRY(int64_t f, to_frames(t, rate, Round::floor));
+      frames.push_back(std::clamp<int64_t>(f, 0, comp.frames - 1)); // a time past the end shows the last frame
+    }
+    const int width = int(int64_t(comp.width) * height / std::max(1, comp.height));
+    std::string warning;
+    json images = json::array();
+    {
+      ATM_TRY(auto stills, render_stills(comp, frames, width, height, &warning));
+      for (size_t i = 0; i < frames.size(); ++i) {
+        const fs::path file = dir / ("r" + std::to_string(pr->revision) + "-f" + std::to_string(frames[i]) + ".jpg");
+        ATM_CHECK(media::write_jpeg(to_utf8(file), stills[i].data(), width & ~1, height & ~1));
+        json image = time_of(frames[i], comp);
+        image["path"] = to_utf8(file);
+        images.push_back(std::move(image));
+      }
+    }
+    json out = {{"images", std::move(images)}, {"width", width & ~1}, {"height", height & ~1},
+                {"duration", time_of(comp.frames, comp)}, {"revision", pr->revision}};
+    if (!warning.empty())
+      out["warning"] = warning;
+    return out;
+  }
+
+  // One JPEG with `count` evenly spaced frames in a grid, each with its timecode underneath.
+  Result<json> see_contact_sheet(const json &params) {
+    ATM_TRY(Project *pr, project(params));
+    const int count = params.value("count", 12), columns = std::clamp(params.value("columns", 4), 1, 8);
+    const int tile_h = params.value("tile_height", 180);
+    if (count < 1 || count > 48)
+      return bad_param("count", "must be between 1 and 48");
+    if (tile_h < 64 || tile_h > 540)
+      return bad_param("tile_height", "must be between 64 and 540 pixels");
+    ATM_TRY(auto setup, see_setup(*pr, params));
+    auto &[comp, dir] = setup;
+    std::vector<int64_t> frames; // the middle of each of `count` equal parts
+    for (int i = 0; i < count; ++i)
+      frames.push_back(std::min(comp.frames - 1, (2 * i + 1) * comp.frames / (2 * count)));
+    frames.erase(std::unique(frames.begin(), frames.end()), frames.end());
+    const int tile_w = int(int64_t(comp.width) * tile_h / std::max(1, comp.height)) & ~1;
+    const int th = tile_h & ~1, label_h = std::max(16, th / 7), gap = 4;
+    const int n = int(frames.size()), cols = std::min(columns, n), rows = (n + cols - 1) / cols;
+    const int sheet_w = cols * tile_w + (cols + 1) * gap, sheet_h = rows * (th + label_h) + (rows + 1) * gap;
+    std::vector<uint8_t> sheet(size_t(sheet_w) * size_t(sheet_h) * 4);
+    for (size_t i = 0; i < sheet.size(); i += 4) { // dark grey background
+      sheet[i] = sheet[i + 1] = sheet[i + 2] = 24;
+      sheet[i + 3] = 255;
+    }
+    std::string warning;
+    ATM_TRY(auto stills, render_stills(comp, frames, tile_w, th, &warning));
+    json tiles = json::array();
+    for (int i = 0; i < n; ++i) {
+      const int x0 = gap + (i % cols) * (tile_w + gap), y0 = gap + (i / cols) * (th + label_h + gap);
+      for (int y = 0; y < th; ++y)
+        std::memcpy(&sheet[(size_t(y0 + y) * size_t(sheet_w) + size_t(x0)) * 4],
+                    &stills[size_t(i)][size_t(y) * size_t(tile_w) * 4], size_t(tile_w) * 4);
+      json tile = time_of(frames[size_t(i)], comp);
+      if (auto label = media::render_text(tile.value("timecode", ""), float(label_h) * 0.7f, false, tile_w)) {
+        const int lx = x0 + std::max(0, (tile_w - label->width) / 2), ly = y0 + th + (label_h - label->height) / 2;
+        for (int y = 0; y < label->height; ++y)
+          for (int x = 0; x < label->width; ++x) {
+            const int sx = lx + x, sy = ly + y;
+            if (sx < 0 || sy < 0 || sx >= sheet_w || sy >= sheet_h)
+              continue;
+            uint8_t *px = &sheet[(size_t(sy) * size_t(sheet_w) + size_t(sx)) * 4];
+            const int a = label->alpha[size_t(y) * size_t(label->width) + size_t(x)];
+            for (int c = 0; c < 3; ++c)
+              px[c] = uint8_t(px[c] + (230 - px[c]) * a / 255);
+          }
+      }
+      tiles.push_back(std::move(tile));
+    }
+    const fs::path file = dir / ("r" + std::to_string(pr->revision) + "-sheet.jpg");
+    ATM_CHECK(media::write_jpeg(to_utf8(file), sheet.data(), sheet_w, sheet_h));
+    json out = {{"images", json::array({{{"path", to_utf8(file)}}})},
+                {"tiles", std::move(tiles)},
+                {"columns", cols},
+                {"width", sheet_w},
+                {"height", sheet_h},
+                {"duration", time_of(comp.frames, comp)},
+                {"revision", pr->revision}};
+    if (!warning.empty())
+      out["warning"] = warning;
+    return out;
+  }
+
   Result<std::shared_ptr<Job>> job_param(const json &params) {
     ATM_TRY(const std::string *id, string_param(params, "job_id"));
     const auto it = jobs.find(*id);
@@ -841,49 +988,133 @@ struct Engine::Impl {
   }
 };
 
+// Parameter schemas are JSON Schema (the MCP inputSchema); "project" is the .attome folder or a prj_ ID.
 const Engine::Impl::Tool Engine::Impl::kTools[] = {
     {"project.create", "core", true, "Create a new .attome project folder with one empty Sequence.",
+     R"({"type":"object","properties":{
+       "path":{"type":"string","description":"Folder to create; \".attome\" is added when missing"},
+       "name":{"type":"string"},
+       "rate":{"type":"string","description":"Frame rate, e.g. \"30\", \"25\" or \"30000/1001\". Default 30"},
+       "canvas":{"type":"object","properties":{"width":{"type":"integer"},"height":{"type":"integer"}},
+                 "description":"Default 1920 x 1080"}},
+       "required":["path"]})",
      &Impl::project_create},
-    {"project.inspect", "core", false, "Summary of a project for people and agents. level: summary | tracks.",
+    {"project.inspect", "core", false,
+     "Summary of a project: sequences, tracks and (level \"tracks\") every clip with its ID, start and duration.",
+     R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},
+       "level":{"type":"string","enum":["summary","tracks"],"description":"\"tracks\" also lists the clips"},
+       "max_items":{"type":"integer","description":"Clips listed per track, default 200"}},
+       "required":["project"]})",
      &Impl::project_inspect},
-    {"project.get", "core", false, "One object by Stable ID.", &Impl::project_get},
+    {"project.get", "core", false, "One object (sequence, track, clip …) by Stable ID, with all its fields.",
+     R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},"id":{"type":"string"}},"required":["project","id"]})",
+     &Impl::project_get},
     {"project.patch", "core", true,
-     "Apply an ID-addressed Patch. Ops: add, remove, replace, move, insert_order, remove_order, test. Paths are "
-     "<StableID>/<field>. Times accept \"12.5s\", SMPTE, \"frames@rate\" or {num,den}. dry_run previews and "
-     "returns the normalized patch and its inverse.",
+     "Edit the project with an ID-addressed Patch; all ops apply or none do. Ops: add, remove, replace, move, "
+     "insert_order, remove_order, test. A path is \"<StableID>/<field>[/<field>…]\".\n"
+     "- Add a track: {\"op\":\"add\",\"path\":\"<seq_id>/tracks/$new:v1\",\"value\":{\"kind\":\"video\"|\"audio\","
+     "\"name\":\"V1\"}}. Tracks stack in order: the first is the bottom layer.\n"
+     "- Add a clip: {\"op\":\"add\",\"path\":\"<track_id or $new:v1>/clips/$new:c1\",\"value\":{\"name\":\"…\","
+     "\"timing\":{\"record_in\":\"0s\",\"duration\":\"5s\",\"source_in\":\"0s\"},\"media_ref\":{\"type\":\"file\","
+     "\"path\":\"<absolute path>\"},\"transform\":{\"position\":[0.5,0.5],\"scale\":[1,1],\"opacity\":1},"
+     "\"volume\":1}}. record_in is where the clip starts on the timeline, source_in where it starts in the file. "
+     "Clips on one track may not overlap.\n"
+     "- Text clip (title, lower third, caption): \"media_ref\":{\"type\":\"text\"},\"content\":{\"text\":\"…\","
+     "\"size\":0.08,\"color\":\"#ffffff\",\"bold\":true} with size a fraction of the canvas height; put it on a track "
+     "above the video. Arabic and other right-to-left text is shaped correctly.\n"
+     "- position is the clip centre in canvas fractions from the top-left ([0.5,0.84] = lower third); scale 1 fits "
+     "the canvas; volume 0 mutes a clip's sound, 1 leaves it unchanged.\n"
+     "- Change a field: {\"op\":\"replace\",\"path\":\"<clip_id>/timing/duration\",\"value\":\"3s\"}; delete: "
+     "{\"op\":\"remove\",\"path\":\"<clip_id>\"}.\n"
+     "$new:<name> placeholders become Stable IDs (returned in id_map) and later ops of the same patch may use them. "
+     "Use media.probe for a file's duration. dry_run checks without changing anything. Not supported yet: "
+     "transitions, keyframes, effects.",
+     R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},
+       "patch":{"type":"object","properties":{
+         "ops":{"type":"array","items":{"type":"object","properties":{
+           "op":{"type":"string","enum":["add","remove","replace","move","insert_order","remove_order","test"]},
+           "path":{"type":"string"},"value":{},"to":{"type":"string"}},"required":["op","path"]}},
+         "label":{"type":"string","description":"Short description shown in the history"},
+         "base_revision":{"type":"integer","description":"Refuse the patch when the project moved past this revision"}},
+         "required":["ops"]},
+       "dry_run":{"type":"boolean"},
+       "task_id":{"type":"string","description":"Groups several edits into one task"}},
+       "required":["project","patch"]})",
      &Impl::project_patch},
-    {"project.undo", "core", true, "Undo the last ChangeSet (steps: N).", &Impl::project_undo},
-    {"project.redo", "project", true, "Redo along the most recent branch of the undo tree.", &Impl::project_redo},
+    {"project.undo", "core", true, "Undo the last edit (steps: N).",
+     R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},"steps":{"type":"integer"}},"required":["project"]})",
+     &Impl::project_undo},
+    {"project.redo", "project", true, "Redo along the most recent branch of the undo tree.",
+     R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},"steps":{"type":"integer"}},"required":["project"]})",
+     &Impl::project_redo},
     {"project.validate", "core", false, "Check the whole project against the semantic rules.",
-     &Impl::project_validate},
-    {"project.save", "project", true, "Write project.json now.", &Impl::project_save},
-    {"project.close", "project", true, "Save and close a project.", &Impl::project_close},
-    {"history.list", "project", false, "ChangeSets of the current epoch and the HEAD.", &Impl::history_list},
+     R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"}},"required":["project"]})", &Impl::project_validate},
+    {"project.save", "project", true, "Write project.json now.",
+     R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"}},"required":["project"]})", &Impl::project_save},
+    {"project.close", "project", true, "Save and close a project.",
+     R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"}},"required":["project"]})", &Impl::project_close},
+    {"history.list", "project", false, "Edits (ChangeSets) of the current epoch and the HEAD.",
+     R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},"limit":{"type":"integer"}},"required":["project"]})",
+     &Impl::history_list},
     {"time.parse", "project", false, "Convert any accepted time spelling to its canonical forms.",
+     R"({"type":"object","properties":{"value":{"type":["string","object"],"description":"\"12.5s\", \"375@30\" (frames@rate), SMPTE \"00:00:12:15\" or {num,den} seconds"},"rate":{"type":"string"}},"required":["value"]})",
      &Impl::time_parse},
     {"media.probe", "core", false, "Size, frame rate, duration and audio format of a media file.",
+     R"({"type":"object","properties":{"path":{"type":"string","description":"Absolute path of the file"}},
+       "required":["path"]})",
      &Impl::media_probe},
+    {"see.frames", "core", false,
+     "Render frames of the sequence as JPEG pictures, to check an edit by eye. Times past the end show the last "
+     "frame. The files are replaced by the next see.* call.",
+     R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},
+       "times":{"type":"array","items":{"type":["string","object"],"description":"\"12.5s\", \"375@30\" (frames@rate), SMPTE \"00:00:12:15\" or {num,den} seconds"},"minItems":1,"maxItems":16},
+       "height":{"type":"integer","description":"Picture height in pixels, default 540"},
+       "sequence":{"type":"string","description":"Sequence ID, default the first"}},
+       "required":["project","times"]})",
+     &Impl::see_frames},
+    {"see.contact_sheet", "core", false,
+     "One JPEG with evenly spaced frames of the whole sequence in a grid, each labelled with its timecode. The "
+     "quickest way to review a cut before rendering it.",
+     R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},
+       "count":{"type":"integer","description":"Number of frames, 1 to 48, default 12"},
+       "columns":{"type":"integer","description":"Default 4"},
+       "tile_height":{"type":"integer","description":"Pixels per frame, default 180"},
+       "sequence":{"type":"string"}},
+       "required":["project"]})",
+     &Impl::see_contact_sheet},
     {"render.sequence", "core", false,
-     "Export a sequence to an H.264 + AAC .mp4 as a background job. Params: project, output, height?, bitrate?, "
-     "audio?. Returns job_id; follow it with jobs.get.",
+     "Export a sequence to an H.264 + AAC .mp4 as a background job. Returns job_id at once; follow it with jobs.get.",
+     R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},
+       "output":{"type":"string","description":"Absolute path of the .mp4 to write"},
+       "height":{"type":"integer","description":"Output height, default the canvas height"},
+       "bitrate":{"type":"integer"},"audio":{"type":"boolean"},
+       "overwrite":{"type":"boolean","description":"Default true"},"sequence":{"type":"string"}},
+       "required":["project","output"]})",
      &Impl::render_sequence},
-    {"jobs.get", "core", false, "State and progress of a job.", &Impl::jobs_get},
-    {"jobs.cancel", "core", false, "Stop a running job.", &Impl::jobs_cancel},
-    {"tools.list", "core", false, "The Tools this engine offers.", &Impl::tools_list},
-    {"daemon.hello", "daemon", false, "Protocol handshake.", &Impl::daemon_hello},
-    {"daemon.status", "daemon", false, "Open projects, uptime and settings.", &Impl::daemon_status},
-    {"daemon.shutdown", "daemon", true, "Save everything and stop the daemon.", &Impl::daemon_shutdown},
+    {"jobs.get", "core", false, "State and progress of a job.",
+     R"({"type":"object","properties":{"job_id":{"type":"string"}},"required":["job_id"]})", &Impl::jobs_get},
+    {"jobs.cancel", "core", false, "Stop a running job.",
+     R"({"type":"object","properties":{"job_id":{"type":"string"}},"required":["job_id"]})", &Impl::jobs_cancel},
+    {"tools.list", "core", false, "The Tools this engine offers, with their parameter schemas.", "",
+     &Impl::tools_list},
+    {"daemon.hello", "daemon", false, "Protocol handshake.", "", &Impl::daemon_hello},
+    {"daemon.status", "daemon", false, "Open projects, uptime and settings.", "", &Impl::daemon_status},
+    {"daemon.shutdown", "daemon", true, "Save everything and stop the daemon.", "", &Impl::daemon_shutdown},
     {"profile.get", "daemon", false, "Zone timings of every engine thread. reset: true zeroes them afterwards.",
-     &Impl::profile_get},
-    {"profile.reset", "daemon", false, "Zero the profiler statistics.", &Impl::profile_reset},
-    {"profile.set", "daemon", false, "Switch the profiler on or off at run time.", &Impl::profile_set},
+     R"({"type":"object","properties":{"reset":{"type":"boolean"}}})", &Impl::profile_get},
+    {"profile.reset", "daemon", false, "Zero the profiler statistics.", "", &Impl::profile_reset},
+    {"profile.set", "daemon", false, "Switch the profiler on or off at run time.",
+     R"({"type":"object","properties":{"enabled":{"type":"boolean"}},"required":["enabled"]})", &Impl::profile_set},
 };
 
 Result<json> Engine::Impl::tools_list(const json &) {
   json list = json::array();
   for (const Tool &tool : kTools)
-    list.push_back({{"name", tool.name}, {"group", tool.group}, {"mutating", tool.mutating},
-                    {"summary", tool.summary}});
+    list.push_back({{"name", tool.name},
+                    {"group", tool.group},
+                    {"mutating", tool.mutating},
+                    {"summary", tool.summary},
+                    {"params", *tool.params ? json::parse(tool.params) : json{{"type", "object"}}}});
   return json{{"tools", std::move(list)}};
 }
 

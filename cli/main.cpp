@@ -14,12 +14,15 @@
 #include <CLI/CLI.hpp>
 
 #include "atm/api/engine.hpp"
+#include "atm/api/mcp.hpp"
 #include "atm/api/transport.hpp"
 #include "atm/base/profiler.hpp"
 #include "atm/media/media.hpp"
 #include "atm/storage/file.hpp"
 
 #if defined(_WIN32)
+#include <fcntl.h>
+#include <io.h>
 #include <windows.h>
 #endif
 
@@ -114,6 +117,74 @@ bool wait_for_daemon(const std::string &endpoint, bool up, int timeout_ms) {
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
   }
   return false;
+}
+
+// `attome mcp --stdio`: one JSON-RPC message per line on stdin and stdout (MCP stdio transport); logs go to stderr.
+// Tools run in the daemon, started on demand, so an agent and the editor share one live project. With --daemon never
+// they run in this process instead.
+int serve_mcp(const Options &opt) {
+#if defined(_WIN32)
+  _setmode(_fileno(stdin), _O_BINARY); // UTF-8 bytes in and out, and "\n" without "\r"
+  _setmode(_fileno(stdout), _O_BINARY);
+#endif
+  std::unique_ptr<atm::api::Engine> local;
+  std::unique_ptr<atm::api::Stream> stream;
+  int next_id = 1;
+  const auto daemon_call = [&](const std::string &tool, const json &params) -> json {
+    for (int attempt = 0; attempt < 2; ++attempt) { // one retry: the daemon may have been restarted in between
+      if (!stream && !(stream = atm::api::connect(opt.endpoint))) {
+        if (!atm::api::spawn_daemon(opt.endpoint, "") || !wait_for_daemon(opt.endpoint, true, 5000))
+          break;
+        stream = atm::api::connect(opt.endpoint);
+        if (!stream)
+          break;
+      }
+      const json request = {{"jsonrpc", "2.0"}, {"id", next_id++}, {"method", tool}, {"params", params}};
+      std::string body;
+      atm::api::FrameReader reader(*stream);
+      if (atm::api::write_frame(*stream, request.dump()) && reader.read(body)) {
+        json response = json::parse(body, nullptr, false);
+        if (response.is_object() && response.contains("result"))
+          return {{"ok", true}, {"result", std::move(response["result"])}};
+        if (response.is_object() && response.contains("error"))
+          return {{"ok", false}, {"error", std::move(response["error"])}};
+      }
+      stream.reset();
+    }
+    return {{"ok", false},
+            {"error", {{"code", 0}, {"message", "The Attome daemon could not be reached."},
+                       {"data", {{"hint", "Check that attomed sits next to attome, or run: attome daemon start"}}}}}};
+  };
+  const auto local_call = [&](const std::string &tool, const json &params) -> json {
+    if (!local)
+      local = std::make_unique<atm::api::Engine>();
+    auto r = local->call(tool, params);
+    local->save_all();
+    if (r)
+      return {{"ok", true}, {"result", std::move(*r)}};
+    return {{"ok", false}, {"error", atm::error_to_json(r.error())}};
+  };
+  atm::api::McpServer server(opt.daemon == "never" ? atm::api::ToolCaller(local_call)
+                                                   : atm::api::ToolCaller(daemon_call));
+  std::fprintf(stderr, "attome %s: MCP server on stdio (%s)\n", atm::api::kEngineVersion,
+               opt.daemon == "never" ? "in-process engine" : opt.endpoint.c_str());
+  std::string line;
+  while (std::getline(std::cin, line)) {
+    if (!line.empty() && line.back() == '\r')
+      line.pop_back();
+    if (line.empty())
+      continue;
+    const json message = json::parse(line, nullptr, false);
+    const json response = message.is_discarded()
+                              ? json{{"jsonrpc", "2.0"}, {"id", nullptr},
+                                     {"error", {{"code", -32700}, {"message", "Parse error."}}}}
+                              : server.handle(message);
+    if (response.is_null())
+      continue;
+    std::cout << response.dump(-1, ' ', false, json::error_handler_t::replace) << '\n';
+    std::cout.flush();
+  }
+  return 0;
 }
 
 } // namespace
@@ -365,6 +436,11 @@ int main(int argc, char **argv) {
         std::this_thread::sleep_for(std::chrono::seconds(1));
     } while (watch && exit_status == 0);
   });
+
+  auto *cmd_mcp = app.add_subcommand("mcp", "Serve the Tools to an AI agent over MCP: attome mcp --stdio");
+  bool mcp_stdio = false;
+  cmd_mcp->add_flag("--stdio", mcp_stdio, "Speak MCP on stdin/stdout (the only transport so far)");
+  cmd_mcp->callback([&] { exit_status = serve_mcp(opt); });
 
   auto *cmd_daemon = app.add_subcommand("daemon", "Start, stop or query the daemon");
   cmd_daemon->require_subcommand(1);
