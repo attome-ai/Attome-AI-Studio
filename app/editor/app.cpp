@@ -450,7 +450,7 @@ void App::import_files(const std::vector<std::string> &paths) {
       media_paths_.push_back(path);
     if (!has_video)
       audio_only_.insert(path);
-    if (has_video && total_frames_ == 0 && !canvas_set) {
+    if (has_video && !info.value("image", false) && total_frames_ == 0 && !canvas_set) { // a logo is no canvas
       ops.push_back({{"op", "set_property"}, {"target", seq_id_}, {"path", "canvas.width"}, {"value", info.value("width", 1920)}});
       ops.push_back({{"op", "set_property"}, {"target", seq_id_}, {"path", "canvas.height"}, {"value", info.value("height", 1080)}});
       canvas_set = true;
@@ -693,7 +693,9 @@ void App::start_export(const std::string &path) {
 // ---- native dialogs ------------------------------------------------------------------------------------------
 
 void App::ask_import() {
-  static const SDL_DialogFileFilter filters[] = {{"Video and sound", "mp4;mov;m4v;mkv;avi;wmv;webm;mp3;wav;m4a;aac;wma;flac"}, {"All files", "*"}};
+  static const SDL_DialogFileFilter filters[] = {
+      {"Video, sound and pictures", "mp4;mov;m4v;mkv;avi;wmv;webm;mp3;wav;m4a;aac;wma;flac;png;jpg;jpeg;bmp;gif;tga"},
+      {"All files", "*"}};
   SDL_ShowOpenFileDialog(
       [](void *self, const char *const *files, int) {
         App *app = static_cast<App *>(self);
@@ -1367,9 +1369,17 @@ void App::draw_media() {
         const float x = p.x + cell * (0.15f + 0.7f * float(i) / 23.0f);
         dl->AddLine(ImVec2(x, p.y + thumb_h * 0.5f - h * 0.5f), ImVec2(x, p.y + thumb_h * 0.5f + h * 0.5f), hex(look::aud), 3.0f);
       }
-    } else if (tex != thumb_tex_.end() && tex->second)
-      dl->AddImageRounded(ImTextureID(reinterpret_cast<intptr_t>(tex->second)), p, ImVec2(p.x + cell, p.y + thumb_h),
+    } else if (tex != thumb_tex_.end() && tex->second) { // fitted inside the tile, keeping its shape
+      float tw = cell, th = thumb_h;
+      if (SDL_GetTextureSize(tex->second, &tw, &th) && tw > 0.0f && th > 0.0f) {
+        const float fit = std::min(cell / tw, thumb_h / th);
+        tw *= fit;
+        th *= fit;
+      }
+      const ImVec2 corner(p.x + (cell - tw) * 0.5f, p.y + (thumb_h - th) * 0.5f);
+      dl->AddImageRounded(ImTextureID(reinterpret_cast<intptr_t>(tex->second)), corner, ImVec2(corner.x + tw, corner.y + th),
                           ImVec2(0, 0), ImVec2(1, 1), IM_COL32_WHITE, 8.0f);
+    }
     if (hovered)
       dl->AddRect(p, ImVec2(p.x + cell, p.y + thumb_h), hex(look::accent), 8.0f, 0, 2.0f);
     dl->PushClipRect(ImVec2(p.x, p.y + thumb_h), ImVec2(p.x + cell, p.y + thumb_h + 24.0f), true);

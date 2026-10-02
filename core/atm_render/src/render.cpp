@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <optional>
 #include <utility>
 
 #include "atm/base/parallel.hpp"
@@ -129,8 +130,8 @@ int sample(const uint8_t *plane, int pitch, int w, int h, int channels, int k, f
   return (top * (256 - wy) + bottom * wy) >> 8;
 }
 
-// A turned picture: every output pixel looks up its picture point (stepping along the row), samples it bilinearly and
-// blends by `alpha` times the edge coverage.
+// A turned or transparent picture: every output pixel looks up its picture point (stepping along the row), samples it
+// bilinearly and blends by `alpha` times the edge coverage times the picture's own opacity, when it has one.
 void draw_rotated(uint8_t *out, int W, int H, const media::FrameView &v, const Placement &pl, int alpha) {
   int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
   if (!pl.box(W, H, x0, y0, x1, y1))
@@ -147,7 +148,12 @@ void draw_rotated(uint8_t *out, int W, int H, const media::FrameView &v, const P
         const float cover = pl.coverage(u, vv);
         if (cover <= 0.0f)
           continue;
-        const int a = int(float(alpha) * cover + 0.5f);
+        float opacity = cover;
+        if (v.alpha)
+          opacity *= float(sample(v.alpha, v.alpha_pitch, v.width, v.height, 1, 0, u - 0.5f, vv - 0.5f)) / 255.0f;
+        const int a = int(float(alpha) * opacity + 0.5f);
+        if (a <= 0)
+          continue;
         const int s = sample(v.y, v.y_pitch, v.width, v.height, 1, 0, u - 0.5f, vv - 0.5f);
         dst[x] = uint8_t((s * a + dst[x] * (256 - a)) >> 8);
       }
@@ -166,7 +172,12 @@ void draw_rotated(uint8_t *out, int W, int H, const media::FrameView &v, const P
         const float cover = pl.coverage(u, vv);
         if (cover <= 0.0f)
           continue;
-        const int a = int(float(alpha) * cover + 0.5f);
+        float opacity = cover;
+        if (v.alpha) // the opacity at the centre of the four pixels
+          opacity *= float(sample(v.alpha, v.alpha_pitch, v.width, v.height, 1, 0, u - 0.5f, vv - 0.5f)) / 255.0f;
+        const int a = int(float(alpha) * opacity + 0.5f);
+        if (a <= 0)
+          continue;
         for (int k = 0; k < 2; ++k) { // U then V
           const int s = sample(v.uv, v.uv_pitch, cw, ch, 2, k, u * 0.5f - 0.5f, vv * 0.5f - 0.5f);
           uint8_t &d = dst[x * 2 + k];
@@ -178,10 +189,10 @@ void draw_rotated(uint8_t *out, int W, int H, const media::FrameView &v, const P
 }
 
 // Draws the NV12 picture `v` into the NV12 canvas `out` as `pl` places it, blending with `alpha` (0..256). Bilinear
-// sampling; the part outside the canvas is cut off. Rows run in parallel. A turned picture goes to draw_rotated; an
-// upright one keeps this simpler path, with its crop cut at whole pixels.
+// sampling; the part outside the canvas is cut off. Rows run in parallel. A turned or transparent picture goes to
+// draw_rotated; an upright opaque one keeps this simpler path, with its crop cut at whole pixels.
 void draw_transformed(uint8_t *out, int W, int H, const media::FrameView &v, const Placement &pl, int alpha) {
-  if (pl.rotated) {
+  if (pl.rotated || v.alpha) {
     draw_rotated(out, W, H, v, pl, alpha);
     return;
   }
@@ -372,15 +383,17 @@ Result<Composition> compile(const json &project, std::string_view sequence_id) {
         const auto ref = clip.find("media_ref");
         const auto timing = clip.find("timing");
         const std::string type = ref == clip.end() ? "" : ref->value("type", "");
-        if (timing == clip.end() || !(type == "text" || type == "adjustment" || (type == "file" && ref->contains("path"))))
+        if (timing == clip.end() ||
+            !(type == "text" || type == "adjustment" || ((type == "file" || type == "image") && ref->contains("path"))))
           continue;
         ATM_TRY(Rational in, rational_field(*timing, "record_in", "0"));
         ATM_TRY(Rational duration, rational_field(*timing, "duration", "0"));
         ATM_TRY(Rational source_in, rational_field(*timing, "source_in", "0"));
         Layer l;
         l.clip_id = it.key();
-        if (type == "file")
+        if (type == "file" || type == "image")
           l.path = (*ref)["path"].get<std::string>();
+        l.is_image = type == "image";
         if (type == "text") {
           l.is_text = true;
           if (const auto content = clip.find("content"); content != clip.end() && content->is_object()) {
@@ -417,7 +430,7 @@ Result<Composition> compile(const json &project, std::string_view sequence_id) {
         const std::string stream = ref->value("stream", std::string());
         l.track = track_index;
         l.video = video && stream != "audio";
-        l.silent = stream == "video";
+        l.silent = stream == "video" || l.is_image; // a picture has no sound
         // The end is rounded, not the length: clips that touch in time then touch in frames too, even when a cut
         // falls between two frames (3.75 s at 30 fps), so no gap opens and a dissolve still finds its pair.
         ATM_TRY(int64_t start, to_frames(in, rate, Round::nearest_even));
@@ -715,24 +728,41 @@ void Renderer::draw(const Layer &l, int64_t frame, uint8_t *out, bool &cleared, 
   }
   if (failed_.count(l.clip_id))
     return;
-  auto it = readers_.find(l.clip_id);
-  if (it == readers_.end()) {
-    auto reader = media::VideoReader::open(l.path, width_, height_);
-    if (!reader) {
-      failed_[l.clip_id] = true;
-      if (warning_.empty())
-        warning_ = reader.error().message;
+  std::optional<media::FrameView> view;
+  if (l.is_image) { // read once, fitted to this renderer's output like a video frame
+    auto it = stills_.find(l.clip_id);
+    if (it == stills_.end()) {
+      auto still = media::read_still(l.path, width_, height_);
+      if (!still) {
+        failed_[l.clip_id] = true;
+        if (warning_.empty())
+          warning_ = still.error().message;
+        return;
+      }
+      it = stills_.emplace(l.clip_id, std::move(*still)).first;
+    }
+    view = it->second.view();
+  } else {
+    auto it = readers_.find(l.clip_id);
+    if (it == readers_.end()) {
+      auto reader = media::VideoReader::open(l.path, width_, height_);
+      if (!reader) {
+        failed_[l.clip_id] = true;
+        if (warning_.empty())
+          warning_ = reader.error().message;
+        return;
+      }
+      it = readers_.emplace(l.clip_id, std::move(*reader)).first;
+    }
+    used.push_back(&l.clip_id);
+    const int64_t source_time = l.source_in_hns + comp_.frame_hns(frame - l.start_frame);
+    auto decoded = it->second->frame_at(std::max<int64_t>(0, source_time));
+    if (!decoded) {
+      if (warning_.empty() && decoded.error().rule != "M_NO_FRAME")
+        warning_ = decoded.error().message;
       return;
     }
-    it = readers_.emplace(l.clip_id, std::move(*reader)).first;
-  }
-  used.push_back(&l.clip_id);
-  const int64_t source_time = l.source_in_hns + comp_.frame_hns(frame - l.start_frame);
-  auto view = it->second->frame_at(std::max<int64_t>(0, source_time));
-  if (!view) {
-    if (warning_.empty() && view.error().rule != "M_NO_FRAME")
-      warning_ = view.error().message;
-    return;
+    view = *decoded;
   }
   const int w = std::min(view->width, width_), h = std::min(view->height, height_);
   const int alpha = int(p.opacity * 256.0f + 0.5f);
@@ -740,7 +770,7 @@ void Renderer::draw(const Layer &l, int64_t frame, uint8_t *out, bool &cleared, 
   const Transform &xf = p.xf;
   const Placement pl(xf, width_, height_, float(view->width), float(view->height));
   const bool plain = xf.scale_x == 1.0f && xf.scale_y == 1.0f && xf.pos_x == 0.5f && xf.pos_y == 0.5f &&
-                     xf.anchor_x == 0.5f && xf.anchor_y == 0.5f && !pl.rotated && !xf.cropped();
+                     xf.anchor_x == 0.5f && xf.anchor_y == 0.5f && !pl.rotated && !xf.cropped() && !view->alpha;
   const bool covers = plain ? (w >= width_ && h >= height_) : false;
   if (!cleared && (alpha < 256 || !covers))
     media::fill_black(out, width_, height_);

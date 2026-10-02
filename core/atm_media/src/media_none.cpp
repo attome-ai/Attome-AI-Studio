@@ -2,6 +2,7 @@
 // nor FFmpeg) and text without FreeType.
 
 #include "atm/media/media.hpp"
+#include "backend.hpp"
 
 #if !defined(_WIN32)
 namespace atm::media {
@@ -18,7 +19,7 @@ struct Encoder::Impl {};
 VideoReader::~VideoReader() = default;
 Encoder::~Encoder() = default;
 
-Result<MediaInfo> probe(const std::string &) { return unsupported("Media decode"); }
+Result<MediaInfo> probe_av(const std::string &) { return unsupported("Media decode"); }
 Result<std::unique_ptr<VideoReader>> VideoReader::open(const std::string &, int, int) { return unsupported("Media decode"); }
 Result<FrameView> VideoReader::frame_at(int64_t) { return unsupported("Media decode"); }
 Result<std::vector<float>> read_audio(const std::string &, int64_t, int64_t) { return unsupported("Media decode"); }

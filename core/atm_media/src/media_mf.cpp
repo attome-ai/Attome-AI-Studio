@@ -2,6 +2,7 @@
 // Media Foundation backend.
 
 #include "atm/media/media.hpp"
+#include "backend.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -132,7 +133,7 @@ void tag_bt709(IMFMediaType *type) {
 
 } // namespace
 
-Result<MediaInfo> probe(const std::string &path) {
+Result<MediaInfo> probe_av(const std::string &path) {
   ATM_PROFILE_SCOPE("media.open");
   ATM_TRY(ComPtr<IMFSourceReader> reader, open_reader(path, false));
   MediaInfo info;

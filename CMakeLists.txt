@@ -97,9 +97,10 @@ else()
   set(ATM_IMAGE_BACKEND_RESOLVED ${ATM_IMAGE_BACKEND})
 endif()
 message(STATUS "Attome image backend: ${ATM_IMAGE_BACKEND_RESOLVED}")
+# stb_image reads still pictures on every system; stb_image_write is the portable still writer.
+find_package(Stb REQUIRED)
+target_include_directories(atm_media PRIVATE ${Stb_INCLUDE_DIR})
 if(ATM_IMAGE_BACKEND_RESOLVED STREQUAL "stb")
-  find_package(Stb REQUIRED)
-  target_include_directories(atm_media PRIVATE ${Stb_INCLUDE_DIR})
   target_compile_definitions(atm_media PUBLIC ATM_IMAGE_STB=1)
 endif()
 # The bundled fonts (SIL OFL) sit in fonts/ next to the programs.

@@ -700,7 +700,8 @@ struct Engine::Impl {
         {"timeline",
          "timeline.edit is the easy way to edit: {\"project\":…,\"ops\":[…]} applies all ops as one step. Give an op "
          "\"id\":\"$new:name\" and later ops use that name. Times: \"2.5s\", \"75@30\", timecode.\n"
-         "- add_clip {asset (from media.import) or path, track? (ID, $new name or \"new\"; default the bottom video "
+         "- add_clip {asset (from media.import) or path (a video, a sound file, or a PNG / JPEG picture, which lasts 5 s "
+         "unless given a duration and keeps its transparency), track? (ID, $new name or \"new\"; default the bottom video "
          "track, or an audio track for sound files), at? (default: after the last clip of the track), source_in? "
          "(default 0), duration? (default the rest of the file), with_audio? (false: picture only), volume?, gain_db?, "
          "position?, scale?, rotation?, anchor?, crop?, opacity?, fade_in?, fade_out?, audio_track?}. A video with sound becomes two LINKED "
@@ -859,6 +860,9 @@ struct Engine::Impl {
   Result<json> media_probe(const json &params) {
     ATM_TRY(const std::string *path, string_param(params, "path"));
     ATM_TRY(media::MediaInfo info, media::probe(*path));
+    if (info.is_image) // a still: any length on the timeline
+      return json{{"path", *path},           {"has_video", true},      {"has_audio", false},
+                  {"image", true},           {"width", info.width},    {"height", info.height}};
     ATM_TRY(Rational duration, Rational::make(info.duration_hns, media::kHnsPerSecond));
     json out = {{"path", *path},           {"has_video", info.has_video}, {"has_audio", info.has_audio},
                 {"duration", duration.to_string()}, {"seconds", duration.to_seconds_lossy()}};
@@ -1333,7 +1337,9 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
     {"time.parse", "project", false, "Convert any accepted time spelling to its canonical forms.",
      R"({"type":"object","properties":{"value":{"type":["string","object"],"description":"\"12.5s\", \"375@30\" (frames@rate), SMPTE \"00:00:12:15\" or {num,den} seconds"},"rate":{"type":"string"}},"required":["value"]})",
      &Impl::time_parse},
-    {"media.probe", "core", false, "Size, frame rate, duration and audio format of a media file.",
+    {"media.probe", "core", false,
+     "Size, frame rate, duration and audio format of a media file. Still pictures (PNG, JPEG, BMP, GIF, TGA) report "
+     "image: true and their size, and have no duration.",
      R"({"type":"object","properties":{"path":{"type":"string","description":"Absolute path of the file"}},
        "required":["path"]})",
      &Impl::media_probe},

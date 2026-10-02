@@ -112,7 +112,8 @@ struct Span {
   const std::string *id;
 };
 
-// Media on either side of a clip's used range, or nullopt when unlimited (text) or unknown (no media_ref.duration).
+// Media on either side of a clip's used range, or nullopt when unlimited (text, still pictures) or unknown (no
+// media_ref.duration).
 struct Handles {
   std::optional<Rational> before, after;
 };
@@ -120,7 +121,7 @@ struct Handles {
 Handles handles_of(const json &clip, const Rational &duration) {
   Handles h;
   const json ref = clip.value("media_ref", json::object());
-  if (ref.value("type", "") == "text")
+  if (const std::string type = ref.value("type", ""); type == "text" || type == "image")
     return h;
   const json timing = clip.value("timing", json::object());
   const auto source_in = Rational::parse(timing.value("source_in", std::string("0")));

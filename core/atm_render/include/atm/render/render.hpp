@@ -60,6 +60,8 @@ struct Layer {
   // Text clips (media_ref.type "text"): no file, the picture is the text. `text_size` is the font height as a
   // fraction of the canvas height; the colour is 0xRRGGBB.
   bool is_text = false, text_bold = false;
+  // Picture clips (media_ref.type "image"): a still file, the same on every frame, with its transparency.
+  bool is_image = false;
   std::string text;
   float text_size = 0.08f;
   uint32_t text_color = 0xFFFFFF;
@@ -127,6 +129,7 @@ private:
     media::TextBitmap bitmap;
   };
   std::unordered_map<std::string, TextEntry> text_; // by clip ID
+  std::unordered_map<std::string, media::Still> stills_; // picture clips, read once, by clip ID
   std::vector<uint8_t> mix_;                          // the incoming clip of a dissolve, drawn over the same background
   std::vector<uint8_t> adjust_, scratch_;             // an adjustment layer's copy of the picture below it
   std::vector<uint8_t> over_black_, over_white_, cover_; // a clip with effects, drawn on its own (see draw_isolated)

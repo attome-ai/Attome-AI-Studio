@@ -873,4 +873,194 @@ TEST_CASE("media: stills are JPEG files, also under a non-ASCII path", "[media]"
   std::error_code ec;
   fs::remove_all(dir, ec);
 }
+
+namespace {
+
+// A minimal PNG writer for the tests: 8-bit RGBA, stored (uncompressed) deflate blocks.
+void write_png(const std::string &path, int w, int h, const std::vector<uint8_t> &rgba) {
+  const auto crc32 = [](const uint8_t *data, size_t n, uint32_t crc = 0xFFFFFFFFu) {
+    for (size_t i = 0; i < n; ++i) {
+      crc ^= data[i];
+      for (int k = 0; k < 8; ++k)
+        crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1u)));
+    }
+    return crc;
+  };
+  std::vector<uint8_t> raw; // each row starts with filter type 0
+  for (int y = 0; y < h; ++y) {
+    raw.push_back(0);
+    raw.insert(raw.end(), rgba.begin() + std::ptrdiff_t(y) * w * 4, rgba.begin() + std::ptrdiff_t(y + 1) * w * 4);
+  }
+  std::vector<uint8_t> z = {0x78, 0x01};
+  for (size_t at = 0; at < raw.size();) {
+    const size_t n = std::min<size_t>(65535, raw.size() - at);
+    z.push_back(at + n == raw.size() ? 1 : 0);
+    z.push_back(uint8_t(n));
+    z.push_back(uint8_t(n >> 8));
+    z.push_back(uint8_t(~n));
+    z.push_back(uint8_t(~n >> 8));
+    z.insert(z.end(), raw.begin() + std::ptrdiff_t(at), raw.begin() + std::ptrdiff_t(at + n));
+    at += n;
+  }
+  uint32_t a = 1, b = 0;
+  for (uint8_t c : raw) {
+    a = (a + c) % 65521;
+    b = (b + a) % 65521;
+  }
+  for (int s = 24; s >= 0; s -= 8)
+    z.push_back(uint8_t(((b << 16) | a) >> s));
+  std::ofstream out(path, std::ios::binary);
+  const auto u32 = [&](uint32_t v) {
+    for (int s = 24; s >= 0; s -= 8)
+      out.put(char(v >> s));
+  };
+  const auto chunk = [&](const char *type, const std::vector<uint8_t> &data) {
+    u32(uint32_t(data.size()));
+    std::vector<uint8_t> body(type, type + 4);
+    body.insert(body.end(), data.begin(), data.end());
+    out.write(reinterpret_cast<const char *>(body.data()), std::streamsize(body.size()));
+    u32(~crc32(body.data(), body.size()));
+  };
+  out.write("\x89PNG\r\n\x1a\n", 8);
+  std::vector<uint8_t> ihdr;
+  for (uint32_t v : {uint32_t(w), uint32_t(h)})
+    for (int s = 24; s >= 0; s -= 8)
+      ihdr.push_back(uint8_t(v >> s));
+  ihdr.insert(ihdr.end(), {8, 6, 0, 0, 0}); // 8-bit RGBA
+  chunk("IHDR", ihdr);
+  chunk("IDAT", z);
+  chunk("IEND", {});
+}
+
+} // namespace
+
+TEST_CASE("media: still pictures keep their transparency, and picture clips draw over video", "[media]") {
+  const fs::path dir = fs::temp_directory_path() / atm::new_id("attome-still");
+  fs::create_directories(dir);
+  // A 64 x 64 logo: a green square of 32 x 32 in the middle, transparent around it.
+  std::vector<uint8_t> logo(64 * 64 * 4, 0);
+  for (int y = 16; y < 48; ++y)
+    for (int x = 16; x < 48; ++x) {
+      uint8_t *p = logo.data() + (size_t(y) * 64 + size_t(x)) * 4;
+      p[1] = 255;
+      p[3] = 255;
+    }
+  const std::string png = (dir / "logo.png").string();
+  write_png(png, 64, 64, logo);
+
+  const auto info = media::probe(png);
+  REQUIRE(info);
+  CHECK(info->is_image);
+  CHECK(info->has_video);
+  CHECK_FALSE(info->has_audio);
+  CHECK(info->width == 64);
+  CHECK(info->height == 64);
+  CHECK(media::is_still("C:/a/B.JPeG"));
+  CHECK_FALSE(media::is_still("clip.mp4"));
+
+  { // fitted into a box, the transparency kept: clear corners, a solid middle, green
+    const auto still = media::read_still(png, 128, 128);
+    REQUIRE(still);
+    CHECK(still->width == 128);
+    CHECK(still->height == 128);
+    REQUIRE(still->alpha.size() == 128u * 128u);
+    CHECK(still->alpha[0] == 0);
+    CHECK(still->alpha[64 * 128 + 64] == 255);
+    std::vector<uint8_t> bgrx(128 * 128 * 4);
+    media::nv12_to_bgrx(still->nv12.data(), 128, 128, bgrx.data());
+    const uint8_t *mid = bgrx.data() + (64 * 128 + 64) * 4;
+    CHECK(mid[1] > 200);
+    CHECK(mid[2] < 60);
+    // The colour under the clear border was filled from the square, so its edge does not darken: the first clear
+    // pixel outside the square (scaled 2x: x = 31) is green, not black.
+    const uint8_t *edge = bgrx.data() + (64 * 128 + 31) * 4;
+    CHECK(edge[1] > 150);
+  }
+  { // a JPEG has no transparency
+    std::vector<uint8_t> grey(32 * 32 * 4, 128);
+    const std::string jpg = (dir / "grey.jpg").string();
+    REQUIRE(media::write_jpeg(jpg, grey.data(), 32, 32));
+    const auto still = media::read_still(jpg, 0, 0);
+    REQUIRE(still);
+    CHECK(still->width == 32);
+    CHECK(still->alpha.empty());
+  }
+  { // not a picture
+    const std::string bad = (dir / "bad.png").string();
+    std::ofstream(bad) << "not a picture";
+    const auto r = media::read_still(bad, 0, 0);
+    REQUIRE_FALSE(r);
+    CHECK(r.error().rule == "M_IMAGE_READ");
+  }
+
+  // Drawn over a video: the logo shows green in its middle and the video through its clear border.
+  const std::string clip = (dir / "clip.mp4").string();
+  write_clip(clip, 320, 240, 30); // red top half, blue bottom half
+  const auto render_over = [&](const atm::render::Transform &xf) {
+    atm::render::Composition comp;
+    comp.width = 320;
+    comp.height = 240;
+    comp.frames = 1;
+    atm::render::Layer video;
+    video.clip_id = "clp_video";
+    video.path = clip;
+    video.frames = 1;
+    atm::render::Layer pic;
+    pic.clip_id = "clp_logo";
+    pic.path = png;
+    pic.is_image = true;
+    pic.frames = 1;
+    pic.track = 1;
+    pic.xf = xf;
+    comp.layers = {video, pic};
+    atm::render::Renderer renderer(comp, 320, 240);
+    std::vector<uint8_t> nv12(media::nv12_size(320, 240)), rgb(320 * 240 * 4);
+    REQUIRE(renderer.render(0, nv12.data()));
+    media::nv12_to_bgrx(nv12.data(), 320, 240, rgb.data());
+    return rgb;
+  };
+  const auto at = [](const std::vector<uint8_t> &rgb, int x, int y) { return rgb.data() + (size_t(y) * 320 + size_t(x)) * 4; };
+  { // fitted, the logo fills the canvas height: 240 x 240 at x 40..280; its square is x 100..220, y 60..180
+    const auto rgb = render_over({});
+    CHECK(at(rgb, 160, 120)[1] > 200); // green square
+    CHECK(at(rgb, 160, 120)[2] < 60);
+    CHECK(at(rgb, 60, 20)[2] > 180);   // the clear border shows the red video
+    CHECK(at(rgb, 60, 220)[0] > 180);  // and the blue
+    CHECK(at(rgb, 10, 60)[2] > 180);   // beside the logo, the video too
+  }
+  { // small in the top-right corner, turned: still green at its centre, the video elsewhere
+    atm::render::Transform xf;
+    xf.scale_x = xf.scale_y = 0.25f;
+    xf.pos_x = 0.85f;
+    xf.pos_y = 0.2f;
+    xf.rotation = 45.0f;
+    const auto rgb = render_over(xf);
+    CHECK(at(rgb, 272, 48)[1] > 200);
+    CHECK(at(rgb, 160, 200)[0] > 180); // elsewhere the blue video, untouched
+    CHECK(at(rgb, 160, 200)[1] < 90);
+  }
+
+  // Through the API: media.probe and timeline.edit make a 5 s picture clip with no sound, and it renders.
+  atm::api::Engine engine;
+  const json probed = ok(engine, "media.probe", {{"path", png}});
+  CHECK(probed.value("image", false));
+  CHECK_FALSE(probed.contains("duration"));
+  const std::string project = (dir / "P.attome").string();
+  ok(engine, "project.create", {{"path", project}, {"canvas", {{"width", 320}, {"height", 240}}}});
+  const json edit = ok(engine, "timeline.edit",
+                       {{"project", project},
+                        {"ops", json::array({{{"op", "add_clip"}, {"path", clip}, {"with_audio", false}},
+                                             {{"op", "add_clip"}, {"id", "$new:logo"}, {"path", png}, {"track", "new"},
+                                              {"at", "0s"}, {"scale", {0.5, 0.5}}}})}});
+  const std::string logo_id = edit["id_map"]["$new:logo"];
+  const json logo_clip = ok(engine, "project.get", {{"project", project}, {"id", logo_id}})["object"];
+  CHECK(logo_clip["media_ref"]["type"] == "image");
+  CHECK(logo_clip["timing"]["duration"] == "5");
+  CHECK_FALSE(logo_clip["media_ref"].contains("stream"));
+  const json frames = ok(engine, "see.frames", {{"project", project}, {"times", json::array({"0.5s"})}});
+  CHECK(frames.dump().find("warning") == std::string::npos);
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}
+
 #endif

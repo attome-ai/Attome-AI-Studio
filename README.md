@@ -29,6 +29,7 @@ What exists today:
 - the same export for scripts and agents: `attome render Demo.attome -o out.mp4`
 - text clips (titles, lower thirds, captions) with a size, colour and position, with Arabic and other right-to-left text shaped correctly in the preview and the export (DirectWrite on Windows; FreeType, HarfBuzz and SheenBidi with the bundled Noto fonts elsewhere)
 - dissolves between clips, with the sound cross-faded at equal power; a dissolve uses media beyond the cut, and an edit that leaves too little is refused with the largest length that fits
+- picture clips from PNG, JPEG, BMP, GIF and TGA files, with their transparency (a logo over the video), 5 s long unless given a length
 - rotation around an anchor point and cropping of each side, for clips and titles (a quarter turn stands a sideways phone video up)
 - keyframes on opacity, position, scale, rotation and anchor (linear, hold and easing presets); the Inspector's Fade card fades a clip in and out, and the timeline draws the opacity curve on the clip
 - sound: music and other sound files on audio tracks, clip gain in dB, pan and fades (equal power or linear), track volume and pan, and mute; the Inspector's Audio card sets them

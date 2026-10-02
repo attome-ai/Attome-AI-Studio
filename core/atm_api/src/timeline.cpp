@@ -291,14 +291,18 @@ private:
       return fail("E_PARAM", "add_clip needs \"asset\" (from media.import) or \"path\".");
     }
     const bool has_video = media.value("has_video", false);
+    const bool image = media.value("image", false); // a still picture: no end, 5 s unless told otherwise
     const std::string kind = has_video ? "video" : "audio";
-    const auto media_duration = Rational::parse(media.value("duration", std::string("0")));
+    std::optional<Rational> media_duration; // none for a still: it has no end
+    if (!image)
+      if (auto d = Rational::parse(media.value("duration", std::string("0"))))
+        media_duration = *d;
     ATM_TRY(Rational source_in, time_or("source_in", Rational()));
     if (source_in.num() < 0)
       return fail("E_PARAM", "\"source_in\" cannot be negative.");
     const Rational rest = media_duration ? minus(*media_duration, source_in) : Rational();
     ATM_TRY(auto dur, time("duration"));
-    const Rational duration = dur ? *dur : rest;
+    const Rational duration = dur ? *dur : image ? *Rational::make(5, 1) : rest;
     if (duration.num() <= 0)
       return fail("E_MEDIA_RANGE", "The clip would be empty: the file has " + seconds_text(rest) + " s after source_in.",
                   "Use a smaller source_in or give a positive duration.");
@@ -321,8 +325,9 @@ private:
     const Rational start = at ? *at : (track(track_id) ? track_end(track_id) : Rational());
 
     const std::string path = media.value("path", std::string());
-    json ref = {{"type", "file"}, {"path", path}, {"duration", media.value("duration", std::string("0"))},
-                {"has_audio", media.value("has_audio", false)}};
+    json ref = image ? json{{"type", "image"}, {"path", path}}
+                     : json{{"type", "file"}, {"path", path}, {"duration", media.value("duration", std::string("0"))},
+                            {"has_audio", media.value("has_audio", false)}};
     if (!asset.empty())
       ref["asset"] = asset;
     if (has_video)
@@ -335,7 +340,7 @@ private:
     // sound can be cut, faded and mixed on its own while edits keep the two together. with_audio: false keeps only
     // the picture.
     const bool sound = has_video && media.value("has_audio", false) && op_.value("with_audio", true);
-    if (has_video)
+    if (has_video && !image)
       ref["stream"] = "video";
     json sound_ref = ref;
     sound_ref["stream"] = "audio";

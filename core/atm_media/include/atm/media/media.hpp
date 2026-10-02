@@ -27,8 +27,11 @@ struct MediaInfo {
   int64_t rate_num = 0, rate_den = 1;
   int64_t duration_hns = 0;
   int audio_rate = 0, audio_channels = 0;
+  bool is_image = false; // a still picture (PNG, JPEG, ...): no duration, no frame rate
 };
 
+// What a file holds. Still pictures are recognised by their extension (is_still) and read with stb_image on every
+// system; everything else goes to the media backend.
 Result<MediaInfo> probe(const std::string &path);
 
 // One decoded NV12 picture. Valid until the next call on the reader that returned it.
@@ -36,6 +39,8 @@ struct FrameView {
   const uint8_t *y = nullptr, *uv = nullptr;
   int y_pitch = 0, uv_pitch = 0;
   int width = 0, height = 0; // even
+  const uint8_t *alpha = nullptr; // straight (not premultiplied) opacity per pixel, or null when fully opaque
+  int alpha_pitch = 0;
 };
 
 // A packed NV12 picture: Y rows of `width` bytes, then height / 2 UV rows of `width` bytes.
@@ -58,6 +63,18 @@ private:
   VideoReader() = default;
   std::unique_ptr<Impl> impl_;
 };
+
+// A still picture (PNG, JPEG, BMP, GIF's first frame, TGA) fitted inside box_width x box_height like VideoReader
+// frames (0 = native size). Transparency is kept as an alpha plane; colours under fully transparent pixels are filled
+// from their neighbours, so scaling the picture up leaves no dark fringe.
+struct Still {
+  int width = 0, height = 0;  // even
+  std::vector<uint8_t> nv12;  // packed
+  std::vector<uint8_t> alpha; // width * height, empty when the picture is opaque
+  FrameView view() const;
+};
+bool is_still(const std::string &path); // by extension
+Result<Still> read_still(const std::string &path, int box_width, int box_height);
 
 // Audio of [start, start + duration) as 48 kHz stereo float. Empty when the file has no audio.
 Result<std::vector<float>> read_audio(const std::string &path, int64_t start_hns, int64_t duration_hns);

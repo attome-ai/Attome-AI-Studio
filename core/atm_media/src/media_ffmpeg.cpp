@@ -4,6 +4,7 @@
 // the first encoder that opens (hardware first, then Cisco's OpenH264).
 
 #include "atm/media/media.hpp"
+#include "backend.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -118,7 +119,7 @@ int64_t to_hns(int64_t ts, const AVStream *s, const AVFormatContext *in) {
 
 } // namespace
 
-Result<MediaInfo> probe(const std::string &path) {
+Result<MediaInfo> probe_av(const std::string &path) {
   ATM_PROFILE_SCOPE("media.open");
   ATM_TRY(Input in, open_input(path));
   MediaInfo info;
