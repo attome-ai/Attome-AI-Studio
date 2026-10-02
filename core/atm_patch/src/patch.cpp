@@ -320,17 +320,17 @@ void check_audio(const json &clip, const std::string &clip_id, const Rational &d
                                "Keep fade_in + fade_out at most the clip's duration."));
 }
 
-// Effects (ADR-004): so far only on adjustment layers, and only the Gaussian blur.
-void check_effects(const json &clip, const std::string &clip_id, json &problems) {
+// Effects (ADR-004): on picture clips (the clip alone) and on adjustment layers (everything below). Only the Gaussian
+// blur so far.
+void check_effects(const json &clip, const std::string &clip_id, bool audio_track, json &problems) {
   const auto fx = clip.find("effects");
   if (fx == clip.end() || (fx->is_object() && fx->empty()))
     return;
-  const bool adjustment = clip.value("media_ref", json::object()).value("type", "") == "adjustment";
-  if (!adjustment || !fx->is_object()) {
+  if (audio_track || !fx->is_object()) {
     problems.push_back(problem("EFFECT_UNSUPPORTED", clip_id + "/effects", clip_id,
-                               "Clip " + clip_id + " has effects; so far only adjustment layers can.",
-                               "Put an adjustment layer (media_ref {\"type\": \"adjustment\"}) on a track above the "
-                               "clip, with the effect on it (guide.get topic \"effects\")."));
+                               audio_track ? "Clip " + clip_id + " is on an audio track; picture effects do not apply to sound."
+                                           : "effects of clip " + clip_id + " must be a map of effect objects.",
+                               "Put picture effects on clips of video tracks (guide.get topic \"effects\")."));
     return;
   }
   for (auto it = fx->begin(); it != fx->end() && problems.size() < kMaxProblems; ++it) {
@@ -368,7 +368,14 @@ void check_track(const doc::Document &doc, const std::string &track_id, json &pr
   for (auto it = clips->begin(); it != clips->end() && problems.size() < kMaxProblems; ++it) {
     const std::string &id = it.key();
     check_keyframes(*it, id, problems);
-    check_effects(*it, id, problems);
+    if (const auto mref = it->find("media_ref"); mref != it->end() && mref->is_object() && mref->contains("stream")) {
+      const std::string stream = mref->value("stream", std::string());
+      if (stream != "video" && stream != "audio")
+        problems.push_back(problem("MEDIA_STREAM", id + "/media_ref/stream", id,
+                                   "media_ref.stream of clip " + id + " is \"" + stream + "\".",
+                                   "Use \"video\" (picture only) or \"audio\" (sound only), or leave it out for both."));
+    }
+    check_effects(*it, id, ref->node->value("kind", "video") == "audio", problems);
     const auto timing = it->find("timing");
     const json *in = nullptr, *dur = nullptr;
     if (timing != it->end() && timing->is_object()) {

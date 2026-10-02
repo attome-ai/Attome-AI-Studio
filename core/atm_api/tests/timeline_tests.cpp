@@ -7,6 +7,7 @@
 #include "atm/api/engine.hpp"
 #include "atm/base/id.hpp"
 #include "atm/media/media.hpp"
+#include "atm/render/render.hpp"
 
 using atm::api::Engine;
 using atm::api::json;
@@ -84,6 +85,21 @@ TEST_CASE("timeline.edit: bad ops are refused with the op's index and a hint", "
   CHECK(f.tracks().empty()); // nothing was applied
 }
 
+TEST_CASE("timeline.edit: an effect on one clip, then disabled and removed", "[timeline]") {
+  Fixture f;
+  const json r = f.ok(json::array({{{"op", "add_text"}, {"id", "$new:t"}, {"text", "Soft"}},
+                                   {{"op", "add_effect"}, {"id", "$new:fx"}, {"target", "$new:t"}, {"radius", 0.04}}}));
+  const std::string fx = r["id_map"]["$new:fx"];
+  CHECK(fx.rfind("fx_", 0) == 0);
+  CHECK(f.get(fx)["params"]["radius"] == 0.04);
+  f.ok(json::array({{{"op", "set_effect_enabled"}, {"effect", fx}, {"enabled", false}}}));
+  CHECK(f.get(fx)["enabled"] == false);
+  f.ok(json::array({{{"op", "remove_effect"}, {"effect", fx}}}));
+  CHECK_FALSE(f.engine.call("project.get", {{"project", f.project}, {"id", fx}}));
+  CHECK(f.fail_rule(json::array({{{"op", "add_effect"}, {"target", r["id_map"]["$new:t"]}, {"type", "glow"}}})) ==
+        "EFFECT_UNSUPPORTED");
+}
+
 #if defined(_WIN32) // media files need the media backend
 namespace {
 
@@ -146,7 +162,8 @@ TEST_CASE("timeline.edit + media.import: clips, dissolves, music and edits by na
   CHECK(r["duration"]["rational"] == "4");
   const json clip_b = f.get(cb);
   CHECK(clip_b["timing"]["record_in"] == "2"); // appended after a
-  CHECK(clip_b["volume"] == 0.0);
+  CHECK(clip_b["media_ref"]["stream"] == "video"); // with_audio: false keeps only the picture
+  CHECK_FALSE(clip_b.contains("link_group"));
   const json d = f.get(r["id_map"]["$new:d"]);
   CHECK(d["in_offset"] == "1/2");
   CHECK(d["out_offset"] == "1/2");
@@ -227,5 +244,86 @@ TEST_CASE("timeline.edit: slip, roll and slide change timing the way editors exp
   CHECK(too_far.error().message.find("0.2") != std::string::npos);   // "0.234 s past the end", not "117/500 s"
   CHECK(too_far.error().message.find('/') == std::string::npos);
   CHECK(too_far.error().hint.find('/') == std::string::npos);
+}
+TEST_CASE("timeline.edit: a video with sound becomes linked picture and sound clips that edits keep together",
+          "[timeline][media]") {
+  Fixture f;
+  const std::string file = (f.dir / "v.mp4").string();
+  write_video(file, 6);
+  const auto add = [&](const char *id) {
+    return json{{"op", "add_clip"}, {"id", id}, {"path", file}, {"source_in", "1s"}, {"duration", "2s"}};
+  };
+  const json r = f.ok(json::array({add("$new:a"), add("$new:b")}));
+  const std::string a = r["id_map"]["$new:a"], b = r["id_map"]["$new:b"];
+  const std::string sa = r["id_map"]["$new:a.audio"], sb = r["id_map"]["$new:b.audio"];
+  const json t = f.tracks();
+  REQUIRE(t.size() == 2);
+  CHECK(t[0]["kind"] == "video");
+  CHECK(t[1]["kind"] == "audio");
+  CHECK(t[1]["clips"] == 2);
+  CHECK(f.get(a)["media_ref"]["stream"] == "video");
+  CHECK(f.get(sa)["media_ref"]["stream"] == "audio");
+  CHECK(f.get(a)["link_group"] == f.get(sa)["link_group"]);
+  CHECK(f.get(a)["link_group"] != f.get(b)["link_group"]);
+  const auto in = [&](const std::string &id) { return f.get(id)["timing"]["record_in"].get<std::string>(); };
+  const auto dur = [&](const std::string &id) { return f.get(id)["timing"]["duration"].get<std::string>(); };
+  const auto src = [&](const std::string &id) { return f.get(id)["timing"]["source_in"].get<std::string>(); };
+
+  // The sound plays once: from the sound clip, not from the picture clip as well.
+  {
+    const json doc = f.engine.call("project.get", {{"project", f.project}, {"id", f.engine.call("project.inspect", {{"project", f.project}})->at("data")["id"]}})->at("object");
+    auto comp = atm::render::compile(doc);
+    REQUIRE(comp);
+    int audible = 0, drawn = 0;
+    for (const auto &l : comp->layers) {
+      audible += l.silent ? 0 : 1;
+      drawn += l.video ? 1 : 0;
+    }
+    CHECK(audible == 2); // the two sound clips
+    CHECK(drawn == 2);   // the two picture clips
+  }
+
+  // A dissolve between the pictures also cross-fades their sound.
+  const json d = f.ok(json::array({{{"op", "add_transition"}, {"id", "$new:d"}, {"between", {a, b}}, {"duration", "1s"}}}));
+  CHECK(d["id_map"].contains("$new:d.audio0"));
+  CHECK(f.get(d["id_map"]["$new:d.audio0"])["from"] == sa);
+
+  // slip, trim, roll, slide, move: the sound follows the picture.
+  f.ok(json::array({{{"op", "slip"}, {"clip", b}, {"delta", "0.25s"}}}));
+  CHECK(src(sb) == "5/4");
+  f.ok(json::array({{{"op", "roll"}, {"between", {a, b}}, {"delta", "0.5s"}}}));
+  CHECK(dur(a) == "5/2");
+  CHECK(dur(sa) == "5/2");
+  CHECK(in(sb) == "5/2");
+  f.ok(json::array({{{"op", "trim"}, {"clip", b}, {"edge", "out"}, {"delta", "-0.5s"}}}));
+  CHECK(dur(sb) == "1");
+  f.ok(json::array({{{"op", "move"}, {"clip", b}, {"to", "4s"}}}));
+  CHECK(in(sb) == "4");
+
+  // "unlink": true edits one clip alone: an L cut, the sound of a starting before its picture ends... here, moved.
+  f.ok(json::array({{{"op", "move"}, {"clip", sa}, {"to", "0.5s"}, {"unlink", true}}}));
+  CHECK(in(sa) == "1/2");
+  CHECK(in(a) == "0");
+
+  // split cuts both halves and links the right halves to each other, not to the left.
+  const json sp = f.ok(json::array({{{"op", "split"}, {"id", "$new:r"}, {"clip", b}, {"at", "4.5s"}}}));
+  const std::string rb = sp["id_map"]["$new:r"], rsb = sp["id_map"]["$new:r.linked0"];
+  CHECK(f.get(rb)["link_group"] == f.get(rsb)["link_group"]);
+  CHECK(f.get(rb)["link_group"] != f.get(b)["link_group"]);
+  CHECK(f.get(rsb)["media_ref"]["stream"] == "audio");
+
+  // unlink takes a clip out of its group (a group of one is no group); delete then removes only what it names.
+  f.ok(json::array({{{"op", "unlink"}, {"clip", rb}}}));
+  CHECK_FALSE(f.get(rb).contains("link_group"));
+  CHECK_FALSE(f.get(rsb).contains("link_group"));
+  f.ok(json::array({{{"op", "delete"}, {"clip", rb}}}));
+  CHECK(f.engine.call("project.get", {{"project", f.project}, {"id", rsb}}));
+  // A linked clip's delete removes its partner too.
+  f.ok(json::array({{{"op", "delete"}, {"clip", a}}}));
+  CHECK_FALSE(f.engine.call("project.get", {{"project", f.project}, {"id", sa}}));
+  // link joins clips again.
+  f.ok(json::array({{{"op", "link"}, {"clips", {b, sb}}}}));
+  CHECK(f.get(b)["link_group"] == f.get(sb)["link_group"]);
+  CHECK(f.engine.call("project.validate", {{"project", f.project}})->at("ok") == true);
 }
 #endif

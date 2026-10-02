@@ -15,6 +15,7 @@
 //   slide @<slider> <fraction>      set a slim slider to a position from 0 (left) to 1 (right)
 //   key <name> [ctrl] [shift]       press and release a key: A..Z, Space, Delete, Enter, Escape, Left, Right
 //   shot <file.jpg>                 save what the window shows
+//   where @<id>                     print where the widget was last drawn and in which windows (to debug a script)
 //   quit                            stop (also at the end of the file)
 //
 // <target> is @<id> (the widget's centre), @<id>@<fx>,<fy> (a point inside it, fractions of its size), or <x>,<y>.

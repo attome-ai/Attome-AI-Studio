@@ -702,8 +702,11 @@ struct Engine::Impl {
          "\"id\":\"$new:name\" and later ops use that name. Times: \"2.5s\", \"75@30\", timecode.\n"
          "- add_clip {asset (from media.import) or path, track? (ID, $new name or \"new\"; default the bottom video "
          "track, or an audio track for sound files), at? (default: after the last clip of the track), source_in? "
-         "(default 0), duration? (default the rest of the file), with_audio? (false mutes it), volume?, gain_db?, "
-         "position?, scale?, opacity?, fade_in?, fade_out?}\n"
+         "(default 0), duration? (default the rest of the file), with_audio? (false: picture only), volume?, gain_db?, "
+         "position?, scale?, opacity?, fade_in?, fade_out?, audio_track?}. A video with sound becomes two LINKED "
+         "clips: the picture, and its sound on an audio track (named \"$new:<name>.audio\" in id_map). Edits (move, "
+         "trim, split, delete, slip, roll, slide) apply to both; add \"unlink\": true to an op to edit one alone (for "
+         "J and L cuts). A dissolve between two linked clips also cross-fades their sound.\n"
          "- add_text {text (\\n for a new line), at? (0), duration? (3s), placement? (center | lower_third | top | "
          "bottom) or position?, size? (0.08 of the height), color? (#ffffff), bold? (true), fade_in?, fade_out?} - "
          "goes on a Titles track on top\n"
@@ -716,6 +719,9 @@ struct Engine::Impl {
          "split {clip, at}; slip {clip, delta} (shows another part of its file, stays in place); roll {between: "
          "[first, second], delta} (moves the cut between them); slide {clip, delta} (moves the clip between its "
          "neighbours, which give and take the time)\n"
+         "- add_effect {target (clip), type? (gaussian_blur), radius? (0.02)} blurs only that clip, its edges soften "
+         "into what is below; remove_effect {effect}; set_effect_enabled {effect, enabled}\n"
+         "- link {clips: [...]} joins clips so edits move them together; unlink {clip} takes one out of its group\n"
          "- set_property {target (clip, track or fx ID), path (e.g. \"audio.gain_db\", \"transform.opacity\", "
          "\"content.text\", \"volume\", \"params.radius\"), value} or {target, path \"transform.opacity|position|"
          "scale\", keyframes: [{t, v, interp?, ease?}]}\n"
@@ -783,8 +789,10 @@ struct Engine::Impl {
          "\"transform\":{\"opacity\":1,\"keyframes\":{\"opacity\":{\"$new:b1\":{\"t\":\"1s\",\"v\":1},\"$new:b2\":{\"t\":"
          "\"2s\",\"v\":0}}}}}}\n"
          "radius is a fraction of the picture height (0.02 soft, 0.1 strong, at most 0.25). The layer's opacity mixes "
-         "the blurred picture with the sharp one, so opacity keyframes fade the effect in or out. Effects on ordinary "
-         "clips are not supported yet."},
+         "the blurred picture with the sharp one, so opacity keyframes fade the effect in or out.\n"
+         "To blur one clip only, put the effect on that clip instead: {\"op\":\"add\",\"path\":\"<clip_id>/effects/"
+         "$new:fx\",\"value\":{\"effect\":\"attome.gaussian_blur@1.0.0\",\"enabled\":true,\"params\":{\"radius\":"
+         "0.02}}} (or timeline.edit add_effect). Its edges soften into what is below it."},
         {"audio",
          "Sound. Music or a voice-over is a clip on an audio track (kind \"audio\"); files without video (mp3, wav, "
          "m4a) belong there. Video clips play their own sound too.\n"
@@ -796,7 +804,9 @@ struct Engine::Impl {
          "\"2s\"}}}\n"
          "Clip \"audio\": gain_db (-96 to 24; -12 is about a quarter of the level), pan (-1 left .. 1 right), fade_in "
          "and fade_out (times from the clip's ends; together at most its duration), fade_curve \"equal_power\" "
-         "(default) or \"linear\". Mute a clip's own sound with \"volume\":0 (1 = unchanged). A track can carry "
+         "(default) or \"linear\". A video added with timeline.edit has its sound as a linked clip on an audio track: "
+         "mute it by setting that clip's volume to 0, or add the video with with_audio:false. An older clip that "
+         "still carries its own sound is muted with \"volume\":0. A track can carry "
          "volume_db and pan for all its clips. Sound under a dissolve cross-fades by itself."},
         {"times",
          "Times accept \"12.5s\", \"375@30\" (frames at a rate), SMPTE \"00:00:12:15\" (needs the sequence rate) or "
@@ -1268,7 +1278,9 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
      &Impl::project_patch},
     {"timeline.edit", "core", true,
      "Edit the timeline with high-level ops, all applied together as one undoable step: add_track, add_clip, add_text, "
-     "add_adjustment, add_transition, delete, ripple_delete, move, trim, split, slip, roll, slide, set_property. "
+     "add_adjustment, add_transition, delete, ripple_delete, move, trim, split, slip, roll, slide, add_effect, "
+     "remove_effect, set_effect_enabled, link, unlink, set_property. A video with sound becomes linked picture and "
+     "sound clips that edits keep together. "
      "Clip defaults are "
      "worked out for you (append to the track, the rest of the file, a Titles track for text, an Effects track under "
      "it for blur). Give an op \"id\": \"$new:name\" and later ops can use that name. guide.get topic \"timeline\" "
@@ -1276,7 +1288,8 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
      R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},
        "ops":{"type":"array","items":{"type":"object","properties":{
          "op":{"type":"string","enum":["add_track","add_clip","add_text","add_adjustment","add_transition","delete",
-                                       "ripple_delete","move","trim","split","slip","roll","slide","set_property"]},
+                                       "ripple_delete","move","trim","split","slip","roll","slide","add_effect","remove_effect",
+                                       "set_effect_enabled","link","unlink","set_property"]},
          "id":{"type":"string","description":"$new:name for what this op creates"}},"required":["op"]}},
        "sequence":{"type":"string"},"label":{"type":"string"},"dry_run":{"type":"boolean"},
        "task_id":{"type":"string","description":"Groups several calls into one task"}},

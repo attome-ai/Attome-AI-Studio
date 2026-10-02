@@ -48,6 +48,7 @@ struct ClipUi {
   json keyframes;                           // the clip's transform.keyframes, for split
   float gain_db = 0.0f, pan = 0.0f;         // the clip's "audio" object
   bool is_adjustment = false;               // an adjustment layer: its effects change the tracks below it
+  std::string link_group, stream;           // linked picture and sound clips share a group; stream "video" / "audio"
   std::string blur_id;                      // its Gaussian blur effect, when it has one
   float blur_radius = 0.0f;
   int64_t audio_fade_in = 0, audio_fade_out = 0; // frames
@@ -106,6 +107,7 @@ private:
   void take_dialog_results();
   void commit_drag(const TrackUi &track, const ClipUi &clip, int mode, int64_t delta, int target_track);
   void drop_transitions(const std::string &clip_id, json &ops) const; // ops that remove the clip's dissolves
+  std::vector<const ClipUi *> linked_of(const ClipUi &clip) const;     // the other clips of its link group
   void draw_transition_card(const TrackUi &track, const ClipUi &clip);
   json fade_ops(const ClipUi &clip, int64_t fade_in, int64_t fade_out, int64_t duration, double full) const;
   void draw_fade_card(const ClipUi &clip);

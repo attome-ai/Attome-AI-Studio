@@ -169,7 +169,7 @@ TEST_CASE("audio: clip gain, pan and fades and track volume are checked, fades i
         "AUDIO_FADE_TOO_LONG");
 }
 
-TEST_CASE("effects: a blur on an adjustment layer is accepted; other effects and effects on clips are refused",
+TEST_CASE("effects: a blur on an adjustment layer or a picture clip is accepted; other effects are refused",
           "[effect]") {
   Fixture f;
   const json blur = {{"effect", "attome.gaussian_blur@1.0.0"}, {"enabled", true}, {"params", {{"radius", 0.02}}}};
@@ -187,8 +187,7 @@ TEST_CASE("effects: a blur on an adjustment layer is accepted; other effects and
   CHECK(f.rule_of(json::array({{{"op", "replace"}, {"path", fx + "/params/radius"}, {"value", 0.5}}})) == "EFFECT_PARAM");
   CHECK(f.rule_of(json::array({{{"op", "replace"}, {"path", fx + "/effect"}, {"value", "attome.glow@1.0.0"}}})) ==
         "EFFECT_UNSUPPORTED");
-  CHECK(f.rule_of(json::array({{{"op", "add"}, {"path", f.a + "/effects/$new:fx2"}, {"value", blur}}})) ==
-        "EFFECT_UNSUPPORTED"); // a file clip: blur it with an adjustment layer above it instead
+  CHECK(f.patch(json::array({{{"op", "add"}, {"path", f.a + "/effects/$new:fx2"}, {"value", blur}}}))); // a file clip
 }
 
 TEST_CASE("transitions: splitting the outgoing clip moves its dissolve to the right half (the editor's split)",

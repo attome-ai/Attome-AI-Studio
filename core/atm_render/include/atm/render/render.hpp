@@ -34,6 +34,9 @@ struct Layer {
   int64_t source_in_hns = 0;  // where in the file the clip starts
   float opacity = 1.0f;
   float volume = 1.0f;
+  // media_ref.stream: a linked pair shares one file, the picture clip with "video" (silent here) and the sound clip
+  // with "audio" (never drawn). Without it a clip shows its picture and plays its sound.
+  bool silent = false;
   // Sound (the clip's "audio" object and its track): gain is linear and folds in the clip's gain_db and the track's
   // volume_db (volume above stays a separate factor); pan is -1 (left) .. 1 (right), clip and track added. Fades are
   // measured from the clip's own ends, [origin_frame, clip_end_frame), not from a dissolve's extension.
@@ -50,8 +53,9 @@ struct Layer {
   std::string text;
   float text_size = 0.08f;
   uint32_t text_color = 0xFFFFFF;
-  // Adjustment layers (media_ref.type "adjustment"): no picture of their own; their effects change everything below
-  // them, and opacity mixes the changed picture with the unchanged one.
+  // Effects. On an adjustment layer (media_ref.type "adjustment", no picture of its own) they change everything below
+  // it, and opacity mixes the changed picture with the unchanged one. On a clip they change only the clip: it is drawn
+  // on its own, changed, and composited with its blurred coverage, so its edges soften into what is below.
   bool is_adjustment = false;
   std::vector<Effect> effects;
   // Dissolve (attome.dissolve) from this clip into the next one on its track. compile() lengthens both clips into the
@@ -114,8 +118,13 @@ private:
   std::unordered_map<std::string, TextEntry> text_; // by clip ID
   std::vector<uint8_t> mix_;                          // the incoming clip of a dissolve, drawn over the same background
   std::vector<uint8_t> adjust_, scratch_;             // an adjustment layer's copy of the picture below it
+  std::vector<uint8_t> over_black_, over_white_, cover_; // a clip with effects, drawn on its own (see draw_isolated)
   std::string warning_;
-  void draw(const Layer &l, int64_t frame, uint8_t *out, bool &cleared, std::vector<const std::string *> &used);
+  // `raw` draws the layer at full opacity without its effects (the isolated pass of a clip with effects).
+  void draw(const Layer &l, int64_t frame, uint8_t *out, bool &cleared, std::vector<const std::string *> &used,
+            bool raw = false);
+  void draw_isolated(const Layer &l, int64_t frame, uint8_t *out, bool &cleared, std::vector<const std::string *> &used,
+                     float opacity);
 };
 
 // The whole sequence as 48 kHz stereo float.

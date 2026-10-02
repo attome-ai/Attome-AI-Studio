@@ -92,15 +92,21 @@ struct UiDriver::Impl {
       return std::nullopt;
     }
     const Mark &m = it->second;
-    if (m.window) { // bring it into view: scroll its panel so the widget sits near the top of the visible area
-      const ImRect clip = m.window->InnerClipRect;
-      if (m.rect.Min.y < clip.Min.y || m.rect.Max.y > clip.Max.y) {
-        if (settle > 0)
-          return std::nullopt;
-        ImGui::SetScrollY(m.window, std::max(0.0f, m.window->Scroll.y + (m.rect.Min.y - clip.Min.y) - 24.0f));
-        settle = 3;
+    // Bring it into view. It must sit inside the visible part of every window that holds it (a card inside the
+    // Inspector, say); where it does not, scroll the nearest window that can scroll so the widget sits near its top.
+    for (ImGuiWindow *w = m.window; w; w = w->ParentWindow) {
+      if (m.rect.Min.y >= w->InnerClipRect.Min.y && m.rect.Max.y <= w->InnerClipRect.Max.y)
+        continue;
+      ImGuiWindow *s = w;
+      while (s && s->ScrollMax.y <= 0.0f)
+        s = s->ParentWindow;
+      if (!s)
+        break; // nothing can scroll it further: use it as it is
+      if (settle > 0)
         return std::nullopt;
-      }
+      ImGui::SetScrollY(s, std::clamp(s->Scroll.y + (m.rect.Min.y - s->InnerClipRect.Min.y) - 24.0f, 0.0f, s->ScrollMax.y));
+      settle = 3;
+      return std::nullopt;
     }
     if (size)
       *size = m.rect.GetSize();
@@ -118,7 +124,9 @@ struct UiDriver::Impl {
     if (now < search_from || settle > 0)
       return;
     for (ImGuiWindow *w : GImGui->Windows)
-      if (w->Active && !w->Hidden && w->ScrollMax.y > 0.0f) {
+      if (w->Active && !w->Hidden && w->ScrollMax.y > 0.0f &&
+          std::strncmp(w->Name, "WindowOverViewport", 18) != 0) { // the dock host holds panels, it is not one
+
         const float page = std::max(40.0f, w->InnerClipRect.GetHeight() * 0.6f);
         ImGui::SetScrollY(w, w->Scroll.y >= w->ScrollMax.y ? 0.0f : std::min(w->ScrollMax.y, w->Scroll.y + page));
       }
@@ -181,6 +189,10 @@ void UiDriver::before_frame() {
   };
   if (done_)
     return;
+  // The first frames lay out the panels (the dock layout is built, saved sizes applied); widgets drawn before that
+  // sit in temporary places. Start once it has settled, so the first click cannot land where a widget used to be.
+  if (ImGui::GetFrameCount() < 10)
+    return;
   if (d.settle > 0)
     --d.settle;
   if (!d.frames.empty()) {
@@ -205,6 +217,19 @@ void UiDriver::before_frame() {
       d.until = Clock::now() + std::chrono::milliseconds(std::atoi(arg(1).c_str()));
     } else if (op == "quit") {
       done_ = true;
+    } else if (op == "where") { // debugging a script: where a widget was last drawn, and in which windows
+      const std::string id = arg(1).empty() ? std::string() : arg(1).substr(1);
+      const auto it = g_marks.find(id);
+      if (it == g_marks.end()) {
+        std::fprintf(stderr, "uitest: where %s: never drawn\n", id.c_str());
+      } else {
+        const Mark &m = it->second;
+        std::fprintf(stderr, "uitest: where %s: frame %d (now %d), rect %.0f,%.0f-%.0f,%.0f\n", id.c_str(), m.frame,
+                     ImGui::GetFrameCount(), m.rect.Min.x, m.rect.Min.y, m.rect.Max.x, m.rect.Max.y);
+        for (ImGuiWindow *w = m.window; w; w = w->ParentWindow)
+          std::fprintf(stderr, "uitest:   in %s: clip y %.0f-%.0f, scroll %.0f/%.0f\n", w->Name, w->InnerClipRect.Min.y,
+                       w->InnerClipRect.Max.y, w->Scroll.y, w->ScrollMax.y);
+      }
     } else if (op == "shot") {
       d.shot = arg(1);
     } else if (op == "key") {

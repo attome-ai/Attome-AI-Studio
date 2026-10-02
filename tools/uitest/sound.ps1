@@ -21,7 +21,7 @@ try {
 
 # A video and a sound file dropped together; then the Audio card of the sound clip.
 $run = Invoke-EditorScript -Project $proj -Import "$work\a.mp4", "$work\music.wav" -Script @(
-  'click @clip:music.wav'
+  'click @clip:music'
   'slide @slider:gain 0.5385'      # -40 .. +12 dB: about -12 dB
   'slide @slider:afadein 0.3333'   # 0 .. 6 s: about 2 s
   "shot $work\sound_set.jpg"
@@ -33,18 +33,25 @@ try {
     $video = $tracks | Where-Object { $_.kind -eq 'video' }
     $audio = $tracks | Where-Object { $_.kind -eq 'audio' }
     "tracks: $(($tracks | ForEach-Object { "$($_.name)/$($_.kind)/$($_.clips)" }) -join ', ')"
-    if (-not $video -or -not $audio -or $video.clips -ne 1 -or $audio.clips -ne 1) {
-      $failed = 'the video and the sound file did not land on a video and an audio track'
+    # The video's own sound is a linked clip on the audio track; the music follows it there.
+    $music = if ($audio) { $audio.clip_list | Where-Object { $_.name -eq 'music' } } else { $null }
+    if (-not $video -or -not $audio -or $video.clips -ne 1 -or $audio.clips -ne 2 -or -not $music) {
+      $failed = 'expected the picture on a video track, and its sound plus the music on an audio track'
     } else {
-      $clip = Get-Object $run $audio.clip_list[0].id
+      $picture = Get-Object $run $video.clip_list[0].id
+      $sound = Get-Object $run ($audio.clip_list | Where-Object { $_.name -eq 'a' }).id
+      "link: picture=$($picture.link_group) sound=$($sound.link_group) stream=$($picture.media_ref.stream)/$($sound.media_ref.stream)"
+      if (-not $picture.link_group -or $picture.link_group -ne $sound.link_group) { $failed = 'the video and its sound are not linked' }
+      $clip = Get-Object $run $music.id
       "audio: $($clip.audio | ConvertTo-Json -Compress)"
       $fade = ConvertFrom-Rational $clip.audio.fade_in
-      if (-not ($clip.audio.gain_db -lt -10.5 -and $clip.audio.gain_db -gt -13.5)) { $failed = 'Gain did not become about -12 dB' }
+      if ($failed) { }
+      elseif (-not ($clip.audio.gain_db -lt -10.5 -and $clip.audio.gain_db -gt -13.5)) { $failed = 'Gain did not become about -12 dB' }
       elseif (-not ($fade -gt 1.8 -and $fade -lt 2.2)) { $failed = 'Fade in did not become about 2 s' }
     }
   }
 } finally { Stop-Daemon $run }
 
 if ($failed) { Write-Host "FAIL: $failed" -ForegroundColor Red; exit 1 }
-Write-Host "PASS: video and sound on their own tracks; gain and fade set from the Audio card (captures in $work)" -ForegroundColor Green
+Write-Host "PASS: a video's picture and linked sound, music on the audio track; gain and fade set from the Audio card (captures in $work)" -ForegroundColor Green
 exit 0

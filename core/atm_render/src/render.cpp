@@ -267,8 +267,8 @@ Result<Composition> compile(const json &project, std::string_view sequence_id) {
               l.text_color = uint32_t(std::strtoul(color.c_str() + 1, nullptr, 16)) & 0xFFFFFF;
           }
         }
-        if (type == "adjustment") {
-          l.is_adjustment = true;
+        l.is_adjustment = type == "adjustment";
+        {
           const auto fx = clip.find("effects");
           if (fx != clip.end() && fx->is_object()) {
             std::vector<std::string> fx_order; // effect_order, then any effect it misses
@@ -289,8 +289,10 @@ Result<Composition> compile(const json &project, std::string_view sequence_id) {
             }
           }
         }
+        const std::string stream = ref->value("stream", std::string());
         l.track = track_index;
-        l.video = video;
+        l.video = video && stream != "audio";
+        l.silent = stream == "video";
         // The end is rounded, not the length: clips that touch in time then touch in frames too, even when a cut
         // falls between two frames (3.75 s at 30 fps), so no gap opens and a dissolve still finds its pair.
         ATM_TRY(int64_t start, to_frames(in, rate, Round::nearest_even));
@@ -510,12 +512,19 @@ Pose pose_at(const Layer &l, const Composition &comp, int64_t frame) {
 }
 
 // Draws one layer into `out`. The black background is drawn first only when the layer does not cover it.
-void Renderer::draw(const Layer &l, int64_t frame, uint8_t *out, bool &cleared, std::vector<const std::string *> &used) {
+void Renderer::draw(const Layer &l, int64_t frame, uint8_t *out, bool &cleared, std::vector<const std::string *> &used,
+                    bool raw) {
   const size_t pitch = size_t(width_); // Y and UV rows of the packed NV12 output
   uint8_t *out_uv = out + pitch * size_t(height_);
-  const Pose p = pose_at(l, comp_, frame);
+  Pose p = pose_at(l, comp_, frame);
   if (p.opacity <= 0.0f)
     return;
+  if (!raw && !l.is_adjustment && !l.effects.empty()) {
+    draw_isolated(l, frame, out, cleared, used, p.opacity);
+    return;
+  }
+  if (raw)
+    p.opacity = 1.0f;
   if (l.is_adjustment) { // change the picture so far, then mix by opacity
     if (l.effects.empty())
       return;
@@ -598,6 +607,74 @@ void Renderer::draw(const Layer &l, int64_t frame, uint8_t *out, bool &cleared, 
   }
 }
 
+// A clip with effects. It is drawn twice on its own, over black and over white: where the two differ, the clip does not
+// cover the pixel fully, which gives its coverage without an alpha channel anywhere else in the compositor. The picture
+// over black is the clip premultiplied around black (16 / 128), so it blurs correctly together with the coverage; then
+//   out = black + (below - black) * (1 - coverage * opacity) + (clip - black) * opacity
+// puts it over the picture so far. A blurred clip's edges therefore fade into what is below it, not into black.
+void Renderer::draw_isolated(const Layer &l, int64_t frame, uint8_t *out, bool &cleared,
+                             std::vector<const std::string *> &used, float opacity) {
+  ATM_PROFILE_SCOPE("composite.clip_effects");
+  const int W = width_, H = height_;
+  const size_t luma = size_t(W) * size_t(H), size = media::nv12_size(W, H);
+  over_black_.resize(size);
+  over_white_.resize(size);
+  media::fill_black(over_black_.data(), W, H);
+  std::memset(over_white_.data(), 235, luma); // white luma; chroma stays neutral, coverage comes from luma alone
+  std::memset(over_white_.data() + luma, 128, size - luma);
+  bool drawn = true;
+  draw(l, frame, over_black_.data(), drawn, used, true);
+  draw(l, frame, over_white_.data(), drawn, used, true);
+  // Coverage 0..255 per luma pixel: 235 - 16 = 219 is the full difference between the backgrounds.
+  cover_.resize(luma);
+  parallel_for(H, 16, [&](int64_t first, int64_t last) {
+    for (size_t i = size_t(first) * size_t(W); i < size_t(last) * size_t(W); ++i) {
+      const int diff = int(over_white_[i]) - int(over_black_[i]);
+      cover_[i] = uint8_t(std::clamp(255 - diff * 255 / 219, 0, 255));
+    }
+  });
+  for (const Effect &e : l.effects)
+    if (e.kind == "gaussian_blur") {
+      const float sigma = e.radius * float(H) * 0.5f;
+      blur_nv12(over_black_.data(), W, H, sigma, scratch_);
+      // The coverage blurs the same way as the luma plane: run it through the same passes as a one-plane picture.
+      std::vector<uint8_t> &tmp = over_white_; // free now
+      const int r = int(std::lround((std::sqrt(1.0 + 4.0 * double(sigma) * double(sigma)) - 1.0) / 2.0));
+      for (int pass = 0; r >= 1 && pass < 3; ++pass) {
+        parallel_for(H, 16, [&](int64_t first, int64_t last) {
+          for (int64_t y = first; y < last; ++y)
+            box_line(cover_.data() + size_t(y) * size_t(W), tmp.data() + size_t(y) * size_t(W), W, 1, r);
+        });
+        box_vertical(tmp.data(), cover_.data(), W, H, r);
+      }
+    }
+  if (!cleared)
+    media::fill_black(out, W, H);
+  cleared = true;
+  const int o = int(std::lround(opacity * 255.0f)); // 0..255
+  const auto mix = [o](int below, int clip, int cover, int k) {
+    const int keep = 255 * 255 - cover * o; // (1 - coverage * opacity), in 255ths squared
+    return uint8_t(std::clamp(k + ((below - k) * keep + (clip - k) * o * 255) / (255 * 255), 0, 255));
+  };
+  parallel_for(H, 16, [&](int64_t first, int64_t last) {
+    for (size_t i = size_t(first) * size_t(W); i < size_t(last) * size_t(W); ++i)
+      out[i] = mix(out[i], over_black_[i], cover_[i], 16);
+  });
+  uint8_t *out_uv = out + luma;
+  const uint8_t *clip_uv = over_black_.data() + luma;
+  parallel_for(H / 2, 16, [&](int64_t first, int64_t last) {
+    for (int64_t cy = first; cy < last; ++cy)
+      for (int cx = 0; cx < W / 2; ++cx) {
+        // Chroma covers 2 x 2 luma pixels: use their mean coverage.
+        const size_t y0 = size_t(cy) * 2 * size_t(W) + size_t(cx) * 2;
+        const int cover = (cover_[y0] + cover_[y0 + 1] + cover_[y0 + size_t(W)] + cover_[y0 + size_t(W) + 1] + 2) / 4;
+        const size_t c = size_t(cy) * size_t(W) + size_t(cx) * 2;
+        out_uv[c] = mix(out_uv[c], clip_uv[c], cover, 128);
+        out_uv[c + 1] = mix(out_uv[c + 1], clip_uv[c + 1], cover, 128);
+      }
+  });
+}
+
 Result<void> Renderer::render(int64_t frame, uint8_t *out) {
   ATM_PROFILE_SCOPE("render.frame");
   bool cleared = false;
@@ -639,7 +716,7 @@ Result<std::vector<float>> mix_audio(const Composition &c) {
   const size_t total = size_t(c.frame_hns(c.frames) * media::kAudioRate / media::kHnsPerSecond);
   std::vector<float> mix(total * 2, 0.0f);
   for (const Layer &l : c.layers) {
-    if (l.volume <= 0.0f || l.gain <= 0.0f || l.is_text || l.is_adjustment)
+    if (l.volume <= 0.0f || l.gain <= 0.0f || l.is_text || l.is_adjustment || l.silent)
       continue;
     auto pcm = media::read_audio(l.path, l.source_in_hns, c.frame_hns(l.frames));
     if (!pcm)

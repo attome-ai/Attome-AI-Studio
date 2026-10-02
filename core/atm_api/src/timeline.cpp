@@ -58,6 +58,14 @@ public:
       return wrap(split());
     if (name == "set_property")
       return wrap(set_property());
+    if (name == "add_effect")
+      return wrap(add_effect());
+    if (name == "link")
+      return wrap(link());
+    if (name == "unlink")
+      return wrap(unlink());
+    if (name == "remove_effect" || name == "set_effect_enabled")
+      return wrap(change_effect(name == "remove_effect"));
     if (name == "slip")
       return wrap(slip());
     if (name == "roll")
@@ -66,7 +74,8 @@ public:
       return wrap(slide());
     return fail("E_OP", "\"" + name + "\" is not a timeline op.",
                 "Use add_track, add_clip, add_text, add_adjustment, add_transition, delete, ripple_delete, move, trim, "
-                "split, slip, roll, slide or set_property (guide.get topic \"timeline\").");
+                "split, slip, roll, slide, add_effect, remove_effect, set_effect_enabled, link, unlink or "
+                "set_property (guide.get topic \"timeline\").");
   }
 
 private:
@@ -321,11 +330,22 @@ private:
         if (media.contains(k))
           ref[k] = media[k];
     const std::u8string stem = std::filesystem::path(std::u8string(path.begin(), path.end())).stem().u8string();
-    json value = {{"name", op_.value("name", std::string(stem.begin(), stem.end()))},
+    const std::string clip_name = op_.value("name", std::string(stem.begin(), stem.end()));
+    // A video with sound becomes two linked clips (F1 §5.8): the picture here, the sound on an audio track, so the
+    // sound can be cut, faded and mixed on its own while edits keep the two together. with_audio: false keeps only
+    // the picture.
+    const bool sound = has_video && media.value("has_audio", false) && op_.value("with_audio", true);
+    if (has_video)
+      ref["stream"] = "video";
+    json sound_ref = ref;
+    sound_ref["stream"] = "audio";
+    for (const char *k : {"width", "height", "rate"})
+      sound_ref.erase(k);
+    json value = {{"name", clip_name},
                   {"timing", {{"record_in", start.to_string()}, {"duration", duration.to_string()}, {"source_in", source_in.to_string()}}},
                   {"media_ref", std::move(ref)},
-                  {"volume", op_.value("with_audio", true) ? op_.value("volume", 1.0) : 0.0}};
-    if (op_.contains("gain_db"))
+                  {"volume", op_.value("volume", 1.0)}};
+    if (op_.contains("gain_db") && !has_video)
       value["audio"]["gain_db"] = op_["gain_db"];
     if (has_video) {
       value["transform"] = {{"opacity", op_.value("opacity", 1.0)}};
@@ -343,8 +363,52 @@ private:
       if (fout)
         value["audio"]["fade_out"] = fout->to_string();
     }
+    if (sound) {
+      const std::string group = new_id("lnk");
+      value["link_group"] = group;
+      value.erase("volume");
+      ATM_TRY(std::string audio_track, sound_track_for(start, duration));
+      json audio = {{"name", clip_name},
+                    {"timing", value["timing"]},
+                    {"media_ref", std::move(sound_ref)},
+                    {"volume", op_.value("volume", 1.0)},
+                    {"link_group", group}};
+      if (op_.contains("gain_db"))
+        audio["audio"]["gain_db"] = op_["gain_db"];
+      push({{"op", "add"}, {"path", track_id + "/clips/" + placeholder()}, {"value", std::move(value)}});
+      push({{"op", "add"}, {"path", audio_track + "/clips/" + placeholder(".audio")}, {"value", std::move(audio)}});
+      return {};
+    }
     push({{"op", "add"}, {"path", track_id + "/clips/" + placeholder()}, {"value", std::move(value)}});
     return {};
+  }
+
+  // The audio track for a clip's linked sound: "audio_track" when given, else the first audio track with room for
+  // [start, start + duration), else a new one on top.
+  Result<std::string> sound_track_for(Rational start, Rational duration) {
+    if (op_.contains("audio_track")) {
+      const std::string id = op_.value("audio_track", std::string());
+      const json *t = track(id);
+      if (!t || t->value("kind", "video") != "audio")
+        return fail("E_TRACK_KIND", "\"audio_track\" must be the ID of an audio track.");
+      return id;
+    }
+    const Rational end = plus(start, duration);
+    for (const std::string &id : track_order()) {
+      const json *t = track(id);
+      if (!t || t->value("kind", "video") != "audio")
+        continue;
+      bool free = true;
+      if (t->contains("clips"))
+        for (const json &c : (*t)["clips"])
+          if (compare(span_of(c).in, end) < 0 && compare(start, span_of(c).end()) < 0)
+            free = false;
+      if (free)
+        return id;
+    }
+    const std::string ph = placeholder(".audio_track");
+    add_track_op(ph, "audio", next_track_name("audio"), nullptr);
+    return ph;
   }
 
   Result<void> add_text() {
@@ -459,8 +523,38 @@ private:
     push({{"op", "add"},
           {"path", ra->parent + "/transitions/" + placeholder()},
           {"value", {{"type", "attome.dissolve"}, {"from", a}, {"to", b}, {"in_offset", in.to_string()}, {"out_offset", out.to_string()}}}});
+    int n = 0; // the linked sound clips that meet at the same cut cross-fade over the same range
+    for (const auto &[la, lb] : linked_pairs(a, b))
+      push({{"op", "add"},
+            {"path", doc_.find(la)->parent + "/transitions/" + placeholder(".audio" + std::to_string(n++))},
+            {"value", {{"type", "attome.dissolve"}, {"from", la}, {"to", lb}, {"in_offset", in.to_string()}, {"out_offset", out.to_string()}}}});
     return {};
   }
+
+  // ---- links (F1 §5.8: every edit applies to all members of a link_group unless the op says "unlink": true) -------
+
+  struct Member {
+    std::string id, track;
+  };
+
+  // The other clips of this clip's link group, on any track of the sequence.
+  std::vector<Member> linked(const std::string &clip_id) const {
+    std::vector<Member> out;
+    if (op_.value("unlink", false))
+      return out;
+    const doc::NodeRef *ref = doc_.find(clip_id);
+    const std::string group = ref ? ref->node->value("link_group", std::string()) : std::string();
+    if (group.empty())
+      return out;
+    for (const std::string &tid : track_order())
+      if (const json *t = track(tid); t && t->contains("clips"))
+        for (auto it = (*t)["clips"].begin(); it != (*t)["clips"].end(); ++it)
+          if (it.key() != clip_id && it->value("link_group", std::string()) == group)
+            out.push_back({it.key(), tid});
+    return out;
+  }
+
+  const json &node_of(const std::string &id) const { return *doc_.find(id)->node; }
 
   // Removes the dissolves that join a clip; a note tells the agent.
   void drop_transitions(const std::string &clip_id, const std::string &track_id) {
@@ -472,123 +566,6 @@ private:
         push({{"op", "remove"}, {"path", it.key()}});
         out_.notes.push_back("Removed dissolve " + it.key() + ": its cut moved. Add it again with add_transition if needed.");
       }
-  }
-
-  Result<void> remove(bool ripple) {
-    if (op_.contains("transition") && !ripple) { // a dissolve on its own
-      const std::string id = op_.value("transition", std::string());
-      if (!doc_.find(id) || id_prefix(id) != "trn")
-        return fail("E_UNKNOWN_ID", "\"transition\" must be the ID of a dissolve, not \"" + id + "\".");
-      push({{"op", "remove"}, {"path", id}});
-      return {};
-    }
-    ATM_TRY(auto c, clip("clip"));
-    const std::string id = op_.value("clip", std::string());
-    const Span s = span_of(*c.first);
-    drop_transitions(id, c.second);
-    push({{"op", "remove"}, {"path", id}});
-    if (ripple) // later clips on the track move left by the gap
-      for (auto it = (*track(c.second))["clips"].begin(); it != (*track(c.second))["clips"].end(); ++it)
-        if (it.key() != id && compare(span_of(*it).in, s.in) > 0)
-          push({{"op", "replace"}, {"path", it.key() + "/timing/record_in"}, {"value", minus(span_of(*it).in, s.duration).to_string()}});
-    return {};
-  }
-
-  Result<void> move() {
-    ATM_TRY(auto c, clip("clip"));
-    const std::string id = op_.value("clip", std::string());
-    ATM_TRY(auto to, time("to"));
-    drop_transitions(id, c.second);
-    if (op_.contains("track") && op_.value("track", std::string()) != c.second) {
-      const std::string dest = op_.value("track", std::string());
-      if (!track(dest))
-        return fail("E_UNKNOWN_TRACK", "There is no track \"" + dest + "\".");
-      push({{"op", "move"}, {"path", id}, {"to", dest + "/clips"}});
-    }
-    if (to)
-      push({{"op", "replace"}, {"path", id + "/timing/record_in"}, {"value", to->to_string()}});
-    if (!to && !op_.contains("track"))
-      return fail("E_PARAM", "move needs \"to\" (a time) and/or \"track\".");
-    return {};
-  }
-
-  Result<void> trim() {
-    ATM_TRY(auto c, clip("clip"));
-    const std::string id = op_.value("clip", std::string());
-    const std::string edge = op_.value("edge", std::string("out"));
-    const Span s = span_of(*c.first);
-    ATM_TRY(auto to, time("to"));
-    ATM_TRY(auto delta, time("delta"));
-    if (!to && !delta)
-      return fail("E_PARAM", "trim needs \"to\" (where the edge goes) or \"delta\" (how far it moves).");
-    Span n = s;
-    if (edge == "out") {
-      const Rational end = to ? *to : plus(s.end(), *delta);
-      n.duration = minus(end, s.in);
-    } else if (edge == "in") {
-      const Rational in = to ? *to : plus(s.in, *delta);
-      const Rational d = minus(in, s.in);
-      n = {in, minus(s.duration, d), plus(s.source_in, d)};
-    } else {
-      return fail("E_PARAM", "\"edge\" must be \"in\" or \"out\".");
-    }
-    if (n.duration.num() <= 0)
-      return fail("E_MEDIA_RANGE", "The clip would be empty.", "Trim by less than its duration, " + seconds_text(s.duration) + " s.");
-    const json ref = c.first->value("media_ref", json::object());
-    if (ref.value("type", "") == "file") {
-      if (n.source_in.num() < 0)
-        return fail("E_MEDIA_RANGE", "The file starts " + seconds_text(s.source_in) + " s before this clip's start; the in edge cannot go earlier.");
-      if (const auto total = Rational::parse(ref.value("duration", std::string()));
-          total && total->num() > 0 && compare(plus(n.source_in, n.duration), *total) > 0)
-        return fail("E_MEDIA_RANGE", "The file ends " + seconds_text(minus(*total, plus(s.source_in, s.duration))) +
-                                         " s after this clip's end; the out edge cannot go later.");
-    }
-    drop_transitions(id, c.second);
-    push({{"op", "replace"}, {"path", id + "/timing/record_in"}, {"value", n.in.to_string()}});
-    push({{"op", "replace"}, {"path", id + "/timing/duration"}, {"value", n.duration.to_string()}});
-    push({{"op", "replace"}, {"path", id + "/timing/source_in"}, {"value", n.source_in.to_string()}});
-    return {};
-  }
-
-  Result<void> split() {
-    ATM_TRY(auto c, clip("clip"));
-    const std::string id = op_.value("clip", std::string());
-    ATM_TRY(auto at, time("at"));
-    const Span s = span_of(*c.first);
-    if (!at || compare(*at, s.in) <= 0 || compare(*at, s.end()) >= 0)
-      return fail("E_PARAM", "\"at\" must be a time inside the clip, between " + seconds_text(s.in) + " and " + seconds_text(s.end()) + " s.");
-    const Rational left = minus(*at, s.in);
-    json right = *c.first;
-    right["timing"] = {{"record_in", at->to_string()}, {"duration", minus(s.duration, left).to_string()},
-                       {"source_in", plus(s.source_in, left).to_string()}};
-    // New IDs for the copied keyframes and effects; keyframe times become local to the right half.
-    int n = 0;
-    const std::string base = placeholder();
-    if (right.contains("transform") && right["transform"].contains("keyframes"))
-      for (auto &[prop, keys] : right["transform"]["keyframes"].items()) {
-        json moved = json::object();
-        for (const auto &[kid, key] : keys.items()) {
-          json k = key;
-          if (const auto t = Rational::parse(k.value("t", std::string("0"))))
-            k["t"] = minus(*t, left).to_string();
-          moved[base + ".k" + std::to_string(n++)] = std::move(k);
-        }
-        keys = std::move(moved);
-      }
-    if (right.contains("effects")) {
-      json fx = json::object();
-      for (const auto &[fid, e] : right["effects"].items())
-        fx[base + ".fx" + std::to_string(n++)] = e;
-      right["effects"] = std::move(fx);
-      right.erase("effect_order");
-    }
-    push({{"op", "replace"}, {"path", id + "/timing/duration"}, {"value", left.to_string()}});
-    push({{"op", "add"}, {"path", c.second + "/clips/" + base}, {"anchor", {{"after", id}}}, {"value", std::move(right)}});
-    if (const json *t = track(c.second); t && t->contains("transitions")) // a dissolve out of the clip leaves from the right half
-      for (auto it = (*t)["transitions"].begin(); it != (*t)["transitions"].end(); ++it)
-        if (it->value("from", "") == id)
-          push({{"op", "replace"}, {"path", it.key() + "/from"}, {"value", base}});
-    return {};
   }
 
   // The media a clip may use: source_in >= 0 and source_in + duration <= the file's length (unknown or text: no limit).
@@ -626,6 +603,157 @@ private:
     return {};
   }
 
+  // ---- edits ----------------------------------------------------------------------------------------------------
+
+  Result<void> remove(bool ripple) {
+    if (op_.contains("transition") && !ripple) { // a dissolve on its own
+      const std::string id = op_.value("transition", std::string());
+      if (!doc_.find(id) || id_prefix(id) != "trn")
+        return fail("E_UNKNOWN_ID", "\"transition\" must be the ID of a dissolve, not \"" + id + "\".");
+      push({{"op", "remove"}, {"path", id}});
+      return {};
+    }
+    ATM_TRY(auto c, clip("clip"));
+    std::vector<Member> all = linked(op_.value("clip", std::string()));
+    all.insert(all.begin(), {op_.value("clip", std::string()), c.second});
+    for (const Member &m : all) {
+      drop_transitions(m.id, m.track);
+      push({{"op", "remove"}, {"path", m.id}});
+    }
+    if (ripple) // on each track, the later clips move left by the gap
+      for (const Member &m : all) {
+        const Span s = span_of(node_of(m.id));
+        for (auto it = (*track(m.track))["clips"].begin(); it != (*track(m.track))["clips"].end(); ++it) {
+          const bool gone = std::any_of(all.begin(), all.end(), [&](const Member &x) { return x.id == it.key(); });
+          if (!gone && compare(span_of(*it).in, s.in) > 0)
+            push({{"op", "replace"}, {"path", it.key() + "/timing/record_in"}, {"value", minus(span_of(*it).in, s.duration).to_string()}});
+        }
+      }
+    return {};
+  }
+
+  Result<void> move() {
+    ATM_TRY(auto c, clip("clip"));
+    const std::string id = op_.value("clip", std::string());
+    ATM_TRY(auto to, time("to"));
+    if (!to && !op_.contains("track"))
+      return fail("E_PARAM", "move needs \"to\" (a time) and/or \"track\".");
+    drop_transitions(id, c.second);
+    if (op_.contains("track") && op_.value("track", std::string()) != c.second) {
+      const std::string dest = op_.value("track", std::string());
+      if (!track(dest))
+        return fail("E_UNKNOWN_TRACK", "There is no track \"" + dest + "\".");
+      push({{"op", "move"}, {"path", id}, {"to", dest + "/clips"}});
+    }
+    if (to) {
+      const Rational delta = minus(*to, span_of(*c.first).in);
+      push({{"op", "replace"}, {"path", id + "/timing/record_in"}, {"value", to->to_string()}});
+      for (const Member &m : linked(id)) { // the linked clips move by the same amount, on their own tracks
+        drop_transitions(m.id, m.track);
+        push({{"op", "replace"}, {"path", m.id + "/timing/record_in"}, {"value", plus(span_of(node_of(m.id)).in, delta).to_string()}});
+      }
+    }
+    return {};
+  }
+
+  // Moves one clip's edge by `d` (in: start and source move together; out: the end moves).
+  Result<void> trim_one(const std::string &id, const std::string &track_id, bool in_edge, Rational d) {
+    const Span s = span_of(node_of(id));
+    Span n = s;
+    if (in_edge)
+      n = {plus(s.in, d), minus(s.duration, d), plus(s.source_in, d)};
+    else
+      n.duration = plus(s.duration, d);
+    if (n.duration.num() <= 0)
+      return fail("E_MEDIA_RANGE", "Clip " + id + " would be empty.", "Trim by less than its duration, " + seconds_text(s.duration) + " s.");
+    ATM_CHECK(check_media(node_of(id), id, n));
+    drop_transitions(id, track_id);
+    put_span(id, s, n);
+    return {};
+  }
+
+  Result<void> trim() {
+    ATM_TRY(auto c, clip("clip"));
+    const std::string id = op_.value("clip", std::string());
+    const std::string edge = op_.value("edge", std::string("out"));
+    if (edge != "in" && edge != "out")
+      return fail("E_PARAM", "\"edge\" must be \"in\" or \"out\".");
+    const Span s = span_of(*c.first);
+    ATM_TRY(auto to, time("to"));
+    ATM_TRY(auto delta, time("delta"));
+    if (!to && !delta)
+      return fail("E_PARAM", "trim needs \"to\" (where the edge goes) or \"delta\" (how far it moves).");
+    const bool in_edge = edge == "in";
+    const Rational d = delta ? *delta : minus(*to, in_edge ? s.in : s.end());
+    ATM_CHECK(trim_one(id, c.second, in_edge, d));
+    for (const Member &m : linked(id)) // the same edge of the linked clips moves the same way
+      ATM_CHECK(trim_one(m.id, m.track, in_edge, d));
+    return {};
+  }
+
+  // Cuts one clip at `at`; the right half is `right_ph`, in `group` (empty: no group). Keyframes become local to each
+  // half and effects get new IDs.
+  void split_one(const std::string &id, const std::string &track_id, Rational at, const std::string &right_ph,
+                 const std::string &group) {
+    const json &node = node_of(id);
+    const Span s = span_of(node);
+    const Rational left = minus(at, s.in);
+    json right = node;
+    right["timing"] = {{"record_in", at.to_string()}, {"duration", minus(s.duration, left).to_string()},
+                       {"source_in", plus(s.source_in, left).to_string()}};
+    if (group.empty())
+      right.erase("link_group");
+    else
+      right["link_group"] = group;
+    int n = 0;
+    if (right.contains("transform") && right["transform"].contains("keyframes"))
+      for (auto &[prop, keys] : right["transform"]["keyframes"].items()) {
+        json moved = json::object();
+        for (const auto &[kid, key] : keys.items()) {
+          json k = key;
+          if (const auto t = Rational::parse(k.value("t", std::string("0"))))
+            k["t"] = minus(*t, left).to_string();
+          moved[right_ph + ".k" + std::to_string(n++)] = std::move(k);
+        }
+        keys = std::move(moved);
+      }
+    if (right.contains("effects")) {
+      json fx = json::object();
+      for (const auto &[fid, e] : right["effects"].items())
+        fx[right_ph + ".fx" + std::to_string(n++)] = e;
+      right["effects"] = std::move(fx);
+      right.erase("effect_order");
+    }
+    push({{"op", "replace"}, {"path", id + "/timing/duration"}, {"value", left.to_string()}});
+    push({{"op", "add"}, {"path", track_id + "/clips/" + right_ph}, {"anchor", {{"after", id}}}, {"value", std::move(right)}});
+    if (const json *t = track(track_id); t && t->contains("transitions")) // a dissolve out of the clip leaves from the right half
+      for (auto it = (*t)["transitions"].begin(); it != (*t)["transitions"].end(); ++it)
+        if (it->value("from", "") == id)
+          push({{"op", "replace"}, {"path", it.key() + "/from"}, {"value", right_ph}});
+  }
+
+  Result<void> split() {
+    ATM_TRY(auto c, clip("clip"));
+    const std::string id = op_.value("clip", std::string());
+    ATM_TRY(auto at, time("at"));
+    const Span s = span_of(*c.first);
+    if (!at || compare(*at, s.in) <= 0 || compare(*at, s.end()) >= 0)
+      return fail("E_PARAM", "\"at\" must be a time inside the clip, between " + seconds_text(s.in) + " and " + seconds_text(s.end()) + " s.");
+    // Linked clips that span the cut are cut too; the right halves form a new group of their own.
+    std::vector<Member> cut;
+    for (const Member &m : linked(id)) {
+      const Span ms = span_of(node_of(m.id));
+      if (compare(*at, ms.in) > 0 && compare(*at, ms.end()) < 0)
+        cut.push_back(m);
+    }
+    const std::string group = cut.empty() ? std::string() : new_id("lnk");
+    const std::string base = placeholder();
+    split_one(id, c.second, *at, base, group);
+    for (size_t i = 0; i < cut.size(); ++i)
+      split_one(cut[i].id, cut[i].track, *at, placeholder(".linked" + std::to_string(i)), group);
+    return {};
+  }
+
   // slip: the clip stays where it is on the timeline and shows another part of its file.
   Result<void> slip() {
     ATM_TRY(auto c, clip("clip"));
@@ -635,14 +763,46 @@ private:
     ATM_TRY(auto delta, time("delta"));
     if (!to && !delta)
       return fail("E_PARAM", "slip needs \"delta\" (how far into the file to move) or \"source_in\".");
-    Span n = s;
-    n.source_in = to ? *to : plus(s.source_in, *delta);
-    ATM_CHECK(check_media(*c.first, id, n));
-    put_span(id, s, n);
+    const Rational d = delta ? *delta : minus(*to, s.source_in);
+    std::vector<Member> all = linked(id);
+    all.insert(all.begin(), {id, c.second});
+    for (const Member &m : all) { // picture and sound stay in sync
+      const Span ms = span_of(node_of(m.id));
+      Span n = ms;
+      n.source_in = plus(ms.source_in, d);
+      ATM_CHECK(check_media(node_of(m.id), m.id, n));
+      put_span(m.id, ms, n);
+    }
     return {};
   }
 
   // roll: the cut between two touching clips moves; the first gets longer as the second gets shorter, or the reverse.
+  Result<void> roll_pair(const std::string &a, const std::string &b, Rational d) {
+    const Span sa = span_of(node_of(a)), sb = span_of(node_of(b));
+    Span na = sa;
+    na.duration = plus(sa.duration, d);
+    const Span nb = {plus(sb.in, d), minus(sb.duration, d), plus(sb.source_in, d)};
+    if (na.duration.num() <= 0 || nb.duration.num() <= 0)
+      return fail("E_MEDIA_RANGE", "The cut would move past the start of the first clip or the end of the second.",
+                  "Move it by less than " + seconds_text(d.num() < 0 ? sa.duration : sb.duration) + " s.");
+    ATM_CHECK(check_media(node_of(a), a, na));
+    ATM_CHECK(check_media(node_of(b), b, nb));
+    put_span(a, sa, na);
+    put_span(b, sb, nb);
+    return {};
+  }
+
+  // The linked partners of a and b that meet at the same cut on one track (the sound of two linked clips).
+  std::vector<std::pair<std::string, std::string>> linked_pairs(const std::string &a, const std::string &b) const {
+    std::vector<std::pair<std::string, std::string>> out;
+    const Rational cut = span_of(node_of(b)).in;
+    for (const Member &ma : linked(a))
+      for (const Member &mb : linked(b))
+        if (ma.track == mb.track && compare(span_of(node_of(ma.id)).end(), cut) == 0 && compare(span_of(node_of(mb.id)).in, cut) == 0)
+          out.emplace_back(ma.id, mb.id);
+    return out;
+  }
+
   Result<void> roll() {
     const auto between = op_.find("between");
     if (between == op_.end() || !between->is_array() || between->size() != 2 || !(*between)[0].is_string() ||
@@ -661,51 +821,106 @@ private:
     if (!to && !delta)
       return fail("E_PARAM", "roll needs \"delta\" or \"to\".");
     const Rational d = to ? minus(*to, sb.in) : *delta;
-    Span na = sa;
-    na.duration = plus(sa.duration, d);
-    const Span nb = {plus(sb.in, d), minus(sb.duration, d), plus(sb.source_in, d)};
-    if (na.duration.num() <= 0 || nb.duration.num() <= 0)
-      return fail("E_MEDIA_RANGE", "The cut would move past the start of the first clip or the end of the second.",
-                  "Move it by less than " + seconds_text(d.num() < 0 ? sa.duration : sb.duration) + " s.");
-    ATM_CHECK(check_media(*ra->node, a, na));
-    ATM_CHECK(check_media(*rb->node, b, nb));
-    put_span(a, sa, na);
-    put_span(b, sb, nb);
+    const auto pairs = linked_pairs(a, b); // read before any change
+    ATM_CHECK(roll_pair(a, b, d));
+    for (const auto &[la, lb] : pairs)
+      ATM_CHECK(roll_pair(la, lb, d));
     return {};
   }
 
   // slide: the clip moves along the track between its neighbours; the one before gets longer (or shorter) and the
   // one after gives up (or gains) the same time, so the rest of the timeline stays put.
+  Result<void> slide_one(const std::string &id, const std::string &track_id, Rational delta) {
+    const Span s = span_of(node_of(id));
+    const std::string before = neighbour(track_id, id, s.in, true), after = neighbour(track_id, id, s.end(), false);
+    Span n = s;
+    n.in = plus(s.in, delta);
+    if (!before.empty()) {
+      const Span sp = span_of(node_of(before));
+      Span np = sp;
+      np.duration = plus(sp.duration, delta);
+      if (np.duration.num() <= 0)
+        return fail("E_MEDIA_RANGE", "Sliding by " + seconds_text(delta) + " s would empty the clip before it.");
+      ATM_CHECK(check_media(node_of(before), before, np));
+      put_span(before, sp, np);
+    }
+    if (!after.empty()) {
+      const Span sn = span_of(node_of(after));
+      const Span nn = {plus(sn.in, delta), minus(sn.duration, delta), plus(sn.source_in, delta)};
+      if (nn.duration.num() <= 0)
+        return fail("E_MEDIA_RANGE", "Sliding by " + seconds_text(delta) + " s would empty the clip after it.");
+      ATM_CHECK(check_media(node_of(after), after, nn));
+      put_span(after, sn, nn);
+    }
+    put_span(id, s, n);
+    return {};
+  }
+
   Result<void> slide() {
     ATM_TRY(auto c, clip("clip"));
     const std::string id = op_.value("clip", std::string());
     ATM_TRY(auto delta, time("delta"));
     if (!delta)
       return fail("E_PARAM", "slide needs \"delta\".");
-    const Span s = span_of(*c.first);
-    const std::string before = neighbour(c.second, id, s.in, true), after = neighbour(c.second, id, s.end(), false);
-    Span n = s;
-    n.in = plus(s.in, *delta);
-    if (!before.empty()) {
-      const json &node = (*track(c.second))["clips"][before];
-      const Span sp = span_of(node);
-      Span np = sp;
-      np.duration = plus(sp.duration, *delta);
-      if (np.duration.num() <= 0)
-        return fail("E_MEDIA_RANGE", "Sliding by " + seconds_text(*delta) + " s would empty the clip before it.");
-      ATM_CHECK(check_media(node, before, np));
-      put_span(before, sp, np);
+    const std::vector<Member> members = linked(id);
+    ATM_CHECK(slide_one(id, c.second, *delta));
+    for (const Member &m : members)
+      ATM_CHECK(slide_one(m.id, m.track, *delta));
+    return {};
+  }
+
+  // link {clips: [...]}: one group, so edits move them together. unlink {clip}: the clip leaves its group.
+  Result<void> link() {
+    const auto clips = op_.find("clips");
+    if (clips == op_.end() || !clips->is_array() || clips->size() < 2)
+      return fail("E_PARAM", "link needs \"clips\": two or more clip IDs.");
+    const std::string group = new_id("lnk");
+    for (const json &c : *clips) {
+      const std::string id = c.is_string() ? c.get<std::string>() : std::string();
+      if (!doc_.find(id) || id_prefix(id) != "clp")
+        return fail("E_UNKNOWN_CLIP", "\"" + id + "\" is not a clip.");
+      push({{"op", "replace"}, {"path", id + "/link_group"}, {"value", group}});
     }
-    if (!after.empty()) {
-      const json &node = (*track(c.second))["clips"][after];
-      const Span sn = span_of(node);
-      const Span nn = {plus(sn.in, *delta), minus(sn.duration, *delta), plus(sn.source_in, *delta)};
-      if (nn.duration.num() <= 0)
-        return fail("E_MEDIA_RANGE", "Sliding by " + seconds_text(*delta) + " s would empty the clip after it.");
-      ATM_CHECK(check_media(node, after, nn));
-      put_span(after, sn, nn);
-    }
-    put_span(id, s, n);
+    return {};
+  }
+
+  Result<void> unlink() {
+    ATM_TRY(auto c, clip("clip"));
+    const std::string id = op_.value("clip", std::string());
+    if (!c.first->contains("link_group"))
+      return fail("E_NOT_LINKED", "Clip " + id + " is not linked to another clip.");
+    push({{"op", "remove"}, {"path", id + "/link_group"}});
+    const std::vector<Member> rest = linked(id);
+    if (rest.size() == 1) // a group of one is no group
+      push({{"op", "remove"}, {"path", rest[0].id + "/link_group"}});
+    return {};
+  }
+
+  // add_effect: a blur on one clip (or on an adjustment layer); it changes only that clip.
+  Result<void> add_effect() {
+    const std::string target = op_.value("target", op_.value("clip", std::string()));
+    const doc::NodeRef *ref = target.empty() ? nullptr : doc_.find(target);
+    if (!ref || id_prefix(target) != "clp")
+      return fail("E_UNKNOWN_CLIP", "\"target\" must be a clip ID or a $new: name.");
+    const std::string type = op_.value("type", std::string("gaussian_blur"));
+    if (type != "gaussian_blur" && type != "blur" && type != "attome.gaussian_blur")
+      return fail("EFFECT_UNSUPPORTED", "The effect \"" + type + "\" is not available.", "Use gaussian_blur, the one effect so far.");
+    push({{"op", "add"},
+          {"path", target + "/effects/" + placeholder()},
+          {"value", {{"effect", "attome.gaussian_blur@1.0.0"}, {"enabled", op_.value("enabled", true)},
+                     {"params", {{"radius", op_.value("radius", 0.02)}}}}}});
+    return {};
+  }
+
+  Result<void> change_effect(bool remove) {
+    const std::string id = op_.value("effect", std::string());
+    if (id.empty() || !doc_.find(id) || id_prefix(id) != "fx")
+      return fail("E_UNKNOWN_ID", "\"effect\" must be the ID of an effect (fx_…).",
+                  "Read a clip's effects with project.get, or use the $new: name given to add_effect.");
+    if (remove)
+      push({{"op", "remove"}, {"path", id}});
+    else
+      push({{"op", "replace"}, {"path", id + "/enabled"}, {"value", op_.value("enabled", true)}});
     return {};
   }
 

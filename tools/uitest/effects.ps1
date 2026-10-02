@@ -51,8 +51,22 @@ try {
       elseif (-not ($blur.params.radius -gt 0.045 -and $blur.params.radius -lt 0.055)) { $failed = 'the Blur card did not set the radius to about 0.05' }
     }
   }
+  if (-not $failed) { # a blur on one clip: the title's own Blur card
+    $again = Invoke-EditorScript -Project $proj -Endpoint $run.Endpoint -Script @(
+      'click @clip:Title'
+      'click @button:add_blur'
+      "shot $work\effects_clip_blur.jpg"
+    )
+    $failed = $again.Errors
+    if (-not $failed) {
+      $title = Get-Object $run ((@(Get-Tracks $run) | Where-Object { $_.name -eq 'Titles' }).clip_list[0].id)
+      $fx = @($title.effects.PSObject.Properties | ForEach-Object { $_.Value })
+      "title effects: $($fx | ConvertTo-Json -Compress)"
+      if ($fx.Count -ne 1 -or $fx[0].effect -notlike 'attome.gaussian_blur*') { $failed = 'the title clip did not get its own blur' }
+    }
+  }
 } finally { Stop-Daemon $run }
 
 if ($failed) { Write-Host "FAIL: $failed" -ForegroundColor Red; exit 1 }
-Write-Host "PASS: a blur adjustment layer from the Effects panel, radius set in its card (captures in $work)" -ForegroundColor Green
+Write-Host "PASS: a blur adjustment layer from the Effects panel, and a blur on one clip from its card (captures in $work)" -ForegroundColor Green
 exit 0

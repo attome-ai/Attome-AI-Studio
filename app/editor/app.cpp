@@ -11,6 +11,7 @@
 #include <imgui.h>
 #include <imgui_internal.h>
 
+#include "atm/base/id.hpp"
 #include "atm/base/profiler.hpp"
 #include "atm/base/time.hpp"
 #include "uidriver.hpp"
@@ -259,8 +260,10 @@ void App::refresh() {
           }
           c.media_w = ref.value("width", 0);
           c.media_h = ref.value("height", 0);
-          if (ref.value("type", "") == "adjustment") {
-            c.is_adjustment = true;
+          c.is_adjustment = ref.value("type", "") == "adjustment";
+          c.link_group = cit->value("link_group", std::string());
+          c.stream = ref.value("stream", std::string());
+          {
             if (const auto fx = cit->find("effects"); fx != cit->end() && fx->is_object())
               for (auto e = fx->begin(); e != fx->end(); ++e)
                 if (e->is_object() && e->value("effect", std::string()).rfind("attome.gaussian_blur", 0) == 0) {
@@ -296,7 +299,7 @@ void App::refresh() {
             c.audio_fade_in = frames_of(*au, "fade_in", rate_);
             c.audio_fade_out = frames_of(*au, "fade_out", rate_);
           }
-          if (track.kind == "audio" && !c.path.empty())
+          if (track.kind == "audio" && !c.path.empty() && c.stream != "audio") // a linked sound uses a video file
             audio_only_.insert(c.path);
           total_frames_ = std::max(total_frames_, c.start + c.frames);
           track.clips.push_back(std::move(c));
@@ -412,36 +415,15 @@ void App::add_title(int preset) {
   }
 }
 
+// Import goes through timeline.edit, so a video with sound becomes linked picture and sound clips, as for an agent.
+// The first video of an empty project sets the canvas.
 void App::import_files(const std::vector<std::string> &paths) {
   if (project_path_.empty() || paths.empty())
     return;
   json ops = json::array();
-  // Each kind of file goes to the selected track when it fits, else the first track of its kind, else a new one.
-  struct Target {
-    std::string track;
-    int64_t at = 0;
-    bool created = false;
-  };
-  const auto target_for = [&](bool audio, const char *placeholder) {
-    Target t;
-    const TrackUi *found = nullptr;
-    for (const TrackUi &k : tracks_)
-      if ((k.kind == "audio") == audio && (k.id == selected_track_ || !found))
-        found = &k;
-    if (found) {
-      t.track = found->id;
-      for (const ClipUi &c : found->clips)
-        t.at = std::max(t.at, c.start + c.frames);
-    } else {
-      t.track = placeholder;
-      t.created = true;
-    }
-    return t;
-  };
-  Target video = target_for(false, "$new:track"), sound = target_for(true, "$new:audio");
-  bool video_used = false, sound_used = false, canvas_set = false;
-  int added = 0;
   std::string problem;
+  bool canvas_set = false;
+  int added = 0;
   for (const std::string &path : paths) {
     json info;
     RpcError error;
@@ -458,52 +440,41 @@ void App::import_files(const std::vector<std::string> &paths) {
       media_paths_.push_back(path);
     if (!has_video)
       audio_only_.insert(path);
-    Target &to = has_video ? video : sound;
-    (has_video ? video_used : sound_used) = true;
-    const int64_t frames = std::max<int64_t>(1, int64_t(std::floor(info.value("seconds", 0.0) * fps())));
-    if (has_video && total_frames_ == 0 && !canvas_set) { // the first video of a project sets the canvas
-      ops.push_back({{"op", "replace"}, {"path", seq_id_ + "/canvas/width"}, {"value", info.value("width", 1920)}});
-      ops.push_back({{"op", "replace"}, {"path", seq_id_ + "/canvas/height"}, {"value", info.value("height", 1080)}});
+    if (has_video && total_frames_ == 0 && !canvas_set) {
+      ops.push_back({{"op", "set_property"}, {"target", seq_id_}, {"path", "canvas.width"}, {"value", info.value("width", 1920)}});
+      ops.push_back({{"op", "set_property"}, {"target", seq_id_}, {"path", "canvas.height"}, {"value", info.value("height", 1080)}});
       canvas_set = true;
     }
-    json media = {{"type", "file"}, {"path", path}, {"duration", info.value("duration", "0")},
-                  {"has_audio", info.value("has_audio", false)}};
-    if (has_video) {
-      media["width"] = info.value("width", 0);
-      media["height"] = info.value("height", 0);
-      if (info.contains("rate"))
-        media["rate"] = info["rate"];
-    }
-    json clip = {{"name", file_name(path)},
-                 {"timing", {{"record_in", frames_text(to.at)}, {"duration", frames_text(frames)}, {"source_in", "0"}}},
-                 {"media_ref", std::move(media)},
-                 {"volume", 1.0}};
-    if (has_video)
-      clip["transform"] = {{"opacity", 1.0}};
-    ops.push_back({{"op", "add"}, {"path", to.track + "/clips/$new:c" + std::to_string(added)}, {"value", std::move(clip)}});
-    to.at += frames;
+    json op = {{"op", "add_clip"}, {"id", "$new:c" + std::to_string(added)}, {"path", path}};
+    // The selected track takes the clip when it is the right kind; otherwise timeline.edit picks one.
+    for (const TrackUi &t : tracks_)
+      if (t.id == selected_track_ && (t.kind == "audio") == !has_video)
+        op["track"] = t.id;
+    ops.push_back(std::move(op));
     ++added;
   }
-  // New tracks go first in the patch, so the clips can name them.
-  json head = json::array();
-  if (video.created && video_used)
-    head.push_back({{"op", "add"}, {"path", seq_id_ + "/tracks/$new:track"}, {"value", {{"kind", "video"}, {"name", "V1"}}}});
-  if (sound.created && sound_used)
-    head.push_back({{"op", "add"}, {"path", seq_id_ + "/tracks/$new:audio"}, {"value", {{"kind", "audio"}, {"name", "A1"}}}});
-  for (json &op : ops)
-    head.push_back(std::move(op));
   if (added > 0) {
-    json ids;
+    json result;
     const std::string label = added == 1 ? "Import " + file_name(paths[0]) : "Import " + std::to_string(added) + " clips";
-    if (patch(std::move(head), label.c_str(), &ids)) {
-      selected_clip_ = ids.value("$new:c" + std::to_string(added - 1), "");
-      for (const char *t : {"$new:track", "$new:audio"})
-        if (ids.contains(t))
-          selected_track_ = ids.value(t, "");
+    if (rpc("timeline.edit", {{"project", project_path_}, {"ops", std::move(ops)}, {"label", label}}, result)) {
+      say(label);
+      selected_clip_ = result["id_map"].value("$new:c" + std::to_string(added - 1), "");
+      refresh();
     }
   }
   if (!problem.empty())
     say(problem, true);
+}
+
+std::vector<const ClipUi *> App::linked_of(const ClipUi &clip) const {
+  std::vector<const ClipUi *> out;
+  if (clip.link_group.empty())
+    return out;
+  for (const TrackUi &t : tracks_)
+    for (const ClipUi &c : t.clips)
+      if (c.id != clip.id && c.link_group == clip.link_group)
+        out.push_back(&c);
+  return out;
 }
 
 void App::delete_selected() {
@@ -511,9 +482,21 @@ void App::delete_selected() {
     return;
   const std::string id = std::exchange(selected_clip_, {});
   json ops = json::array();
-  drop_transitions(id, ops);
-  ops.push_back({{"op", "remove"}, {"path", id}});
-  patch(std::move(ops), "Delete clip");
+  std::vector<std::string> ids = {id};
+  if (const ClipUi *c = [&]() -> const ClipUi * {
+        for (const TrackUi &t : tracks_)
+          for (const ClipUi &k : t.clips)
+            if (k.id == id)
+              return &k;
+        return nullptr;
+      }())
+    for (const ClipUi *m : linked_of(*c)) // picture and sound go together
+      ids.push_back(m->id);
+  for (const std::string &x : ids) {
+    drop_transitions(x, ops);
+    ops.push_back({{"op", "remove"}, {"path", x}});
+  }
+  patch(std::move(ops), ids.size() > 1 ? "Delete linked clips" : "Delete clip");
 }
 
 void App::drop_transitions(const std::string &clip_id, json &ops) const {
@@ -582,6 +565,35 @@ void App::split_at_playhead() {
       ops.push_back({{"op", "replace"}, {"path", tr.id + "/from"}, {"value", "$new:right"}});
   for (json &op : split_ops)
     ops.push_back(std::move(op));
+  // Linked clips that span the playhead are cut too; the right halves form a group of their own.
+  std::string group;
+  int n = 0;
+  for (const ClipUi *m : linked_of(*c)) {
+    if (playhead_ <= m->start || playhead_ >= m->start + m->frames)
+      continue;
+    if (group.empty()) {
+      group = new_id("lnk");
+      ops[1]["value"]["link_group"] = group;
+    }
+    const TrackUi *mt = nullptr;
+    for (const TrackUi &t : tracks_)
+      for (const ClipUi &k : t.clips)
+        if (k.id == m->id)
+          mt = &t;
+    const int64_t mleft = playhead_ - m->start;
+    json mright = doc_["sequences"][seq_id_]["tracks"][mt->id]["clips"][m->id];
+    mright["timing"] = {{"record_in", frames_text(playhead_)}, {"duration", frames_text(m->frames - mleft)},
+                        {"source_in", frames_text(m->source_frames + mleft)}};
+    mright["link_group"] = group;
+    const std::string ph = "$new:linked" + std::to_string(n++);
+    ops.push_back({{"op", "replace"}, {"path", m->id + "/timing/duration"}, {"value", frames_text(mleft)}});
+    ops.push_back({{"op", "add"}, {"path", mt->id + "/clips/" + ph}, {"anchor", {{"after", m->id}}}, {"value", std::move(mright)}});
+    for (const TransitionUi &tr : mt->transitions)
+      if (tr.from == m->id)
+        ops.push_back({{"op", "replace"}, {"path", tr.id + "/from"}, {"value", ph}});
+  }
+  if (group.empty() && ops[1]["value"].contains("link_group")) // nothing linked was cut: the right half stands alone
+    ops[1]["value"].erase("link_group");
   json ids;
   if (patch(std::move(ops), "Split clip", &ids))
     selected_clip_ = ids.value("$new:right", "");
@@ -633,7 +645,29 @@ void App::commit_drag(const TrackUi &track, const ClipUi &c, int mode, int64_t d
       ops.push_back(std::move(op));
   }
   drop_transitions(c.id, ops); // the cut moves, so a dissolve on it would no longer fit
-  patch(std::move(ops), label);
+  // Linked clips (a picture and its sound) move and trim the same way, on their own tracks.
+  for (const ClipUi *m : linked_of(c)) {
+    if (mode == 1) {
+      const int64_t start = std::max<int64_t>(0, m->start + (std::max<int64_t>(0, c.start + d) - c.start));
+      if (start != m->start)
+        ops.push_back({{"op", "replace"}, {"path", m->id + "/timing/record_in"}, {"value", frames_text(start)}});
+    } else if (mode == 2) {
+      int64_t frames = 0;
+      for (const json &op : ops)
+        if (op["path"] == c.id + "/timing/duration")
+          if (const auto t = Rational::parse(op["value"].get<std::string>()))
+            frames = to_frames(*t, rate_, Round::nearest_even).value_or(c.frames);
+      if (frames > 0 && frames != c.frames)
+        ops.push_back({{"op", "replace"}, {"path", m->id + "/timing/duration"},
+                       {"value", frames_text(std::max<int64_t>(1, m->frames + (frames - c.frames)))}});
+    } else if (d != 0) {
+      ops.push_back({{"op", "replace"}, {"path", m->id + "/timing/record_in"}, {"value", frames_text(m->start + d)}});
+      ops.push_back({{"op", "replace"}, {"path", m->id + "/timing/duration"}, {"value", frames_text(m->frames - d)}});
+      ops.push_back({{"op", "replace"}, {"path", m->id + "/timing/source_in"}, {"value", frames_text(m->source_frames + d)}});
+    }
+    drop_transitions(m->id, ops);
+  }
+  patch(std::move(ops), linked_of(c).empty() ? label : (std::string(label) + " (linked)").c_str());
 }
 
 void App::start_export(const std::string &path) {
@@ -1427,7 +1461,8 @@ void App::draw_blur_card(const ClipUi &c) {
   const std::string id = c.id, fx = c.blur_id;
   if (fx.empty()) {
     ImGui::PushTextWrapPos(0.0f);
-    ImGui::TextColored(hexv(look::fg3), "This adjustment layer has no blur.");
+    ImGui::TextColored(hexv(look::fg3), "%s", c.is_adjustment ? "This adjustment layer has no blur."
+                                                              : "Soften this clip; its edges blend into what is below.");
     ImGui::PopTextWrapPos();
     if (soft_button("add_blur", "Add blur", ImVec2(-1.0f, 28.0f)))
       pending_ = [this, id] {
@@ -1452,6 +1487,12 @@ void App::draw_blur_card(const ClipUi &c) {
   ImGui::PushFont(g_fonts.mono, 13.0f);
   ImGui::TextColored(hexv(look::fg2), "%.3f", blur_radius_);
   ImGui::PopFont();
+  if (!c.is_adjustment) { // a clip's own opacity is in its Transform card
+    if (soft_button("remove_blur", "Remove blur", ImVec2(-1.0f, 28.0f)))
+      pending_ = [this, fx] { patch(json::array({{{"op", "remove"}, {"path", fx}}}), "Remove blur"); };
+    end_card();
+    return;
+  }
   ImGui::TextColored(hexv(look::fg2), "Amount");
   ImGui::SameLine(88.0f);
   slim_slider("blur_amount", &blur_amount_, 0.0f, 1.0f, ImGui::GetContentRegionAvail().x - 60.0f, "");
@@ -1811,6 +1852,8 @@ void App::draw_timeline() {
       selected_track_ = track.id;
       selected_clip_.clear();
     }
+    const ClipUi *sel_clip = selected();
+    const std::string sel_link = sel_clip ? sel_clip->link_group : std::string();
     for (const ClipUi &c : track.clips) {
       // What the clip looks like while it is being dragged; the document changes on release.
       int64_t start = c.start, frames = c.frames;
@@ -1838,6 +1881,8 @@ void App::draw_timeline() {
       dl->AddRectFilled(ImVec2(x0, cy), ImVec2(x1 - 1.0f, cy + 3.0f), IM_COL32(255, 255, 255, 70), 5.0f, ImDrawFlags_RoundCornersTop);
       if (is_selected)
         dl->AddRect(ImVec2(x0, cy), ImVec2(x1 - 1.0f, cy + ch), hex(look::accent), 5.0f, 0, 2.0f);
+      else if (!c.link_group.empty() && sel_link == c.link_group) // the selected clip's linked partner
+        dl->AddRect(ImVec2(x0, cy), ImVec2(x1 - 1.0f, cy + ch), hex(look::accent, 150), 5.0f, 0, 1.0f);
       if ((c.audio_fade_in > 0 || c.audio_fade_out > 0) && drag_id_ != c.id) { // sound fades: ramps at the ends
         const float fx_in = x_of(double(start + std::min(c.audio_fade_in, frames)));
         const float fx_out = x_of(double(start + frames - std::min(c.audio_fade_out, frames)));
@@ -2192,6 +2237,29 @@ void App::draw_inspector() {
   end_card();
   ImGui::PopStyleColor();
 
+  // A linked clip says what it is linked to; Unlink lets the two be edited apart for good.
+  if (const auto partners = linked_of(*c); !partners.empty()) {
+    if (begin_card("##link", "Linked")) {
+      ImGui::PushTextWrapPos(0.0f);
+      for (const ClipUi *m : partners)
+        ImGui::TextColored(hexv(look::fg2), "%s  (%s)", m->name.c_str(),
+                           m->stream == "audio" ? "its sound" : m->stream == "video" ? "its picture" : "linked clip");
+      ImGui::TextColored(hexv(look::fg3), "Moving, trimming, splitting and deleting change them together.");
+      ImGui::PopTextWrapPos();
+      const std::string cid = c->id;
+      if (soft_button("unlink", "Unlink", ImVec2(-1.0f, 28.0f)))
+        pending_ = [this, cid] {
+          json result;
+          if (rpc("timeline.edit", {{"project", project_path_}, {"ops", json::array({{{"op", "unlink"}, {"clip", cid}}})}, {"label", "Unlink"}}, result)) {
+            say("Unlink");
+            refresh();
+          }
+        };
+    }
+    end_card();
+  }
+
+
   if (c->is_text) {
     if (begin_card("##text", "Text")) {
       ImGui::PushStyleColor(ImGuiCol_FrameBg, hexv(look::raised));
@@ -2245,7 +2313,7 @@ void App::draw_inspector() {
   }
 
   const bool picture = track->kind != "audio" && !c->is_adjustment; // sound clips and adjustment layers have no picture
-  if (c->is_adjustment)
+  if (c->is_adjustment) // the blur is what an adjustment layer is for: first
     draw_blur_card(*c);
   if (picture && begin_card("##look", "Transform")) {
     // Position is shown in canvas pixels from the centre; the document stores canvas fractions (ADR-021).
@@ -2319,13 +2387,16 @@ void App::draw_inspector() {
     }
     ImGui::EndDisabled();
   }
-  if (picture)
+  if (picture) {
     end_card();
+    draw_blur_card(*c); // a blur on this clip alone
+  }
   if (picture || c->is_adjustment) // an adjustment layer's fades fade its effect
     draw_fade_card(*c);
   draw_transition_card(*track, *c);
 
-  const bool show_audio = !c->is_text && !c->is_adjustment; // text clips and adjustment layers have no sound
+  // Text, adjustment layers and pictures whose sound lives in a linked clip have no sound of their own here.
+  const bool show_audio = !c->is_text && !c->is_adjustment && c->stream != "video";
   if (show_audio && begin_card("##sound", "Audio")) {
     // One row: label, slider, value. The edit is sent when the slider is let go.
     const auto row = [&](const char *label, const char *slider, float *value, float lo, float hi, const char *fmt,

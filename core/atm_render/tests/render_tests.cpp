@@ -630,4 +630,60 @@ TEST_CASE("render: an adjustment layer blurs everything below it, mixed by its o
   std::error_code ec;
   fs::remove_all(dir, ec);
 }
+
+TEST_CASE("render: a blur on one clip softens its edges into what is below, not into black", "[media]") {
+  const fs::path dir = fs::temp_directory_path() / atm::new_id("attome-clipfx");
+  fs::create_directories(dir);
+  const std::string white = (dir / "white.mp4").string(), red = (dir / "red.mp4").string();
+  write_solid(white, 0xF0F0F0, 440.0, 1);
+  write_solid(red, 0xE00000, 440.0, 1);
+  // A white frame below; a red clip at half size in the middle above it (x 80..240, y 60..180 at 320 x 240).
+  const auto render_with = [&](const json &effects, double opacity) {
+    json red_clip = {{"timing", {{"record_in", "0"}, {"duration", "1"}, {"source_in", "0"}}},
+                     {"media_ref", {{"type", "file"}, {"path", red}}},
+                     {"transform", {{"scale", {0.5, 0.5}}, {"opacity", opacity}}}};
+    if (!effects.is_null())
+      red_clip["effects"] = effects;
+    const json doc = {
+        {"sequences",
+         {{"seq_1",
+           {{"rate", "30"},
+            {"canvas", {{"width", 320}, {"height", 240}}},
+            {"track_order", {"trk_bg", "trk_red"}},
+            {"tracks",
+             {{"trk_bg", {{"clips", {{"clp_bg", {{"timing", {{"record_in", "0"}, {"duration", "1"}, {"source_in", "0"}}},
+                                                {"media_ref", {{"type", "file"}, {"path", white}}}}}}}}},
+              {"trk_red", {{"clips", {{"clp_red", red_clip}}}}}}}}}}},
+        {"sequence_order", {"seq_1"}}};
+    auto comp = atm::render::compile(doc);
+    REQUIRE(comp);
+    atm::render::Renderer renderer(*comp, 320, 240);
+    std::vector<uint8_t> nv12(media::nv12_size(320, 240)), rgb(320 * 240 * 4);
+    REQUIRE(renderer.render(5, nv12.data()));
+    media::nv12_to_bgrx(nv12.data(), 320, 240, rgb.data());
+    return rgb;
+  };
+  const auto px = [](const std::vector<uint8_t> &rgb, int x, int y) { return rgb.data() + (size_t(y) * 320 + size_t(x)) * 4; };
+  const json blur = {{"fx_1", {{"effect", "attome.gaussian_blur@1.0.0"}, {"params", {{"radius", 0.08}}}}}};
+  const auto sharp = render_with(nullptr, 1.0), soft = render_with(blur, 1.0), faint = render_with(blur, 0.5);
+
+  // Sharp: red inside, white just outside the left edge.
+  CHECK(px(sharp, 160, 120)[2] > 180);
+  CHECK(px(sharp, 160, 120)[1] < 60);
+  CHECK(px(sharp, 74, 120)[1] > 200);
+  // Blurred: just outside the edge is a mix of red and white (green between the two), not a dark halo.
+  const uint8_t *edge = px(soft, 74, 120);
+  CHECK(edge[1] > 70);
+  CHECK(edge[1] < 200);
+  CHECK(edge[2] > 200); // red stays high: both red and white have it, black would not
+  // Far from the clip the background is untouched; its middle stays red.
+  CHECK(px(soft, 10, 10)[1] > 200);
+  CHECK(px(soft, 160, 120)[2] > 180);
+  CHECK(px(soft, 160, 120)[1] < 80);
+  // Half opacity: the middle is halfway between red and white.
+  CHECK(px(faint, 160, 120)[1] > 90);
+  CHECK(px(faint, 160, 120)[1] < 160);
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}
 #endif
