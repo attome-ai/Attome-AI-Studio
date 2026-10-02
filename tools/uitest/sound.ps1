@@ -1,5 +1,6 @@
-# UI test: a video file and a sound file imported together land on a video track and an audio track.
-# Needs a build (build\win-msvc-release\bin). Exit code 0 = pass.
+# UI test: a video file and a sound file imported together land on a video track and an audio track; the Inspector's
+# Audio card sets the sound clip's gain in dB and a fade in.
+# Virtual input only (uitest.psm1). Needs a build (build\win-msvc-release\bin). Exit code 0 = pass.
 #   .\tools\uitest\sound.ps1
 
 $ErrorActionPreference = 'Stop'
@@ -18,21 +19,32 @@ try {
   & "$bin\attome.exe" new $proj --rate 30 | Out-Null
 } finally { Remove-Item Env:\ATTOME_ENDPOINT -ErrorAction SilentlyContinue }
 
-function Get-Tracks($ed) { (Invoke-Attome $ed --json inspect $proj --level tracks | ConvertFrom-Json).result.data.sequences[0].tracks }
-
-$ed = Start-Editor -Project $proj -Import "$work\a.mp4", "$work\music.wav"
-$failed = $null
+# A video and a sound file dropped together; then the Audio card of the sound clip.
+$run = Invoke-EditorScript -Project $proj -Import "$work\a.mp4", "$work\music.wav" -Script @(
+  'click @clip:music.wav'
+  'slide @slider:gain 0.5385'      # -40 .. +12 dB: about -12 dB
+  'slide @slider:afadein 0.3333'   # 0 .. 6 s: about 2 s
+  "shot $work\sound_set.jpg"
+)
+$failed = $run.Errors
 try {
-  Show-Window $ed
-  $tracks = @(Get-Tracks $ed)
-  $video = $tracks | Where-Object { $_.kind -eq 'video' }
-  $audio = $tracks | Where-Object { $_.kind -eq 'audio' }
-  "tracks: $(($tracks | ForEach-Object { "$($_.name)/$($_.kind)/$($_.clips)" }) -join ', ')"
-  Save-Shot $ed (Join-Path $work 'sound_imported.png') | Out-Null
-  if (-not $video -or -not $audio -or $video.clips -ne 1 -or $audio.clips -ne 1) {
-    $failed = 'the video and the sound file did not land on a video and an audio track'
+  if (-not $failed) {
+    $tracks = @(Get-Tracks $run)
+    $video = $tracks | Where-Object { $_.kind -eq 'video' }
+    $audio = $tracks | Where-Object { $_.kind -eq 'audio' }
+    "tracks: $(($tracks | ForEach-Object { "$($_.name)/$($_.kind)/$($_.clips)" }) -join ', ')"
+    if (-not $video -or -not $audio -or $video.clips -ne 1 -or $audio.clips -ne 1) {
+      $failed = 'the video and the sound file did not land on a video and an audio track'
+    } else {
+      $clip = Get-Object $run $audio.clip_list[0].id
+      "audio: $($clip.audio | ConvertTo-Json -Compress)"
+      $fade = ConvertFrom-Rational $clip.audio.fade_in
+      if (-not ($clip.audio.gain_db -lt -10.5 -and $clip.audio.gain_db -gt -13.5)) { $failed = 'Gain did not become about -12 dB' }
+      elseif (-not ($fade -gt 1.8 -and $fade -lt 2.2)) { $failed = 'Fade in did not become about 2 s' }
+    }
   }
-} finally { Stop-Editor $ed }
+} finally { Stop-Daemon $run }
 
 if ($failed) { Write-Host "FAIL: $failed" -ForegroundColor Red; exit 1 }
-Write-Host "PASS: video and sound imported to their own tracks (captures in $work)" -ForegroundColor Green
+Write-Host "PASS: video and sound on their own tracks; gain and fade set from the Audio card (captures in $work)" -ForegroundColor Green
+exit 0

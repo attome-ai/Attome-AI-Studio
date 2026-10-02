@@ -13,6 +13,7 @@
 
 #include "atm/base/profiler.hpp"
 #include "atm/base/time.hpp"
+#include "uidriver.hpp"
 
 namespace atm::editor {
 namespace {
@@ -770,6 +771,7 @@ bool soft_button(const char *id, const char *label, ImVec2 size, bool enabled = 
   if (size.x <= 0.0f)
     size.x = text_size(label).x + 24.0f;
   ImGui::InvisibleButton("##b", size);
+  ui_mark(std::string("button:") + id);
   const bool hovered = enabled && ImGui::IsItemHovered(), held = enabled && ImGui::IsItemActive();
   ImDrawList *dl = ImGui::GetWindowDrawList();
   ImU32 bg = primary ? hex(look::accent) : hex(fill);
@@ -791,6 +793,7 @@ bool icon_button(const char *id, uint32_t cp, bool enabled = true, bool active =
   ImGui::PushID(id);
   const ImVec2 p = ImGui::GetCursorScreenPos();
   ImGui::InvisibleButton("##i", ImVec2(size, size));
+  ui_mark(std::string("icon:") + id);
   const bool hovered = enabled && ImGui::IsItemHovered();
   ImDrawList *dl = ImGui::GetWindowDrawList();
   if (active)
@@ -813,6 +816,7 @@ bool slim_slider(const char *id, float *value, float lo, float hi, float width, 
   const float h = 20.0f;
   const ImVec2 p = ImGui::GetCursorScreenPos();
   ImGui::InvisibleButton("##s", ImVec2(width, h));
+  ui_mark(std::string("slider:") + id);
   bool changed = false;
   if (ImGui::IsItemActive()) {
     const float t = std::clamp((ImGui::GetIO().MousePos.x - p.x - 8.0f) / (width - 16.0f), 0.0f, 1.0f);
@@ -999,6 +1003,7 @@ void App::draw_menu() {
       ImGui::SetCursorPos(ImVec2(mx, 9.0f));
       ImGui::PushID(label);
       ImGui::InvisibleButton("##m", ImVec2(mw, 32.0f));
+      ui_mark(std::string("menu:") + label);
       const bool hovered = ImGui::IsItemHovered();
       if (ImGui::IsItemClicked())
         ImGui::OpenPopup("##menu");
@@ -1120,6 +1125,7 @@ void App::draw_rail() {
       ImGui::SetCursorPos(ImVec2(6.0f, y));
       ImGui::PushID(it.label);
       ImGui::InvisibleButton("##r", ImVec2(56.0f, 50.0f));
+      ui_mark(std::string("rail:") + it.label);
       const bool hovered = ImGui::IsItemHovered();
       const bool clicked = ImGui::IsItemClicked();
       ImGui::PopID();
@@ -1247,6 +1253,7 @@ void App::draw_media() {
     const ImVec2 p = ImGui::GetCursorScreenPos();
     ImGui::PushID(path.c_str());
     ImGui::InvisibleButton("##m", ImVec2(cell, thumb_h + 24.0f));
+    ui_mark("media:" + name);
     const bool hovered = ImGui::IsItemHovered();
     ImDrawList *dl = ImGui::GetWindowDrawList();
     const auto tex = thumb_tex_.find(path);
@@ -1306,6 +1313,7 @@ void App::draw_text_panel() {
     const ImVec2 p = ImGui::GetCursorScreenPos();
     ImGui::PushID(i);
     ImGui::InvisibleButton("##style", ImVec2(-1.0f, 78.0f));
+    ui_mark(std::string("style:") + styles[i].name);
     const bool hovered = ImGui::IsItemHovered();
     if (ImGui::IsItemClicked())
       add_title(i);
@@ -1412,6 +1420,7 @@ void App::draw_viewer() {
 
     ImGui::SetCursorScreenPos(p0);
     ImGui::InvisibleButton("##picture", size);
+    ui_mark("monitor");
     const ImVec2 mouse = ImGui::GetIO().MousePos;
     if (ImGui::IsItemActivated()) {
       const float mx = (mouse.x - p0.x) / k, my = (mouse.y - p0.y) / k; // canvas pixels
@@ -1510,6 +1519,7 @@ void App::draw_viewer() {
     jump_cut(true);
   ImGui::SetCursorScreenPos(ImVec2(cx - 22.0f, cy - 22.0f));
   ImGui::InvisibleButton("##play", ImVec2(44.0f, 44.0f));
+  ui_mark("transport:play");
   const bool play_hover = ImGui::IsItemHovered();
   if (ImGui::IsItemClicked() && total_frames_ > 0)
     play(!playing_);
@@ -1721,6 +1731,10 @@ void App::draw_timeline() {
       const auto handle = [&](const char *suffix, float bx, float bw, int mode) {
         ImGui::SetCursorScreenPos(ImVec2(bx, cy));
         ImGui::InvisibleButton((c.id + suffix).c_str(), ImVec2(std::max(1.0f, bw), ch));
+        if (mode == 1) { // the clip's body, by name and by ID
+          ui_mark("clip:" + c.name);
+          ui_mark("clip:" + c.id);
+        }
         if (mode != 1 && (ImGui::IsItemHovered() || ImGui::IsItemActive()))
           ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
         if (ImGui::IsItemActivated()) {
@@ -2076,7 +2090,9 @@ void App::draw_inspector() {
         };
       }
       ImGui::SameLine(0.0f, 24.0f);
-      if (ImGui::Checkbox("Bold", &text_bold_)) {
+      const bool bold_changed = ImGui::Checkbox("Bold", &text_bold_);
+      ui_mark("check:bold");
+      if (bold_changed) {
         const bool value = text_bold_;
         pending_ = [this, id, value] {
           patch(json::array({{{"op", "replace"}, {"path", id + "/content/bold"}, {"value", value}}}), "Change text weight");
@@ -2192,7 +2208,9 @@ void App::draw_inspector() {
     row("Fade in", "afadein", &audio_fade_in_s_, 0.0f, max_fade, "%.2fs", "fade_in", "Sound fade in", true);
     row("Fade out", "afadeout", &audio_fade_out_s_, 0.0f, max_fade, "%.2fs", "fade_out", "Sound fade out", true);
     bool muted = c->volume <= 0.0f;
-    if (ImGui::Checkbox("Mute", &muted)) {
+    const bool mute_changed = ImGui::Checkbox("Mute", &muted);
+    ui_mark("check:mute");
+    if (mute_changed) {
       const float v = muted ? 0.0f : 1.0f;
       pending_ = [this, id, v] {
         patch(json::array({{{"op", "replace"}, {"path", id + "/volume"}, {"value", v}}}), v > 0.0f ? "Unmute" : "Mute");

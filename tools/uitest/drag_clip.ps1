@@ -1,5 +1,5 @@
 # UI regression test: dragging the picture in the Monitor moves the selected clip and saves one "Move clip" edit.
-# Needs a build (build\win-msvc-release\bin). Exit code 0 = pass.
+# Virtual input only (uitest.psm1). Needs a build (build\win-msvc-release\bin). Exit code 0 = pass.
 #   .\tools\uitest\drag_clip.ps1
 
 $ErrorActionPreference = 'Stop'
@@ -12,8 +12,7 @@ $proj = Join-Path $work 'Drag.attome'
 Remove-Item $proj -Recurse -Force -ErrorAction SilentlyContinue
 
 # A scratch project made with a private daemon, so nothing of the user's is touched.
-$endpoint = "\\.\pipe\attome-uitest-setup-$PID"
-$env:ATTOME_ENDPOINT = $endpoint
+$env:ATTOME_ENDPOINT = "\\.\pipe\attome-uitest-setup-$PID"
 try {
   & "$bin\attome.exe" sample "$work\a.mp4" --seconds 4 --height 540 | Out-Null
   & "$bin\attome.exe" new $proj --rate 30 | Out-Null
@@ -28,25 +27,24 @@ try {
   & "$bin\attome.exe" patch $proj "$work\p.json" | Out-Null
 } finally { Remove-Item Env:\ATTOME_ENDPOINT -ErrorAction SilentlyContinue }
 
-$ed = Start-Editor -Project $proj -SelectFirstClip
-$failed = $null
+# The half-size clip sits in the middle of the Monitor picture: drag it a quarter of the picture left, 30 % down.
+$run = Invoke-EditorScript -Project $proj -SelectFirstClip -Script @(
+  'drag @monitor -25% 30%'
+  "shot $work\drag_after.jpg"
+)
+$failed = $run.Errors
 try {
-  Show-Window $ed
-  $cid = (Invoke-Attome $ed --json inspect $proj --level tracks | ConvertFrom-Json).result.data.sequences[0].tracks[0].clip_list[0].id
-  $pos = { (Invoke-Attome $ed --json get $proj $cid | ConvertFrom-Json).result.object.transform.position }
-  $before = & $pos
-  Save-Shot $ed (Join-Path $work 'drag_before.png') | Out-Null
-  # The clip is half size and centred in the Monitor; the Monitor picture is centred in the window.
-  Move-Drag $ed 853 320 703 425
-  Save-Shot $ed (Join-Path $work 'drag_after.png') | Out-Null
-  $after = & $pos
-  "position before: $($before -join ', ')   after: $($after -join ', ')"
-  if ([math]::Abs($before[0] - 0.5) -gt 0.001) { $failed = "unexpected start position" }
-  elseif (-not ($after[0] -lt 0.30 -and $after[0] -gt 0.20)) { $failed = "x did not move to about 0.27" }
-  elseif (-not ($after[1] -gt 0.70 -and $after[1] -lt 0.85)) { $failed = "y did not move to about 0.79" }
-  $edits = (Invoke-Attome $ed --json history $proj | ConvertFrom-Json).result.changesets | Where-Object { $_.label -eq 'Move clip' }
-  if (-not $failed -and @($edits).Count -ne 1) { $failed = "expected exactly one 'Move clip' edit, found $(@($edits).Count)" }
-} finally { Stop-Editor $ed }
+  if (-not $failed) {
+    $cid = (Get-Tracks $run)[0].clip_list[0].id
+    $after = (Get-Object $run $cid).transform.position
+    "position after: $($after -join ', ')"
+    if (-not ($after[0] -lt 0.30 -and $after[0] -gt 0.20)) { $failed = "x did not move to about 0.25" }
+    elseif (-not ($after[1] -gt 0.72 -and $after[1] -lt 0.88)) { $failed = "y did not move to about 0.80" }
+    $edits = (Invoke-Attome $run --json history $proj | ConvertFrom-Json).result.changesets | Where-Object { $_.label -eq 'Move clip' }
+    if (-not $failed -and @($edits).Count -ne 1) { $failed = "expected exactly one 'Move clip' edit, found $(@($edits).Count)" }
+  }
+} finally { Stop-Daemon $run }
 
 if ($failed) { Write-Host "FAIL: $failed" -ForegroundColor Red; exit 1 }
 Write-Host "PASS: dragging the picture moved the clip (captures in $work)" -ForegroundColor Green
+exit 0

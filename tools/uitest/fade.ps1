@@ -1,5 +1,5 @@
 # UI test: drag the Inspector's "Fade in" slider; the clip gets opacity keys that rise from 0; split keeps them valid.
-# Needs a build (build\win-msvc-release\bin). Exit code 0 = pass.
+# Virtual input only (uitest.psm1). Needs a build (build\win-msvc-release\bin). Exit code 0 = pass.
 #   .\tools\uitest\fade.ps1
 
 $ErrorActionPreference = 'Stop'
@@ -26,56 +26,45 @@ try {
   & "$bin\attome.exe" patch $proj "$work\pt.json" | Out-Null
 } finally { Remove-Item Env:\ATTOME_ENDPOINT -ErrorAction SilentlyContinue }
 
-function Get-Clips($ed) {
-  $track = (Invoke-Attome $ed --json inspect $proj --level tracks | ConvertFrom-Json).result.data.sequences[0].tracks[0]
-  @($track.clip_list | ForEach-Object { (Invoke-Attome $ed --json get $proj $_.id | ConvertFrom-Json).result.object })
-}
 function Get-OpacityKeys($clip) {
   $k = $clip.transform.keyframes.opacity
   if (-not $k) { return ,@() }
-  $keys = @($k.PSObject.Properties | ForEach-Object { $_.Value })
-  # sorted by time; times are canonical rationals such as "1" or "7/2"
-  ,@($keys | Sort-Object { $p = $_.t -split '/'; [double]$p[0] / $(if ($p.Count -gt 1) { [double]$p[1] } else { 1.0 }) })
+  ,@($k.PSObject.Properties | ForEach-Object { $_.Value } | Sort-Object { ConvertFrom-Rational $_.t })
 }
-function Wait-Keys($ed, [int]$Count) {
-  for ($i = 0; $i -lt 15; $i++) {
-    $keys = Get-OpacityKeys (Get-Clips $ed)[0]
-    if ($keys.Count -eq $Count) { return ,$keys }
-    Start-Sleep -Milliseconds 200
-  }
-  ,$keys
-}
+function Get-Clips($run) { ,@((Get-Tracks $run)[0].clip_list | ForEach-Object { Get-Object $run $_.id }) }
 
-$ed = Start-Editor -Project $proj -SelectFirstClip
-$failed = $null
+# The 4-second clip is selected; each fade slider spans 0..4 s, so a quarter is 1 s.
+$run = Invoke-EditorScript -Project $proj -SelectFirstClip -Script @(
+  'slide @slider:fadein 0.25'
+  'slide @slider:fadeout 0.25'
+  "shot $work\fade_after.jpg"
+)
+$failed = $run.Errors
 try {
-  Show-Window $ed
-  Scroll-At $ed 1430 400 10 # the Fade card sits below Transform in the Inspector
-  Save-Shot $ed (Join-Path $work 'fade_before.png') | Out-Null
-  Move-Drag $ed 1378 185 1412 185 # Fade in: about 1 s
-  $keys = Wait-Keys $ed 2
-  "after fade in: $($keys | ConvertTo-Json -Compress)"
-  if ($keys.Count -ne 2 -or $keys[0].t -ne '0' -or $keys[0].v -ne 0 -or $keys[1].v -ne 1) { $failed = 'Fade in did not make keys 0 -> 1' }
-  else {
-    Move-Drag $ed 1378 212 1412 212 # Fade out: about 1 s
-    $keys = Wait-Keys $ed 4
-    "after fade out: $($keys | ConvertTo-Json -Compress)"
-    if ($keys.Count -ne 4 -or $keys[3].t -ne '4' -or $keys[3].v -ne 0) { $failed = 'Fade out did not end at 0 at the clip end' }
-  }
-  Save-Shot $ed (Join-Path $work 'fade_after.png') | Out-Null
   if (-not $failed) {
-    Send-Key $ed 0x53 # S: split at the playhead (2 s)
-    Start-Sleep -Seconds 1
-    $clips = Get-Clips $ed
-    $l = Get-OpacityKeys $clips[0]; $r = Get-OpacityKeys $clips[1]
-    "after split: left $($l | ConvertTo-Json -Compress)  right $($r | ConvertTo-Json -Compress)"
-    Save-Shot $ed (Join-Path $work 'fade_split.png') | Out-Null
-    if ($clips.Count -ne 2) { $failed = 'split did not make two clips' }
-    elseif ($l.Count -ne 2 -or $l[0].v -ne 0 -or $r.Count -ne 2 -or $r[1].v -ne 0 -or $r[1].t -ne '2') {
-      $failed = 'after a split the left half should keep the fade in and the right half the fade out'
+    $keys = Get-OpacityKeys (Get-Clips $run)[0]
+    "after the fades: $($keys | ConvertTo-Json -Compress)"
+    $rise = if ($keys.Count -eq 4) { ConvertFrom-Rational $keys[1].t } else { 0 }
+    if ($keys.Count -ne 4 -or $keys[0].t -ne '0' -or $keys[0].v -ne 0 -or $keys[3].t -ne '4' -or $keys[3].v -ne 0 -or
+        $rise -lt 0.8 -or $rise -gt 1.2) {
+      $failed = 'the Fade card did not make a 1 s fade in from 0 and a fade out to 0 at the end'
     }
   }
-} finally { Stop-Editor $ed }
+  if (-not $failed) { # S splits at the playhead (2 s): each half keeps the fade at its outer end
+    $split = Invoke-EditorScript -Project $proj -SelectFirstClip -Endpoint $run.Endpoint -Script @('key S', "shot $work\fade_split.jpg")
+    $failed = $split.Errors
+    if (-not $failed) {
+      $clips = Get-Clips $run
+      $l = Get-OpacityKeys $clips[0]; $r = Get-OpacityKeys $clips[1]
+      "after split: left $($l | ConvertTo-Json -Compress)  right $($r | ConvertTo-Json -Compress)"
+      if ($clips.Count -ne 2) { $failed = 'split did not make two clips' }
+      elseif ($l.Count -ne 2 -or $l[0].v -ne 0 -or $r.Count -ne 2 -or $r[1].v -ne 0 -or $r[1].t -ne '2') {
+        $failed = 'after a split the left half should keep the fade in and the right half the fade out'
+      }
+    }
+  }
+} finally { Stop-Daemon $run }
 
 if ($failed) { Write-Host "FAIL: $failed" -ForegroundColor Red; exit 1 }
 Write-Host "PASS: fades from the Inspector, kept through a split (captures in $work)" -ForegroundColor Green
+exit 0

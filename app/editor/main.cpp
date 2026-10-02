@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <memory>
 #include <string>
 
 #include <SDL3/SDL.h>
@@ -14,6 +15,7 @@
 #include <imgui_impl_sdlrenderer3.h>
 
 #include "app.hpp"
+#include "uidriver.hpp"
 #include "atm/base/profiler.hpp"
 
 namespace {
@@ -91,8 +93,11 @@ int main(int argc, char **argv) {
     return 1;
   }
   SDL_InitSubSystem(SDL_INIT_AUDIO); // best effort: without a sound device the editor still works, silently
-  SDL_Window *window =
-      SDL_CreateWindow("Attome", 1600, 960, SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY | SDL_WINDOW_MAXIMIZED);
+  // A UI test script drives a fixed-size window that never takes the focus (uidriver.hpp).
+  std::unique_ptr<atm::editor::UiDriver> driver = atm::editor::UiDriver::from_env();
+  SDL_Window *window = SDL_CreateWindow(
+      "Attome", 1600, 960,
+      SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY | (driver ? SDL_WINDOW_NOT_FOCUSABLE : SDL_WINDOW_MAXIMIZED));
   SDL_Renderer *renderer = window ? SDL_CreateRenderer(window, nullptr) : nullptr;
   if (!renderer) {
     SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Attome", SDL_GetError(), nullptr);
@@ -111,7 +116,7 @@ int main(int argc, char **argv) {
   ImGui::CreateContext();
   ImGuiIO &io = ImGui::GetIO();
   io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_DockingEnable;
-  io.IniFilename = ini.c_str();
+  io.IniFilename = driver ? nullptr : ini.c_str(); // tests always start from the default layout
   atm::editor::Fonts &fonts = atm::editor::g_fonts;
   fonts.ui = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\segoeui.ttf", 15.0f);
   if (fonts.ui) { // icons are merged into the UI font
@@ -152,7 +157,8 @@ int main(int argc, char **argv) {
       // Nothing moving: wait for input instead of redrawing. The timeout keeps the polls of the daemon alive.
       bool have = (awake > 0 || app.busy()) ? SDL_PollEvent(&event) : SDL_WaitEventTimeout(&event, 100);
       while (have) {
-        ImGui_ImplSDL3_ProcessEvent(&event);
+        if (!driver || atm::editor::UiDriver::passes(event))
+          ImGui_ImplSDL3_ProcessEvent(&event);
         if (event.type == SDL_EVENT_QUIT ||
             (event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED && event.window.windowID == SDL_GetWindowID(window)))
           running = false;
@@ -161,6 +167,8 @@ int main(int argc, char **argv) {
         awake = 4;
         have = SDL_PollEvent(&event);
       }
+      if (driver)
+        awake = 4; // a script keeps the editor drawing
       if (awake > 0)
         --awake;
       const auto now = std::chrono::steady_clock::now();
@@ -182,6 +190,11 @@ int main(int argc, char **argv) {
       ATM_PROFILE_FRAME();
       ImGui_ImplSDLRenderer3_NewFrame();
       ImGui_ImplSDL3_NewFrame();
+      if (driver) {
+        driver->before_frame();
+        if (driver->done())
+          running = false;
+      }
       ImGui::NewFrame();
       app.frame(dt);
       ImGui::Render();
@@ -190,6 +203,8 @@ int main(int argc, char **argv) {
         SDL_SetRenderDrawColor(renderer, 13, 15, 21, 255);
         SDL_RenderClear(renderer);
         ImGui_ImplSDLRenderer3_RenderDrawData(ImGui::GetDrawData(), renderer);
+        if (driver)
+          driver->after_render(renderer);
         SDL_RenderPresent(renderer);
       }
     }
@@ -202,5 +217,5 @@ int main(int argc, char **argv) {
   SDL_DestroyRenderer(renderer);
   SDL_DestroyWindow(window);
   SDL_Quit();
-  return 0;
+  return driver ? driver->exit_code() : 0;
 }
