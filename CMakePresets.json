@@ -42,6 +42,7 @@
         "CMAKE_BUILD_TYPE": "Release",
         "ATM_MEDIA_BACKEND": "ffmpeg",
         "ATM_TEXT_BACKEND": "freetype",
+        "ATM_IMAGE_BACKEND": "stb",
         "VCPKG_MANIFEST_FEATURES": "ffmpeg;portable-text"
       }
     },

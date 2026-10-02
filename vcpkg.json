@@ -10,6 +10,7 @@
     "cli11",
     "catch2",
     "sdl3",
+    "stb",
     {
       "name": "imgui",
       "features": [

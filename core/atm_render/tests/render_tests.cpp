@@ -1,4 +1,4 @@
-#if defined(_WIN32) // the only media backend so far
+#if defined(_WIN32) || defined(ATM_MEDIA_FFMPEG) // a system with a media backend
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
@@ -7,6 +7,7 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <thread>
 
 #include "atm/api/engine.hpp"
@@ -683,6 +684,39 @@ TEST_CASE("render: a blur on one clip softens its edges into what is below, not 
   // Half opacity: the middle is halfway between red and white.
   CHECK(px(faint, 160, 120)[1] > 90);
   CHECK(px(faint, 160, 120)[1] < 160);
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}
+
+TEST_CASE("media: stills are JPEG files, also under a non-ASCII path", "[media]") {
+  const fs::path dir = fs::temp_directory_path() / atm::new_id("attome-still");
+  fs::create_directories(dir);
+  const int w = 64, h = 48;
+  std::vector<uint8_t> bgrx(size_t(w) * size_t(h) * 4);
+  for (int y = 0; y < h; ++y)
+    for (int x = 0; x < w; ++x) {
+      uint8_t *p = bgrx.data() + (size_t(y) * size_t(w) + size_t(x)) * 4;
+      p[0] = uint8_t(x * 4);
+      p[1] = uint8_t(y * 5);
+      p[2] = 200;
+      p[3] = 0;
+    }
+  const std::u8string name = u8"\u0635\u0648\u0631\u0629 still.jpg"; // "picture" in Arabic
+  const fs::path file = dir / name;
+  const std::u8string file_u8 = file.u8string();
+  REQUIRE(media::write_jpeg(std::string(file_u8.begin(), file_u8.end()), bgrx.data(), w, h));
+  std::ifstream in(file, std::ios::binary);
+  const std::vector<char> bytes{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+  REQUIRE(bytes.size() > 100);
+  CHECK(uint8_t(bytes[0]) == 0xFF); // SOI
+  CHECK(uint8_t(bytes[1]) == 0xD8);
+  CHECK(uint8_t(bytes[bytes.size() - 2]) == 0xFF); // EOI
+  CHECK(uint8_t(bytes[bytes.size() - 1]) == 0xD9);
+
+  const fs::path missing = dir / "no such folder" / "x.jpg";
+  const auto r = media::write_jpeg(missing.string(), bgrx.data(), w, h);
+  REQUIRE_FALSE(r);
+  CHECK(r.error().rule == "M_IMAGE_WRITE");
   std::error_code ec;
   fs::remove_all(dir, ec);
 }

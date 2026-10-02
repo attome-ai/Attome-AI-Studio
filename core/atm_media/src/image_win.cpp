@@ -1,4 +1,4 @@
-#if defined(_WIN32)
+#if defined(_WIN32) && !defined(ATM_IMAGE_STB)
 // Still images for agents (see.frames, see.contact_sheet), written with the Windows Imaging Component.
 
 #include <windows.h>
