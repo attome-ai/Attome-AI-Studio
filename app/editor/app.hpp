@@ -63,11 +63,11 @@ struct ClipUi {
   int64_t audio_fade_in = 0, audio_fade_out = 0; // frames
 };
 
-struct TransitionUi { // a dissolve or wipe over [cut - in, cut + out), where `to` starts
+struct TransitionUi { // a dissolve, wipe or push over [cut - in, cut + out), where `to` starts
   std::string id, from, to;
   int64_t in = 0, out = 0; // frames
-  bool wipe = false;       // an attome.wipe; `direction` is the eval::WipeDirection it enters from
-  int direction = 0;
+  eval::TransitionKind kind = eval::TransitionKind::dissolve;
+  int direction = 0;       // a wipe or push: the eval::WipeDirection the incoming clip enters from
 };
 
 struct TrackUi {
@@ -218,7 +218,7 @@ private:
   float gain_db_ = 0.0f, pan_ = 0.0f, audio_fade_in_s_ = 0.0f, audio_fade_out_s_ = 0.0f;
   float amount_ = 1.0f;                    // an adjustment layer's opacity: how much of its effect shows
   std::map<std::string, float> fx_edit_;   // effect sliders being dragged, by "<effect id>/<param>"
-  int wipe_dir_ = 0;                       // the side a new wipe enters from (eval::WipeDirection)
+  int wipe_dir_ = 0;                       // the side a new wipe or push enters from (eval::WipeDirection)
 
   // inspector
   std::string insp_for_;

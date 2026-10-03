@@ -1,5 +1,5 @@
 # UI test: the Effects panel adds a colour grade and a vignette as adjustment layers, the Color grade card changes a
-# parameter, and the Transition card adds a wipe from a chosen side. Virtual input only (uitest.psm1). Needs a build
+# parameter, and the Transition card adds a wipe and a push from a chosen side. Virtual input only (uitest.psm1). Needs a build
 # (build\win-msvc-release\bin). Exit code 0 = pass.
 #   .\tools\uitest\grade_wipe.ps1
 
@@ -79,8 +79,30 @@ try {
       if ($track.transitions -and @($track.transitions.PSObject.Properties).Count -ne 0) { $failed = 'the Transition card did not remove the wipe' }
     }
   }
+  if (-not $failed) { # a push from the top, the same card
+    $push = Invoke-EditorScript -Project $proj -SelectFirstClip -Endpoint $run.Endpoint -Script @(
+      'click @button:wipe_up'
+      'click @button:add_push'
+      "shot $work\push_added.jpg"
+    )
+    $failed = $push.Errors
+    if (-not $failed) {
+      $track = Get-Object $run (@(Get-Tracks $run) | Where-Object { $_.name -eq 'V1' }).id
+      $t = @($track.transitions.PSObject.Properties | ForEach-Object { $_.Value })
+      "transition: $($t | ConvertTo-Json -Compress)"
+      if ($t.Count -ne 1 -or $t[0].type -ne 'attome.push' -or $t[0].params.direction -ne 'up') { $failed = 'the Transition card did not add a push from the top' }
+    }
+  }
+  if (-not $failed) {
+    $gone = Invoke-EditorScript -Project $proj -SelectFirstClip -Endpoint $run.Endpoint -Script @('click @button:remove_push')
+    $failed = $gone.Errors
+    if (-not $failed) {
+      $track = Get-Object $run (@(Get-Tracks $run) | Where-Object { $_.name -eq 'V1' }).id
+      if ($track.transitions -and @($track.transitions.PSObject.Properties).Count -ne 0) { $failed = 'the Transition card did not remove the push' }
+    }
+  }
 } finally { Stop-Daemon $run }
 
 if ($failed) { Write-Host "FAIL: $failed" -ForegroundColor Red; exit 1 }
-Write-Host "PASS: colour grade and vignette layers, a grade parameter, and a wipe added and removed (captures in $work)" -ForegroundColor Green
+Write-Host "PASS: colour grade and vignette layers, a grade parameter, and a wipe and a push added and removed (captures in $work)" -ForegroundColor Green
 exit 0

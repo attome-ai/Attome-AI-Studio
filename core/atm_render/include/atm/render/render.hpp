@@ -85,10 +85,11 @@ struct Layer {
   int mixed_by = -1; // on the incoming clip: the outgoing one
   int64_t mix_start = 0, mix_frames = 0; // on the outgoing clip
   bool mixing_at(int64_t frame) const { return frame >= mix_start && frame < mix_start + mix_frames; }
-  // On the outgoing clip: an attome.wipe instead of a dissolve. The incoming clip enters from `wipe_dir`; the edge is
-  // `wipe_softness` of the picture wide. wipe_dir < 0 means a plain dissolve.
-  int wipe_dir = -1; // an eval::WipeDirection
-  float wipe_softness = 0.1f;
+  // On the outgoing clip: how the two clips mix. A wipe and a push have the incoming clip enter from `mix_dir` (an
+  // eval::WipeDirection); a wipe's edge is `mix_softness` of the picture wide.
+  eval::TransitionKind mix_kind = eval::TransitionKind::dissolve;
+  int mix_dir = 0;
+  float mix_softness = 0.1f;
   // Keyframes (transform.keyframes) replace the static values above while they exist. Their times are clip-local:
   // 0 is `origin_frame`, the clip's record_in (start_frame moves earlier when a dissolve leads into the clip).
   int64_t origin_frame = 0;

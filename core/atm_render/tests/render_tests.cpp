@@ -1278,4 +1278,73 @@ TEST_CASE("render: effect parameters follow their keyframes in clip-local time",
   fs::remove_all(dir, ec);
 }
 
+TEST_CASE("render: a push slides the outgoing clip away and brings the incoming one in behind it", "[media]") {
+  const fs::path dir = fs::temp_directory_path() / atm::new_id("attome-push");
+  fs::create_directories(dir);
+  const std::string outgoing = (dir / "red_blue.mp4").string(), incoming = (dir / "white.mp4").string();
+  write_clip(outgoing, 320, 240, 90); // red top half, blue bottom half
+  write_solid(incoming, 0xF0F0F0, 660.0, 3);
+  const auto build = [&](const char *direction) {
+    const json t = {{"type", "attome.push"}, {"from", "clp_a"}, {"to", "clp_b"}, {"in_offset", "1/2"}, {"out_offset", "1/2"},
+                    {"params", {{"direction", direction}}}};
+    const auto clip = [](const std::string &path, const char *in, const char *source_in) {
+      return json{{"timing", {{"record_in", in}, {"duration", "1"}, {"source_in", source_in}}},
+                  {"media_ref", {{"type", "file"}, {"path", path}, {"duration", "3"}}}};
+    };
+    const json doc = {{"sequences",
+                       {{"seq_1",
+                         {{"rate", "30"},
+                          {"canvas", {{"width", 320}, {"height", 240}}},
+                          {"track_order", {"trk_v"}},
+                          {"tracks",
+                           {{"trk_v",
+                             {{"clips", {{"clp_a", clip(outgoing, "0", "0")}, {"clp_b", clip(incoming, "1", "1")}}},
+                              {"transitions", {{"trn_1", t}}}}}}}}}}},
+                      {"sequence_order", {"seq_1"}}};
+    auto comp = atm::render::compile(doc);
+    REQUIRE(comp);
+    return std::move(*comp);
+  };
+  struct Rgb {
+    int r, g, b;
+  };
+  // The picture at `frame` for a push from `direction`, sampled at (x, y).
+  const auto sample = [&](const char *direction, int64_t frame, int x, int y) {
+    auto comp = build(direction);
+    atm::render::Renderer renderer(comp, 320, 240);
+    std::vector<uint8_t> nv12(media::nv12_size(320, 240)), rgb(320 * 240 * 4);
+    REQUIRE(renderer.render(frame, nv12.data()));
+    media::nv12_to_bgrx(nv12.data(), 320, 240, rgb.data());
+    const uint8_t *p = rgb.data() + (size_t(y) * 320 + size_t(x)) * 4;
+    return Rgb{p[2], p[1], p[0]};
+  };
+  const auto is_white = [](Rgb c) { return c.r > 200 && c.g > 200 && c.b > 200; };
+  const auto is_red = [](Rgb c) { return c.r > 190 && c.g < 90 && c.b < 90; };
+  const auto is_blue = [](Rgb c) { return c.b > 190 && c.g < 90 && c.r < 90; };
+
+  // The push runs frames 15..45; at the middle (30) the incoming picture has come halfway in.
+  CHECK(is_red(sample("up", 10, 160, 40)));   // before: the outgoing clip alone
+  CHECK(is_blue(sample("up", 10, 160, 200)));
+  CHECK(is_white(sample("up", 50, 160, 120))); // after: the incoming clip alone
+
+  // From the top: the incoming picture fills the top half and the outgoing one has moved down by half its height, so
+  // below the middle we see the outgoing clip's red top half (a dissolve or a wipe would show blue there).
+  CHECK(is_white(sample("up", 30, 160, 60)));
+  CHECK(is_red(sample("up", 30, 160, 200)));
+  // From the bottom: the outgoing clip moved up, so above the middle we see its blue bottom half.
+  CHECK(is_white(sample("down", 30, 160, 200)));
+  CHECK(is_blue(sample("down", 30, 160, 60)));
+  // From the left and the right: the clip keeps its red top and blue bottom, only shifted sideways.
+  CHECK(is_white(sample("left", 30, 20, 40)));
+  CHECK(is_red(sample("left", 30, 300, 40)));
+  CHECK(is_blue(sample("left", 30, 300, 200)));
+  CHECK(is_white(sample("right", 30, 300, 200)));
+  CHECK(is_red(sample("right", 30, 20, 40)));
+  CHECK(is_blue(sample("right", 30, 20, 200)));
+  // Nothing is mixed: right at the start the edge has barely entered, and the line between the two is sharp.
+  CHECK(is_red(sample("left", 16, 160, 40)));
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}
+
 #endif

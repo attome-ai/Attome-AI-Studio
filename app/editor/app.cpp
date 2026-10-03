@@ -331,11 +331,11 @@ void App::refresh() {
         {
           track.transitions.push_back({t.key(), t->value("from", ""), t->value("to", ""),
                                        frames_of(*t, "in_offset", rate_), frames_of(*t, "out_offset", rate_)});
-          if (eval::transition_id(t->value("type", "")) == "wipe") {
+          eval::parse_transition(t->value("type", ""), track.transitions.back().kind);
+          if (eval::transition_has_direction(track.transitions.back().kind)) {
             eval::WipeDirection dir = eval::WipeDirection::left;
             if (const auto p = t->find("params"); p != t->end() && p->is_object())
               eval::parse_wipe_direction(p->value("direction", std::string("left")), dir);
-            track.transitions.back().wipe = true;
             track.transitions.back().direction = int(dir);
           }
         }
@@ -2331,14 +2331,22 @@ void App::draw_timeline() {
       const float bx0 = x_of(double(to->start - tr.in)), bx1 = std::max(bx0 + 4.0f, x_of(double(to->start + tr.out)));
       const float by0 = origin.y + ruler_h + float(ti) * row_h + 4.0f, by1 = by0 + row_h - 8.0f;
       dl->AddRectFilled(ImVec2(bx0, by0), ImVec2(bx1, by1), IM_COL32(10, 12, 18, 150), 4.0f);
-      if (tr.wipe) { // a wipe: an arrow in the direction the edge travels (the incoming clip enters from `direction`)
+      if (tr.kind != eval::TransitionKind::dissolve) { // a wipe or push: an arrow in the direction the picture travels
         static const ImVec2 kTravel[] = {ImVec2(1, 0), ImVec2(-1, 0), ImVec2(0, 1), ImVec2(0, -1)};
         const ImVec2 d = kTravel[std::clamp(tr.direction, 0, 3)], n(-d.y, d.x);
         const ImVec2 mid((bx0 + bx1) * 0.5f, (by0 + by1) * 0.5f);
         const float r = std::min(7.0f, (by1 - by0) * 0.3f);
-        dl->AddTriangleFilled(ImVec2(mid.x + d.x * r * 1.3f, mid.y + d.y * r * 1.3f),
-                              ImVec2(mid.x - d.x * r + n.x * r, mid.y - d.y * r + n.y * r),
-                              ImVec2(mid.x - d.x * r - n.x * r, mid.y - d.y * r - n.y * r), IM_COL32(255, 255, 255, 200));
+        const auto arrow = [&](float at) { // one triangle, `at` along the direction from the middle
+          const ImVec2 c(mid.x + d.x * at, mid.y + d.y * at);
+          dl->AddTriangleFilled(ImVec2(c.x + d.x * r * 1.3f, c.y + d.y * r * 1.3f), ImVec2(c.x - d.x * r + n.x * r, c.y - d.y * r + n.y * r),
+                                ImVec2(c.x - d.x * r - n.x * r, c.y - d.y * r - n.y * r), IM_COL32(255, 255, 255, 200));
+        };
+        if (tr.kind == eval::TransitionKind::push) { // a push moves both pictures: two arrows
+          arrow(-r * 0.9f);
+          arrow(r * 0.9f);
+        } else {
+          arrow(0.0f);
+        }
       } else { // a dissolve: a cross, the usual sign for a mix of two clips
         dl->AddLine(ImVec2(bx0, by0), ImVec2(bx1, by1), IM_COL32(255, 255, 255, 170), 1.5f);
         dl->AddLine(ImVec2(bx0, by1), ImVec2(bx1, by0), IM_COL32(255, 255, 255, 170), 1.5f);
@@ -2403,12 +2411,14 @@ void App::draw_transition_card(const TrackUi &track, const ClipUi &c) {
   if (current != track.transitions.end()) {
     static const char *const kSide[] = {"left", "right", "top", "bottom"}; // eval::WipeDirection order
     const double seconds = double(current->in + current->out) / fps();
-    if (current->wipe)
+    if (current->kind == eval::TransitionKind::wipe)
       ImGui::TextColored(hexv(look::fg2), "Wipe from the %s into the next clip, %.2f s", kSide[std::clamp(current->direction, 0, 3)], seconds);
+    else if (current->kind == eval::TransitionKind::push)
+      ImGui::TextColored(hexv(look::fg2), "Push in from the %s into the next clip, %.2f s", kSide[std::clamp(current->direction, 0, 3)], seconds);
     else
       ImGui::TextColored(hexv(look::fg2), "Dissolve into the next clip, %.2f s", seconds);
     const std::string tid = current->id;
-    const char *kind = current->wipe ? "wipe" : "dissolve";
+    const char *kind = current->kind == eval::TransitionKind::wipe ? "wipe" : current->kind == eval::TransitionKind::push ? "push" : "dissolve";
     if (soft_button((std::string("remove_") + kind).c_str(), (std::string("Remove ") + kind).c_str(), ImVec2(-1.0f, 28.0f)))
       pending_ = [this, tid, label = std::string("Remove ") + kind] { patch(json::array({{{"op", "remove"}, {"path", tid}}}), label.c_str()); };
   } else if (next == track.clips.end()) {
@@ -2447,7 +2457,7 @@ void App::draw_transition_card(const TrackUi &track, const ClipUi &c) {
       };
       if (soft_button("add_dissolve", "Dissolve into next clip", ImVec2(-1.0f, 28.0f)))
         add("attome.dissolve", "Add dissolve", json::object());
-      ImGui::TextColored(hexv(look::fg2), "Wipe from");
+      ImGui::TextColored(hexv(look::fg2), "From the");
       ImGui::SameLine(88.0f);
       static const char *const kSideName[] = {"Left", "Right", "Top", "Bottom"};
       static const char *const kSideId[] = {"wipe_left", "wipe_right", "wipe_up", "wipe_down"};
@@ -2458,8 +2468,11 @@ void App::draw_transition_card(const TrackUi &track, const ClipUi &c) {
         if (soft_button(kSideId[i], kSideName[i], ImVec2(button_w, 26.0f), true, wipe_dir_ == i))
           wipe_dir_ = i;
       }
+      const char *side = eval::wipe_direction_name(eval::WipeDirection(wipe_dir_));
       if (soft_button("add_wipe", "Wipe into next clip", ImVec2(-1.0f, 28.0f)))
-        add("attome.wipe", "Add wipe", {{"direction", eval::wipe_direction_name(eval::WipeDirection(wipe_dir_))}, {"softness", 0.1}});
+        add("attome.wipe", "Add wipe", {{"direction", side}, {"softness", 0.1}});
+      if (soft_button("add_push", "Push into next clip", ImVec2(-1.0f, 28.0f)))
+        add("attome.push", "Add push", {{"direction", side}});
     }
   }
   ImGui::PopTextWrapPos();

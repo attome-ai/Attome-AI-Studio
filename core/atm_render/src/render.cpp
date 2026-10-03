@@ -363,8 +363,9 @@ Result<Composition> compile(const json &project, std::string_view sequence_id) {
   struct Dissolve {
     std::string from, to;
     int64_t in, out;       // frames before and after the cut
-    int wipe_dir = -1;     // an eval::WipeDirection for an attome.wipe, -1 for a dissolve
-    float wipe_softness = 0.1f;
+    eval::TransitionKind kind = eval::TransitionKind::dissolve;
+    int dir = 0;           // an eval::WipeDirection, for a wipe or a push
+    float softness = 0.1f; // a wipe's edge
   };
   std::vector<Dissolve> dissolves;
   int track_index = 0;
@@ -538,14 +539,15 @@ Result<Composition> compile(const json &project, std::string_view sequence_id) {
         ATM_TRY(int64_t in_frames, to_frames(in_off, rate, Round::nearest_even));
         ATM_TRY(int64_t out_frames, to_frames(out_off, rate, Round::nearest_even));
         Dissolve d{t.value("from", ""), t.value("to", ""), in_frames, out_frames};
-        if (eval::transition_id(t.value("type", "")) == "wipe") {
+        eval::parse_transition(t.value("type", ""), d.kind);
+        if (eval::transition_has_direction(d.kind)) {
           eval::WipeParams wp;
           if (const auto p = t.find("params"); p != t.end() && p->is_object()) {
             eval::parse_wipe_direction(p->value("direction", std::string("left")), wp.direction);
             wp.softness = std::clamp(p->value("softness", wp.softness), 0.01f, 1.0f);
           }
-          d.wipe_dir = int(wp.direction);
-          d.wipe_softness = wp.softness;
+          d.dir = int(wp.direction);
+          d.softness = wp.softness;
         }
         dissolves.push_back(std::move(d));
       }
@@ -574,8 +576,9 @@ Result<Composition> compile(const json &project, std::string_view sequence_id) {
     b.frames += d.in;
     a.mix_with = ib;
     b.mixed_by = ia;
-    a.wipe_dir = d.wipe_dir;
-    a.wipe_softness = d.wipe_softness;
+    a.mix_kind = d.kind;
+    a.mix_dir = d.dir;
+    a.mix_softness = d.softness;
     a.mix_start = cut - d.in;
     a.mix_frames = d.in + d.out;
   }
@@ -760,6 +763,55 @@ void remask_nv12(uint8_t *nv12, const uint8_t *cover, int W, int H) {
           p[k] = uint8_t(128 + ((int(p[k]) - 128) * c + (p[k] >= 128 ? 127 : -127)) / 255);
       }
   });
+}
+
+// The push of a transition: the outgoing picture (in `out`) slides away towards the side opposite `dir` and the
+// incoming one follows it in from `dir`, so the two pictures meet along a moving line and nothing is mixed. The offset
+// is a whole even number of pixels (chroma is shared by 2 x 2 pixels) and follows a smooth start and stop.
+void push_blend(uint8_t *out, const uint8_t *incoming, int W, int H, float progress, eval::WipeDirection dir,
+                std::vector<uint8_t> &outgoing) {
+  ATM_PROFILE_SCOPE("composite.push");
+  const size_t size = media::nv12_size(W, H);
+  outgoing.assign(out, out + size); // `out` is rewritten from the two pictures
+  const bool horizontal = dir == eval::WipeDirection::left || dir == eval::WipeDirection::right;
+  const bool from_start = dir == eval::WipeDirection::left || dir == eval::WipeDirection::up; // incoming enters at x=0 / y=0
+  const int extent = horizontal ? W : H;
+  const int d = std::clamp(int(smooth01(progress) * float(extent) + 0.5f) & ~1, 0, extent); // how far the incoming has come in
+  // One plane of `rows` rows of `width` bytes. The shift is `d` luma pixels: d bytes in a luma row, d bytes in a chroma
+  // row (two bytes per chroma sample, one sample per two pixels), d rows of luma or d / 2 rows of chroma.
+  const auto plane = [&](size_t offset, int rows, int row_shift) {
+    uint8_t *dst = out + offset;
+    const uint8_t *in = incoming + offset, *old = outgoing.data() + offset;
+    parallel_for(rows, 16, [&](int64_t first, int64_t last) {
+      for (int64_t y = first; y < last; ++y) {
+        uint8_t *row = dst + size_t(y) * size_t(W);
+        if (horizontal) {
+          const uint8_t *i = in + size_t(y) * size_t(W), *o = old + size_t(y) * size_t(W);
+          if (from_start) { // [incoming's last d bytes][outgoing's first W - d]
+            std::memcpy(row, i + (W - d), size_t(d));
+            std::memcpy(row + d, o, size_t(W - d));
+          } else {          // [outgoing's last W - d][incoming's first d]
+            std::memcpy(row, o + d, size_t(W - d));
+            std::memcpy(row + (W - d), i, size_t(d));
+          }
+        } else {
+          const int total = rows, s = row_shift; // rows of this plane that the incoming picture covers
+          int64_t src_y;
+          const uint8_t *src;
+          if (from_start) {
+            src = y < s ? in : old;
+            src_y = y < s ? y + (total - s) : y - s;
+          } else {
+            src = y < total - s ? old : in;
+            src_y = y < total - s ? y + s : y - (total - s);
+          }
+          std::memcpy(row, src + size_t(src_y) * size_t(W), size_t(W));
+        }
+      }
+    });
+  };
+  plane(0, H, d);
+  plane(size_t(W) * size_t(H), H / 2, d / 2);
 }
 
 // One effect of a layer on a picture that is not isolated (an adjustment layer's copy of everything below it).
@@ -1080,8 +1132,10 @@ Result<void> Renderer::render(int64_t frame, uint8_t *out) {
     draw(comp_.layers[size_t(l.mix_with)], frame, mix_.data(), cleared, used);
     // Progress at the frame centre, so a 1-frame dissolve shows the 50 % mix.
     const double progress = (double(frame - l.mix_start) + 0.5) / double(l.mix_frames);
-    if (l.wipe_dir >= 0)
-      wipe_blend(out, mix_.data(), width_, height_, float(progress), eval::WipeDirection(l.wipe_dir), l.wipe_softness);
+    if (l.mix_kind == eval::TransitionKind::wipe)
+      wipe_blend(out, mix_.data(), width_, height_, float(progress), eval::WipeDirection(l.mix_dir), l.mix_softness);
+    else if (l.mix_kind == eval::TransitionKind::push)
+      push_blend(out, mix_.data(), width_, height_, float(progress), eval::WipeDirection(l.mix_dir), scratch_);
     else
       put_rows(out, size_t(width_), mix_.data(), size_t(width_), height_ * 3 / 2, width_,
                std::clamp(int(progress * 256.0 + 0.5), 0, 256));

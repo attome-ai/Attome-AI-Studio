@@ -48,8 +48,15 @@ struct WipeParams {
 bool parse_wipe_direction(std::string_view name, WipeDirection &out);
 const char *wipe_direction_name(WipeDirection d);
 
-// "attome.dissolve", "dissolve", "attome.wipe", "wipe" -> "dissolve" or "wipe"; "" when unknown.
+// The transitions of this build. A wipe and a push both take a direction (the side the incoming clip enters from); a
+// wipe also takes a softness. A push slides the outgoing clip away and the incoming one in behind it.
+enum class TransitionKind { dissolve, wipe, push };
+
+// "attome.dissolve", "dissolve", "attome.wipe", "wipe", "attome.push", "push" -> "dissolve", "wipe" or "push";
+// "" when unknown.
 std::string transition_id(std::string_view type);
-std::string transition_ids(); // "dissolve, wipe"
+bool parse_transition(std::string_view type, TransitionKind &out);
+inline bool transition_has_direction(TransitionKind k) { return k != TransitionKind::dissolve; }
+std::string transition_ids(); // "dissolve, wipe, push"
 
 } // namespace atm::eval

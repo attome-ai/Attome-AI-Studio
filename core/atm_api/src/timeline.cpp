@@ -24,7 +24,7 @@ json effect_object(const eval::EffectDef &def, const json &src) {
   return {{"effect", eval::effect_name(def)}, {"enabled", true}, {"params", std::move(params)}};
 }
 
-// A transition object ("dissolve" or "wipe") between two clips; a wipe carries its params.
+// A transition object ("dissolve", "wipe" or "push") between two clips; a wipe and a push carry their params.
 json transition_value(const std::string &kind, const std::string &from, const std::string &to, const Rational &in,
                       const Rational &out, const json &params) {
   json v = {{"type", "attome." + kind}, {"from", from}, {"to", to}, {"in_offset", in.to_string()}, {"out_offset", out.to_string()}};
@@ -538,13 +538,15 @@ private:
     if (kind.empty())
       return fail("TRANSITION_UNSUPPORTED", "The transition \"" + type + "\" is not available.",
                   "Use one of: " + eval::transition_ids() + ".");
-    json params = json::object(); // a wipe: the side the incoming clip enters from, and the softness of its edge
-    if (kind == "wipe") {
+    json params = json::object(); // a wipe or push: the side the incoming clip enters from (a wipe: and its softness)
+    if (kind == "wipe" || kind == "push") {
       const std::string direction = op_.value("direction", std::string("left"));
       eval::WipeDirection dir;
       if (!eval::parse_wipe_direction(direction, dir))
         return fail("E_PARAM", "\"direction\" must be left, right, up or down.");
-      params = {{"direction", direction}, {"softness", op_.value("softness", 0.1)}};
+      params = {{"direction", direction}};
+      if (kind == "wipe")
+        params["softness"] = op_.value("softness", 0.1);
     }
     ATM_TRY(Rational d, time_or("duration", Rational::from_int(1)));
     const std::string alignment = op_.value("alignment", std::string("center"));

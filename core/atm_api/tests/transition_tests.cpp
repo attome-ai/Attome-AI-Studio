@@ -369,3 +369,38 @@ TEST_CASE("timeline.edit: set_property animates an effect parameter, and a split
   CHECK(times == std::vector<std::string>{"-1", "1"}); // 0 s and 2 s of the whole clip, seen from the right half at 1 s
 }
 
+TEST_CASE("transitions: a push takes a direction, and the same media rules as a dissolve", "[transition]") {
+  Fixture f;
+  const auto push = [&](json params, const char *in = "0.5s", const char *out = "0.5s") {
+    json op = f.dissolve(f.a, f.b, in, out);
+    op["value"]["type"] = "attome.push";
+    op["value"]["params"] = std::move(params);
+    return op;
+  };
+  CHECK(f.rule_of(json::array({push({{"direction", "sideways"}})})) == "TRANSITION_PARAM");
+  CHECK(f.rule_of(json::array({push({{"direction", "left"}}, "1.5s", "0.5s")})) == "TRANSITION_INSUFFICIENT_HANDLES");
+  // A push has no softness: whatever is written there is not its business, and a direction alone is enough.
+  auto r = f.patch(json::array({push({{"direction", "down"}})}));
+  INFO((r ? "" : r.error().message));
+  REQUIRE(r);
+  const json t = f.engine.call("project.get", {{"project", f.project}, {"id", (*r)["id_map"]["$new:d"]}})->at("object");
+  CHECK(t["type"] == "attome.push");
+  CHECK(t["params"]["direction"] == "down");
+  // timeline.edit: type push with a direction, an unknown direction refused.
+  Fixture g;
+  auto ok = g.engine.call("timeline.edit", {{"project", g.project},
+                                            {"ops", json::array({{{"op", "add_transition"}, {"between", json::array({g.a, g.b})},
+                                                                  {"type", "push"}, {"direction", "up"}, {"duration", "1s"}}})}});
+  INFO((ok ? "" : ok.error().message));
+  REQUIRE(ok);
+  const json track = g.engine.call("project.get", {{"project", g.project}, {"id", g.track}})->at("object");
+  const json &pt = *track["transitions"].begin();
+  CHECK(pt["type"] == "attome.push");
+  CHECK(pt["params"]["direction"] == "up");
+  CHECK_FALSE(pt["params"].contains("softness"));
+  Fixture h;
+  CHECK_FALSE(h.engine.call("timeline.edit", {{"project", h.project},
+                                              {"ops", json::array({{{"op", "add_transition"}, {"between", json::array({h.a, h.b})},
+                                                                    {"type", "push"}, {"direction", "diagonal"}}})}}));
+}
+
