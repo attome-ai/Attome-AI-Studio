@@ -1225,4 +1225,57 @@ TEST_CASE("render: a wipe replaces the outgoing clip from the chosen side, with 
   fs::remove_all(dir, ec);
 }
 
+TEST_CASE("render: effect parameters follow their keyframes in clip-local time", "[media]") {
+  const fs::path dir = fs::temp_directory_path() / atm::new_id("attome-fxkeys");
+  fs::create_directories(dir);
+  const std::string clip = (dir / "clip.mp4").string();
+  write_clip(clip, 320, 240, 30); // red top half, blue bottom half
+  // A vignette whose strength rises from 0 to 1 over the clip's one second, on an adjustment layer above the clip.
+  const json vignette = json::parse(R"({"effect":"attome.vignette@1.0.0","enabled":true,
+      "params":{"strength":0.9,"radius":0.3,"softness":0.3},
+      "keyframes":{"strength":{"kf_1":{"t":"0","v":0.0,"interp":"linear"},"kf_2":{"t":"1","v":1.0}}}})");
+  const json adjustment = {{"timing", {{"record_in", "0"}, {"duration", "1"}, {"source_in", "0"}}},
+                           {"media_ref", {{"type", "adjustment"}}},
+                           {"effects", {{"fx_1", vignette}}}};
+  const json doc = {
+      {"sequences",
+       {{"seq_1",
+         {{"rate", "30"},
+          {"canvas", {{"width", 320}, {"height", 240}}},
+          {"track_order", {"trk_v", "trk_fx"}},
+          {"tracks",
+           {{"trk_v", {{"clips", {{"clp_v", {{"timing", {{"record_in", "0"}, {"duration", "1"}, {"source_in", "0"}}},
+                                             {"media_ref", {{"type", "file"}, {"path", clip}}}}}}}}},
+            {"trk_fx", {{"clips", {{"clp_adj", adjustment}}}}}}}}}}},
+      {"sequence_order", {"seq_1"}}};
+  auto comp = atm::render::compile(doc);
+  REQUIRE(comp);
+  REQUIRE(comp->layers.size() == 2);
+
+  { // the evaluated parameter: the key curve wins over the plain value (0.9), halfway through it is 0.5
+    const atm::render::Layer &adj = comp->layers[1];
+    REQUIRE(adj.effects.size() == 1);
+    CHECK(std::abs(atm::render::effect_values(adj, adj.effects[0], *comp, 0)[0] - 0.0f) < 1e-4f);
+    CHECK(std::abs(atm::render::effect_values(adj, adj.effects[0], *comp, 15)[0] - 0.5f) < 1e-4f);
+    CHECK(std::abs(atm::render::effect_values(adj, adj.effects[0], *comp, 30)[0] - 1.0f) < 1e-4f);
+    CHECK(std::abs(atm::render::effect_values(adj, adj.effects[0], *comp, 15)[1] - 0.3f) < 1e-4f); // radius: plain
+  }
+  atm::render::Renderer renderer(*comp, 320, 240);
+  std::vector<uint8_t> nv12(media::nv12_size(320, 240)), rgb(320 * 240 * 4);
+  const auto red = [&](int64_t frame, int x, int y) {
+    REQUIRE(renderer.render(frame, nv12.data()));
+    media::nv12_to_bgrx(nv12.data(), 320, 240, rgb.data());
+    return int(rgb[(size_t(y) * 320 + size_t(x)) * 4 + 2]);
+  };
+  // The top-left corner darkens as the strength rises; the middle never does.
+  const int start = red(0, 4, 4), middle = red(15, 4, 4), end = red(29, 4, 4);
+  CHECK(start > 200);
+  CHECK(middle < start - 40);
+  CHECK(end < middle - 40);
+  CHECK(end < 40);
+  CHECK(std::abs(red(0, 160, 100) - red(29, 160, 100)) < 10);
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}
+
 #endif

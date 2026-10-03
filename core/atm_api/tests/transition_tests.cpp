@@ -1,6 +1,9 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <filesystem>
+#include <string>
+#include <vector>
 
 #include "atm/api/engine.hpp"
 #include "atm/base/id.hpp"
@@ -287,5 +290,82 @@ TEST_CASE("timeline.edit: add_effect takes any effect by name, add_transition a 
                                              {"ops", json::array({{{"op", "add_transition"}, {"between", json::array({g.a, g.b})},
                                                                    {"type", "wipe"}, {"direction", "sideways"}}})}});
   CHECK_FALSE(bad);
+}
+
+TEST_CASE("effects: parameter keyframes are validated against the parameter's range and names", "[effect]") {
+  Fixture f;
+  const auto layer = [](const Fixture &on, const char *effect_json) {
+    return json::array({{{"op", "add"},
+                         {"path", on.track + "/clips/$new:adj"},
+                         {"value",
+                          {{"timing", {{"record_in", "4s"}, {"duration", "2s"}, {"source_in", "0s"}}},
+                           {"media_ref", {{"type", "adjustment"}}},
+                           {"effects", {{"$new:fx", json::parse(effect_json)}}}}}}});
+  };
+  const auto vignette = [](const char *keyframes) {
+    static std::string text;
+    text = std::string(R"({"effect":"attome.vignette@1.0.0","enabled":true,"params":{},"keyframes":)") + keyframes + "}";
+    return text.c_str();
+  };
+  // Above the parameter's range, an unknown parameter, keys that are not a map, two keys at one time.
+  CHECK(f.rule_of(layer(f, vignette(R"({"strength":{"$new:k1":{"t":"0s","v":2.0}}})"))) == "EFFECT_PARAM");
+  CHECK(f.rule_of(layer(f, vignette(R"({"glow":{"$new:k1":{"t":"0s","v":0.5}}})"))) == "KEYFRAME_PROPERTY_UNSUPPORTED");
+  CHECK(f.rule_of(layer(f, vignette(R"([])"))) == "KEYFRAME_TYPE_MISMATCH");
+  CHECK(f.rule_of(layer(f, vignette(R"({"strength":{"$new:k1":{"t":"1s","v":0.2},"$new:k2":{"t":"1s","v":0.4}}})"))) ==
+        "KEYFRAMES_UNSORTED");
+  // Two keys inside the range are accepted, and get keyframe IDs.
+  auto r = f.patch(layer(f, vignette(R"({"strength":{"$new:k1":{"t":"0s","v":0.0},"$new:k2":{"t":"1s","v":1.0,"interp":"hold"}}})")));
+  INFO((r ? "" : r.error().message));
+  REQUIRE(r);
+  const json clip = f.engine.call("project.get", {{"project", f.project}, {"id", (*r)["id_map"]["$new:adj"]}})->at("object");
+  const json &keys = (*clip["effects"].begin())["keyframes"]["strength"];
+  REQUIRE(keys.size() == 2);
+  CHECK(keys.begin().key().rfind("kf_", 0) == 0);
+  // A blur needs its radius, unless the radius is animated.
+  Fixture g;
+  CHECK(g.rule_of(layer(g, R"({"effect":"attome.gaussian_blur@1.0.0","params":{}})")) == "EFFECT_PARAM");
+  CHECK(g.patch(layer(g, R"({"effect":"attome.gaussian_blur@1.0.0","params":{},"keyframes":{"radius":{"$new:k1":{"t":"0s","v":0.1},"$new:k2":{"t":"1s","v":0.0}}}})")));
+}
+
+TEST_CASE("timeline.edit: set_property animates an effect parameter, and a split moves the keys to the right half",
+          "[timeline]") {
+  Fixture f;
+  const auto edit = [&](json ops) { return f.engine.call("timeline.edit", {{"project", f.project}, {"ops", std::move(ops)}}); };
+  auto added = edit(json::array({{{"op", "add_effect"}, {"id", "$new:v"}, {"target", f.a}, {"type", "vignette"}}}));
+  REQUIRE(added);
+  const std::string fx = (*added)["id_map"]["$new:v"];
+  const auto keys_of = [&](const std::string &fx_id, const char *param) {
+    const json a = f.engine.call("project.get", {{"project", f.project}, {"id", f.a}})->at("object");
+    return a["effects"].contains(fx_id) && a["effects"][fx_id].contains("keyframes") && a["effects"][fx_id]["keyframes"].contains(param)
+               ? a["effects"][fx_id]["keyframes"][param]
+               : json::object();
+  };
+  auto set = edit(json::array({{{"op", "set_property"}, {"target", fx}, {"path", "params.strength"},
+                                {"keyframes", json::parse(R"([{"t":"0s","v":0.0},{"t":"2s","v":1.0,"interp":"easing","ease":"ease_out_cubic"}])")}}}));
+  INFO((set ? "" : set.error().message));
+  REQUIRE(set);
+  CHECK(keys_of(fx, "strength").size() == 2);
+  // New keys replace the old ones of that parameter.
+  REQUIRE(edit(json::array({{{"op", "set_property"}, {"target", fx}, {"path", "params.strength"},
+                             {"keyframes", json::parse(R"([{"t":"1s","v":0.5}])")}}})));
+  CHECK(keys_of(fx, "strength").size() == 1);
+  // An unknown parameter, and a parameter that is not animatable by name, are refused with a hint.
+  CHECK_FALSE(edit(json::array({{{"op", "set_property"}, {"target", fx}, {"path", "params.glow"}, {"keyframes", json::parse(R"([{"t":"0s","v":0.5}])")}}})));
+  // Split `a` (0..2 s) at 1 s: the right half carries its own effect copy with the keys local to it.
+  REQUIRE(edit(json::array({{{"op", "set_property"}, {"target", fx}, {"path", "params.strength"},
+                             {"keyframes", json::parse(R"([{"t":"0s","v":0.0},{"t":"2s","v":1.0}])")}}})));
+  auto split = edit(json::array({{{"op", "split"}, {"clip", f.a}, {"at", "1s"}, {"id", "$new:right"}}}));
+  INFO((split ? "" : split.error().message));
+  REQUIRE(split);
+  const std::string right = (*split)["id_map"]["$new:right"];
+  const json r = f.engine.call("project.get", {{"project", f.project}, {"id", right}})->at("object");
+  REQUIRE(r["effects"].size() == 1);
+  const json &rk = (*r["effects"].begin())["keyframes"]["strength"];
+  REQUIRE(rk.size() == 2);
+  std::vector<std::string> times;
+  for (const auto &[id, k] : rk.items())
+    times.push_back(k["t"]);
+  std::sort(times.begin(), times.end());
+  CHECK(times == std::vector<std::string>{"-1", "1"}); // 0 s and 2 s of the whole clip, seen from the right half at 1 s
 }
 

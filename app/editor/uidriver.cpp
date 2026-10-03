@@ -38,7 +38,8 @@ std::optional<ImGuiKey> key_named(const std::string &name) {
     return ImGuiKey(int(ImGuiKey_A) + (name[0] - 'A'));
   static const std::pair<const char *, ImGuiKey> keys[] = {
       {"Space", ImGuiKey_Space}, {"Delete", ImGuiKey_Delete}, {"Enter", ImGuiKey_Enter}, {"Escape", ImGuiKey_Escape},
-      {"Left", ImGuiKey_LeftArrow}, {"Right", ImGuiKey_RightArrow}, {"Backspace", ImGuiKey_Backspace}};
+      {"Left", ImGuiKey_LeftArrow}, {"Right", ImGuiKey_RightArrow}, {"Backspace", ImGuiKey_Backspace},
+      {"Home", ImGuiKey_Home}, {"End", ImGuiKey_End}};
   for (const auto &[n, k] : keys)
     if (name == n)
       return k;

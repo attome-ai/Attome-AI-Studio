@@ -131,6 +131,16 @@ void bench_effects() {
     comp.layers.push_back(std::move(adj));
     return comp;
   };
+  const auto keyed_vignette = [&] { // strength animated by 50 keys: the cost of evaluating keyframes on top of the effect
+    atm::render::Composition comp = with_effect("vignette", 0.6f, 0.5f, 0.4f);
+    json keys = json::object();
+    for (int i = 0; i < 50; ++i)
+      keys["kf_" + std::to_string(i)] = {{"t", std::to_string(i) + "/3"}, {"v", i % 2 ? 0.8 : 0.2}, {"interp", "easing"}, {"ease", "ease_in_out_quad"}};
+    atm::render::Effect &e = comp.layers[0].effects[0];
+    e.def = atm::eval::find_effect("vignette");
+    e.curve[0] = *atm::eval::parse_curve(keys, 1);
+    return comp;
+  };
   const auto two_clips = [](int wipe_dir) { // text clips: no files needed; they are cached after the first frame
     atm::render::Composition comp;
     comp.frames = 60;
@@ -154,6 +164,7 @@ void bench_effects() {
   report("blur 0.02 (reference), adjustment layer", frame_ms(with_effect("gaussian_blur", 0.02f, 0, 0), 10), "ms", 40.0);
   report("color grade, adjustment layer", frame_ms(with_effect("color_grade", 0.1f, 0.2f, 1.2f), 10), "ms", 2.0);
   report("vignette, adjustment layer", frame_ms(with_effect("vignette", 0.6f, 0.5f, 0.4f), 10), "ms", 3.0);
+  report("vignette, strength animated by 50 keys", frame_ms(keyed_vignette(), 10), "ms", 3.0);
   report("dissolve (reference), two text clips", frame_ms(two_clips(-1), 30), "ms", 20.0);
   report("wipe, two text clips", frame_ms(two_clips(0), 30), "ms", 4.0);
 }

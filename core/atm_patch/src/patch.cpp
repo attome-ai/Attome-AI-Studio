@@ -402,10 +402,55 @@ void check_effects(const json &clip, const std::string &clip_id, bool audio_trac
                                      std::to_string(def->params[0].def) + "}."));
       continue;
     }
+    // Keyframes of the parameters ("keyframes": {"radius": {"kf_1": {t, v, interp, ease}, ...}}): a parameter with keys
+    // needs no plain value, and every key's value stays inside the parameter's range.
+    const auto kfs = it->find("keyframes");
+    if (kfs != it->end() && !kfs->is_object()) {
+      problems.push_back(problem("KEYFRAME_TYPE_MISMATCH", id + "/keyframes", clip_id,
+                                 "keyframes of effect " + id + " must be a map of parameters.",
+                                 "Write {\"" + std::string(def->params[0].key) + "\": {\"$new:k1\": {\"t\": \"0s\", \"v\": " +
+                                     std::to_string(def->params[0].def) + "}, ...}}."));
+      continue;
+    }
+    if (kfs != it->end())
+      for (auto k = kfs->begin(); k != kfs->end() && problems.size() < kMaxProblems; ++k) {
+        const eval::EffectParam *param = nullptr;
+        for (const eval::EffectParam &p : def->params)
+          if (k.key() == p.key)
+            param = &p;
+        const std::string path = id + "/keyframes/" + k.key();
+        if (!param) {
+          problems.push_back(problem("KEYFRAME_PROPERTY_UNSUPPORTED", path, clip_id,
+                                     "The effect " + id + " has no parameter \"" + k.key() + "\" to animate.",
+                                     "Its parameters are: " + [&] {
+                                       std::string names;
+                                       for (const eval::EffectParam &p : def->params)
+                                         names += (names.empty() ? "" : ", ") + std::string(p.key);
+                                       return names;
+                                     }() + "."));
+          continue;
+        }
+        auto curve = eval::parse_curve(*k, 1);
+        if (!curve) {
+          problems.push_back(problem(curve.error().rule, curve.error().path.empty() ? path : path + "/" + curve.error().path,
+                                     clip_id, curve.error().message, curve.error().hint));
+          continue;
+        }
+        for (const eval::Key &key : curve->keys)
+          if (key.v[0] < param->lo || key.v[0] > param->hi) {
+            problems.push_back(problem("EFFECT_PARAM", path, clip_id,
+                                       "A keyframe of " + std::string(param->title) + " in effect " + id + " has the value " +
+                                           std::to_string(key.v[0]) + "; it must be from " + std::to_string(param->lo) + " to " +
+                                           std::to_string(param->hi) + ".",
+                                       "Keep every key inside the parameter's range."));
+            break;
+          }
+      }
     for (const eval::EffectParam &p : def->params) {
       const auto v = params.find(p.key);
       const bool missing = v == params.end();
-      if ((missing && !p.required) || problems.size() >= kMaxProblems)
+      const bool animated = kfs != it->end() && kfs->is_object() && kfs->contains(p.key) && !(*kfs)[p.key].empty();
+      if ((missing && (!p.required || animated)) || problems.size() >= kMaxProblems)
         continue;
       if (missing || !v->is_number() || v->get<double>() < p.lo || v->get<double>() > p.hi)
         problems.push_back(problem("EFFECT_PARAM", id + "/params/" + p.key, clip_id,

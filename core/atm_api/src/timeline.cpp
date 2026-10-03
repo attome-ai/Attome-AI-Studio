@@ -731,7 +731,7 @@ private:
   }
 
   // Cuts one clip at `at`; the right half is `right_ph`, in `group` (empty: no group). Keyframes become local to each
-  // half and effects get new IDs.
+  // half and effects get new IDs (and their parameters' keyframes become local to the half).
   void split_one(const std::string &id, const std::string &track_id, Rational at, const std::string &right_ph,
                  const std::string &group) {
     const json &node = node_of(id);
@@ -758,8 +758,21 @@ private:
       }
     if (right.contains("effects")) {
       json fx = json::object();
-      for (const auto &[fid, e] : right["effects"].items())
-        fx[right_ph + ".fx" + std::to_string(n++)] = e;
+      for (const auto &[fid, e] : right["effects"].items()) {
+        json moved_fx = e;
+        if (moved_fx.contains("keyframes") && moved_fx["keyframes"].is_object()) // the keys of the parameters, local to the half
+          for (auto &[param, keys] : moved_fx["keyframes"].items()) {
+            json moved = json::object();
+            for (const auto &[kid, key] : keys.items()) {
+              json k = key;
+              if (const auto t = Rational::parse(k.value("t", std::string("0"))))
+                k["t"] = minus(*t, left).to_string();
+              moved[right_ph + ".k" + std::to_string(n++)] = std::move(k);
+            }
+            keys = std::move(moved);
+          }
+        fx[right_ph + ".fx" + std::to_string(n++)] = std::move(moved_fx);
+      }
       right["effects"] = std::move(fx);
       right.erase("effect_order");
     }
@@ -981,12 +994,29 @@ private:
                     "for animation. To change an effect, target its ID (fx_…) with path \"params.radius\".");
     std::replace(path.begin(), path.end(), '.', '/');
     if (const auto keys = op_.find("keyframes"); keys != op_.end()) {
-      const std::string prop = path.rfind("transform/", 0) == 0 ? path.substr(10) : std::string();
-      if (prop != "opacity" && prop != "position" && prop != "scale" && prop != "rotation" && prop != "anchor")
-        return fail("E_PARAM", "Keyframes go on transform.opacity, position, scale, rotation or anchor.",
-                    "Crop cannot be animated yet; set it with path \"transform.crop\" and a value.");
       if (!keys->is_array())
         return fail("E_PARAM", "\"keyframes\" must be an array of {t, v, interp?, ease?}.");
+      if (id_prefix(target) == "fx") { // an effect parameter: path "params.<name>"
+        const auto def = eval::find_effect(ref->node->value("effect", std::string()));
+        const std::string param = path.rfind("params/", 0) == 0 ? path.substr(7) : std::string();
+        const bool known = def && std::any_of(def->params.begin(), def->params.end(),
+                                              [&](const eval::EffectParam &p) { return param == p.key; });
+        if (!known)
+          return fail("E_PARAM", "Keyframes of an effect go on one of its parameters, path \"params.<name>\".",
+                      def ? "The parameters of this effect are in guide.get topic \"effects\"." : "The target is not a known effect.");
+        if (const auto old = ref->node->find("keyframes"); old != ref->node->end() && old->contains(param)) // the new keys replace the old
+          for (const auto &[kid, k] : (*old)[param].items())
+            push({{"op", "remove"}, {"path", kid}});
+        const std::string base = placeholder();
+        int n = 0;
+        for (const json &k : *keys)
+          push({{"op", "add"}, {"path", target + "/keyframes/" + param + "/" + base + ".k" + std::to_string(n++)}, {"value", k}});
+        return {};
+      }
+      const std::string prop = path.rfind("transform/", 0) == 0 ? path.substr(10) : std::string();
+      if (prop != "opacity" && prop != "position" && prop != "scale" && prop != "rotation" && prop != "anchor")
+        return fail("E_PARAM", "Keyframes go on transform.opacity, position, scale, rotation or anchor, or on an effect's params.",
+                    "Crop cannot be animated yet; set it with path \"transform.crop\" and a value.");
       // The new keys replace the old ones of this property.
       if (const auto tr = ref->node->find("transform"); tr != ref->node->end() && tr->contains("keyframes") &&
                                                         (*tr)["keyframes"].contains(prop))

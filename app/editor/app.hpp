@@ -34,6 +34,7 @@ inline Fonts g_fonts;
 struct EffectUi { // one effect of a clip or adjustment layer: its ID, the eval::EffectDef id, and its parameters in table order
   std::string id, kind;
   float v[3] = {0.0f, 0.0f, 0.0f};
+  eval::Curve curve[3]; // keyframes of each parameter, clip-local; empty: the plain value in v
 };
 
 struct ClipUi {
@@ -107,6 +108,14 @@ private:
   void draw_effects_panel();
   void draw_effect_card(const ClipUi &clip, const eval::EffectDef &def, bool show_amount);
   void draw_effect_cards(const ClipUi &clip);
+  // Keyframes of effect parameters: the value at the playhead, and the edits that write a key there.
+  const ClipUi *find_clip(const std::string &id) const;
+  const EffectUi *find_effect_ui(const std::string &fx_id, const ClipUi **clip = nullptr) const;
+  float effect_value(const ClipUi &clip, const EffectUi &fx, size_t param) const;
+  std::string effect_key_id_at(const std::string &fx_id, const std::string &param, int64_t rel) const;
+  void write_effect_param(const std::string &fx_id, size_t param, float value, const char *label);
+  void toggle_effect_key(const std::string &fx_id, size_t param);
+  void jump_effect_key(const ClipUi &clip, const EffectUi &fx, bool forward);
   void draw_text_panel();
   void delete_selected();
   void split_at_playhead();

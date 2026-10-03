@@ -428,6 +428,7 @@ Result<Composition> compile(const json &project, std::string_view sequence_id) {
                 continue; // the validator refuses an unknown effect; one that still gets here is skipped
               Effect effect;
               effect.kind = def->id;
+              effect.def = def;
               const auto params = e.find("params");
               for (size_t i = 0; i < def->params.size() && i < 3; ++i) {
                 const eval::EffectParam &p = def->params[i];
@@ -437,6 +438,11 @@ Result<Composition> compile(const json &project, std::string_view sequence_id) {
                     v = &*f;
                 const double value = v && v->is_number() ? v->get<double>() : p.def;
                 effect.v[i] = float(std::clamp(value, p.lo, p.hi));
+                // Keys are checked by the validator; a map that still fails to read leaves the plain value.
+                if (const auto kf = e.find("keyframes"); kf != e.end() && kf->is_object())
+                  if (const auto m = kf->find(p.key); m != kf->end())
+                    if (auto curve = eval::parse_curve(*m, 1))
+                      effect.curve[i] = std::move(*curve);
               }
               l.effects.push_back(std::move(effect));
             }
@@ -757,13 +763,14 @@ void remask_nv12(uint8_t *nv12, const uint8_t *cover, int W, int H) {
 }
 
 // One effect of a layer on a picture that is not isolated (an adjustment layer's copy of everything below it).
-void apply_effect(const Effect &e, uint8_t *nv12, int W, int H, std::vector<uint8_t> &scratch) {
-  if (e.kind == "gaussian_blur") // radius in canvas heights, about two standard deviations
-    blur_nv12(nv12, W, H, e.v[0] * float(H) * 0.5f, scratch);
-  else if (e.kind == "color_grade")
-    grade_nv12(nv12, W, H, e.v[0], e.v[1], e.v[2]);
-  else if (e.kind == "vignette")
-    vignette_nv12(nv12, W, H, e.v[0], e.v[1], e.v[2]);
+void apply_effect(const std::string &kind, const std::array<float, 3> &v, uint8_t *nv12, int W, int H,
+                  std::vector<uint8_t> &scratch) {
+  if (kind == "gaussian_blur") // radius in canvas heights, about two standard deviations
+    blur_nv12(nv12, W, H, v[0] * float(H) * 0.5f, scratch);
+  else if (kind == "color_grade")
+    grade_nv12(nv12, W, H, v[0], v[1], v[2]);
+  else if (kind == "vignette")
+    vignette_nv12(nv12, W, H, v[0], v[1], v[2]);
 }
 
 // The wipe of a transition: `out` (the outgoing clip's picture) becomes `incoming` behind an edge that travels across
@@ -810,6 +817,27 @@ void wipe_blend(uint8_t *out, const uint8_t *incoming, int W, int H, float progr
 }
 
 } // namespace
+
+std::array<float, 3> effect_values(const Layer &l, const Effect &e, const Composition &comp, int64_t frame) {
+  std::array<float, 3> v = {e.v[0], e.v[1], e.v[2]};
+  if (!e.def || (e.curve[0].empty() && e.curve[1].empty() && e.curve[2].empty()))
+    return v;
+  ATM_PROFILE_SCOPE("effect.keyframes");
+  std::optional<Rational> local; // clip-local time, found once for all the parameters that have keys
+  for (size_t i = 0; i < 3 && i < e.def->params.size(); ++i) {
+    if (e.curve[i].empty())
+      continue;
+    if (!local) {
+      const auto made = Rational::make(int64_t(frame - l.origin_frame) * comp.rate_den, comp.rate_num);
+      if (!made)
+        break;
+      local = *made;
+    }
+    const eval::EffectParam &p = e.def->params[i];
+    v[i] = float(std::clamp(e.curve[i].at(*local)[0], p.lo, p.hi));
+  }
+  return v;
+}
 
 Pose pose_at(const Layer &l, const Composition &comp, int64_t frame) {
   Pose p{l.opacity, l.xf};
@@ -865,7 +893,7 @@ void Renderer::draw(const Layer &l, int64_t frame, uint8_t *out, bool &cleared, 
     const size_t size = media::nv12_size(width_, height_);
     adjust_.assign(out, out + size);
     for (const Effect &e : l.effects)
-      apply_effect(e, adjust_.data(), width_, height_, scratch_);
+      apply_effect(e.kind, effect_values(l, e, comp_, frame), adjust_.data(), width_, height_, scratch_);
     put_rows(out, pitch, adjust_.data(), pitch, height_ * 3 / 2, width_, int(p.opacity * 256.0f + 0.5f));
     return;
   }
@@ -981,9 +1009,10 @@ void Renderer::draw_isolated(const Layer &l, int64_t frame, uint8_t *out, bool &
       cover_[i] = uint8_t(std::clamp(255 - diff * 255 / 219, 0, 255));
     }
   });
-  for (const Effect &e : l.effects)
+  for (const Effect &e : l.effects) {
+    const std::array<float, 3> v = effect_values(l, e, comp_, frame);
     if (e.kind == "gaussian_blur") {
-      const float sigma = e.v[0] * float(H) * 0.5f;
+      const float sigma = v[0] * float(H) * 0.5f;
       blur_nv12(over_black_.data(), W, H, sigma, scratch_);
       // The coverage blurs the same way as the luma plane: run it through the same passes as a one-plane picture.
       std::vector<uint8_t> &tmp = over_white_; // free now
@@ -996,9 +1025,10 @@ void Renderer::draw_isolated(const Layer &l, int64_t frame, uint8_t *out, bool &
         box_vertical(tmp.data(), cover_.data(), W, H, r);
       }
     } else { // a colour effect: apply it, then take back what it changed where the clip is not
-      apply_effect(e, over_black_.data(), W, H, scratch_);
+      apply_effect(e.kind, v, over_black_.data(), W, H, scratch_);
       remask_nv12(over_black_.data(), cover_.data(), W, H);
     }
+  }
   if (!cleared)
     media::fill_black(out, W, H);
   cleared = true;

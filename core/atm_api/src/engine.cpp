@@ -726,7 +726,8 @@ struct Engine::Impl {
          "- link {clips: [...]} joins clips so edits move them together; unlink {clip} takes one out of its group\n"
          "- set_property {target (clip, track or fx ID), path (e.g. \"audio.gain_db\", \"transform.opacity\", "
          "\"content.text\", \"volume\", \"params.radius\", \"transform.crop\"), value} or {target, path "
-         "\"transform.opacity|position|scale|rotation|anchor\", keyframes: [{t, v, interp?, ease?}]}\n"
+         "\"transform.opacity|position|scale|rotation|anchor\", keyframes: [{t, v, interp?, ease?}]} or, for an effect, "
+         "{target (fx ID), path \"params.<name>\", keyframes: [...]} to animate that parameter\n"
          "Example: four clips with dissolves, a fading title, a blur and music:\n"
          "[{\"op\":\"add_clip\",\"id\":\"$new:a\",\"asset\":\"ast_…\",\"source_in\":\"1s\",\"duration\":\"4s\",\"with_audio\":false},"
          "{\"op\":\"add_clip\",\"id\":\"$new:b\",\"asset\":\"ast_…\",\"source_in\":\"1s\",\"duration\":\"4s\",\"with_audio\":false},"
@@ -782,7 +783,11 @@ struct Engine::Impl {
          "\"ease\": ease_in_quad, ease_out_quad, ease_in_out_quad, ease_in_cubic, ease_out_cubic, ease_in_out_cubic, "
          "ease_in_expo, ease_out_expo, ease_in_out_expo or ease_out_back.\n"
          "Add one key to a clip that exists: {\"op\":\"add\",\"path\":\"<clip_id>/transform/keyframes/opacity/$new:k5\","
-         "\"value\":{\"t\":\"2s\",\"v\":0.5}}. Keyframes replace the plain value while they exist."},
+         "\"value\":{\"t\":\"2s\",\"v\":0.5}}. Keyframes replace the plain value while they exist.\n"
+         "Effect parameters animate the same way, with the keys inside the effect object (t is clip-local, v a number "
+         "inside the parameter's range): {\"op\":\"add\",\"path\":\"<fx_id>/keyframes/radius/$new:k1\",\"value\":{\"t\":"
+         "\"0s\",\"v\":0.1,\"interp\":\"easing\",\"ease\":\"ease_out_cubic\"}} - or timeline.edit set_property with the fx ID, "
+         "path \"params.radius\" and keyframes. A blur that clears over 2 s, or a vignette that closes in, needs only two keys."},
         {"effects",
          "Effects go on an adjustment layer: a clip with no picture of its own that changes everything on the tracks "
          "below it while it plays. The effects: attome.gaussian_blur (radius), attome.color_grade (brightness -1..1, contrast -1..1, saturation 0..3, 1 = unchanged) and attome.vignette (strength 0..1, radius 0..1 where darkening starts, softness 0.01..1). Blur the video under a title for its "

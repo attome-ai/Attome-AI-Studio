@@ -32,7 +32,7 @@ What exists today:
 - dissolves between clips, with the sound cross-faded at equal power; a dissolve uses media beyond the cut, and an edit that leaves too little is refused with the largest length that fits
 - picture clips from PNG, JPEG, BMP, GIF and TGA files, with their transparency (a logo over the video), 5 s long unless given a length
 - rotation around an anchor point and cropping of each side, for clips and titles (a quarter turn stands a sideways phone video up)
-- keyframes on opacity, position, scale, rotation and anchor (linear, hold and easing presets); the Inspector's Fade card fades a clip in and out, and the timeline draws the opacity curve on the clip
+- keyframes on opacity, position, scale, rotation and anchor, and on the parameters of effects (a vignette that closes in, a blur that clears; a diamond on each effect slider adds, updates or removes a key at the playhead, with Previous and Next key) (linear, hold and easing presets); the Inspector's Fade card fades a clip in and out, and the timeline draws the opacity curve on the clip
 - sound: music and other sound files on audio tracks, clip gain in dB, pan and fades (equal power or linear), track volume and pan, and mute; the Inspector's Audio card sets them
 - colour grade (brightness, contrast, saturation) and vignette, on one clip or on an adjustment layer, from the Effects panel and the Inspector's effect cards
 - a Gaussian blur on one clip (its edges soften into what is below it) or on an adjustment layer, which changes everything on the tracks below it; the Effects panel and each clip's Blur card add them

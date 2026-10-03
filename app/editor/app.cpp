@@ -281,10 +281,15 @@ void App::refresh() {
                   continue;
                 EffectUi ui{e.key(), def->id, {}};
                 const json params = e->value("params", json::object());
-                for (size_t i = 0; i < def->params.size() && i < 3; ++i)
+                for (size_t i = 0; i < def->params.size() && i < 3; ++i) {
                   ui.v[i] = params.is_object() && params.contains(def->params[i].key) && params[def->params[i].key].is_number()
                                 ? params[def->params[i].key].get<float>()
                                 : float(def->params[i].def);
+                  if (const auto kf = e->find("keyframes"); kf != e->end() && kf->is_object())
+                    if (const auto m = kf->find(def->params[i].key); m != kf->end())
+                      if (auto curve = eval::parse_curve(*m, 1))
+                        ui.curve[i] = std::move(*curve);
+                }
                 c.effects.push_back(std::move(ui));
               }
           }
@@ -572,6 +577,28 @@ void App::split_at_playhead() {
         }
       *prop = std::move(moved);
     }
+  }
+  if (right.contains("effects") && right["effects"].is_object()) { // new effect IDs; each parameter's keys local to the right half
+    const Rational eshift = from_frames(left, rate_).value_or(Rational());
+    json effects = json::object();
+    int fx_n = 0, key_n = 0;
+    for (auto e = right["effects"].begin(); e != right["effects"].end(); ++e) {
+      json fx = *e;
+      if (fx.contains("keyframes") && fx["keyframes"].is_object())
+        for (auto prop = fx["keyframes"].begin(); prop != fx["keyframes"].end(); ++prop) {
+          json moved = json::object();
+          for (auto k = prop->begin(); k != prop->end(); ++k) {
+            json key = *k;
+            if (const auto t = Rational::parse(key.value("t", std::string("0"))))
+              key["t"] = sub(*t, eshift).value_or(*t).to_string();
+            moved["$new:splitfk" + std::to_string(key_n++)] = std::move(key);
+          }
+          *prop = std::move(moved);
+        }
+      effects["$new:splitfx" + std::to_string(fx_n++)] = std::move(fx);
+    }
+    right["effects"] = std::move(effects);
+    right.erase("effect_order");
   }
   if (fades) { // the fade in stays on the left half, the fade out goes with the right half
     const int64_t rlen = c->frames - left, fo = std::min(c->fade_out, rlen);
@@ -990,6 +1017,26 @@ void section_label(const char *text) {
   ImGui::PushFont(g_fonts.bold, 11.0f);
   ImGui::TextColored(hexv(look::fg3), "%s", text);
   ImGui::PopFont();
+}
+
+// The keyframe diamond of a parameter row. state: 0 not animated, 1 animated, 2 there is a key at the playhead.
+bool key_diamond(const char *id, int state) {
+  const ImVec2 p = ImGui::GetCursorScreenPos();
+  const float size = 18.0f;
+  ImGui::InvisibleButton(id, ImVec2(size, size));
+  const bool hovered = ImGui::IsItemHovered();
+  const ImVec2 c(p.x + size * 0.5f, p.y + size * 0.5f + 1.0f);
+  const float r = 5.5f;
+  const ImVec2 quad[4] = {ImVec2(c.x, c.y - r), ImVec2(c.x + r, c.y), ImVec2(c.x, c.y + r), ImVec2(c.x - r, c.y)};
+  ImDrawList *dl = ImGui::GetWindowDrawList();
+  const ImU32 line = hex(state == 0 ? (hovered ? look::fg2 : look::fg3) : look::accent);
+  if (state == 2)
+    dl->AddConvexPolyFilled(quad, 4, line);
+  else
+    dl->AddPolyline(quad, 4, line, ImDrawFlags_Closed, 1.6f);
+  if (hovered)
+    ImGui::SetTooltip("%s", state == 2 ? "Remove the keyframe here" : state == 1 ? "Add a keyframe here" : "Animate: add a keyframe here");
+  return ImGui::IsItemClicked();
 }
 
 } // namespace
@@ -1470,7 +1517,128 @@ json default_effect(const eval::EffectDef &def) {
     params[p.key] = p.def;
   return {{"effect", eval::effect_name(def)}, {"enabled", true}, {"params", std::move(params)}};
 }
+
+json new_effect_key(const std::string &t, float v) {
+  return {{"t", t}, {"v", v}, {"interp", "easing"}, {"ease", "ease_in_out_quad"}};
+}
 } // namespace
+
+const ClipUi *App::find_clip(const std::string &id) const {
+  for (const TrackUi &t : tracks_)
+    for (const ClipUi &c : t.clips)
+      if (c.id == id)
+        return &c;
+  return nullptr;
+}
+
+const EffectUi *App::find_effect_ui(const std::string &fx_id, const ClipUi **clip) const {
+  for (const TrackUi &t : tracks_)
+    for (const ClipUi &c : t.clips)
+      for (const EffectUi &e : c.effects)
+        if (e.id == fx_id) {
+          if (clip)
+            *clip = &c;
+          return &e;
+        }
+  return nullptr;
+}
+
+// An effect parameter at the playhead: its plain value, or its keyframe curve evaluated there.
+float App::effect_value(const ClipUi &c, const EffectUi &fx, size_t i) const {
+  const eval::EffectDef *def = eval::find_effect(fx.kind);
+  if (fx.curve[i].empty() || !def || i >= def->params.size())
+    return fx.v[i];
+  const int64_t rel = std::clamp<int64_t>(playhead_ - c.start, 0, std::max<int64_t>(0, c.frames - 1));
+  const auto t = from_frames(rel, rate_);
+  return t ? float(std::clamp(fx.curve[i].at(*t)[0], def->params[i].lo, def->params[i].hi)) : fx.v[i];
+}
+
+// The ID of the key of an effect parameter that sits `rel` frames from the clip's start, or "".
+std::string App::effect_key_id_at(const std::string &fx_id, const std::string &param, int64_t rel) const {
+  const auto seqs = doc_.find("sequences");
+  if (seqs == doc_.end() || !seqs->contains(seq_id_) || !(*seqs)[seq_id_].contains("tracks"))
+    return {};
+  for (const auto &track : (*seqs)[seq_id_]["tracks"]) {
+    const auto clips = track.find("clips");
+    if (clips == track.end())
+      continue;
+    for (const auto &clip : *clips) {
+      const auto effects = clip.find("effects");
+      if (effects == clip.end() || !effects->contains(fx_id))
+        continue;
+      const json &fx = (*effects)[fx_id];
+      const auto kfs = fx.find("keyframes");
+      if (kfs == fx.end() || !kfs->contains(param))
+        return {};
+      for (auto k = (*kfs)[param].begin(); k != (*kfs)[param].end(); ++k) {
+        const auto r = Rational::parse(k->value("t", "0"));
+        if (r && std::llround(r->to_seconds_lossy() * fps()) == rel)
+          return k.key();
+      }
+      return {};
+    }
+  }
+  return {};
+}
+
+// Sets an effect parameter: a plain value when it is not animated, else the key at the playhead (made when missing).
+void App::write_effect_param(const std::string &fx_id, size_t param, float value, const char *label) {
+  const ClipUi *c = nullptr;
+  const EffectUi *fx = find_effect_ui(fx_id, &c);
+  const eval::EffectDef *def = fx ? eval::find_effect(fx->kind) : nullptr;
+  if (!fx || !def || param >= def->params.size())
+    return;
+  const std::string key = def->params[param].key;
+  if (fx->curve[param].empty()) {
+    patch(json::array({{{"op", "replace"}, {"path", fx_id + "/params/" + key}, {"value", value}}}), label);
+    return;
+  }
+  const int64_t rel = std::clamp<int64_t>(playhead_ - c->start, 0, std::max<int64_t>(0, c->frames - 1));
+  const std::string at_key = effect_key_id_at(fx_id, key, rel);
+  if (!at_key.empty())
+    patch(json::array({{{"op", "replace"}, {"path", at_key + "/v"}, {"value", value}}}), label);
+  else
+    patch(json::array({{{"op", "add"}, {"path", fx_id + "/keyframes/" + key + "/$new:k"}, {"value", new_effect_key(frames_text(rel), value)}}}),
+          label);
+}
+
+// The diamond: animate the parameter from here, add a key at the playhead, or remove the key that is there (the last
+// key to go leaves the value it had as the plain value).
+void App::toggle_effect_key(const std::string &fx_id, size_t param) {
+  const ClipUi *c = nullptr;
+  const EffectUi *fx = find_effect_ui(fx_id, &c);
+  const eval::EffectDef *def = fx ? eval::find_effect(fx->kind) : nullptr;
+  if (!fx || !def || param >= def->params.size())
+    return;
+  const std::string key = def->params[param].key;
+  const int64_t rel = std::clamp<int64_t>(playhead_ - c->start, 0, std::max<int64_t>(0, c->frames - 1));
+  const float value = effect_value(*c, *fx, param);
+  const std::string at_key = fx->curve[param].empty() ? std::string() : effect_key_id_at(fx_id, key, rel);
+  if (at_key.empty()) {
+    patch(json::array({{{"op", "add"}, {"path", fx_id + "/keyframes/" + key + "/$new:k"}, {"value", new_effect_key(frames_text(rel), value)}}}),
+          "Add keyframe");
+    return;
+  }
+  json ops = json::array();
+  if (fx->curve[param].keys.size() == 1)
+    ops.push_back({{"op", "replace"}, {"path", fx_id + "/params/" + key}, {"value", value}});
+  ops.push_back({{"op", "remove"}, {"path", at_key}});
+  patch(std::move(ops), "Remove keyframe");
+}
+
+// Moves the playhead to the next or previous key of any parameter of the effect.
+void App::jump_effect_key(const ClipUi &c, const EffectUi &fx, bool forward) {
+  const int64_t now = playhead_ - c.start;
+  int64_t best = -1;
+  for (const eval::Curve &curve : fx.curve)
+    for (const eval::Key &k : curve.keys) {
+      const int64_t f = std::llround(k.t.to_seconds_lossy() * fps());
+      if (forward ? f > now && (best < 0 || f < best) : f < now && (best < 0 || f > best))
+        best = f;
+    }
+  if (best >= 0)
+    seek(c.start + best);
+}
 
 void App::draw_effects_panel() {
   ImGui::PushFont(g_fonts.bold, 15.0f);
@@ -1629,24 +1797,48 @@ void App::draw_effect_card(const ClipUi &c, const eval::EffectDef &def, bool sho
   for (size_t i = 0; i < def.params.size(); ++i) {
     const eval::EffectParam &p = def.params[i];
     const std::string key = fx + "/" + p.key;
-    float v = found->v[i];
+    float v = effect_value(c, *found, i); // at the playhead when the parameter is animated
     if (const auto it = fx_edit_.find(key); it != fx_edit_.end())
       v = it->second;
+    const bool at_clip = playhead_ >= c.start && playhead_ < c.start + c.frames;
+    const int64_t rel = std::clamp<int64_t>(playhead_ - c.start, 0, std::max<int64_t>(0, c.frames - 1));
+    const int state = found->curve[i].empty() ? 0 : effect_key_id_at(fx, p.key, rel).empty() ? 1 : 2;
+    ImGui::BeginDisabled(!at_clip);
+    if (key_diamond(("##key_" + name + "_" + p.key).c_str(), state))
+      pending_ = [this, fx, i] { toggle_effect_key(fx, i); };
+    ui_mark("key:" + name + "_" + p.key);
+    ImGui::EndDisabled();
+    ImGui::SameLine(36.0f); // offsets count from the window edge; the card content starts 14 px in
     ImGui::TextColored(hexv(look::fg2), "%s", p.title);
-    ImGui::SameLine(88.0f);
+    ImGui::SameLine(120.0f);
     if (slim_slider((name + "_" + p.key).c_str(), &v, float(p.lo), float(p.ui_hi), ImGui::GetContentRegionAvail().x - 60.0f, ""))
       fx_edit_[key] = v;
     if (ImGui::IsItemDeactivatedAfterEdit()) {
       const float rounded = std::round(v * 1000.0f) / 1000.0f;
       fx_edit_.erase(key);
-      pending_ = [this, fx, rounded, param = std::string(p.key), label = "Change " + lower] {
-        patch(json::array({{{"op", "replace"}, {"path", fx + "/params/" + param}, {"value", rounded}}}), label.c_str());
-      };
+      pending_ = [this, fx, i, rounded, label = "Change " + lower] { write_effect_param(fx, i, rounded, label.c_str()); };
     }
     ImGui::SameLine();
     ImGui::PushFont(g_fonts.mono, 13.0f);
     ImGui::TextColored(hexv(look::fg2), "%.3f", v);
     ImGui::PopFont();
+  }
+  const bool animated = found->curve[0].keys.size() + found->curve[1].keys.size() + found->curve[2].keys.size() > 0;
+  if (animated) { // step between the effect's keys
+    const float half_w = (ImGui::GetContentRegionAvail().x - 8.0f) * 0.5f;
+    if (soft_button(("prev_key_" + name).c_str(), "< Previous key", ImVec2(half_w, 26.0f)))
+      pending_ = [this, id, fx] {
+        const ClipUi *clip = nullptr;
+        if (const EffectUi *e = find_effect_ui(fx, &clip))
+          jump_effect_key(*clip, *e, false);
+      };
+    ImGui::SameLine(0.0f, 8.0f);
+    if (soft_button(("next_key_" + name).c_str(), "Next key >", ImVec2(-1.0f, 26.0f)))
+      pending_ = [this, id, fx] {
+        const ClipUi *clip = nullptr;
+        if (const EffectUi *e = find_effect_ui(fx, &clip))
+          jump_effect_key(*clip, *e, true);
+      };
   }
   if (!c.is_adjustment || c.effects.size() > 1) { // an adjustment layer with a single effect keeps it: remove the layer instead
     if (soft_button(("remove_" + name).c_str(), ("Remove " + lower).c_str(), ImVec2(-1.0f, 28.0f)))
@@ -2047,6 +2239,18 @@ void App::draw_timeline() {
       dl->AddRectFilled(ImVec2(x0, cy), ImVec2(x1 - 1.0f, cy + 3.0f), IM_COL32(255, 255, 255, 70), 5.0f, ImDrawFlags_RoundCornersTop);
       if (is_selected)
         dl->AddRect(ImVec2(x0, cy), ImVec2(x1 - 1.0f, cy + ch), hex(look::accent), 5.0f, 0, 2.0f);
+      if (is_selected) // the keys of its effects' parameters: a small diamond at each key time
+        for (const EffectUi &fx : c.effects)
+          for (const eval::Curve &curve : fx.curve)
+            for (const eval::Key &k : curve.keys) {
+              const float kx = x_of(double(start) + k.t.to_seconds_lossy() * fps());
+              if (kx < x0 || kx > x1)
+                continue;
+              const float ky = cy + ch - 7.0f, r = 4.5f;
+              const ImVec2 quad[4] = {ImVec2(kx, ky - r), ImVec2(kx + r, ky), ImVec2(kx, ky + r), ImVec2(kx - r, ky)};
+              dl->AddConvexPolyFilled(quad, 4, IM_COL32(255, 255, 255, 235));
+              dl->AddPolyline(quad, 4, IM_COL32(20, 24, 34, 200), ImDrawFlags_Closed, 1.0f);
+            }
       else if (!c.link_group.empty() && sel_link == c.link_group) // the selected clip's linked partner
         dl->AddRect(ImVec2(x0, cy), ImVec2(x1 - 1.0f, cy + ch), hex(look::accent, 150), 5.0f, 0, 1.0f);
       if ((c.audio_fade_in > 0 || c.audio_fade_out > 0) && drag_id_ != c.id) { // sound fades: ramps at the ends
