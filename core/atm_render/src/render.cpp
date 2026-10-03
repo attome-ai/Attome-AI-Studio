@@ -882,15 +882,65 @@ void zoom_blend(uint8_t *out, const uint8_t *incoming, int W, int H, float progr
   plane(size_t(W) * size_t(H), W / 2, H / 2, 2);
 }
 
-// One effect of a layer on a picture that is not isolated (an adjustment layer's copy of everything below it).
+// An unsharp mask on the luma: each pixel moves away from the blurred picture by `amount` times its difference from it,
+// so edges get steeper. The chroma is left as it is (sharpening colour only fringes it). `sigma` is the blur's, in pixels.
+void sharpen_nv12(uint8_t *nv12, int W, int H, float amount, float sigma, std::vector<uint8_t> &tmp) {
+  ATM_PROFILE_SCOPE("effect.sharpen");
+  static thread_local std::vector<uint8_t> blurred; // the whole picture is blurred (the blur works on both planes); only luma is used
+  blurred.assign(nv12, nv12 + media::nv12_size(W, H));
+  blur_nv12(blurred.data(), W, H, sigma, tmp);
+  const uint8_t *soft = blurred.data(); // the worker threads of the loop must read this thread's buffer, not their own
+  parallel_for(H, 16, [&](int64_t first, int64_t last) {
+    for (size_t i = size_t(first) * size_t(W); i < size_t(last) * size_t(W); ++i) {
+      const float y = float(nv12[i]);
+      nv12[i] = uint8_t(std::clamp(int(y + amount * (y - float(soft[i])) + 0.5f), 16, 235));
+    }
+  });
+}
+
+// Film grain: zero-mean noise on the luma, new for every frame and the same every time a frame is rendered (the noise is
+// a hash of the grain's cell and the frame, not a random generator), so an export repeats exactly. A grain is a square
+// cell of `size` pixels; the noise is triangular (the mean of two uniform values) and strongest in the midtones, where
+// real grain shows most. A full `strength` is about 48 levels of the 219 of the video range.
+void grain_nv12(uint8_t *nv12, int W, int H, float strength, float size, int64_t frame) {
+  ATM_PROFILE_SCOPE("effect.film_grain");
+  const int cell = std::max(1, int(std::lround(size)));
+  const float amp = strength * 48.0f;
+  const uint32_t seed = uint32_t(frame) * 0x9E3779B1u + 0x7F4A7C15u;
+  parallel_for(H, 16, [&](int64_t first, int64_t last) {
+    for (int64_t y = first; y < last; ++y) {
+      uint8_t *row = nv12 + size_t(y) * size_t(W);
+      const uint32_t cy = uint32_t(y / cell) * 19349663u;
+      for (int x = 0; x < W; ++x) {
+        uint32_t h = (uint32_t(x / cell) * 73856093u) ^ cy ^ seed;
+        h ^= h >> 16;
+        h *= 0x85EBCA6Bu;
+        h ^= h >> 13;
+        h *= 0xC2B2AE35u;
+        h ^= h >> 16;
+        const float n = (float(h & 0xFFFFu) + float(h >> 16) - 65535.0f) * (1.0f / 65536.0f); // -1 .. 1, triangular
+        const float l = (float(row[x]) - 16.0f) * (1.0f / 219.0f);
+        const float weight = 0.35f + 0.65f * 4.0f * l * (1.0f - l); // 1 in the midtones, 0.35 at black and white
+        row[x] = uint8_t(std::clamp(int(float(row[x]) + n * amp * weight + 0.5f), 16, 235));
+      }
+    }
+  });
+}
+
+// One effect of a layer on a picture that is not isolated (an adjustment layer's copy of everything below it). `frame`
+// is the frame of the sequence: grain changes with it.
 void apply_effect(const std::string &kind, const std::array<float, 3> &v, uint8_t *nv12, int W, int H,
-                  std::vector<uint8_t> &scratch) {
+                  std::vector<uint8_t> &scratch, int64_t frame) {
   if (kind == "gaussian_blur") // radius in canvas heights, about two standard deviations
     blur_nv12(nv12, W, H, v[0] * float(H) * 0.5f, scratch);
   else if (kind == "color_grade")
     grade_nv12(nv12, W, H, v[0], v[1], v[2]);
   else if (kind == "vignette")
     vignette_nv12(nv12, W, H, v[0], v[1], v[2]);
+  else if (kind == "sharpen") // radius in canvas heights, like the blur
+    sharpen_nv12(nv12, W, H, v[0], v[1] * float(H) * 0.5f, scratch);
+  else if (kind == "film_grain") // size in pixels of a 1080-line picture, scaled to this picture
+    grain_nv12(nv12, W, H, v[0], v[1] * float(H) / 1080.0f, frame);
 }
 
 // The wipe of a transition: `out` (the outgoing clip's picture) becomes `incoming` behind an edge that travels across
@@ -1013,7 +1063,7 @@ void Renderer::draw(const Layer &l, int64_t frame, uint8_t *out, bool &cleared, 
     const size_t size = media::nv12_size(width_, height_);
     adjust_.assign(out, out + size);
     for (const Effect &e : l.effects)
-      apply_effect(e.kind, effect_values(l, e, comp_, frame), adjust_.data(), width_, height_, scratch_);
+      apply_effect(e.kind, effect_values(l, e, comp_, frame), adjust_.data(), width_, height_, scratch_, frame);
     put_rows(out, pitch, adjust_.data(), pitch, height_ * 3 / 2, width_, int(p.opacity * 256.0f + 0.5f));
     return;
   }
@@ -1145,7 +1195,7 @@ void Renderer::draw_isolated(const Layer &l, int64_t frame, uint8_t *out, bool &
         box_vertical(tmp.data(), cover_.data(), W, H, r);
       }
     } else { // a colour effect: apply it, then take back what it changed where the clip is not
-      apply_effect(e.kind, v, over_black_.data(), W, H, scratch_);
+      apply_effect(e.kind, v, over_black_.data(), W, H, scratch_, frame);
       remask_nv12(over_black_.data(), cover_.data(), W, H);
     }
   }

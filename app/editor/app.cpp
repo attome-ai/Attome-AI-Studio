@@ -1678,8 +1678,9 @@ void App::draw_effects_panel() {
   ImGui::Spacing();
   section_label("ADJUSTMENT LAYERS");
   ImGui::Spacing();
-  static const char *const kBlurb[] = {"Softens everything below", "Brightness, contrast and colour", "Darkens the corners"};
-  int index = 0;
+  static const std::pair<const char *, const char *> kBlurb[] = {
+      {"blur", "Softens everything below"}, {"grade", "Brightness, contrast and colour"}, {"vignette", "Darkens the corners"},
+      {"sharpen", "Crisper edges"}, {"grain", "Film grain, new every frame"}};
   for (const eval::EffectDef &def : eval::effect_defs()) {
     const std::string name = def.short_name();
     const ImVec2 p = ImGui::GetCursorScreenPos();
@@ -1700,15 +1701,25 @@ void App::draw_effects_panel() {
       dl->AddCircleFilled(ImVec2(c.x - 9.0f, c.y + 5.0f), 15.0f, IM_COL32(230, 70, 70, 130));
       dl->AddCircleFilled(ImVec2(c.x + 9.0f, c.y + 5.0f), 15.0f, IM_COL32(70, 200, 110, 130));
       dl->AddCircleFilled(ImVec2(c.x, c.y - 10.0f), 15.0f, IM_COL32(80, 130, 240, 130));
+    } else if (name == "sharpen") { // an edge that overshoots on both sides: the profile of a sharpened step
+      const ImVec2 edge[6] = {ImVec2(c.x - 34.0f, c.y + 10.0f), ImVec2(c.x - 9.0f, c.y + 10.0f), ImVec2(c.x - 7.0f, c.y + 16.0f),
+                              ImVec2(c.x - 5.0f, c.y - 16.0f), ImVec2(c.x - 3.0f, c.y - 10.0f), ImVec2(c.x + 34.0f, c.y - 10.0f)};
+      dl->AddPolyline(edge, 6, hex(look::adj), 0, 2.2f);
+    } else if (name == "grain") { // scattered specks
+      for (int i = 0; i < 70; ++i)
+        dl->AddRectFilled(ImVec2(c.x - 34.0f + std::fmod(float(i) * 37.3f, 68.0f), c.y - 22.0f + std::fmod(float(i) * 53.7f, 44.0f)),
+                          ImVec2(c.x - 33.0f + std::fmod(float(i) * 37.3f, 68.0f), c.y - 21.0f + std::fmod(float(i) * 53.7f, 44.0f)),
+                          hex(look::adj, 90 + (i * 53) % 150));
     } else { // vignette: a frame whose edges fade to dark
       for (int i = 0; i < 5; ++i)
         dl->AddRect(ImVec2(c.x - 30.0f + float(i) * 3.0f, c.y - 20.0f + float(i) * 2.0f),
                     ImVec2(c.x + 30.0f - float(i) * 3.0f, c.y + 20.0f - float(i) * 2.0f), hex(look::adj, 60 + i * 40), 8.0f, 0, 2.0f);
     }
     dl->AddText(ImVec2(p.x + 12.0f, q.y - 22.0f), hex(look::fg2), def.title);
-    dl->AddText(ImVec2(p.x + 20.0f + text_size(def.title).x, q.y - 22.0f), hex(look::fg3), kBlurb[std::min(index, 2)]);
+    for (const auto &[blurb_name, blurb] : kBlurb)
+      if (name == blurb_name)
+        dl->AddText(ImVec2(p.x + 20.0f + text_size(def.title).x, q.y - 22.0f), hex(look::fg3), blurb);
     ImGui::Dummy(ImVec2(0.0f, 4.0f));
-    ++index;
   }
 }
 
@@ -1873,7 +1884,8 @@ void App::draw_effect_card(const ClipUi &c, const eval::EffectDef &def, bool sho
   if (show_amount) {
     ImGui::TextColored(hexv(look::fg2), "Amount");
     ImGui::SameLine(88.0f);
-    slim_slider((name + "_amount").c_str(), &amount_, 0.0f, 1.0f, ImGui::GetContentRegionAvail().x - 60.0f, "");
+    // the layer's amount: its own ID, because an effect may have a parameter called "amount" (sharpen), "<name>_amount"
+    slim_slider((name + "_layer_amount").c_str(), &amount_, 0.0f, 1.0f, ImGui::GetContentRegionAvail().x - 60.0f, "");
     if (ImGui::IsItemDeactivatedAfterEdit()) {
       const float v = std::round(amount_ * 100.0f) / 100.0f;
       const ClipUi clip = c;

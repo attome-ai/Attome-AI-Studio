@@ -1522,4 +1522,107 @@ TEST_CASE("render: a zoom out shrinks the outgoing picture over the incoming one
   fs::remove_all(dir, ec);
 }
 
+TEST_CASE("render: sharpen steepens an edge and nothing else; film grain is zero-mean noise that changes with the frame", "[media]") {
+  const fs::path dir = fs::temp_directory_path() / atm::new_id("attome-sharpgrain");
+  fs::create_directories(dir);
+  const std::string clip = (dir / "clip.mp4").string();
+  write_clip(clip, 320, 240, 30); // red top half, blue bottom half: a luma step at y = 120
+  const std::string grey = (dir / "grey.mp4").string();
+  write_solid(grey, 0x808080, 440.0, 2); // mid grey: nothing clips when it is converted to RGB, so grain statistics are honest
+
+  const auto render_fx = [&](json effects, int64_t frame, bool on_grey = false) {
+    json adjustment = {{"timing", {{"record_in", "0"}, {"duration", "1"}, {"source_in", "0"}}},
+                       {"media_ref", {{"type", "adjustment"}}},
+                       {"effects", std::move(effects)}};
+    const json doc = {
+        {"sequences",
+         {{"seq_1",
+           {{"rate", "30"},
+            {"canvas", {{"width", 320}, {"height", 240}}},
+            {"track_order", {"trk_v", "trk_fx"}},
+            {"tracks",
+             {{"trk_v", {{"clips", {{"clp_v", {{"timing", {{"record_in", "0"}, {"duration", "1"}, {"source_in", "0"}}},
+                                               {"media_ref", {{"type", "file"}, {"path", on_grey ? grey : clip}}}}}}}}},
+              {"trk_fx", {{"clips", {{"clp_adj", adjustment}}}}}}}}}}},
+        {"sequence_order", {"seq_1"}}};
+    auto comp = atm::render::compile(doc);
+    REQUIRE(comp);
+    atm::render::Renderer renderer(*comp, 320, 240);
+    std::vector<uint8_t> nv12(media::nv12_size(320, 240)), rgb(320 * 240 * 4);
+    REQUIRE(renderer.render(frame, nv12.data()));
+    media::nv12_to_bgrx(nv12.data(), 320, 240, rgb.data());
+    return rgb;
+  };
+  const auto luma = [](const std::vector<uint8_t> &rgb, int x, int y) {
+    const uint8_t *p = rgb.data() + (size_t(y) * 320 + size_t(x)) * 4;
+    return 0.2126f * float(p[2]) + 0.7152f * float(p[1]) + 0.0722f * float(p[0]);
+  };
+  const auto fx = [](const char *name, json params) {
+    return json{{"fx_1", {{"effect", name}, {"enabled", true}, {"params", std::move(params)}}}};
+  };
+  const auto plain = render_fx(json::object(), 10);
+
+  { // sharpen: the bright side of the edge gets brighter, the dark side darker, and the flat parts stay as they are
+    const auto sharp = render_fx(fx("attome.sharpen@1.0.0", {{"amount", 3.0}, {"radius", 0.02}}), 10);
+    CHECK(luma(sharp, 160, 118) > luma(plain, 160, 118) + 6.0f); // red side, next to the edge
+    float lowest = 1000.0f; // blue side: the darkest change over the rows just below the edge (the blue is near black, so it has little room)
+    for (int y = 121; y <= 127; ++y)
+      lowest = std::min(lowest, luma(sharp, 160, y) - luma(plain, 160, y));
+    CHECK(lowest < -1.0f);
+    CHECK(std::abs(luma(sharp, 160, 20) - luma(plain, 160, 20)) < 3.0f);
+    CHECK(std::abs(luma(sharp, 160, 220) - luma(plain, 160, 220)) < 3.0f);
+    const auto none = render_fx(fx("attome.sharpen@1.0.0", {{"amount", 0.0}}), 10); // amount 0 changes nothing
+    CHECK(std::abs(luma(none, 160, 118) - luma(plain, 160, 118)) < 2.0f);
+  }
+  const auto plain_grey = render_fx(json::object(), 10, true);
+  const auto delta = [&](const std::vector<uint8_t> &grainy, int x, int y) { return luma(grainy, x, y) - luma(plain_grey, x, y); };
+  const auto stats = [&](const std::vector<uint8_t> &grainy) { // over a flat region: the mean change and the mean size of it
+    double sum = 0, sum_abs = 0;
+    int n = 0;
+    for (int y = 20; y < 220; ++y)
+      for (int x = 20; x < 300; ++x, ++n) {
+        const double d = double(delta(grainy, x, y));
+        sum += d;
+        sum_abs += std::abs(d);
+      }
+    return std::pair<double, double>{sum / n, sum_abs / n};
+  };
+  { // grain: noise with no overall brightening, stronger with strength, new every frame, the same every time for one frame
+    const auto weak = render_fx(fx("attome.film_grain@1.0.0", {{"strength", 0.2}, {"size", 1.0}}), 10, true);
+    const auto strong = render_fx(fx("attome.film_grain@1.0.0", {{"strength", 0.8}, {"size", 1.0}}), 10, true);
+    const auto [weak_mean, weak_abs] = stats(weak);
+    const auto [strong_mean, strong_abs] = stats(strong);
+    CHECK(std::abs(strong_mean) < 1.5);
+    CHECK(weak_abs > 1.0);
+    CHECK(strong_abs > weak_abs * 2.5);
+    const auto off = render_fx(fx("attome.film_grain@1.0.0", {{"strength", 0.0}}), 10, true);
+    CHECK(stats(off).second < 0.6);
+    CHECK(strong == render_fx(fx("attome.film_grain@1.0.0", {{"strength", 0.8}, {"size", 1.0}}), 10, true)); // repeatable
+    const auto next = render_fx(fx("attome.film_grain@1.0.0", {{"strength", 0.8}, {"size", 1.0}}), 11, true);
+    double between = 0;
+    int n = 0;
+    for (int y = 20; y < 220; ++y)
+      for (int x = 20; x < 300; ++x, ++n)
+        between += std::abs(double(luma(strong, x, y) - luma(next, x, y)));
+    CHECK(between / n > 2.0); // another frame, other grain
+  }
+  { // grain size: the size is in pixels of a 1080-line picture, so 8 is a 2-pixel cell on this 240-line one (1 is a pixel);
+    // the two pixels of a cell change together, the next cell's do not
+    const auto big = render_fx(fx("attome.film_grain@1.0.0", {{"strength", 1.0}, {"size", 8.0}}), 10, true);
+    const auto fine = render_fx(fx("attome.film_grain@1.0.0", {{"strength", 1.0}, {"size", 1.0}}), 10, true);
+    int inside_big = 0, across_big = 0, inside_fine = 0, pairs = 0;
+    for (int y = 20; y < 220; ++y)
+      for (int x = 20; x < 300; x += 2, ++pairs) { // x even: x and x + 1 share a cell, x + 1 and x + 2 do not
+        inside_big += std::abs(delta(big, x, y) - delta(big, x + 1, y)) < 2.5f;
+        across_big += std::abs(delta(big, x + 1, y) - delta(big, x + 2, y)) < 2.5f;
+        inside_fine += std::abs(delta(fine, x, y) - delta(fine, x + 1, y)) < 2.5f;
+      }
+    CHECK(inside_big > pairs * 9 / 10);  // nearly all pairs inside a cell move together
+    CHECK(across_big < pairs / 2);       // neighbouring cells mostly differ
+    CHECK(inside_fine < pairs / 2);      // one-pixel grain: neighbours mostly differ
+  }
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}
+
 #endif

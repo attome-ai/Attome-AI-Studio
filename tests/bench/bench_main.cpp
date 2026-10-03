@@ -166,6 +166,8 @@ void bench_effects() {
   report("color grade, adjustment layer", frame_ms(with_effect("color_grade", 0.1f, 0.2f, 1.2f), 10), "ms", 2.0);
   report("vignette, adjustment layer", frame_ms(with_effect("vignette", 0.6f, 0.5f, 0.4f), 10), "ms", 3.0);
   report("vignette, strength animated by 50 keys", frame_ms(keyed_vignette(), 10), "ms", 3.0);
+  report("sharpen (a blur and a pass over the luma), adjustment layer", frame_ms(with_effect("sharpen", 1.0f, 0.004f, 0), 10), "ms", 8.0);
+  report("film grain, adjustment layer", frame_ms(with_effect("film_grain", 0.3f, 1.5f, 0), 10), "ms", 2.0);
   report("dissolve (reference), two text clips", frame_ms(two_clips(atm::eval::TransitionKind::dissolve), 30), "ms", 20.0);
   report("wipe, two text clips", frame_ms(two_clips(atm::eval::TransitionKind::wipe), 30), "ms", 4.0);
   report("push, two text clips", frame_ms(two_clips(atm::eval::TransitionKind::push), 30), "ms", 4.0);

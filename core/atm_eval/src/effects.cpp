@@ -19,10 +19,21 @@ constexpr EffectParam kVignette[] = {
     {"softness", "Softness", 0.01, 1.0, 0.45, false, 1.0},
 };
 
+constexpr EffectParam kSharpen[] = {
+    {"amount", "Amount", 0.0, 4.0, 1.0, false, 3.0},
+    {"radius", "Radius", 0.0005, 0.02, 0.004, false, 0.012}, // like a blur's: a fraction of the picture height
+};
+constexpr EffectParam kGrain[] = {
+    {"strength", "Strength", 0.0, 1.0, 0.25, false, 1.0},
+    {"size", "Size", 1.0, 8.0, 1.5, false, 6.0}, // pixels of one grain on a 1080-line picture
+};
+
 constexpr EffectDef kEffects[] = {
     {"gaussian_blur", "Blur", "blur", kBlur},
     {"color_grade", "Color grade", "grade", kGrade},
     {"vignette", "Vignette", "", kVignette},
+    {"sharpen", "Sharpen", "", kSharpen},
+    {"film_grain", "Film grain", "grain", kGrain},
 };
 
 constexpr std::array<std::pair<const char *, WipeDirection>, 4> kDirections = {{

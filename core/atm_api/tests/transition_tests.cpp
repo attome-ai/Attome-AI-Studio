@@ -841,3 +841,40 @@ TEST_CASE("timeline.edit: the Titles and Effects tracks the ops make are locked 
   CHECK_FALSE(locked.at("Plain"));    // not asked for
   CHECK_FALSE(edit(json::array({{{"op", "add_track"}, {"kind", "video"}, {"sync_lock", "yes"}}})));
 }
+
+TEST_CASE("effects: sharpen and film grain are accepted with their parameters, out-of-range values are refused", "[effect]") {
+  Fixture f;
+  const auto layer = [](const Fixture &on, json effect) {
+    return json::array({{{"op", "add"},
+                         {"path", on.track + "/clips/$new:adj"},
+                         {"value",
+                          {{"timing", {{"record_in", "4s"}, {"duration", "2s"}, {"source_in", "0s"}}},
+                           {"media_ref", {{"type", "adjustment"}}},
+                           {"effects", {{"$new:fx", std::move(effect)}}}}}}});
+  };
+  const auto fx = [](const char *name, json params) { return json{{"effect", name}, {"enabled", true}, {"params", std::move(params)}}; };
+  CHECK(f.rule_of(layer(f, fx("attome.sharpen@1.0.0", {{"amount", 9}}))) == "EFFECT_PARAM");
+  CHECK(f.rule_of(layer(f, fx("attome.sharpen@1.0.0", {{"radius", 0.0}}))) == "EFFECT_PARAM"); // below the smallest radius
+  CHECK(f.rule_of(layer(f, fx("attome.film_grain@1.0.0", {{"size", 20}}))) == "EFFECT_PARAM");
+  CHECK(f.rule_of(layer(f, fx("attome.film_grain@1.0.0", {{"strength", -0.1}}))) == "EFFECT_PARAM");
+  CHECK(f.patch(layer(f, fx("attome.sharpen@1.0.0", json::object())))); // defaults
+  Fixture g;
+  CHECK(g.patch(layer(g, fx("attome.film_grain@1.0.0", {{"strength", 0.4}, {"size", 2.5}}))));
+  // timeline.edit: by id and by the short name "grain"; the parameters the op does not give take their defaults.
+  Fixture h;
+  auto r = h.engine.call("timeline.edit",
+                         {{"project", h.project},
+                          {"ops", json::array({{{"op", "add_effect"}, {"id", "$new:s"}, {"target", h.a}, {"type", "sharpen"}, {"amount", 2.0}},
+                                               {{"op", "add_effect"}, {"id", "$new:g"}, {"target", h.b}, {"type", "grain"}}})}});
+  INFO((r ? "" : r.error().message));
+  REQUIRE(r);
+  const json a = h.engine.call("project.get", {{"project", h.project}, {"id", h.a}})->at("object");
+  const json &sharp = *a["effects"].begin();
+  CHECK(sharp["effect"] == "attome.sharpen@1.0.0");
+  CHECK(sharp["params"]["amount"] == 2.0);
+  CHECK(sharp["params"]["radius"] == 0.004);
+  const json b = h.engine.call("project.get", {{"project", h.project}, {"id", h.b}})->at("object");
+  CHECK((*b["effects"].begin())["effect"] == "attome.film_grain@1.0.0");
+  CHECK((*b["effects"].begin())["params"]["strength"] == 0.25);
+}
+
