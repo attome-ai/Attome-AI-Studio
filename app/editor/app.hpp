@@ -35,8 +35,8 @@ inline Fonts g_fonts;
 struct EffectUi { // one effect of a clip or adjustment layer: its ID, the eval::EffectDef id, and its parameters in table order
   std::string id, kind;
   std::string file; // a LUT's .cube path
-  float v[3] = {0.0f, 0.0f, 0.0f};
-  eval::Curve curve[3]; // keyframes of each parameter, clip-local; empty: the plain value in v
+  float v[eval::kMaxEffectParams] = {};
+  eval::Curve curve[eval::kMaxEffectParams]; // keyframes of each parameter, clip-local; empty: the plain value in v
 };
 
 struct ClipUi {

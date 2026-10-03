@@ -14,6 +14,9 @@
 
 namespace atm::eval {
 
+// The most numeric parameters one effect has. The renderer and the editor keep this many values and curves per effect.
+constexpr size_t kMaxEffectParams = 4;
+
 struct EffectParam {
   const char *key;
   const char *title;

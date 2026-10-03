@@ -35,8 +35,11 @@ function Get-KeyHue($run) {
 $failed = $null
 $green = $null; $blue = $null
 $run = Invoke-EditorScript -Project $proj -Import $png -Script @(
-  'wait 500'
+  'wait 800'
+  'expect @clip:halves'
   'click @clip:halves'
+  'wait 300'
+  'expect @button:add_key'
   'click @button:add_key'
   'click @button:pick_key'
   'click @monitor@0.25,0.5'             # the green half
@@ -46,8 +49,11 @@ $failed = $run.Errors
 try { if (-not $failed) { $green = Get-KeyHue $run } } finally { Stop-Daemon $run }
 if (-not $failed) {
   $run = Invoke-EditorScript -Project $proj -Script @(
-    'wait 500'
+    'wait 800'
+    'expect @clip:halves'
     'click @clip:halves'
+    'wait 300'
+    'expect @button:pick_key'
     'click @button:pick_key'
     'click @monitor@0.75,0.5'           # the blue half
     'wait 800'

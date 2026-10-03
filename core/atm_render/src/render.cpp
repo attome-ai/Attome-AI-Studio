@@ -444,7 +444,7 @@ Result<Composition> compile(const json &project, std::string_view sequence_id) {
                 if (const auto prm = e.find("params"); prm != e.end() && prm->is_object())
                   effect.file = prm->value(def->file_param, std::string());
               const auto params = e.find("params");
-              for (size_t i = 0; i < def->params.size() && i < 3; ++i) {
+              for (size_t i = 0; i < def->params.size() && i < eval::kMaxEffectParams; ++i) {
                 const eval::EffectParam &p = def->params[i];
                 const json *v = nullptr;
                 if (params != e.end() && params->is_object())
@@ -789,7 +789,8 @@ void remask_nv12(uint8_t *nv12, const uint8_t *cover, int W, int H) {
 // Chroma key: removes the pixels whose colour is near the key colour. `nv12` is the picture of the clip alone,
 // premultiplied around black, and `cover` its coverage; the key multiplies both by a matte, so what is keyed out is
 // transparent and the edge is soft. `hue` is in degrees, `similarity` how far round the colour wheel from the key colour
-// is still removed (1 is a quarter turn), `smoothness` the width of the soft edge.
+// is still removed (1 is a quarter turn), `smoothness` the width of the soft edge, `detail` how much thin detail in the
+// keyed-out area is kept (see below): 1 all of it, 0 none (and the pass is skipped).
 //
 // The match is made on the hue ANGLE of the chroma (Cb, Cr), not on its distance from one point: the chroma of one
 // colour grows and shrinks with its brightness, so a screen in shadow is the same hue with less chroma and a distance
@@ -797,7 +798,7 @@ void remask_nv12(uint8_t *nv12, const uint8_t *cover, int W, int H) {
 // (greys and near-blacks, whose angle is noise, are kept). The matte is made per chroma sample from the mean luma of its
 // 2 x 2 pixels and read back bilinearly for the luma, so its edge is not blocky. Pixels that stay get the key colour's
 // spill taken out of their chroma (the part along the key direction), strongest near the key's hue.
-void key_nv12(uint8_t *nv12, uint8_t *cover, int W, int H, float hue, float similarity, float smoothness,
+void key_nv12(uint8_t *nv12, uint8_t *cover, int W, int H, float hue, float similarity, float smoothness, float detail,
               std::vector<uint8_t> &matte) {
   ATM_PROFILE_SCOPE("effect.chroma_key");
   constexpr float kPi = 3.14159265f;
@@ -858,7 +859,8 @@ void key_nv12(uint8_t *nv12, uint8_t *cover, int W, int H, float hue, float simi
   t_alpha.resize(size_t(W) * size_t(H));
   std::vector<float> &ref = t_ref, &valid = t_valid, &wl = t_wl, &ww = t_ww, &tl = t_tl, &tw = t_tw;
   std::vector<uint8_t> &alpha = t_alpha;
-  {
+  const float start = 0.10f + 0.25f * (1.0f - detail); // how far from the screen a line must be: weak features (markers) need detail 1 to stay
+  if (detail > 0.001f) {
     ATM_PROFILE_SCOPE("effect.chroma_key.detail");
     constexpr int R = 3;
     parallel_for(CH, 16, [&](int64_t first, int64_t last) {
@@ -901,6 +903,8 @@ void key_nv12(uint8_t *nv12, uint8_t *cover, int W, int H, float hue, float simi
         }
       }
     });
+  }
+  {
     // The matte for every pixel, from the unchanged luma: the chroma matte read bilinearly, raised where a thin line is. How
     // far a pixel is from the screen near it is taken from the nearest chroma sample (the screen's luma is smooth).
     const auto dist = [&](int px, int y) {
@@ -920,15 +924,15 @@ void key_nv12(uint8_t *nv12, uint8_t *cover, int W, int H, float hue, float simi
           const int top = int(m[size_t(y0) * size_t(CW) + size_t(x0)]) * (256 - tx) + int(m[size_t(y0) * size_t(CW) + size_t(x1)]) * tx;
           const int bot = int(m[size_t(y1) * size_t(CW) + size_t(x0)]) * (256 - tx) + int(m[size_t(y1) * size_t(CW) + size_t(x1)]) * tx;
           int a = (top * (256 - ty) + bot * ty) >> 16; // 0..255
-          if (a < 200) { // mostly screen: look for a thin line in it
+          if (a < 200 && detail > 0.001f) { // mostly screen: look for a thin line in it
             const float d = dist(px, int(y));
-            if (d > 0.10f) {
+            if (d > start) {
               float thin = 0.0f;
               if (px >= 2 && px + 2 < W)
                 thin = std::max(thin, std::min(d - dist(px - 2, int(y)), d - dist(px + 2, int(y))));
               if (inside_y)
                 thin = std::max(thin, std::min(d - dist(px, int(y) - 2), d - dist(px, int(y) + 2)));
-              a = std::max(a, int(smooth01((d - 0.10f) / 0.10f) * smooth01((thin - 0.04f) / 0.06f) * 255.0f + 0.5f));
+              a = std::max(a, int(smooth01((d - start) / 0.10f) * smooth01((thin - 0.04f) / 0.06f) * 255.0f + 0.5f));
             }
           }
           alpha[size_t(y) * size_t(W) + size_t(px)] = uint8_t(a);
@@ -1227,7 +1231,7 @@ void lut_nv12(uint8_t *nv12, int W, int H, const BakedLut &lut, float strength) 
 
 // One effect of a layer on a picture that is not isolated (an adjustment layer's copy of everything below it). `frame`
 // is the frame of the sequence: grain changes with it.
-void apply_effect(const std::string &kind, const std::array<float, 3> &v, uint8_t *nv12, int W, int H,
+void apply_effect(const std::string &kind, const std::array<float, eval::kMaxEffectParams> &v, uint8_t *nv12, int W, int H,
                   std::vector<uint8_t> &scratch, int64_t frame, const BakedLut *lut = nullptr) {
   if (kind == "lut") {
     if (lut && v[0] > 0.0f) // a table that would not load leaves the picture alone (the warning says why)
@@ -1289,13 +1293,14 @@ void wipe_blend(uint8_t *out, const uint8_t *incoming, int W, int H, float progr
 
 } // namespace
 
-std::array<float, 3> effect_values(const Layer &l, const Effect &e, const Composition &comp, int64_t frame) {
-  std::array<float, 3> v = {e.v[0], e.v[1], e.v[2]};
-  if (!e.def || (e.curve[0].empty() && e.curve[1].empty() && e.curve[2].empty()))
+std::array<float, eval::kMaxEffectParams> effect_values(const Layer &l, const Effect &e, const Composition &comp, int64_t frame) {
+  std::array<float, eval::kMaxEffectParams> v{};
+  std::copy(std::begin(e.v), std::end(e.v), v.begin());
+  if (!e.def || std::all_of(std::begin(e.curve), std::end(e.curve), [](const eval::Curve &c) { return c.empty(); }))
     return v;
   ATM_PROFILE_SCOPE("effect.keyframes");
   std::optional<Rational> local; // clip-local time, found once for all the parameters that have keys
-  for (size_t i = 0; i < 3 && i < e.def->params.size(); ++i) {
+  for (size_t i = 0; i < eval::kMaxEffectParams && i < e.def->params.size(); ++i) {
     if (e.curve[i].empty())
       continue;
     if (!local) {
@@ -1495,7 +1500,7 @@ void Renderer::draw_isolated(const Layer &l, int64_t frame, uint8_t *out, bool &
     }
   });
   for (const Effect &e : l.effects) {
-    const std::array<float, 3> v = effect_values(l, e, comp_, frame);
+    const std::array<float, eval::kMaxEffectParams> v = effect_values(l, e, comp_, frame);
     if (e.kind == "gaussian_blur") {
       const float sigma = v[0] * float(H) * 0.5f;
       blur_nv12(over_black_.data(), W, H, sigma, scratch_);
@@ -1512,7 +1517,7 @@ void Renderer::draw_isolated(const Layer &l, int64_t frame, uint8_t *out, bool &
     } else if (e.kind == "luma_key") {
       luma_key_nv12(over_black_.data(), cover_.data(), W, H, v[0], v[1], v[2]);
     } else if (e.kind == "chroma_key") {
-      key_nv12(over_black_.data(), cover_.data(), W, H, v[0], v[1], v[2], scratch_);
+      key_nv12(over_black_.data(), cover_.data(), W, H, v[0], v[1], v[2], v[3], scratch_);
     } else { // a colour effect: apply it, then take back what it changed where the clip is not
       apply_effect(e.kind, v, over_black_.data(), W, H, scratch_, frame, lut_for(e));
       remask_nv12(over_black_.data(), cover_.data(), W, H);

@@ -2068,9 +2068,9 @@ TEST_CASE("render: chroma key on harder footage - blurred silhouette, hair stran
     media::nv12_to_bgrx(nv12.data(), W, H, rgb.data());
     return rgb;
   };
-  const auto fx = [](double hue, double similarity, double smoothness) {
+  const auto fx = [](double hue, double similarity, double smoothness, double detail = 1.0) {
     return json{{"fx_1", {{"effect", "attome.chroma_key@1.0.0"}, {"enabled", true},
-                          {"params", {{"hue", hue}, {"similarity", similarity}, {"smoothness", smoothness}}}}}};
+                          {"params", {{"hue", hue}, {"similarity", similarity}, {"smoothness", smoothness}, {"detail", detail}}}}}};
   };
   const auto plain = render(nullptr), bg_only = render(nullptr, false);
   const auto keyed = render(fx(147.0, 0.35, 0.15)); // the middle of the drifting hue
@@ -2125,6 +2125,31 @@ TEST_CASE("render: chroma key on harder footage - blurred silhouette, hair stran
   CHECK(edge_fringe < 15.0);  // the blurred edge mixes skin and the background below, with no green in it
   CHECK(strand_fringe < 15.0);
 
+  { // detail: 1 keeps hair and the marker (above); 0 switches the pass off, which drops both; in between is a sensitivity
+    const auto count = [&](const std::vector<uint8_t> &img) {
+      int hair = 0, hair_n = 0, mark = 0;
+      for (int y = 0; y < H; ++y)
+        for (int x = 0; x < W; ++x) {
+          const double X = x + 0.5, Y = y + 0.5;
+          double ns = 1e9;
+          for (const Strand &s : strands)
+            ns = std::min(ns, seg_distance(X, Y, s));
+          if (std::fabs(X - 80) < 14 && std::fabs(Y - 60) < 14) {
+            mark += l1(at(img, x, y), at(bg_only, x, y)) > 45;
+          } else if (ns < 0.5 && std::hypot(X - cx, Y - cy) - radius > 4) {
+            ++hair_n;
+            hair += l1(at(img, x, y), at(bg_only, x, y)) > 60;
+          }
+        }
+      return std::pair<double, int>{double(hair) / hair_n, mark};
+    };
+    const auto off = count(render(fx(147.0, 0.35, 0.15, 0.0)));
+    const auto mid = count(render(fx(147.0, 0.35, 0.15, 0.5)));
+    WARN("detail 0: hair kept " << off.first << ", marker px " << off.second << "   detail 0.5: hair kept " << mid.first << ", marker px " << mid.second);
+    CHECK(off.second < 8);   // off: the marker is keyed out with the screen
+    CHECK(off.first < 0.4);  // and the fine hair is lost as before
+    CHECK(mid.first <= kept + 1e-9); // a lower sensitivity never keeps more
+  }
   // The same footage with the key colour off by 30 degrees: this tells where the similarity runs out.
   const auto off = render(fx(207.0, 0.35, 0.15));
   int off_bad = 0, off_n = 0; // off_bad: pixels that still differ from the background, i.e. not removed

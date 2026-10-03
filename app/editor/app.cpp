@@ -285,7 +285,7 @@ void App::refresh() {
                 const json params = e->value("params", json::object());
                 if (def->file_param[0] != '\0' && params.is_object())
                   ui.file = params.value(def->file_param, std::string());
-                for (size_t i = 0; i < def->params.size() && i < 3; ++i) {
+                for (size_t i = 0; i < def->params.size() && i < eval::kMaxEffectParams; ++i) {
                   ui.v[i] = params.is_object() && params.contains(def->params[i].key) && params[def->params[i].key].is_number()
                                 ? params[def->params[i].key].get<float>()
                                 : float(def->params[i].def);
@@ -1984,7 +1984,7 @@ void App::draw_effect_card(const ClipUi &c, const eval::EffectDef &def, bool sho
     ImGui::TextColored(hexv(look::fg2), "%.3f", v);
     ImGui::PopFont();
   }
-  const bool animated = found->curve[0].keys.size() + found->curve[1].keys.size() + found->curve[2].keys.size() > 0;
+  const bool animated = std::any_of(std::begin(found->curve), std::end(found->curve), [](const eval::Curve &k) { return !k.keys.empty(); });
   if (animated) { // step between the effect's keys
     const float half_w = (ImGui::GetContentRegionAvail().x - 8.0f) * 0.5f;
     if (soft_button(("prev_key_" + name).c_str(), "< Previous key", ImVec2(half_w, 26.0f)))

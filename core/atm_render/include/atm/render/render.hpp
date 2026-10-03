@@ -29,11 +29,11 @@ struct BakedLut; // a .cube table resampled onto a grid of video-range YUV (rend
 struct Effect {
   std::string kind;
   std::string file; // a lut's .cube path (the effect's params.file), else empty
-  float v[3] = {0.0f, 0.0f, 0.0f};
+  float v[eval::kMaxEffectParams] = {};
   // Keyframes of the parameters (the effect object's "keyframes": {<param>: {...}}), clip-local like the transform's.
   // A parameter with keys follows its curve and ignores its plain value in v; `def` gives the range it is held to.
   const eval::EffectDef *def = nullptr;
-  eval::Curve curve[3];
+  eval::Curve curve[eval::kMaxEffectParams];
 };
 
 // The static transform of a clip (ADR-021 canvas fractions). Position is where the anchor sits on the canvas, top-left
@@ -103,7 +103,7 @@ struct Layer {
 
 // The parameters of an effect of a layer at one frame, keyframes applied, in the order of the effect's table entry.
 struct Composition;
-std::array<float, 3> effect_values(const Layer &layer, const Effect &effect, const Composition &comp, int64_t frame);
+std::array<float, eval::kMaxEffectParams> effect_values(const Layer &layer, const Effect &effect, const Composition &comp, int64_t frame);
 
 // The transform of a layer at one frame, keyframes applied.
 struct Pose {

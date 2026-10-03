@@ -196,10 +196,13 @@ void bench_effects() {
     l.text_size = 0.5f;
     atm::render::Effect e;
     e.kind = "chroma_key";
-    e.v[0] = 120.0f, e.v[1] = 0.35f, e.v[2] = 0.15f;
+    e.v[0] = 120.0f, e.v[1] = 0.35f, e.v[2] = 0.15f, e.v[3] = 1.0f;
     l.effects.push_back(e);
     comp.layers.push_back(std::move(l));
+    atm::render::Composition no_detail = comp;
+    no_detail.layers[0].effects[0].v[3] = 0.0f;
     report("chroma key, text clip (isolated pass included)", frame_ms(std::move(comp), 10), "ms", 12.0);
+    report("chroma key, detail 0 (the thin-line pass skipped)", frame_ms(std::move(no_detail), 10), "ms", 8.0);
   }
   { // luma key: the same isolated pass as the chroma key, then a table lookup per pixel
     atm::render::Composition comp;

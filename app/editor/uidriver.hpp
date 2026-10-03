@@ -9,7 +9,7 @@
 // layout changes. Commands, one per line (# starts a comment):
 //
 //   wait <ms>                       let the editor run
-//   expect @<id>                    fail unless the widget appears within 5 s
+//   expect @<id>                    fail unless the widget appears within 15 s (it pages the scrolled panels to find it)
 //   click <target>                  press and release
 //   drag <target> <dx> <dy>         press, move by (dx, dy) in steps, release; points, or 25% of the target's size
 //   slide @<slider> <fraction>      set a slim slider to a position from 0 (left) to 1 (right)

@@ -35,6 +35,7 @@ constexpr EffectParam kKey[] = {
     {"hue", "Key colour", 0.0, 360.0, 120.0, false, 360.0}, // degrees round the colour wheel: 120 green, 240 blue
     {"similarity", "Similarity", 0.0, 1.0, 0.35, false, 1.0}, // how far from the key colour a pixel is still removed
     {"smoothness", "Smoothness", 0.0, 1.0, 0.15, false, 1.0}, // the soft edge between removed and kept
+    {"detail", "Detail", 0.0, 1.0, 1.0, false, 1.0}, // sensitivity to thin lines (hair) in the keyed-out area: 1 keeps them, lower keeps only strong ones, 0 off
 };
 
 constexpr EffectParam kLumaKey[] = {

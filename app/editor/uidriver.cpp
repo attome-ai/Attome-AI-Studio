@@ -209,7 +209,7 @@ void UiDriver::before_frame() {
     const auto arg = [&](size_t i) { return i < c.words.size() ? c.words[i] : std::string(); };
     if (!d.looking) {
       d.looking = true;
-      d.deadline = Clock::now() + std::chrono::seconds(5);
+      d.deadline = Clock::now() + std::chrono::seconds(15);
     }
     bool finished = true;
     std::string error;
