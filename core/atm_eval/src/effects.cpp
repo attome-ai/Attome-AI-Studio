@@ -116,20 +116,23 @@ const char *zoom_direction_name(ZoomDirection d) { return d == ZoomDirection::ou
 
 std::string transition_id(std::string_view type) {
   type = strip(type);
-  return type == "dissolve" || type == "wipe" || type == "push" || type == "zoom" ? std::string(type) : std::string();
+  return type == "dissolve" || type == "wipe" || type == "push" || type == "zoom" || type == "slide" || type == "iris" ? std::string(type)
+                                                                                                                    : std::string();
 }
 
 bool parse_transition(std::string_view type, TransitionKind &out) {
   const std::string id = transition_id(type);
   if (id.empty())
     return false;
-  out = id == "wipe"   ? TransitionKind::wipe
-        : id == "push" ? TransitionKind::push
-        : id == "zoom" ? TransitionKind::zoom
-                       : TransitionKind::dissolve;
+  out = id == "wipe"    ? TransitionKind::wipe
+        : id == "push"  ? TransitionKind::push
+        : id == "zoom"  ? TransitionKind::zoom
+        : id == "slide" ? TransitionKind::slide
+        : id == "iris"  ? TransitionKind::iris
+                        : TransitionKind::dissolve;
   return true;
 }
 
-std::string transition_ids() { return "dissolve, wipe, push, zoom"; }
+std::string transition_ids() { return "dissolve, wipe, push, zoom, slide, iris"; }
 
 } // namespace atm::eval

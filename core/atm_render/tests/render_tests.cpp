@@ -2250,3 +2250,78 @@ TEST_CASE("render: luma key on a dark subject - what survives next to a black se
   std::error_code ec;
   fs::remove_all(dir, ec);
 }
+
+TEST_CASE("render: a slide brings the incoming clip over the outgoing one, which stays put; an iris opens it as a circle", "[media]") {
+  const fs::path dir = fs::temp_directory_path() / atm::new_id("attome-slideiris");
+  fs::create_directories(dir);
+  const std::string outgoing = (dir / "red_blue.mp4").string(), incoming = (dir / "white.mp4").string();
+  write_clip(outgoing, 320, 240, 90); // red top half, blue bottom half
+  write_solid(incoming, 0xF0F0F0, 660.0, 3);
+  struct Rgb {
+    int r, g, b;
+  };
+  const auto sample = [&](const char *type, json params, int64_t frame, int x, int y) {
+    const json t = {{"type", type}, {"from", "clp_a"}, {"to", "clp_b"}, {"in_offset", "1/2"}, {"out_offset", "1/2"}, {"params", std::move(params)}};
+    const auto clip = [](const std::string &path, const char *in, const char *source_in) {
+      return json{{"timing", {{"record_in", in}, {"duration", "1"}, {"source_in", source_in}}},
+                  {"media_ref", {{"type", "file"}, {"path", path}, {"duration", "3"}}}};
+    };
+    const json doc = {{"sequences",
+                       {{"seq_1",
+                         {{"rate", "30"},
+                          {"canvas", {{"width", 320}, {"height", 240}}},
+                          {"track_order", {"trk_v"}},
+                          {"tracks",
+                           {{"trk_v",
+                             {{"clips", {{"clp_a", clip(outgoing, "0", "0")}, {"clp_b", clip(incoming, "1", "1")}}},
+                              {"transitions", {{"trn_1", t}}}}}}}}}}},
+                      {"sequence_order", {"seq_1"}}};
+    auto comp = atm::render::compile(doc);
+    REQUIRE(comp);
+    atm::render::Renderer renderer(*comp, 320, 240);
+    std::vector<uint8_t> nv12(media::nv12_size(320, 240)), rgb(320 * 240 * 4);
+    REQUIRE(renderer.render(frame, nv12.data()));
+    media::nv12_to_bgrx(nv12.data(), 320, 240, rgb.data());
+    const uint8_t *p = rgb.data() + (size_t(y) * 320 + size_t(x)) * 4;
+    return Rgb{p[2], p[1], p[0]};
+  };
+  const auto is_white = [](Rgb c) { return c.r > 200 && c.g > 200 && c.b > 200; };
+  const auto is_red = [](Rgb c) { return c.r > 190 && c.g < 90 && c.b < 90; };
+  const auto is_blue = [](Rgb c) { return c.b > 190 && c.g < 90 && c.r < 90; };
+  const auto slide = [&](const char *dir, int64_t frame, int x, int y) { return sample("attome.slide", {{"direction", dir}}, frame, x, y); };
+  const auto iris = [&](int64_t frame, int x, int y) { return sample("attome.iris", {{"softness", 0.1}}, frame, x, y); };
+
+  // The transition runs frames 15..45; at the middle (30) the incoming picture has come halfway in.
+  CHECK(is_red(slide("up", 10, 160, 40)));    // before: the outgoing clip alone
+  CHECK(is_white(slide("up", 50, 160, 120))); // after: the incoming clip alone
+  // From the top the incoming fills the top half. The outgoing clip has NOT moved (a push shows its red top half below
+  // the middle): below the middle it is still the blue bottom half.
+  CHECK(is_white(slide("up", 30, 160, 60)));
+  CHECK(is_blue(slide("up", 30, 160, 200)));
+  CHECK(is_white(slide("down", 30, 160, 200)));
+  CHECK(is_red(slide("down", 30, 160, 60)));
+  CHECK(is_white(slide("left", 30, 20, 40)));
+  CHECK(is_red(slide("left", 30, 300, 40)));
+  CHECK(is_blue(slide("left", 30, 300, 200)));
+  CHECK(is_white(slide("right", 30, 300, 40)));
+  CHECK(is_red(slide("right", 30, 20, 40)));
+  CHECK(is_blue(slide("right", 30, 20, 200)));
+  // A quarter of the way in, only about a quarter is covered (smoothstep eases it): the far side is still the outgoing clip.
+  CHECK(is_red(slide("left", 20, 200, 40)));
+
+  // The iris: the middle opens first, the corners last.
+  CHECK(is_red(iris(10, 20, 40)));   // before
+  CHECK(is_white(iris(50, 20, 40))); // after: even the corner is the incoming clip
+  CHECK(is_white(iris(30, 160, 120))); // halfway: the middle is open ...
+  CHECK(is_red(iris(30, 20, 40)));     // ... the corners are still the outgoing clip ...
+  CHECK(is_blue(iris(30, 20, 200)));
+  CHECK(is_blue(iris(30, 300, 200)));
+  // ... and it is a circle in pixels: 80 px from the middle is open straight down as well as straight across (an ellipse that
+  // followed the picture's shape would still be closed down there), and 119 px is closed in both directions.
+  CHECK(is_white(iris(30, 240, 120)));
+  CHECK(is_white(iris(30, 160, 200)));
+  CHECK(is_red(iris(30, 279, 118)));
+  CHECK(is_blue(iris(30, 160, 238)));
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}

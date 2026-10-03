@@ -560,8 +560,10 @@ Result<Composition> compile(const json &project, std::string_view sequence_id) {
             eval::parse_zoom_direction(p->value("direction", std::string("in")), zdir);
             d.dir = int(zdir);
           }
-        if (eval::transition_has_direction(d.kind)) {
+        if (eval::transition_has_direction(d.kind) || eval::transition_has_softness(d.kind)) {
           eval::WipeParams wp;
+          if (d.kind == eval::TransitionKind::iris)
+            wp.softness = 0.15f;
           if (const auto p = t.find("params"); p != t.end() && p->is_object()) {
             eval::parse_wipe_direction(p->value("direction", std::string("left")), wp.direction);
             wp.softness = std::clamp(p->value("softness", wp.softness), 0.01f, 1.0f);
@@ -1291,6 +1293,86 @@ void wipe_blend(uint8_t *out, const uint8_t *incoming, int W, int H, float progr
   });
 }
 
+// The slide of a transition: the incoming picture comes in over the outgoing one from the side `dir` while the outgoing
+// picture stays where it is (a push moves both). `out` holds the outgoing picture and keeps the part the incoming
+// one has not reached; the incoming one is shown by its far edge first, as if it were being pulled in.
+void slide_blend(uint8_t *out, const uint8_t *incoming, int W, int H, float progress, eval::WipeDirection dir) {
+  ATM_PROFILE_SCOPE("composite.slide");
+  const bool horizontal = dir == eval::WipeDirection::left || dir == eval::WipeDirection::right;
+  const bool from_start = dir == eval::WipeDirection::left || dir == eval::WipeDirection::up;
+  const int extent = horizontal ? W : H;
+  const int d = std::clamp(int(smooth01(progress) * float(extent) + 0.5f) & ~1, 0, extent); // how far the incoming has come in
+  const auto plane = [&](size_t offset, int rows, int shift) {
+    uint8_t *dst = out + offset;
+    const uint8_t *in = incoming + offset;
+    parallel_for(rows, 16, [&](int64_t first, int64_t last) {
+      for (int64_t y = first; y < last; ++y) {
+        uint8_t *row = dst + size_t(y) * size_t(W);
+        if (horizontal) {
+          const uint8_t *i = in + size_t(y) * size_t(W);
+          if (from_start)
+            std::memcpy(row, i + (W - d), size_t(d)); // the outgoing picture already sits at row + d ...
+          else
+            std::memcpy(row + (W - d), i, size_t(d));  // ... or in front of row + W - d
+        } else if (from_start ? y < shift : y >= rows - shift) {
+          const int64_t src_y = from_start ? y + (rows - shift) : y - (rows - shift);
+          std::memcpy(row, in + size_t(src_y) * size_t(W), size_t(W));
+        }
+      }
+    });
+  };
+  plane(0, H, d);
+  plane(size_t(W) * size_t(H), H / 2, d / 2);
+}
+
+// The iris of a transition: the incoming picture opens as a circle from the centre of the picture, `softness` of the
+// picture's half diagonal wide at its edge, until the circle has passed the corners. The circle is a circle in pixels,
+// not an ellipse that follows the picture's shape. The alpha is a table over the squared distance from the centre, so a
+// pixel costs a lookup, not a square root.
+void iris_blend(uint8_t *out, const uint8_t *incoming, int W, int H, float progress, float softness) {
+  ATM_PROFILE_SCOPE("composite.iris");
+  constexpr int N = 1024;
+  const float half_diag2 = 0.25f * (float(W) * float(W) + float(H) * float(H));
+  const float reach = progress * (1.0f + softness); // the radius, as a fraction of the half diagonal, that is fully open
+  int table[N + 1];
+  for (int i = 0; i <= N; ++i)
+    table[i] = int(smooth01((reach - std::sqrt(float(i) / float(N))) / softness) * 256.0f + 0.5f);
+  std::vector<float> dx2(static_cast<size_t>(W)), dy2(static_cast<size_t>(H)), cx2(static_cast<size_t>(W / 2)), cy2(static_cast<size_t>(H / 2));
+  const float cx = float(W) * 0.5f, cy = float(H) * 0.5f;
+  for (int x = 0; x < W; ++x)
+    dx2[size_t(x)] = (float(x) + 0.5f - cx) * (float(x) + 0.5f - cx) / half_diag2 * float(N);
+  for (int y = 0; y < H; ++y)
+    dy2[size_t(y)] = (float(y) + 0.5f - cy) * (float(y) + 0.5f - cy) / half_diag2 * float(N);
+  for (int x = 0; x < W / 2; ++x)
+    cx2[size_t(x)] = (float(2 * x + 1) - cx) * (float(2 * x + 1) - cx) / half_diag2 * float(N);
+  for (int y = 0; y < H / 2; ++y)
+    cy2[size_t(y)] = (float(2 * y + 1) - cy) * (float(2 * y + 1) - cy) / half_diag2 * float(N);
+  const auto alpha = [&](float d2) { return table[std::clamp(int(d2 + 0.5f), 0, N)]; };
+  parallel_for(H, 16, [&](int64_t first, int64_t last) {
+    for (int64_t y = first; y < last; ++y) {
+      uint8_t *d = out + size_t(y) * size_t(W);
+      const uint8_t *s = incoming + size_t(y) * size_t(W);
+      for (int x = 0; x < W; ++x) {
+        const int a = alpha(dx2[size_t(x)] + dy2[size_t(y)]);
+        d[x] = uint8_t((int(d[x]) * (256 - a) + int(s[x]) * a) >> 8);
+      }
+    }
+  });
+  uint8_t *d_uv = out + size_t(W) * size_t(H);
+  const uint8_t *s_uv = incoming + size_t(W) * size_t(H);
+  parallel_for(H / 2, 16, [&](int64_t first, int64_t last) {
+    for (int64_t y = first; y < last; ++y) {
+      uint8_t *d = d_uv + size_t(y) * size_t(W);
+      const uint8_t *s = s_uv + size_t(y) * size_t(W);
+      for (int x = 0; x < W / 2; ++x) {
+        const int a = alpha(cx2[size_t(x)] + cy2[size_t(y)]);
+        d[2 * x] = uint8_t((int(d[2 * x]) * (256 - a) + int(s[2 * x]) * a) >> 8);
+        d[2 * x + 1] = uint8_t((int(d[2 * x + 1]) * (256 - a) + int(s[2 * x + 1]) * a) >> 8);
+      }
+    }
+  });
+}
+
 } // namespace
 
 std::array<float, eval::kMaxEffectParams> effect_values(const Layer &l, const Effect &e, const Composition &comp, int64_t frame) {
@@ -1578,6 +1660,10 @@ Result<void> Renderer::render(int64_t frame, uint8_t *out) {
       wipe_blend(out, mix_.data(), width_, height_, float(progress), eval::WipeDirection(l.mix_dir), l.mix_softness);
     else if (l.mix_kind == eval::TransitionKind::push)
       push_blend(out, mix_.data(), width_, height_, float(progress), eval::WipeDirection(l.mix_dir), scratch_);
+    else if (l.mix_kind == eval::TransitionKind::slide)
+      slide_blend(out, mix_.data(), width_, height_, float(progress), eval::WipeDirection(l.mix_dir));
+    else if (l.mix_kind == eval::TransitionKind::iris)
+      iris_blend(out, mix_.data(), width_, height_, float(progress), l.mix_softness);
     else if (l.mix_kind == eval::TransitionKind::zoom)
       zoom_blend(out, mix_.data(), width_, height_, float(progress), l.mix_amount,
                  eval::ZoomDirection(l.mix_dir) == eval::ZoomDirection::out, scratch_);

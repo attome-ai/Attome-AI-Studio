@@ -974,3 +974,54 @@ TEST_CASE("effects: a luma key is for clips with a picture; add_effect takes the
                                              {"ops", json::array({{{"op", "set_property"}, {"target", id}, {"path", "params.level"}, {"value", 2}}})}});
   CHECK_FALSE(bad); // out of range
 }
+
+TEST_CASE("transitions: a slide takes a direction like a push; an iris takes a softness, and both follow the media rules", "[transition]") {
+  Fixture f;
+  const auto make_on = [&](Fixture &on, const char *type, json params, const char *in = "0.5s", const char *out = "0.5s") {
+    json op = on.dissolve(on.a, on.b, in, out);
+    op["value"]["type"] = type;
+    op["value"]["params"] = std::move(params);
+    return op;
+  };
+  const auto make = [&](const char *type, json params, const char *in = "0.5s", const char *out = "0.5s") { return make_on(f, type, std::move(params), in, out); };
+  CHECK(f.rule_of(json::array({make("attome.slide", {{"direction", "sideways"}})})) == "TRANSITION_PARAM");
+  CHECK(f.rule_of(json::array({make("attome.slide", {{"direction", "left"}}, "1.5s", "0.5s")})) == "TRANSITION_INSUFFICIENT_HANDLES");
+  CHECK(f.rule_of(json::array({make("attome.iris", {{"softness", 2.0}})})) == "TRANSITION_PARAM");
+  CHECK(f.rule_of(json::array({make("attome.iris", {{"softness", 0.0}})})) == "TRANSITION_PARAM");
+  CHECK(f.rule_of(json::array({make("attome.iris", {{"softness", 0.2}}, "1.5s", "0.5s")})) == "TRANSITION_INSUFFICIENT_HANDLES");
+  auto r = f.patch(json::array({make("attome.slide", {{"direction", "down"}})}));
+  INFO((r ? "" : r.error().message));
+  REQUIRE(r);
+  CHECK(f.engine.call("project.get", {{"project", f.project}, {"id", (*r)["id_map"]["$new:d"]}})->at("object")["type"] == "attome.slide");
+  Fixture i;
+  CHECK(i.patch(json::array({make_on(i, "attome.iris", {{"softness", 0.3}})}))); // no direction: an iris has none
+  // timeline.edit: both by short name.
+  Fixture g;
+  auto ok = g.engine.call("timeline.edit", {{"project", g.project},
+                                            {"ops", json::array({{{"op", "add_transition"}, {"between", json::array({g.a, g.b})},
+                                                                  {"type", "slide"}, {"direction", "up"}, {"duration", "1s"}}})}});
+  INFO((ok ? "" : ok.error().message));
+  REQUIRE(ok);
+  const json st_track = g.engine.call("project.get", {{"project", g.project}, {"id", g.track}})->at("object");
+  const json &st = *st_track["transitions"].begin();
+  CHECK(st["type"] == "attome.slide");
+  CHECK(st["params"]["direction"] == "up");
+  CHECK_FALSE(st["params"].contains("softness"));
+  Fixture h;
+  auto iris = h.engine.call("timeline.edit", {{"project", h.project},
+                                              {"ops", json::array({{{"op", "add_transition"}, {"between", json::array({h.a, h.b})},
+                                                                    {"type", "iris"}, {"duration", "1s"}}})}});
+  INFO((iris ? "" : iris.error().message));
+  REQUIRE(iris);
+  const json it_track = h.engine.call("project.get", {{"project", h.project}, {"id", h.track}})->at("object");
+  const json &it = *it_track["transitions"].begin();
+  CHECK(it["type"] == "attome.iris");
+  CHECK(it["params"]["softness"] == 0.15);
+  Fixture bad;
+  CHECK_FALSE(bad.engine.call("timeline.edit", {{"project", bad.project},
+                                                {"ops", json::array({{{"op", "add_transition"}, {"between", json::array({bad.a, bad.b})},
+                                                                      {"type", "iris"}, {"softness", 5.0}}})}}));
+  CHECK_FALSE(bad.engine.call("timeline.edit", {{"project", bad.project},
+                                                {"ops", json::array({{{"op", "add_transition"}, {"between", json::array({bad.a, bad.b})},
+                                                                      {"type", "slide"}, {"direction", "diagonal"}}})}}));
+}

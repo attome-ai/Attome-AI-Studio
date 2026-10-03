@@ -185,6 +185,14 @@ void UiDriver::before_frame() {
   ImGuiIO &io = ImGui::GetIO();
   const auto fail = [&](int line, const std::string &message) {
     std::fprintf(stderr, "uitest: line %d: %s\n", line, message.c_str());
+    // What a person would look at first: is the window there at all? A minimized or hidden window has a display size of
+    // zero, so nothing is drawn and nothing can be found; that is the window's state, not the editor's.
+    if (SDL_Window *w = static_cast<SDL_Window *>(ImGui::GetMainViewport()->PlatformHandle)) {
+      const SDL_WindowFlags f = SDL_GetWindowFlags(w);
+      std::fprintf(stderr, "uitest:   window: display %.0fx%.0f, frame %d%s%s%s%s\n", io.DisplaySize.x, io.DisplaySize.y,
+                   ImGui::GetFrameCount(), (f & SDL_WINDOW_MINIMIZED) ? ", MINIMIZED" : "", (f & SDL_WINDOW_HIDDEN) ? ", HIDDEN" : "",
+                   (f & SDL_WINDOW_OCCLUDED) ? ", OCCLUDED" : "", (f & SDL_WINDOW_FULLSCREEN) ? ", fullscreen" : "");
+    }
     std::fflush(stderr);
     failed_ = done_ = true;
   };

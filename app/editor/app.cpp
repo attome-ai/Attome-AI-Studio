@@ -2508,7 +2508,12 @@ void App::draw_timeline() {
           dl->AddRect(ImVec2(mid.x - r, mid.y - r), ImVec2(mid.x + r, mid.y + r), IM_COL32(255, 255, 255, 200), 1.5f, 0, 1.5f);
           dl->AddRectFilled(ImVec2(mid.x - r * 0.5f, mid.y - r * 0.5f), ImVec2(mid.x + r * 0.5f, mid.y + r * 0.5f), IM_COL32(255, 255, 255, 200), 1.0f);
         }
-      } else if (tr.kind != eval::TransitionKind::dissolve) { // a wipe or push: an arrow in the direction the picture travels
+      } else if (tr.kind == eval::TransitionKind::iris) { // an iris: rings opening from the centre
+        const ImVec2 mid((bx0 + bx1) * 0.5f, (by0 + by1) * 0.5f);
+        const float r = std::min(8.0f, (by1 - by0) * 0.34f);
+        dl->AddCircle(mid, r, IM_COL32(255, 255, 255, 200), 0, 1.5f);
+        dl->AddCircleFilled(mid, r * 0.5f, IM_COL32(255, 255, 255, 200));
+      } else if (tr.kind != eval::TransitionKind::dissolve) { // a wipe, push or slide: an arrow in the direction the picture travels
         static const ImVec2 kTravel[] = {ImVec2(1, 0), ImVec2(-1, 0), ImVec2(0, 1), ImVec2(0, -1)};
         const ImVec2 d = kTravel[std::clamp(tr.direction, 0, 3)], n(-d.y, d.x);
         const ImVec2 mid((bx0 + bx1) * 0.5f, (by0 + by1) * 0.5f);
@@ -2617,6 +2622,10 @@ void App::draw_transition_card(const TrackUi &track, const ClipUi &c) {
       ImGui::TextColored(hexv(look::fg2), "Wipe from the %s into the next clip, %.2f s", kSide[std::clamp(current->direction, 0, 3)], seconds);
     else if (current->kind == eval::TransitionKind::push)
       ImGui::TextColored(hexv(look::fg2), "Push in from the %s into the next clip, %.2f s", kSide[std::clamp(current->direction, 0, 3)], seconds);
+    else if (current->kind == eval::TransitionKind::slide)
+      ImGui::TextColored(hexv(look::fg2), "Slide in from the %s over the next clip, %.2f s", kSide[std::clamp(current->direction, 0, 3)], seconds);
+    else if (current->kind == eval::TransitionKind::iris)
+      ImGui::TextColored(hexv(look::fg2), "Iris open into the next clip, %.2f s", seconds);
     else if (current->kind == eval::TransitionKind::zoom)
       ImGui::TextColored(hexv(look::fg2), current->direction == 1 ? "Zoom out of this clip into the next, %.0f%%, %.2f s"
                                                                   : "Zoom into the next clip, %.0f%% bigger, %.2f s",
@@ -2627,6 +2636,8 @@ void App::draw_transition_card(const TrackUi &track, const ClipUi &c) {
     const char *kind = current->kind == eval::TransitionKind::wipe   ? "wipe"
                        : current->kind == eval::TransitionKind::push ? "push"
                        : current->kind == eval::TransitionKind::zoom ? "zoom"
+                       : current->kind == eval::TransitionKind::slide ? "slide"
+                       : current->kind == eval::TransitionKind::iris ? "iris"
                                                                      : "dissolve";
     if (soft_button((std::string("remove_") + kind).c_str(), (std::string("Remove ") + kind).c_str(), ImVec2(-1.0f, 28.0f)))
       pending_ = [this, tid, label = std::string("Remove ") + kind] { patch(json::array({{{"op", "remove"}, {"path", tid}}}), label.c_str()); };
@@ -2725,6 +2736,10 @@ void App::draw_transition_card(const TrackUi &track, const ClipUi &c) {
         add("attome.wipe", "Add wipe", {{"direction", side}, {"softness", 0.1}});
       if (soft_button("add_push", "Push into next clip", ImVec2(-1.0f, 28.0f)))
         add("attome.push", "Add push", {{"direction", side}});
+      if (soft_button("add_slide", "Slide over next clip", ImVec2(-1.0f, 28.0f)))
+        add("attome.slide", "Add slide", {{"direction", side}});
+      if (soft_button("add_iris", "Iris into next clip", ImVec2(-1.0f, 28.0f)))
+        add("attome.iris", "Add iris", {{"softness", 0.15}});
       ImGui::TextColored(hexv(look::fg2), "Zoom");
       ImGui::SameLine(88.0f);
       slim_slider("zoom_amount", &zoom_amount_, float(eval::kZoomMin), float(eval::kZoomMax), ImGui::GetContentRegionAvail().x - 60.0f, "");

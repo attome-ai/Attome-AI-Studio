@@ -65,11 +65,11 @@ struct ClipUi {
   int64_t audio_fade_in = 0, audio_fade_out = 0; // frames
 };
 
-struct TransitionUi { // a dissolve, wipe, push or zoom over [cut - in, cut + out), where `to` starts
+struct TransitionUi { // a dissolve, wipe, push, zoom, slide or iris over [cut - in, cut + out), where `to` starts
   std::string id, from, to;
   int64_t in = 0, out = 0; // frames
   eval::TransitionKind kind = eval::TransitionKind::dissolve;
-  int direction = 0;       // a wipe or push: the eval::WipeDirection the incoming clip enters from; a zoom: 0 in, 1 out
+  int direction = 0;       // a wipe, push or slide: the eval::WipeDirection the incoming clip enters from; a zoom: 0 in, 1 out
   float amount = 0.0f;     // a zoom: how much bigger the picture grows (params.amount)
 };
 

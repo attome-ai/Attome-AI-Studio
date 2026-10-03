@@ -223,6 +223,8 @@ void bench_effects() {
   report("dissolve (reference), two text clips", frame_ms(two_clips(atm::eval::TransitionKind::dissolve), 30), "ms", 20.0);
   report("wipe, two text clips", frame_ms(two_clips(atm::eval::TransitionKind::wipe), 30), "ms", 4.0);
   report("push, two text clips", frame_ms(two_clips(atm::eval::TransitionKind::push), 30), "ms", 4.0);
+  report("slide, two text clips", frame_ms(two_clips(atm::eval::TransitionKind::slide), 30), "ms", 4.0);
+  report("iris, two text clips", frame_ms(two_clips(atm::eval::TransitionKind::iris), 30), "ms", 5.0);
   report("zoom out, two text clips (the outgoing one shrinks over the incoming)", frame_ms(two_clips(atm::eval::TransitionKind::zoom, 1), 30), "ms", 6.0);
   report("zoom, two text clips (two bilinear resamples)", frame_ms(two_clips(atm::eval::TransitionKind::zoom), 30), "ms", 6.0);
 }

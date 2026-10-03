@@ -28,7 +28,7 @@ json effect_object(const eval::EffectDef &def, const json &src) {
   return {{"effect", eval::effect_name(def)}, {"enabled", true}, {"params", std::move(params)}};
 }
 
-// A transition object ("dissolve", "wipe", "push" or "zoom") between two clips; the others carry their params.
+// A transition object ("dissolve", "wipe", "push", "zoom", "slide" or "iris") between two clips; the others carry their params.
 json transition_value(const std::string &kind, const std::string &from, const std::string &to, const Rational &in,
                       const Rational &out, const json &params) {
   json v = {{"type", "attome." + kind}, {"from", from}, {"to", to}, {"in_offset", in.to_string()}, {"out_offset", out.to_string()}};
@@ -831,7 +831,7 @@ private:
       return fail("TRANSITION_UNSUPPORTED", "The transition \"" + type + "\" is not available.",
                   "Use one of: " + eval::transition_ids() + ".");
     json params = json::object(); // a wipe or push: the side the incoming clip enters from (a wipe: and its softness)
-    if (kind == "wipe" || kind == "push") {
+    if (kind == "wipe" || kind == "push" || kind == "slide") {
       const std::string direction = op_.value("direction", std::string("left"));
       eval::WipeDirection dir;
       if (!eval::parse_wipe_direction(direction, dir))
@@ -839,6 +839,12 @@ private:
       params = {{"direction", direction}};
       if (kind == "wipe")
         params["softness"] = op_.value("softness", 0.1);
+    }
+    if (kind == "iris") {
+      const double softness = op_.value("softness", 0.15);
+      if (softness < 0.01 || softness > 1.0)
+        return fail("E_PARAM", "\"softness\" must be from 0.01 to 1.", "The width of the iris's soft edge as a fraction of the picture; 0.15 is a good start.");
+      params = {{"softness", softness}};
     }
     if (kind == "zoom") {
       const double amount = op_.value("amount", eval::kZoomDefault);

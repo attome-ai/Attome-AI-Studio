@@ -60,7 +60,9 @@ const char *wipe_direction_name(WipeDirection d);
 // wipe also takes a softness. A push slides the outgoing clip away and the incoming one in behind it. A zoom takes an
 // amount: the outgoing picture grows to (1 + amount) times its size around the centre while the incoming one settles
 // from that size to 1, the two cross-faded, so the camera seems to fly through one scene into the next.
-enum class TransitionKind { dissolve, wipe, push, zoom };
+// A slide brings the incoming clip in over the outgoing one from a side while the outgoing clip stays where it is (a push
+// moves both). An iris opens the incoming clip as a circle from the centre of the picture, with a soft edge like the wipe's.
+enum class TransitionKind { dissolve, wipe, push, zoom, slide, iris };
 
 constexpr double kZoomMin = 0.05, kZoomMax = 2.0, kZoomDefault = 0.5; // params.amount of a zoom
 
@@ -71,11 +73,14 @@ enum class ZoomDirection { in, out };
 bool parse_zoom_direction(std::string_view name, ZoomDirection &out);
 const char *zoom_direction_name(ZoomDirection d);
 
-// "attome.dissolve", "dissolve", "attome.wipe", "wipe", "push", "zoom" (with or without "attome.") -> the id; ""
+// "attome.dissolve", "dissolve", "attome.wipe", "wipe", "push", "zoom", "slide", "iris" (with or without "attome.") -> the id; ""
 // when unknown.
 std::string transition_id(std::string_view type);
 bool parse_transition(std::string_view type, TransitionKind &out);
-inline bool transition_has_direction(TransitionKind k) { return k == TransitionKind::wipe || k == TransitionKind::push; }
-std::string transition_ids(); // "dissolve, wipe, push, zoom"
+inline bool transition_has_direction(TransitionKind k) {
+  return k == TransitionKind::wipe || k == TransitionKind::push || k == TransitionKind::slide;
+}
+inline bool transition_has_softness(TransitionKind k) { return k == TransitionKind::wipe || k == TransitionKind::iris; }
+std::string transition_ids(); // "dissolve, wipe, push, zoom, slide, iris"
 
 } // namespace atm::eval

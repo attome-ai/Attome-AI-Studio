@@ -153,7 +153,7 @@ void check_transitions(const json &track, const std::string &track_id, const std
     if (kind.empty()) {
       problems.push_back(problem("TRANSITION_UNSUPPORTED", id + "/type", id,
                                  "Transition " + id + " has the type \"" + t.value("type", "") + "\".",
-                                 "Use \"type\": one of attome.dissolve, attome.wipe, attome.push, attome.zoom (" + eval::transition_ids() + ")."));
+                                 "Use \"type\": one of attome.dissolve, attome.wipe, attome.push, attome.zoom, attome.slide, attome.iris (" + eval::transition_ids() + ")."));
       continue;
     }
     if (kind == "zoom") {
@@ -175,20 +175,20 @@ void check_transitions(const json &track, const std::string &track_id, const std
         continue;
       }
     }
-    if (kind == "wipe" || kind == "push") {
+    if (kind == "wipe" || kind == "push" || kind == "slide" || kind == "iris") {
       const json params = t.value("params", json::object());
       eval::WipeDirection dir;
       const auto d = params.is_object() ? params.find("direction") : params.end();
       const auto s = params.is_object() ? params.find("softness") : params.end();
-      if (d != params.end() && !(d->is_string() && eval::parse_wipe_direction(d->get<std::string>(), dir))) {
+      if (kind != "iris" && d != params.end() && !(d->is_string() && eval::parse_wipe_direction(d->get<std::string>(), dir))) {
         problems.push_back(problem("TRANSITION_PARAM", id + "/params/direction", id,
                                    "The " + kind + " " + id + " has an unknown params.direction.",
                                    "Use \"left\", \"right\", \"up\" or \"down\": the side the incoming clip enters from."));
         continue;
       }
-      if (kind == "wipe" && s != params.end() && (!s->is_number() || s->get<double>() < 0.01 || s->get<double>() > 1.0)) {
+      if ((kind == "wipe" || kind == "iris") && s != params.end() && (!s->is_number() || s->get<double>() < 0.01 || s->get<double>() > 1.0)) {
         problems.push_back(problem("TRANSITION_PARAM", id + "/params/softness", id,
-                                   "The wipe " + id + " needs params.softness from 0.01 to 1.",
+                                   "The " + kind + " " + id + " needs params.softness from 0.01 to 1.",
                                    "softness is the width of the soft edge as a fraction of the picture; 0.1 is a good start."));
         continue;
       }
