@@ -86,10 +86,11 @@ struct Layer {
   int64_t mix_start = 0, mix_frames = 0; // on the outgoing clip
   bool mixing_at(int64_t frame) const { return frame >= mix_start && frame < mix_start + mix_frames; }
   // On the outgoing clip: how the two clips mix. A wipe and a push have the incoming clip enter from `mix_dir` (an
-  // eval::WipeDirection); a wipe's edge is `mix_softness` of the picture wide.
+  // eval::WipeDirection); a wipe's edge is `mix_softness` of the picture wide; a zoom grows the pictures by `mix_amount`.
   eval::TransitionKind mix_kind = eval::TransitionKind::dissolve;
   int mix_dir = 0;
   float mix_softness = 0.1f;
+  float mix_amount = 0.5f;
   // Keyframes (transform.keyframes) replace the static values above while they exist. Their times are clip-local:
   // 0 is `origin_frame`, the clip's record_in (start_frame moves earlier when a dissolve leads into the clip).
   int64_t origin_frame = 0;

@@ -714,7 +714,7 @@ struct Engine::Impl {
          "goes on a Titles track on top\n"
          "- add_adjustment {at?, duration? (2s), blur? (radius, e.g. 0.02) or effects? [{type, ...params}], opacity?, fade_in?, fade_out?} - changes "
          "everything below; goes on an Effects track under the titles\n"
-         "- add_transition {between: [first, second], type? (dissolve | wipe | push), direction? (left | right | up | down, for a wipe or push: the side the new clip enters from), softness? (0.01..1, a wipe's edge, 0.1), duration? (1s), alignment? (center | start | end)} - a dissolve, a wipe (an edge crosses the picture) or a push (the old clip slides away, the new one follows); "
+         "- add_transition {between: [first, second], type? (dissolve | wipe | push | zoom), direction? (left | right | up | down, for a wipe or push: the side the new clip enters from), softness? (0.01..1, a wipe's edge, 0.1), amount? (0.05..2, a zoom's size, 0.5), duration? (1s), alignment? (center | start | end)} - a dissolve, a wipe (an edge crosses the picture), a push (the old clip slides away, the new one follows) or a zoom (the old picture grows while the new one settles into place); "
          "the clips must touch, and center needs half the duration of spare media on each side of the cut\n"
          "- add_track {kind (video | audio), name?, position? (top | bottom), below? / above? (track ID)}\n"
          "- delete {clip} or {transition}; ripple_delete {clip} (closes the gap); move {clip, to?, track?}; trim {clip, edge (in | out), to or delta}; "

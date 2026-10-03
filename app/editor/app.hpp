@@ -63,11 +63,12 @@ struct ClipUi {
   int64_t audio_fade_in = 0, audio_fade_out = 0; // frames
 };
 
-struct TransitionUi { // a dissolve, wipe or push over [cut - in, cut + out), where `to` starts
+struct TransitionUi { // a dissolve, wipe, push or zoom over [cut - in, cut + out), where `to` starts
   std::string id, from, to;
   int64_t in = 0, out = 0; // frames
   eval::TransitionKind kind = eval::TransitionKind::dissolve;
   int direction = 0;       // a wipe or push: the eval::WipeDirection the incoming clip enters from
+  float amount = 0.0f;     // a zoom: how much bigger the picture grows (params.amount)
 };
 
 struct TrackUi {
@@ -219,6 +220,7 @@ private:
   float amount_ = 1.0f;                    // an adjustment layer's opacity: how much of its effect shows
   std::map<std::string, float> fx_edit_;   // effect sliders being dragged, by "<effect id>/<param>"
   int wipe_dir_ = 0;                       // the side a new wipe or push enters from (eval::WipeDirection)
+  float zoom_amount_ = float(eval::kZoomDefault); // how much bigger a new zoom grows the picture
 
   // inspector
   std::string insp_for_;

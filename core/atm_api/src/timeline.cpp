@@ -24,7 +24,7 @@ json effect_object(const eval::EffectDef &def, const json &src) {
   return {{"effect", eval::effect_name(def)}, {"enabled", true}, {"params", std::move(params)}};
 }
 
-// A transition object ("dissolve", "wipe" or "push") between two clips; a wipe and a push carry their params.
+// A transition object ("dissolve", "wipe", "push" or "zoom") between two clips; the others carry their params.
 json transition_value(const std::string &kind, const std::string &from, const std::string &to, const Rational &in,
                       const Rational &out, const json &params) {
   json v = {{"type", "attome." + kind}, {"from", from}, {"to", to}, {"in_offset", in.to_string()}, {"out_offset", out.to_string()}};
@@ -547,6 +547,13 @@ private:
       params = {{"direction", direction}};
       if (kind == "wipe")
         params["softness"] = op_.value("softness", 0.1);
+    }
+    if (kind == "zoom") {
+      const double amount = op_.value("amount", eval::kZoomDefault);
+      if (amount < eval::kZoomMin || amount > eval::kZoomMax)
+        return fail("E_PARAM", "\"amount\" must be from " + std::to_string(eval::kZoomMin) + " to " + std::to_string(eval::kZoomMax) + ".",
+                    "0.5 is half as big again, 1 doubles the picture.");
+      params = {{"amount", amount}};
     }
     ATM_TRY(Rational d, time_or("duration", Rational::from_int(1)));
     const std::string alignment = op_.value("alignment", std::string("center"));

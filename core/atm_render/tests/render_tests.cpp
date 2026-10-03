@@ -1347,4 +1347,86 @@ TEST_CASE("render: a push slides the outgoing clip away and brings the incoming 
   fs::remove_all(dir, ec);
 }
 
+TEST_CASE("render: a zoom grows the outgoing picture around the centre while the incoming one settles, with no borders", "[media]") {
+  const fs::path dir = fs::temp_directory_path() / atm::new_id("attome-zoom");
+  fs::create_directories(dir);
+  const std::string outgoing = (dir / "edge.mp4").string(), incoming = (dir / "white.mp4").string();
+  { // a clip whose left quarter (x < 80 of 320) is red and the rest blue: a zoom about the centre moves that edge outwards
+    auto encoder = media::Encoder::create({outgoing, 320, 240, 30, 1, 2'000'000, true});
+    REQUIRE(encoder);
+    std::vector<uint8_t> picture(320 * 240 * 4), nv12(media::nv12_size(320, 240));
+    for (int y = 0; y < 240; ++y)
+      for (int x = 0; x < 320; ++x) {
+        uint8_t *p = picture.data() + (size_t(y) * 320 + size_t(x)) * 4;
+        p[0] = x < 80 ? 0 : 255; // B
+        p[1] = 0;
+        p[2] = x < 80 ? 255 : 0; // R
+        p[3] = 255;
+      }
+    media::bgrx_to_nv12(picture.data(), 320, 240, nv12.data());
+    std::vector<float> tone(1600 * 2, 0.25f);
+    for (int f = 0; f < 90; ++f) {
+      REQUIRE((*encoder)->video(nv12.data(), f));
+      REQUIRE((*encoder)->audio(tone.data(), 1600));
+    }
+    REQUIRE((*encoder)->finish());
+  }
+  write_solid(incoming, 0xF0F0F0, 660.0, 3);
+  const json zoom = {{"type", "attome.zoom"}, {"from", "clp_a"}, {"to", "clp_b"}, {"in_offset", "1/2"}, {"out_offset", "1/2"},
+                     {"params", {{"amount", 1.0}}}};
+  const auto clip = [](const std::string &path, const char *in, const char *source_in) {
+    return json{{"timing", {{"record_in", in}, {"duration", "1"}, {"source_in", source_in}}},
+                {"media_ref", {{"type", "file"}, {"path", path}, {"duration", "3"}}}};
+  };
+  const json doc = {{"sequences",
+                     {{"seq_1",
+                       {{"rate", "30"},
+                        {"canvas", {{"width", 320}, {"height", 240}}},
+                        {"track_order", {"trk_v"}},
+                        {"tracks",
+                         {{"trk_v",
+                           {{"clips", {{"clp_a", clip(outgoing, "0", "0")}, {"clp_b", clip(incoming, "1", "1")}}},
+                            {"transitions", {{"trn_1", zoom}}}}}}}}}}},
+                    {"sequence_order", {"seq_1"}}};
+  auto comp = atm::render::compile(doc);
+  REQUIRE(comp);
+  REQUIRE(comp->layers.size() == 2);
+  CHECK(comp->layers[0].mix_kind == atm::eval::TransitionKind::zoom);
+  CHECK(std::abs(comp->layers[0].mix_amount - 1.0f) < 1e-5f);
+  atm::render::Renderer renderer(*comp, 320, 240);
+  std::vector<uint8_t> nv12(media::nv12_size(320, 240)), rgb(320 * 240 * 4);
+  struct Rgb {
+    int r, g, b;
+  };
+  const auto at = [&](int64_t frame, int x, int y) {
+    REQUIRE(renderer.render(frame, nv12.data()));
+    media::nv12_to_bgrx(nv12.data(), 320, 240, rgb.data());
+    const uint8_t *p = rgb.data() + (size_t(y) * 320 + size_t(x)) * 4;
+    return Rgb{p[2], p[1], p[0]};
+  };
+  // The zoom runs frames 15..45. Before it, the clip as it is: red at x = 60. After it, the white clip alone.
+  const Rgb before = at(10, 60, 120);
+  CHECK(before.r > 190);
+  CHECK(before.b < 90);
+  const Rgb after = at(50, 60, 120);
+  CHECK(after.r > 200);
+  CHECK(after.g > 200);
+  CHECK(after.b > 200);
+  // In the middle the outgoing picture is 1.5 times its size about the centre, so the red edge (x = 80) has moved out
+  // to x = 40: at x = 60 there is blue now, half mixed with white. Without any scaling it would be red mixed with white
+  // (a red channel near 247); with it, the red channel is about half the white's.
+  const Rgb mid = at(30, 60, 120);
+  CHECK(mid.b > 200);
+  CHECK(mid.r > 70);
+  CHECK(mid.r < 170);
+  // Both pictures are at least their own size, so no frame of the zoom has a border: even the corners stay bright.
+  for (const int64_t frame : {16, 22, 30, 38, 44})
+    for (const auto &[x, y] : {std::pair{0, 0}, std::pair{319, 0}, std::pair{0, 239}, std::pair{319, 239}}) {
+      const Rgb c = at(frame, x, y);
+      CHECK(c.r + c.g + c.b > 150);
+    }
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}
+
 #endif

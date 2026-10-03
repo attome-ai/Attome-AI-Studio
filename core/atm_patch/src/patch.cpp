@@ -152,8 +152,19 @@ void check_transitions(const json &track, const std::string &track_id, const std
     if (kind.empty()) {
       problems.push_back(problem("TRANSITION_UNSUPPORTED", id + "/type", id,
                                  "Transition " + id + " has the type \"" + t.value("type", "") + "\".",
-                                 "Use \"type\": \"attome.dissolve\", \"attome.wipe\" or \"attome.push\" (" + eval::transition_ids() + ")."));
+                                 "Use \"type\": one of attome.dissolve, attome.wipe, attome.push, attome.zoom (" + eval::transition_ids() + ")."));
       continue;
+    }
+    if (kind == "zoom") {
+      const json params = t.value("params", json::object());
+      const auto amount = params.is_object() ? params.find("amount") : params.end();
+      if (amount != params.end() && (!amount->is_number() || amount->get<double>() < eval::kZoomMin || amount->get<double>() > eval::kZoomMax)) {
+        problems.push_back(problem("TRANSITION_PARAM", id + "/params/amount", id,
+                                   "The zoom " + id + " needs params.amount from " + std::to_string(eval::kZoomMin) + " to " +
+                                       std::to_string(eval::kZoomMax) + ".",
+                                   "amount is how much bigger the picture grows: 0.5 is half as big again, 1 doubles it."));
+        continue;
+      }
     }
     if (kind == "wipe" || kind == "push") {
       const json params = t.value("params", json::object());

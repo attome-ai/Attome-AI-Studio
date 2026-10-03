@@ -338,6 +338,9 @@ void App::refresh() {
               eval::parse_wipe_direction(p->value("direction", std::string("left")), dir);
             track.transitions.back().direction = int(dir);
           }
+          if (track.transitions.back().kind == eval::TransitionKind::zoom)
+            if (const auto p = t->find("params"); p != t->end() && p->is_object())
+              track.transitions.back().amount = p->value("amount", float(eval::kZoomDefault));
         }
       tracks_.push_back(std::move(track));
     }
@@ -2331,7 +2334,12 @@ void App::draw_timeline() {
       const float bx0 = x_of(double(to->start - tr.in)), bx1 = std::max(bx0 + 4.0f, x_of(double(to->start + tr.out)));
       const float by0 = origin.y + ruler_h + float(ti) * row_h + 4.0f, by1 = by0 + row_h - 8.0f;
       dl->AddRectFilled(ImVec2(bx0, by0), ImVec2(bx1, by1), IM_COL32(10, 12, 18, 150), 4.0f);
-      if (tr.kind != eval::TransitionKind::dissolve) { // a wipe or push: an arrow in the direction the picture travels
+      if (tr.kind == eval::TransitionKind::zoom) { // a zoom: a frame inside a frame, the picture growing
+        const ImVec2 mid((bx0 + bx1) * 0.5f, (by0 + by1) * 0.5f);
+        const float r = std::min(8.0f, (by1 - by0) * 0.34f);
+        dl->AddRect(ImVec2(mid.x - r, mid.y - r), ImVec2(mid.x + r, mid.y + r), IM_COL32(255, 255, 255, 200), 1.5f, 0, 1.5f);
+        dl->AddRectFilled(ImVec2(mid.x - r * 0.5f, mid.y - r * 0.5f), ImVec2(mid.x + r * 0.5f, mid.y + r * 0.5f), IM_COL32(255, 255, 255, 200), 1.0f);
+      } else if (tr.kind != eval::TransitionKind::dissolve) { // a wipe or push: an arrow in the direction the picture travels
         static const ImVec2 kTravel[] = {ImVec2(1, 0), ImVec2(-1, 0), ImVec2(0, 1), ImVec2(0, -1)};
         const ImVec2 d = kTravel[std::clamp(tr.direction, 0, 3)], n(-d.y, d.x);
         const ImVec2 mid((bx0 + bx1) * 0.5f, (by0 + by1) * 0.5f);
@@ -2415,10 +2423,15 @@ void App::draw_transition_card(const TrackUi &track, const ClipUi &c) {
       ImGui::TextColored(hexv(look::fg2), "Wipe from the %s into the next clip, %.2f s", kSide[std::clamp(current->direction, 0, 3)], seconds);
     else if (current->kind == eval::TransitionKind::push)
       ImGui::TextColored(hexv(look::fg2), "Push in from the %s into the next clip, %.2f s", kSide[std::clamp(current->direction, 0, 3)], seconds);
+    else if (current->kind == eval::TransitionKind::zoom)
+      ImGui::TextColored(hexv(look::fg2), "Zoom into the next clip, %.0f%% bigger, %.2f s", double(current->amount) * 100.0, seconds);
     else
       ImGui::TextColored(hexv(look::fg2), "Dissolve into the next clip, %.2f s", seconds);
     const std::string tid = current->id;
-    const char *kind = current->kind == eval::TransitionKind::wipe ? "wipe" : current->kind == eval::TransitionKind::push ? "push" : "dissolve";
+    const char *kind = current->kind == eval::TransitionKind::wipe   ? "wipe"
+                       : current->kind == eval::TransitionKind::push ? "push"
+                       : current->kind == eval::TransitionKind::zoom ? "zoom"
+                                                                     : "dissolve";
     if (soft_button((std::string("remove_") + kind).c_str(), (std::string("Remove ") + kind).c_str(), ImVec2(-1.0f, 28.0f)))
       pending_ = [this, tid, label = std::string("Remove ") + kind] { patch(json::array({{{"op", "remove"}, {"path", tid}}}), label.c_str()); };
   } else if (next == track.clips.end()) {
@@ -2473,6 +2486,15 @@ void App::draw_transition_card(const TrackUi &track, const ClipUi &c) {
         add("attome.wipe", "Add wipe", {{"direction", side}, {"softness", 0.1}});
       if (soft_button("add_push", "Push into next clip", ImVec2(-1.0f, 28.0f)))
         add("attome.push", "Add push", {{"direction", side}});
+      ImGui::TextColored(hexv(look::fg2), "Zoom");
+      ImGui::SameLine(88.0f);
+      slim_slider("zoom_amount", &zoom_amount_, float(eval::kZoomMin), float(eval::kZoomMax), ImGui::GetContentRegionAvail().x - 60.0f, "");
+      ImGui::SameLine();
+      ImGui::PushFont(g_fonts.mono, 13.0f);
+      ImGui::TextColored(hexv(look::fg2), "+%.0f%%", double(zoom_amount_) * 100.0);
+      ImGui::PopFont();
+      if (soft_button("add_zoom", "Zoom into next clip", ImVec2(-1.0f, 28.0f)))
+        add("attome.zoom", "Add zoom", {{"amount", std::round(double(zoom_amount_) * 100.0) / 100.0}});
     }
   }
   ImGui::PopTextWrapPos();

@@ -404,3 +404,40 @@ TEST_CASE("transitions: a push takes a direction, and the same media rules as a 
                                                                     {"type", "push"}, {"direction", "diagonal"}}})}}));
 }
 
+TEST_CASE("transitions: a zoom takes an amount inside its range, and the same media rules as a dissolve", "[transition]") {
+  Fixture f;
+  const auto zoom = [&](json params, const char *in = "0.5s", const char *out = "0.5s") {
+    json op = f.dissolve(f.a, f.b, in, out);
+    op["value"]["type"] = "attome.zoom";
+    op["value"]["params"] = std::move(params);
+    return op;
+  };
+  CHECK(f.rule_of(json::array({zoom({{"amount", 0.0}})})) == "TRANSITION_PARAM");
+  CHECK(f.rule_of(json::array({zoom({{"amount", 5}})})) == "TRANSITION_PARAM");
+  CHECK(f.rule_of(json::array({zoom({{"amount", "big"}})})) == "TRANSITION_PARAM");
+  CHECK(f.rule_of(json::array({zoom({{"amount", 0.5}}, "1.5s", "0.5s")})) == "TRANSITION_INSUFFICIENT_HANDLES");
+  // No params at all is fine: the amount defaults.
+  Fixture g;
+  CHECK(g.patch(json::array({[&] { json op = g.dissolve(g.a, g.b, "0.5s", "0.5s"); op["value"]["type"] = "attome.zoom"; return op; }()})));
+  auto r = f.patch(json::array({zoom({{"amount", 1.2}})}));
+  INFO((r ? "" : r.error().message));
+  REQUIRE(r);
+  const json t = f.engine.call("project.get", {{"project", f.project}, {"id", (*r)["id_map"]["$new:d"]}})->at("object");
+  CHECK(t["type"] == "attome.zoom");
+  CHECK(t["params"]["amount"] == 1.2);
+  // timeline.edit: type zoom with an amount, the default when none is given, an amount out of range refused.
+  Fixture h;
+  const auto edit = [&](json op) {
+    return h.engine.call("timeline.edit", {{"project", h.project}, {"ops", json::array({std::move(op)})}});
+  };
+  CHECK_FALSE(edit({{"op", "add_transition"}, {"between", json::array({h.a, h.b})}, {"type", "zoom"}, {"amount", 9}}));
+  auto ok = edit({{"op", "add_transition"}, {"between", json::array({h.a, h.b})}, {"type", "zoom"}, {"duration", "1s"}});
+  INFO((ok ? "" : ok.error().message));
+  REQUIRE(ok);
+  const json track = h.engine.call("project.get", {{"project", h.project}, {"id", h.track}})->at("object");
+  const json &zt = *track["transitions"].begin();
+  CHECK(zt["type"] == "attome.zoom");
+  CHECK(zt["params"]["amount"] == 0.5);
+  CHECK_FALSE(zt["params"].contains("direction"));
+}
+

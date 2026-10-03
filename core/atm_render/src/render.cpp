@@ -366,6 +366,7 @@ Result<Composition> compile(const json &project, std::string_view sequence_id) {
     eval::TransitionKind kind = eval::TransitionKind::dissolve;
     int dir = 0;           // an eval::WipeDirection, for a wipe or a push
     float softness = 0.1f; // a wipe's edge
+    float amount = 0.5f;   // a zoom's growth
   };
   std::vector<Dissolve> dissolves;
   int track_index = 0;
@@ -540,6 +541,9 @@ Result<Composition> compile(const json &project, std::string_view sequence_id) {
         ATM_TRY(int64_t out_frames, to_frames(out_off, rate, Round::nearest_even));
         Dissolve d{t.value("from", ""), t.value("to", ""), in_frames, out_frames};
         eval::parse_transition(t.value("type", ""), d.kind);
+        if (d.kind == eval::TransitionKind::zoom)
+          if (const auto p = t.find("params"); p != t.end() && p->is_object())
+            d.amount = float(std::clamp(p->value("amount", eval::kZoomDefault), eval::kZoomMin, eval::kZoomMax));
         if (eval::transition_has_direction(d.kind)) {
           eval::WipeParams wp;
           if (const auto p = t.find("params"); p != t.end() && p->is_object()) {
@@ -579,6 +583,7 @@ Result<Composition> compile(const json &project, std::string_view sequence_id) {
     a.mix_kind = d.kind;
     a.mix_dir = d.dir;
     a.mix_softness = d.softness;
+    a.mix_amount = d.amount;
     a.mix_start = cut - d.in;
     a.mix_frames = d.in + d.out;
   }
@@ -812,6 +817,56 @@ void push_blend(uint8_t *out, const uint8_t *incoming, int W, int H, float progr
   };
   plane(0, H, d);
   plane(size_t(W) * size_t(H), H / 2, d / 2);
+}
+
+// The zoom of a transition: the outgoing picture (in `out`) grows to (1 + amount) times its size around the centre
+// while the incoming one settles from that size to 1, cross-faded by the same smooth progress. Both are always at least
+// their own size, so no border ever shows. Each plane is resampled bilinearly in fixed point: the source positions
+// depend only on the column or only on the row, so they are worked out once per column and once per row.
+void zoom_blend(uint8_t *out, const uint8_t *incoming, int W, int H, float progress, float amount,
+                std::vector<uint8_t> &outgoing) {
+  ATM_PROFILE_SCOPE("composite.zoom");
+  outgoing.assign(out, out + media::nv12_size(W, H)); // `out` is rewritten from the two pictures
+  const float e = smooth01(progress);
+  const float scale_out = 1.0f + amount * e, scale_in = 1.0f + amount * (1.0f - e);
+  const int weight = int(e * 256.0f + 0.5f); // of the incoming picture, 0..256
+  struct Axis { // for each destination sample: the two source samples and the weight of the second (0..256)
+    std::vector<int> a, b, f;
+  };
+  const auto axis = [](int n, float scale) {
+    Axis ax{std::vector<int>(size_t(n)), std::vector<int>(size_t(n)), std::vector<int>(size_t(n))};
+    const float c = float(n - 1) * 0.5f;
+    for (int i = 0; i < n; ++i) {
+      const float p = std::clamp(c + (float(i) - c) / scale, 0.0f, float(n - 1));
+      const int a = int(p);
+      ax.a[size_t(i)] = a;
+      ax.b[size_t(i)] = std::min(a + 1, n - 1);
+      ax.f[size_t(i)] = int((p - float(a)) * 256.0f + 0.5f);
+    }
+    return ax;
+  };
+  // A plane of `w` x `h` samples of `ch` bytes each (1 for luma, 2 for the interleaved chroma), rows W bytes apart.
+  const auto plane = [&](size_t offset, int w, int h, int ch) {
+    const Axis xo = axis(w, scale_out), xi = axis(w, scale_in), yo = axis(h, scale_out), yi = axis(h, scale_in);
+    const uint8_t *old = outgoing.data() + offset, *in = incoming + offset;
+    uint8_t *dst = out + offset;
+    const auto sample = [&](const uint8_t *src, const Axis &ax, const Axis &ay, int x, int y, int k) {
+      const uint8_t *r0 = src + size_t(ay.a[size_t(y)]) * size_t(W), *r1 = src + size_t(ay.b[size_t(y)]) * size_t(W);
+      const int xa = ax.a[size_t(x)] * ch + k, xb = ax.b[size_t(x)] * ch + k, fx = ax.f[size_t(x)], fy = ay.f[size_t(y)];
+      const int top = r0[xa] * (256 - fx) + r0[xb] * fx, bottom = r1[xa] * (256 - fx) + r1[xb] * fx;
+      return (top * (256 - fy) + bottom * fy) >> 16;
+    };
+    parallel_for(h, 16, [&](int64_t first, int64_t last) {
+      for (int64_t y = first; y < last; ++y) {
+        uint8_t *row = dst + size_t(y) * size_t(W);
+        for (int x = 0; x < w; ++x)
+          for (int k = 0; k < ch; ++k)
+            row[x * ch + k] = uint8_t((sample(old, xo, yo, x, int(y), k) * (256 - weight) + sample(in, xi, yi, x, int(y), k) * weight) >> 8);
+      }
+    });
+  };
+  plane(0, W, H, 1);
+  plane(size_t(W) * size_t(H), W / 2, H / 2, 2);
 }
 
 // One effect of a layer on a picture that is not isolated (an adjustment layer's copy of everything below it).
@@ -1136,6 +1191,8 @@ Result<void> Renderer::render(int64_t frame, uint8_t *out) {
       wipe_blend(out, mix_.data(), width_, height_, float(progress), eval::WipeDirection(l.mix_dir), l.mix_softness);
     else if (l.mix_kind == eval::TransitionKind::push)
       push_blend(out, mix_.data(), width_, height_, float(progress), eval::WipeDirection(l.mix_dir), scratch_);
+    else if (l.mix_kind == eval::TransitionKind::zoom)
+      zoom_blend(out, mix_.data(), width_, height_, float(progress), l.mix_amount, scratch_);
     else
       put_rows(out, size_t(width_), mix_.data(), size_t(width_), height_ * 3 / 2, width_,
                std::clamp(int(progress * 256.0 + 0.5), 0, 256));

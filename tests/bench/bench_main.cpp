@@ -107,7 +107,7 @@ void bench_rational() {
 // One 1080p frame of an adjustment layer with each effect, and of a wipe, against their references (a blur, a dissolve).
 // The pixel passes run on the packed NV12 picture the renderer works in, so this is the cost the export pays per frame.
 void bench_effects() {
-  std::printf("\nEffects, wipe and push (1920 x 1080 frame, p50 of 40)\n");
+  std::printf("\nEffects, wipe, push and zoom (1920 x 1080 frame, p50 of 40)\n");
   const auto frame_ms = [](atm::render::Composition comp, int64_t frame) {
     atm::render::Renderer renderer(std::move(comp), 1920, 1080);
     std::vector<uint8_t> out(atm::media::nv12_size(1920, 1080));
@@ -168,6 +168,7 @@ void bench_effects() {
   report("dissolve (reference), two text clips", frame_ms(two_clips(atm::eval::TransitionKind::dissolve), 30), "ms", 20.0);
   report("wipe, two text clips", frame_ms(two_clips(atm::eval::TransitionKind::wipe), 30), "ms", 4.0);
   report("push, two text clips", frame_ms(two_clips(atm::eval::TransitionKind::push), 30), "ms", 4.0);
+  report("zoom, two text clips (two bilinear resamples)", frame_ms(two_clips(atm::eval::TransitionKind::zoom), 30), "ms", 6.0);
 }
 
 void bench_profiler() {
