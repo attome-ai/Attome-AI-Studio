@@ -1,6 +1,6 @@
 # UI test: a clip with no media before its start cannot take a dissolve; the Transition card says what is missing, Make
-# room trims it and moves the later clips up (the clips on the Titles track too, unless it is switched off), and the
-# dissolve can then be added. Virtual input only (uitest.psm1). Needs a build (build\win-msvc-release\bin).
+# room trims it and moves the later clips up (the clips on the Titles track too while it is locked to the cut, which the
+# checkbox in the card switches off for good), and the dissolve can then be added. Virtual input only (uitest.psm1). Needs a build (build\win-msvc-release\bin).
 # Exit code 0 = pass.
 #   .\tools\uitest\make_room.ps1
 
@@ -30,7 +30,7 @@ try {
  {"op":"add","path":"`$new:v1/clips/`$new:a","value":{"name":"a.mp4","timing":{"record_in":"0","duration":"3","source_in":"0"},"media_ref":{"type":"file","path":"$a","duration":"6","width":960,"height":540}}},
  {"op":"add","path":"`$new:v1/clips/`$new:b","value":{"name":"b.mp4","timing":{"record_in":"3","duration":"3","source_in":"0"},"media_ref":{"type":"file","path":"$b","duration":"6","width":960,"height":540}}},
  {"op":"add","path":"`$new:v1/clips/`$new:c","value":{"name":"c.mp4","timing":{"record_in":"6","duration":"3","source_in":"0"},"media_ref":{"type":"file","path":"$b","duration":"6","width":960,"height":540}}},
- {"op":"add","path":"$seq/tracks/`$new:t","value":{"kind":"video","name":"Titles"}},
+ {"op":"add","path":"$seq/tracks/`$new:t","value":{"kind":"video","name":"Titles","sync_lock":true}},
  {"op":"add","path":"`$new:t/clips/`$new:across","value":{"name":"across","timing":{"record_in":"2","duration":"2","source_in":"0"},"media_ref":{"type":"text"},"content":{"text":"Across the cut","size":0.08}}},
  {"op":"add","path":"`$new:t/clips/`$new:later","value":{"name":"later","timing":{"record_in":"6","duration":"1","source_in":"0"},"media_ref":{"type":"text"},"content":{"text":"Later","size":0.08}}}
 ]}
@@ -50,7 +50,7 @@ function Show($run) {
 }
 
 $failed = $null
-# 1. Titles switched off: the picture track makes room, the titles stay where they were.
+# 1. Titles unlocked from the card (a saved edit): the picture track makes room, the titles stay where they were.
 $run = Invoke-EditorScript -Project $proj -SelectFirstClip -Script @(
   'expect @check:ripple_Titles'
   'click @check:ripple_Titles'
@@ -66,11 +66,13 @@ try {
     if ($b.source_in -ne '1/2' -or $c.record_in -ne '11/2') { $failed = 'Make room did not trim the next clip and move the third up' }
     elseif ($x.duration -ne '2' -or $l.record_in -ne '6') { $failed = 'the Titles track moved although it was switched off' }
   }
-  # 2. Undo, then Make room again with the default (Titles on): the titles follow the cut.
+  # 2. Undo both, then Make room again: the Titles track is locked to the cut again, so the titles follow it.
   if (-not $failed) {
-    $undo = Invoke-EditorScript -Project $proj -Endpoint $run.Endpoint -Script @('key Z ctrl')
+    $undo = Invoke-EditorScript -Project $proj -Endpoint $run.Endpoint -Script @('key Z ctrl', 'key Z ctrl')
     $failed = $undo.Errors
+    $titlesTrack = Get-Object $run (@(Get-Tracks $run) | Where-Object { $_.name -eq 'Titles' }).id
     if (-not $failed -and (Get-Timing $run 'V1' 'b.mp4').source_in -ne '0') { $failed = 'undo did not restore the second clip' }
+    elseif (-not $failed -and $titlesTrack.sync_lock -ne $true) { $failed = 'undo did not bring the lock on the Titles track back' }
   }
   if (-not $failed) {
     $again = Invoke-EditorScript -Project $proj -SelectFirstClip -Endpoint $run.Endpoint -Script @(
@@ -112,5 +114,5 @@ try {
 } finally { Stop-Daemon $run }
 
 if ($failed) { Write-Host "FAIL: $failed" -ForegroundColor Red; exit 1 }
-Write-Host "PASS: Make room moved the picture track, and the Titles track only while it was switched on; the dissolve was added; undo restored everything (captures in $work)" -ForegroundColor Green
+Write-Host "PASS: Make room moved the picture track, and the Titles track only while it was locked to the cut; the dissolve was added; undo restored everything (captures in $work)" -ForegroundColor Green
 exit 0

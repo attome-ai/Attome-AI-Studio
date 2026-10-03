@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <filesystem>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -736,3 +737,107 @@ TEST_CASE("transitions: a zoom goes in or out, in by default, and anything else 
   CHECK((*track["transitions"].begin())["params"]["amount"] == 0.7);
 }
 
+TEST_CASE("tracks: sync_lock must be true or false", "[timeline]") {
+  Fixture f;
+  CHECK(f.rule_of(json::array({{{"op", "replace"}, {"path", f.track + "/sync_lock"}, {"value", "yes"}}})) == "TRACK_TYPE_MISMATCH");
+  CHECK(f.rule_of(json::array({{{"op", "replace"}, {"path", f.track + "/sync_lock"}, {"value", 1}}})) == "TRACK_TYPE_MISMATCH");
+  REQUIRE(f.patch(json::array({{{"op", "replace"}, {"path", f.track + "/sync_lock"}, {"value", true}}})));
+  CHECK(f.engine.call("project.get", {{"project", f.project}, {"id", f.track}})->at("object")["sync_lock"] == true);
+  REQUIRE(f.patch(json::array({{{"op", "replace"}, {"path", f.track + "/sync_lock"}, {"value", false}}})));
+  REQUIRE(f.engine.call("project.undo", {{"project", f.project}})); // the lock is an edit like any other
+  CHECK(f.engine.call("project.get", {{"project", f.project}, {"id", f.track}})->at("object")["sync_lock"] == true);
+}
+
+TEST_CASE("timeline.edit: tracks locked to the cut follow make_room and ripple_delete without being named", "[timeline]") {
+  Fixture f; // a: 0..2 s, b: 2..4 s from 1 s of its file, c: 4..6 s
+  const std::string seq = f.engine.call("project.inspect", {{"project", f.project}})->at("data")["sequences"][0]["id"];
+  const auto text = [](const char *at, const char *dur) {
+    return json{{"name", "title"},
+                {"timing", {{"record_in", at}, {"duration", dur}, {"source_in", "0s"}}},
+                {"media_ref", {{"type", "text"}}},
+                {"content", {{"text", "hi"}}}};
+  };
+  auto made = f.patch(json::array(
+      {{{"op", "add"}, {"path", f.track + "/clips/$new:c"},
+        {"value", {{"name", "c"}, {"timing", {{"record_in", "4s"}, {"duration", "2s"}, {"source_in", "0s"}}},
+                   {"media_ref", {{"type", "file"}, {"path", "x.mp4"}, {"duration", "4s"}}}}}},
+       {{"op", "add"}, {"path", seq + "/tracks/$new:locked"}, {"value", {{"kind", "video"}, {"name", "Locked"}, {"sync_lock", true}}}},
+       {{"op", "add"}, {"path", "$new:locked/clips/$new:lk_after"}, {"value", text("4.5s", "0.5s")}},
+       {{"op", "add"}, {"path", seq + "/tracks/$new:free"}, {"value", {{"kind", "video"}, {"name", "Free"}}}},
+       {{"op", "add"}, {"path", "$new:free/clips/$new:fr_after"}, {"value", text("4.5s", "0.5s")}},
+       {{"op", "add"}, {"path", seq + "/tracks/$new:lk2"}, {"value", {{"kind", "video"}, {"name", "Locked 2"}, {"sync_lock", true}}}},
+       {{"op", "add"}, {"path", "$new:lk2/clips/$new:lk_span"}, {"value", text("1s", "4s")}},   // 1..5: spans a ripple delete of b
+       {{"op", "add"}, {"path", seq + "/tracks/$new:lk3"}, {"value", {{"kind", "video"}, {"name", "Locked 3"}, {"sync_lock", true}}}},
+       {{"op", "add"}, {"path", "$new:lk3/clips/$new:lk_media"},
+        {"value", {{"name", "overlay.mp4"}, {"timing", {{"record_in", "1s"}, {"duration", "4s"}, {"source_in", "0s"}}},
+                   {"media_ref", {{"type", "file"}, {"path", "y.mp4"}, {"duration", "4s"}}}}}}}));
+  INFO((made ? "" : made.error().message));
+  REQUIRE(made);
+  const json &ids = (*made)["id_map"];
+  const auto timing = [&](const char *name) {
+    return f.engine.call("project.get", {{"project", f.project}, {"id", ids[std::string("$new:") + name]}})->at("object")["timing"];
+  };
+  const std::string c = ids["$new:c"];
+  const auto edit = [&](json op) { return f.engine.call("timeline.edit", {{"project", f.project}, {"ops", json::array({std::move(op)})}}); };
+  const json room = {{"op", "make_room"}, {"between", json::array({f.a, f.b})}, {"duration", "3s"}}; // takes [2.0, 2.5) out
+
+  SECTION("make_room: the locked track follows by default, the other does not") {
+    auto r = edit(room);
+    INFO((r ? "" : r.error().message));
+    REQUIRE(r);
+    CHECK(f.engine.call("project.get", {{"project", f.project}, {"id", c}})->at("object")["timing"]["record_in"] == "7/2");
+    CHECK(timing("lk_after")["record_in"] == "4");   // locked: up by 0.5 s
+    CHECK(timing("fr_after")["record_in"] == "9/2"); // not locked: where it was
+    CHECK(r->at("notes").dump().find("locked to the cut") != std::string::npos);
+  }
+  SECTION("ripple \"track\" keeps even the locked track still; \"all\" moves both") {
+    auto still = edit({{"op", "make_room"}, {"between", json::array({f.a, f.b})}, {"duration", "3s"}, {"ripple", "track"}});
+    REQUIRE(still);
+    CHECK(timing("lk_after")["record_in"] == "9/2");
+    REQUIRE(f.engine.call("project.undo", {{"project", f.project}}));
+    auto all = edit({{"op", "make_room"}, {"between", json::array({f.a, f.b})}, {"duration", "3s"}, {"ripple", "all"}});
+    REQUIRE(all);
+    CHECK(timing("lk_after")["record_in"] == "4");
+    CHECK(timing("fr_after")["record_in"] == "4");
+  }
+  SECTION("the lock is read when the edit runs: unlock the track and it stays") {
+    REQUIRE(f.patch(json::array({{{"op", "replace"}, {"path", f.engine.call("project.get", {{"project", f.project}, {"id", ids["$new:lk_after"]}})->at("parent").get<std::string>() + "/sync_lock"}, {"value", false}}})));
+    REQUIRE(edit(room));
+    CHECK(timing("lk_after")["record_in"] == "9/2");
+  }
+  SECTION("ripple_delete: the locked tracks follow, a clip with media that spans the cut is left alone") {
+    auto r = edit({{"op", "ripple_delete"}, {"clip", f.b}}); // takes [2, 4) out: 2 s
+    INFO((r ? "" : r.error().message));
+    REQUIRE(r);
+    CHECK(f.engine.call("project.get", {{"project", f.project}, {"id", c}})->at("object")["timing"]["record_in"] == "2");
+    CHECK(timing("lk_after")["record_in"] == "5/2"); // locked, after the span: up by 2 s
+    CHECK(timing("fr_after")["record_in"] == "9/2"); // not locked: where it was
+    CHECK(timing("lk_span")["record_in"] == "1");    // locked, spans the span: shorter by 2 s
+    CHECK(timing("lk_span")["duration"] == "2");
+    CHECK(timing("lk_media")["duration"] == "4");    // carries media and spans it: left alone, with a note
+    CHECK(r->at("notes").dump().find("overlay.mp4") != std::string::npos);
+    REQUIRE(f.engine.call("project.undo", {{"project", f.project}})); // one undo restores all of it
+    CHECK(timing("lk_after")["record_in"] == "9/2");
+    CHECK(timing("lk_span")["duration"] == "4");
+  }
+}
+
+TEST_CASE("timeline.edit: the Titles and Effects tracks the ops make are locked to the cut, other tracks are not", "[timeline]") {
+  Fixture f;
+  const auto edit = [&](json ops) { return f.engine.call("timeline.edit", {{"project", f.project}, {"ops", std::move(ops)}}); };
+  REQUIRE(edit(json::array({{{"op", "add_text"}, {"text", "Hello"}, {"at", "0s"}, {"duration", "1s"}},
+                            {{"op", "add_adjustment"}, {"at", "0s"}, {"duration", "1s"}, {"blur", 0.02}},
+                            {{"op", "add_track"}, {"kind", "video"}, {"name", "Plain"}},
+                            {{"op", "add_track"}, {"kind", "audio"}, {"name", "Music"}, {"sync_lock", true}}})));
+  const json tracks = f.engine.call("project.inspect", {{"project", f.project}, {"level", "tracks"}})->at("data")["sequences"][0]["tracks"];
+  std::map<std::string, bool> locked;
+  for (const json &t : tracks) {
+    const json node = f.engine.call("project.get", {{"project", f.project}, {"id", t["id"]}})->at("object");
+    locked[t["name"]] = node.contains("sync_lock") && node["sync_lock"] == true;
+  }
+  CHECK(locked.at("Titles"));
+  CHECK(locked.at("Effects"));
+  CHECK(locked.at("Music"));          // asked for
+  CHECK_FALSE(locked.at("Plain"));    // not asked for
+  CHECK_FALSE(edit(json::array({{{"op", "add_track"}, {"kind", "video"}, {"sync_lock", "yes"}}})));
+}

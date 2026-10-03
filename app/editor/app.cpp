@@ -230,7 +230,9 @@ void App::refresh() {
       const auto tit = seq["tracks"].find(tid.get<std::string>());
       if (tit == seq["tracks"].end())
         continue;
-      TrackUi track{tid.get<std::string>(), tit->value("name", ""), tit->value("kind", "video"), {}};
+      TrackUi track{tid.get<std::string>(), tit->value("name", ""), tit->value("kind", "video"), {}, {}, false};
+      if (const auto lock = tit->find("sync_lock"); lock != tit->end() && lock->is_boolean())
+        track.sync = lock->get<bool>();
       if (tit->contains("clips") && tit->contains("clip_order"))
         for (const json &cid : (*tit)["clip_order"]) {
           const auto cit = (*tit)["clips"].find(cid.get<std::string>());
@@ -396,6 +398,12 @@ bool App::timeline_edit(json ops, const char *label) {
   return true;
 }
 
+// Locks a track to the cut or releases it: while it is locked, its clips follow Make room and ripple delete.
+void App::set_track_lock(const std::string &track_id, bool locked) {
+  patch(json::array({{{"op", "replace"}, {"path", track_id + "/sync_lock"}, {"value", locked}}}),
+        locked ? "Lock track to the cut" : "Unlock track from the cut");
+}
+
 const ClipUi *App::selected(const TrackUi **track) const {
   for (const TrackUi &t : tracks_)
     for (const ClipUi &c : t.clips)
@@ -448,7 +456,7 @@ void App::add_title(int preset) {
   json ops = json::array();
   std::string track = titles ? titles->id : "$new:titles";
   if (!titles)
-    ops.push_back({{"op", "add"}, {"path", seq_id_ + "/tracks/$new:titles"}, {"value", {{"kind", "video"}, {"name", "Titles"}}}});
+    ops.push_back({{"op", "add"}, {"path", seq_id_ + "/tracks/$new:titles"}, {"value", {{"kind", "video"}, {"name", "Titles"}, {"sync_lock", true}}}});
   ops.push_back({{"op", "add"},
                  {"path", track + "/clips/$new:t"},
                  {"value",
@@ -1728,7 +1736,7 @@ void App::add_adjustment(const eval::EffectDef &def) {
   json ops = json::array();
   const std::string track = effects ? effects->id : "$new:effects";
   if (!effects) {
-    json add = {{"op", "add"}, {"path", seq_id_ + "/tracks/$new:effects"}, {"value", {{"kind", "video"}, {"name", "Effects"}}}};
+    json add = {{"op", "add"}, {"path", seq_id_ + "/tracks/$new:effects"}, {"value", {{"kind", "video"}, {"name", "Effects"}, {"sync_lock", true}}}};
     if (titles)
       add["anchor"] = {{"before", titles->id}};
     ops.push_back(std::move(add));
@@ -2400,6 +2408,31 @@ void App::draw_timeline() {
     dl->AddText(ImVec2(win.x + 26.0f - bs.x * 0.5f, y + 22.0f - bs.y * 0.5f), IM_COL32_WHITE, track.name.c_str());
     ImGui::PopFont();
     dl->AddText(ImVec2(win.x + 50.0f, y + 14.0f), hex(look::fg2), track.kind == "audio" ? "Audio" : "Video");
+    // The padlock: a locked track follows the cut (its clips come up with Make room and ripple delete).
+    const ImVec2 lock_at(win.x + header_w - 24.0f, y + row_h * 0.5f);
+    ImGui::SetCursorScreenPos(ImVec2(lock_at.x - 13.0f, lock_at.y - 13.0f));
+    ImGui::InvisibleButton(("##lock_" + track.id).c_str(), ImVec2(26.0f, 26.0f));
+    ui_mark("lock:" + track.name);
+    const bool lock_hovered = ImGui::IsItemHovered();
+    if (lock_hovered)
+      ImGui::SetTooltip("%s", track.sync ? "Locked to the cut: this track's clips follow when time is taken out of another track "
+                                           "(Make room, ripple delete). Click to unlock."
+                                         : "Click to lock this track to the cut, so its clips follow Make room and ripple delete.");
+    if (ImGui::IsItemClicked()) {
+      const std::string tid = track.id;
+      const bool lock = !track.sync;
+      pending_ = [this, tid, lock] { set_track_lock(tid, lock); };
+    }
+    {
+      const ImU32 col = hex(track.sync ? look::accent : lock_hovered ? look::fg2 : look::fg3);
+      const float cx = lock_at.x, cy = lock_at.y;
+      dl->AddRectFilled(ImVec2(cx - 6.5f, cy - 1.0f), ImVec2(cx + 6.5f, cy + 7.5f), col, 2.0f); // the body
+      dl->PathLineTo(ImVec2(cx - 4.0f, cy - 1.0f)); // the shackle: down into the body when locked, lifted when not
+      dl->PathLineTo(ImVec2(cx - 4.0f, cy - (track.sync ? 3.5f : 6.5f)));
+      dl->PathArcTo(ImVec2(cx, cy - (track.sync ? 3.5f : 6.5f)), 4.0f, 3.14159265f, 6.2831853f, 10);
+      dl->PathLineTo(ImVec2(cx + 4.0f, cy - (track.sync ? 1.0f : 4.5f)));
+      dl->PathStroke(col, 0, 1.8f);
+    }
   }
   dl->AddRectFilled(ImVec2(win.x, origin.y), ImVec2(win.x + header_w, origin.y + ruler_h), hex(look::panel));
   dl->AddLine(ImVec2(win.x + header_w, origin.y), ImVec2(win.x + header_w, origin.y + ruler_h), hex(look::line));
@@ -2500,8 +2533,8 @@ void App::draw_transition_card(const TrackUi &track, const ClipUi &c) {
         ImGui::TextColored(hexv(look::fg3),
                            "Make room trims that off the clips, moves the later clips on this track up, and shortens the track by %.2f s.",
                            double(miss_after + miss_before) / fps());
-        // Other tracks with clips after the cut (titles, effect layers, music): their clips come up with it. All on by default.
-        std::vector<std::string> ripple;
+        // The other tracks with clips after the cut: the ones locked to the cut come up with it. These checkboxes are the
+        // same lock as the padlock in the track header, and stay as they are set.
         const int64_t cut_frame = c.start + c.frames;
         bool listed = false;
         for (const TrackUi &other : tracks_) {
@@ -2509,25 +2542,19 @@ void App::draw_transition_card(const TrackUi &track, const ClipUi &c) {
               !std::any_of(other.clips.begin(), other.clips.end(), [&](const ClipUi &k) { return k.start + k.frames > cut_frame; }))
             continue;
           if (!listed)
-            ImGui::TextColored(hexv(look::fg2), "Move with the cut:");
+            ImGui::TextColored(hexv(look::fg2), "Tracks that follow the cut:");
           listed = true;
-          bool on = ripple_off_.count(other.id) == 0;
+          bool on = other.sync;
           if (ImGui::Checkbox((other.name + "##rip_" + other.id).c_str(), &on)) {
-            if (on)
-              ripple_off_.erase(other.id);
-            else
-              ripple_off_.insert(other.id);
+            const std::string tid = other.id;
+            pending_ = [this, tid, on] { set_track_lock(tid, on); };
           }
           ui_mark("check:ripple_" + other.name);
-          if (on)
-            ripple.push_back(other.id);
         }
         if (soft_button("make_room", "Make room", ImVec2(-1.0f, 28.0f), true, true))
-          pending_ = [this, from, to, total, ripple] {
-            json op = {{"op", "make_room"}, {"between", json::array({from, to})}, {"duration", frames_text(total)}};
-            if (!ripple.empty())
-              op["ripple"] = ripple;
-            timeline_edit(json::array({std::move(op)}), "Make room");
+          pending_ = [this, from, to, total] { // the tracks locked to the cut follow: that is the default of the op
+            timeline_edit(json::array({{{"op", "make_room"}, {"between", json::array({from, to})}, {"duration", frames_text(total)}}}),
+                          "Make room");
           };
       }
       ImGui::BeginDisabled(!fits);

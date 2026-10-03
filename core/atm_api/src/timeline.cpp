@@ -206,8 +206,11 @@ private:
 
   void push(json op) { out_.ops.push_back(std::move(op)); }
 
-  void add_track_op(const std::string &ph, const std::string &kind, const std::string &name, json anchor) {
-    json op = {{"op", "add"}, {"path", ctx_.sequence + "/tracks/" + ph}, {"value", {{"kind", kind}, {"name", name}}}};
+  void add_track_op(const std::string &ph, const std::string &kind, const std::string &name, json anchor, bool sync_lock = false) {
+    json value = {{"kind", kind}, {"name", name}};
+    if (sync_lock)
+      value["sync_lock"] = true;
+    json op = {{"op", "add"}, {"path", ctx_.sequence + "/tracks/" + ph}, {"value", std::move(value)}};
     if (!anchor.is_null())
       op["anchor"] = std::move(anchor);
     push(std::move(op));
@@ -289,7 +292,10 @@ private:
       anchor = {{"after", op_["above"]}};
     else if (position == "bottom")
       anchor = {{"first", true}};
-    add_track_op(placeholder(), kind, op_.value("name", next_track_name(kind)), std::move(anchor));
+    const auto lock = op_.find("sync_lock");
+    if (lock != op_.end() && !lock->is_boolean())
+      return fail("E_PARAM", "\"sync_lock\" must be true or false.");
+    add_track_op(placeholder(), kind, op_.value("name", next_track_name(kind)), std::move(anchor), lock != op_.end() && lock->get<bool>());
     return {};
   }
 
@@ -446,7 +452,7 @@ private:
       if (const std::string id = track_id_named("Titles"); !id.empty())
         return id;
       const std::string ph = placeholder(".track");
-      add_track_op(ph, "video", "Titles", nullptr); // on top, over the video and any effects
+      add_track_op(ph, "video", "Titles", nullptr, true); // on top, over the video and any effects; locked to the cut
       return ph;
     }));
     ATM_TRY(Rational start, time_or("at", Rational()));
@@ -484,7 +490,7 @@ private:
         return id;
       const std::string ph = placeholder(".track");
       const std::string titles = track_id_named("Titles"); // under the titles, so text stays sharp
-      add_track_op(ph, "video", "Effects", titles.empty() ? json(nullptr) : json{{"before", titles}});
+      add_track_op(ph, "video", "Effects", titles.empty() ? json(nullptr) : json{{"before", titles}}, true); // locked to the cut
       return ph;
     }));
     ATM_TRY(Rational start, time_or("at", Rational()));
@@ -579,35 +585,127 @@ private:
     return r;
   }
 
-  // The tracks besides the cut's own whose clips ripple with it: the op's "ripple" is "track" (none, the default), "all",
-  // or a list of track IDs.
+  // A track locked to the cut ("sync_lock": true) follows the edits that take time out of another track.
+  bool is_locked(const std::string &track_id) const {
+    const json *t = track(track_id);
+    return t && t->contains("sync_lock") && (*t)["sync_lock"].is_boolean() && (*t)["sync_lock"].get<bool>();
+  }
+
+  // The tracks besides the edited one whose clips ripple with it: the op's "ripple" is "synced" (the default: the tracks
+  // locked to the cut), "track" (none), "all", or a list of track IDs.
   Result<std::vector<std::string>> ripple_tracks(const std::string &own) const {
     std::vector<std::string> out;
     const auto it = op_.find("ripple");
-    if (it == op_.end() || it->is_null())
+    const std::string mode = it == op_.end() || it->is_null() ? "synced" : it->is_string() ? it->get<std::string>() : std::string();
+    if (mode == "track")
       return out;
-    if (it->is_string()) {
-      const std::string v = it->get<std::string>();
-      if (v == "track")
-        return out;
-      if (v != "all")
-        return fail("E_PARAM", "\"ripple\" must be \"track\", \"all\" or a list of track IDs.");
+    if (mode == "all" || mode == "synced") {
       for (const std::string &id : track_order())
-        if (id != own)
+        if (id != own && (mode == "all" || is_locked(id)))
           out.push_back(id);
       return out;
     }
-    if (!it->is_array())
-      return fail("E_PARAM", "\"ripple\" must be \"track\", \"all\" or a list of track IDs.");
+    if (it == op_.end() || !it->is_array())
+      return fail("E_PARAM", "\"ripple\" must be \"synced\", \"track\", \"all\" or a list of track IDs.");
     for (const json &v : *it) {
       const std::string id = v.is_string() ? v.get<std::string>() : std::string();
       if (!track(id))
         return fail("E_UNKNOWN_TRACK", "There is no track \"" + id + "\" to ripple.",
-                    "Use track IDs from project.inspect, \"all\", or leave \"ripple\" out.");
+                    "Use track IDs from project.inspect, \"synced\", \"all\", or leave \"ripple\" out.");
       if (id != own && std::find(out.begin(), out.end(), id) == out.end())
         out.push_back(id);
     }
     return out;
+  }
+
+  std::vector<std::string> done_; // clips this op has already given a new span or removed
+
+  bool seen(const std::string &id) const { return std::find(done_.begin(), done_.end(), id) != done_.end(); }
+
+  // Gives a clip a new span, checked against its media; the clip counts as done. `why` explains an empty result.
+  Result<void> change(const std::string &id, Span after, const std::string &why = {}) {
+    if (after.duration.num() <= 0)
+      return fail("E_MEDIA_RANGE", "Clip " + id + " would be empty" + (why.empty() ? "." : ": " + why + "."),
+                  "Use a shorter transition, or clips with more media beyond the cut.");
+    ATM_CHECK(check_media(node_of(id), id, after));
+    put_span(id, span_of(node_of(id)), after);
+    done_.push_back(id);
+    return {};
+  }
+
+  struct SpanRipple {
+    int moved = 0, cut = 0, removed = 0;
+    std::vector<std::string> left_alone;
+  };
+
+  // The clips of `tracks` after time was taken out of [start, end) of another track (shift = end - start), as in a ripple
+  // delete of that span: before it, nothing; after it, moved up; ending inside it, cut short; starting inside it, the head
+  // is cut and the keyframes count from the new start; wholly inside it, removed; spanning it, shortened by the span when
+  // the clip has no media of its own (a title, an effect layer, a still), and left alone when it does (it would need a
+  // split). A transition on a clip whose length changes is dropped. Clips this op has already handled are skipped.
+  Result<SpanRipple> ripple_span(const std::vector<std::string> &tracks, const Rational &start, const Rational &end,
+                                 const Rational &shift) {
+    SpanRipple r;
+    for (const std::string &tid : tracks) {
+      const json *t = track(tid);
+      if (!t || !t->contains("clips"))
+        continue;
+      for (auto it = (*t)["clips"].begin(); it != (*t)["clips"].end(); ++it) {
+        const std::string id = it.key();
+        if (seen(id))
+          continue;
+        const Span sp = span_of(*it);
+        const Rational clip_end = sp.end();
+        if (compare(clip_end, start) <= 0)
+          continue; // before the span
+        if (compare(sp.in, end) >= 0) { // after it: up by the span
+          ATM_CHECK(change(id, {minus(sp.in, shift), sp.duration, sp.source_in}));
+          ++r.moved;
+          continue;
+        }
+        const bool starts_before = compare(sp.in, start) < 0, ends_after = compare(clip_end, end) > 0;
+        const bool media = it->value("media_ref", json::object()).value("type", "") == "file";
+        if (starts_before && ends_after && media) { // would need a split: left as it is
+          r.left_alone.push_back(it->value("name", id));
+          continue;
+        }
+        drop_transitions(id, tid); // its length changes
+        if (!starts_before && !ends_after) { // wholly inside the span
+          push({{"op", "remove"}, {"path", id}});
+          done_.push_back(id);
+          ++r.removed;
+        } else if (starts_before && ends_after) { // spans it
+          ATM_CHECK(change(id, {sp.in, minus(sp.duration, shift), sp.source_in}));
+          ++r.cut;
+        } else if (starts_before) { // ends inside it
+          ATM_CHECK(change(id, {sp.in, minus(start, sp.in), sp.source_in}));
+          ++r.cut;
+        } else { // starts inside it: the part in the span is gone, the rest starts where the span began
+          const Rational lost = minus(end, sp.in);
+          ATM_CHECK(change(id, {start, minus(sp.duration, lost), plus(sp.source_in, lost)}));
+          shift_key_times(id, lost);
+          ++r.cut;
+        }
+      }
+    }
+    return r;
+  }
+
+  void ripple_notes(const SpanRipple &r, const Rational &shift, bool any_tracks) {
+    if (any_tracks) {
+      std::string more = "On the other tracks that follow (locked to the cut, or named by \"ripple\"): moved " + std::to_string(r.moved) +
+                         " clip" + (r.moved == 1 ? "" : "s") + " " + seconds_text(shift) + " s earlier, shortened " + std::to_string(r.cut);
+      if (r.removed > 0)
+        more += ", removed " + std::to_string(r.removed) + " that lay wholly inside the removed span";
+      out_.notes.push_back(more + ".");
+    }
+    if (!r.left_alone.empty()) {
+      std::string names;
+      for (const std::string &n : r.left_alone)
+        names += (names.empty() ? "" : ", ") + n;
+      out_.notes.push_back("Left in place, because it carries media and spans the cut: " + names +
+                           ". Split it at the cut if it should follow.");
+    }
   }
 
   // A clip that lost `delta` from its head: its keyframes (the transform's and its effects') count from the new start.
@@ -634,11 +732,8 @@ private:
   // used to be on screen. The second clip then moves up to meet the first, and every later clip of its track follows by
   // the same amount, so no gap opens; linked clips (the sound of a video) are cut and moved with their partners.
   //
-  // The span taken out of the track is [cut - short_a, cut + short_b). Other tracks stay as they are unless the op's
-  // "ripple" names them ("all" or a list of track IDs): then each of their clips is treated like a ripple delete of
-  // that span: before it, nothing; after it, moved up; ending inside it, cut short; starting inside it, its head is cut
-  // (its keyframes count from the new start); wholly inside it, removed; spanning it, shortened by the span when it has no
-  // media of its own (a title, an effect layer, a still), and left alone, with a note, when it does (it would need a split).
+  // The span taken out of the track is [cut - short_a, cut + short_b). The tracks locked to the cut (sync_lock), or named
+  // by the op's "ripple" ("all", "track" for none, or a list of track IDs), follow it as ripple_span describes.
   Result<void> make_room_at(const Cut &cut) {
     const auto pairs = linked_pairs(cut.a, cut.b); // read before any change
     std::vector<std::string> side_a{cut.a}, side_b{cut.b};
@@ -660,33 +755,22 @@ private:
       return {};
     }
     const Rational shift = plus(short_a, short_b); // how much shorter the track gets after the cut
-    std::vector<std::string> done;
-    const auto seen = [&](const std::string &id) { return std::find(done.begin(), done.end(), id) != done.end(); };
-    const auto change = [&](const std::string &id, Span after) -> Result<void> {
-      if (after.duration.num() <= 0)
-        return fail("E_MEDIA_RANGE", "Clip " + id + " would be empty: making room takes " + seconds_text(short_a) +
-                                         " s off the end of the first clip and " + seconds_text(short_b) +
-                                         " s off the start of the second.",
-                    "Use a shorter transition, or clips with more media beyond the cut.");
-      ATM_CHECK(check_media(node_of(id), id, after));
-      put_span(id, span_of(node_of(id)), after);
-      done.push_back(id);
-      return {};
-    };
+    const std::string why = "making room takes " + seconds_text(short_a) + " s off the end of the first clip and " +
+                            seconds_text(short_b) + " s off the start of the second";
     for (const std::string &id : side_a) { // the end of the first clip comes in
       const Span s = span_of(node_of(id));
-      ATM_CHECK(change(id, {s.in, minus(s.duration, short_a), s.source_in}));
+      ATM_CHECK(change(id, {s.in, minus(s.duration, short_a), s.source_in}, why));
     }
     for (const std::string &id : side_b) { // the start of the second comes in, and it meets the first clip's new end
       const Span s = span_of(node_of(id));
-      ATM_CHECK(change(id, {minus(s.in, short_a), minus(s.duration, short_b), plus(s.source_in, short_b)}));
+      ATM_CHECK(change(id, {minus(s.in, short_a), minus(s.duration, short_b), plus(s.source_in, short_b)}, why));
     }
     int later = 0; // every later clip on the track, and the clips linked to them, moves up by the same amount
     const auto follow = [&](const std::string &id) -> Result<void> {
       if (seen(id))
         return {};
       const Span s = span_of(node_of(id));
-      ATM_CHECK(change(id, {minus(s.in, shift), s.duration, s.source_in}));
+      ATM_CHECK(change(id, {minus(s.in, shift), s.duration, s.source_in}, why));
       ++later;
       return {};
     };
@@ -700,54 +784,8 @@ private:
       for (const Member &m : linked(id))
         ATM_CHECK(follow(m.id));
     }
-    // Other tracks that ripple with the cut.
     ATM_TRY(std::vector<std::string> others, ripple_tracks(cut.ra->parent));
-    const Rational span_start = minus(cut.sb.in, short_a), span_end = plus(cut.sb.in, short_b);
-    int other_moved = 0, other_cut = 0, other_removed = 0;
-    std::vector<std::string> left_alone;
-    for (const std::string &tid : others) {
-      const json *t = track(tid);
-      if (!t || !t->contains("clips"))
-        continue;
-      for (auto it = (*t)["clips"].begin(); it != (*t)["clips"].end(); ++it) {
-        const std::string id = it.key();
-        if (seen(id))
-          continue;
-        const Span sp = span_of(*it);
-        const Rational end = sp.end();
-        if (compare(end, span_start) <= 0)
-          continue; // before the span
-        if (compare(sp.in, span_end) >= 0) { // after it: up by the span
-          ATM_CHECK(change(id, {minus(sp.in, shift), sp.duration, sp.source_in}));
-          ++other_moved;
-          continue;
-        }
-        const bool starts_before = compare(sp.in, span_start) < 0, ends_after = compare(end, span_end) > 0;
-        const bool media = it->value("media_ref", json::object()).value("type", "") == "file";
-        const std::string name = it->value("name", id);
-        if (starts_before && ends_after && media) { // would need a split: left as it is
-          left_alone.push_back(name);
-          continue;
-        }
-        drop_transitions(id, tid); // its length changes
-        if (!starts_before && !ends_after) { // wholly inside the span
-          push({{"op", "remove"}, {"path", id}});
-          done.push_back(id);
-          ++other_removed;
-        } else if (starts_before && ends_after) { // spans it
-          ATM_CHECK(change(id, {sp.in, minus(sp.duration, shift), sp.source_in}));
-          ++other_cut;
-        } else if (starts_before) { // ends inside it
-          ATM_CHECK(change(id, {sp.in, minus(span_start, sp.in), sp.source_in}));
-          ++other_cut;
-        } else { // starts inside it: the part in the span is gone, the rest starts where the cut now is
-          const Rational lost = minus(span_end, sp.in);
-          ATM_CHECK(change(id, {span_start, minus(sp.duration, lost), plus(sp.source_in, lost)}));
-          shift_key_times(id, lost);
-          ++other_cut;
-        }
-      }
-    }
+    ATM_TRY(SpanRipple spans, ripple_span(others, minus(cut.sb.in, short_a), plus(cut.sb.in, short_b), shift));
     // A transition that already joins these clips at this cut no longer fits: it goes, with a note.
     const auto drop_between = [&](const std::string &from, const std::string &to) {
       const doc::NodeRef *r = doc_.find(from);
@@ -770,21 +808,7 @@ private:
     note += ", and moved " + std::to_string(later) + " later clip" + (later == 1 ? "" : "s") + " " + seconds_text(shift) +
             " s earlier. The track is " + seconds_text(shift) + " s shorter after the cut.";
     out_.notes.push_back(note);
-    if (!others.empty()) {
-      std::string more = "On the other tracks that ripple: moved " + std::to_string(other_moved) + " clip" + (other_moved == 1 ? "" : "s") +
-                         " " + seconds_text(shift) + " s earlier, shortened " + std::to_string(other_cut);
-      if (other_removed > 0)
-        more += ", removed " + std::to_string(other_removed) + " that lay wholly inside the trimmed span";
-      more += ".";
-      out_.notes.push_back(more);
-    }
-    if (!left_alone.empty()) {
-      std::string names;
-      for (const std::string &n : left_alone)
-        names += (names.empty() ? "" : ", ") + n;
-      out_.notes.push_back("Left in place, because it carries media and spans the cut: " + names +
-                           ". Split it at the cut if it should follow.");
-    }
+    ripple_notes(spans, shift, !others.empty());
     return {};
   }
 
@@ -934,6 +958,19 @@ private:
             push({{"op", "replace"}, {"path", it.key() + "/timing/record_in"}, {"value", minus(span_of(*it).in, s.duration).to_string()}});
         }
       }
+    if (ripple) { // the tracks locked to the cut (or named by "ripple") follow as for a trimmed span
+      ATM_TRY(std::vector<std::string> others, ripple_tracks(c.second));
+      std::erase_if(others, [&](const std::string &tid) {
+        return std::any_of(all.begin(), all.end(), [&](const Member &m) { return m.track == tid; }); // moved above
+      });
+      if (!others.empty()) {
+        const Span s = span_of(*c.first);
+        for (const Member &m : all)
+          done_.push_back(m.id);
+        ATM_TRY(SpanRipple spans, ripple_span(others, s.in, s.end(), s.duration));
+        ripple_notes(spans, s.duration, true);
+      }
+    }
     return {};
   }
 

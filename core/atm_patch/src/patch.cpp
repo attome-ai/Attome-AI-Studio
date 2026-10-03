@@ -488,6 +488,11 @@ void check_track(const doc::Document &doc, const std::string &track_id, json &pr
     return;
   check_number(*ref->node, "volume_db", -96.0, 24.0, track_id, track_id, problems);
   check_number(*ref->node, "pan", -1.0, 1.0, track_id, track_id, problems);
+  if (const auto lock = ref->node->find("sync_lock"); lock != ref->node->end() && !lock->is_boolean())
+    problems.push_back(problem("TRACK_TYPE_MISMATCH", track_id + "/sync_lock", track_id,
+                               "sync_lock of track " + track_id + " must be true or false.",
+                               "true locks the track to the cut: its clips follow when time is taken out of another track "
+                               "(make_room, ripple_delete)."));
   const auto clips = ref->node->find("clips");
   if (clips == ref->node->end() || !clips->is_object())
     return;
