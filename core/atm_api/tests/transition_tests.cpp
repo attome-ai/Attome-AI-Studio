@@ -594,3 +594,121 @@ TEST_CASE("timeline.edit: transitions with make_room on several cuts of one call
   CHECK(track["transitions"].size() == 2);
   CHECK(made->at("duration")["seconds"] == 10.0);
 }
+
+TEST_CASE("timeline.edit: make_room can ripple other tracks, treating the trimmed span like a ripple delete", "[timeline]") {
+  Fixture f; // a: 0..2 s, b: 2..4 s from 1 s of its file: a 3 s transition makes 0.5 s room by taking [2.0, 2.5) out
+  const std::string seq = f.engine.call("project.inspect", {{"project", f.project}})->at("data")["sequences"][0]["id"];
+  const auto text = [](const char *at, const char *dur, const char *keys = nullptr) {
+    json clip = {{"name", "title"},
+                 {"timing", {{"record_in", at}, {"duration", dur}, {"source_in", "0s"}}},
+                 {"media_ref", {{"type", "text"}}},
+                 {"content", {{"text", "hi"}}}};
+    if (keys)
+      clip["transform"] = {{"keyframes", {{"opacity", json::parse(keys)}}}};
+    return clip;
+  };
+  json ops = json::array({{{"op", "add"}, {"path", f.track + "/clips/$new:c"},
+                           {"value", {{"name", "c"}, {"timing", {{"record_in", "4s"}, {"duration", "2s"}, {"source_in", "0s"}}},
+                                      {"media_ref", {{"type", "file"}, {"path", "x.mp4"}, {"duration", "4s"}}}}}}});
+  const std::vector<std::pair<const char *, json>> titles = {
+      {"before", text("0s", "1.5s")},         // ends before the span
+      {"ends", text("1s", "1.25s")},          // 1.0 .. 2.25: ends inside it
+      {"spans", text("1.5s", "2.5s")},        // 1.5 .. 4.0: spans it
+      {"starts", text("2.2s", "1s", R"({"$new:k1":{"t":"0","v":0.0},"$new:k2":{"t":"1/2","v":1.0}})")}, // 2.2 .. 3.2: starts inside
+      {"inside", text("2.1s", "0.3s")},       // wholly inside it
+      {"after", text("3s", "0.5s")}};         // after it
+  for (const auto &[name, clip] : titles) {
+    const std::string n = name;
+    ops.push_back({{"op", "add"}, {"path", seq + "/tracks/$new:t_" + n}, {"value", {{"kind", "video"}, {"name", "T " + n}}}});
+    ops.push_back({{"op", "add"}, {"path", "$new:t_" + n + "/clips/$new:" + n}, {"value", clip}});
+  }
+  ops.push_back({{"op", "add"}, {"path", seq + "/tracks/$new:v2"}, {"value", {{"kind", "video"}, {"name", "V2"}}}});
+  ops.push_back({{"op", "add"}, {"path", "$new:v2/clips/$new:media"},
+                 {"value", {{"name", "overlay.mp4"}, {"timing", {{"record_in", "1.5s"}, {"duration", "2.5s"}, {"source_in", "0s"}}},
+                            {"media_ref", {{"type", "file"}, {"path", "y.mp4"}, {"duration", "4s"}}}}}});
+  auto made = f.patch(ops);
+  INFO((made ? "" : made.error().message));
+  REQUIRE(made);
+  const json &ids = (*made)["id_map"];
+  const auto timing = [&](const std::string &id) {
+    return f.engine.call("project.get", {{"project", f.project}, {"id", id}})->at("object")["timing"];
+  };
+  const auto room = [&](json extra) {
+    json op = {{"op", "make_room"}, {"between", json::array({f.a, f.b})}, {"duration", "3s"}};
+    op.update(extra);
+    return f.engine.call("timeline.edit", {{"project", f.project}, {"ops", json::array({std::move(op)})}});
+  };
+  const std::string c = ids["$new:c"];
+
+  SECTION("by default the other tracks stay where they are") {
+    REQUIRE(room(json::object()));
+    CHECK(timing(c)["record_in"] == "7/2"); // the cut's own track moved
+    const std::vector<std::pair<const char *, const char *>> starts_at = {
+        {"before", "0"}, {"ends", "1"}, {"spans", "3/2"}, {"starts", "11/5"}, {"inside", "21/10"}, {"after", "3"}}; // as written, canonical
+    for (const auto &[name, at] : starts_at)
+      CHECK(timing(ids[std::string("$new:") + name])["record_in"] == at);
+    CHECK(timing(ids["$new:spans"])["duration"] == "5/2");
+  }
+  SECTION("ripple all: every case of the span, and the media clip that spans it is left alone with a note") {
+    auto r = room({{"ripple", "all"}});
+    INFO((r ? "" : r.error().message));
+    REQUIRE(r);
+    const auto of = [&](const char *n) { return timing(ids[std::string("$new:") + n]); };
+    CHECK(of("before")["record_in"] == "0");  // before the span: untouched
+    CHECK(of("before")["duration"] == "3/2");
+    CHECK(of("ends")["record_in"] == "1");    // ends inside it: cut short at the span's start
+    CHECK(of("ends")["duration"] == "1");
+    CHECK(of("spans")["record_in"] == "3/2"); // spans it: shorter by the span (0.5 s)
+    CHECK(of("spans")["duration"] == "2");
+    CHECK(of("starts")["record_in"] == "2");  // starts inside it: begins where the cut now is, minus the 0.3 s inside
+    CHECK(of("starts")["duration"] == "7/10");
+    CHECK(of("after")["record_in"] == "5/2"); // after it: up by the span
+    CHECK(of("after")["duration"] == "1/2");
+    CHECK_FALSE(f.engine.call("project.get", {{"project", f.project}, {"id", ids["$new:inside"]}})); // wholly inside: removed
+    CHECK(timing(ids["$new:media"])["record_in"] == "3/2"); // media that spans the cut: not touched
+    CHECK(timing(ids["$new:media"])["duration"] == "5/2");
+    CHECK(r->at("notes").dump().find("Left in place") != std::string::npos);
+    CHECK(r->at("notes").dump().find("overlay.mp4") != std::string::npos);
+    // The head of "starts" was cut by 0.3 s, so its keyframes count from the new start: 0 -> -0.3 s, 0.5 -> 0.2 s.
+    const json clip = f.engine.call("project.get", {{"project", f.project}, {"id", ids["$new:starts"]}})->at("object");
+    std::vector<std::string> times;
+    for (const auto &[kid, k] : clip["transform"]["keyframes"]["opacity"].items())
+      times.push_back(k["t"]);
+    std::sort(times.begin(), times.end());
+    CHECK(times == std::vector<std::string>{"-3/10", "1/5"});
+    // One undo takes all of it back.
+    REQUIRE(f.engine.call("project.undo", {{"project", f.project}}));
+    CHECK(timing(ids["$new:after"])["record_in"] == "3");
+    CHECK(timing(ids["$new:spans"])["duration"] == "5/2");
+    CHECK(f.engine.call("project.get", {{"project", f.project}, {"id", ids["$new:inside"]}}));
+  }
+  SECTION("ripple with a list: only those tracks follow") {
+    const json after_track = f.engine.call("project.inspect", {{"project", f.project}, {"level", "tracks"}})->at("data")["sequences"][0]["tracks"];
+    std::string after_id, spans_id;
+    for (const json &t : after_track) {
+      if (t["name"] == "T after")
+        after_id = t["id"];
+      if (t["name"] == "T spans")
+        spans_id = t["id"];
+    }
+    REQUIRE_FALSE(after_id.empty());
+    REQUIRE(room({{"ripple", json::array({after_id})}}));
+    CHECK(timing(ids["$new:after"])["record_in"] == "5/2");  // listed: moved
+    CHECK(timing(ids["$new:spans"])["duration"] == "5/2");   // not listed: as it was
+  }
+  SECTION("a bad ripple value or an unknown track is refused") {
+    CHECK_FALSE(room({{"ripple", "everything"}}));
+    CHECK_FALSE(room({{"ripple", json::array({"trk_01JD0000000000000000000000"})}}));
+    CHECK_FALSE(room({{"ripple", 3}}));
+  }
+  SECTION("add_transition with make_room and ripple does both in one step") {
+    auto r = f.engine.call("timeline.edit", {{"project", f.project},
+                                            {"ops", json::array({{{"op", "add_transition"}, {"between", json::array({f.a, f.b})},
+                                                                  {"duration", "3s"}, {"make_room", true}, {"ripple", "all"}}})}});
+    INFO((r ? "" : r.error().message));
+    REQUIRE(r);
+    CHECK(timing(ids["$new:after"])["record_in"] == "5/2");
+    const json track = f.engine.call("project.get", {{"project", f.project}, {"id", f.track}})->at("object");
+    CHECK(track["transitions"].size() == 1);
+  }
+}

@@ -579,11 +579,66 @@ private:
     return r;
   }
 
+  // The tracks besides the cut's own whose clips ripple with it: the op's "ripple" is "track" (none, the default), "all",
+  // or a list of track IDs.
+  Result<std::vector<std::string>> ripple_tracks(const std::string &own) const {
+    std::vector<std::string> out;
+    const auto it = op_.find("ripple");
+    if (it == op_.end() || it->is_null())
+      return out;
+    if (it->is_string()) {
+      const std::string v = it->get<std::string>();
+      if (v == "track")
+        return out;
+      if (v != "all")
+        return fail("E_PARAM", "\"ripple\" must be \"track\", \"all\" or a list of track IDs.");
+      for (const std::string &id : track_order())
+        if (id != own)
+          out.push_back(id);
+      return out;
+    }
+    if (!it->is_array())
+      return fail("E_PARAM", "\"ripple\" must be \"track\", \"all\" or a list of track IDs.");
+    for (const json &v : *it) {
+      const std::string id = v.is_string() ? v.get<std::string>() : std::string();
+      if (!track(id))
+        return fail("E_UNKNOWN_TRACK", "There is no track \"" + id + "\" to ripple.",
+                    "Use track IDs from project.inspect, \"all\", or leave \"ripple\" out.");
+      if (id != own && std::find(out.begin(), out.end(), id) == out.end())
+        out.push_back(id);
+    }
+    return out;
+  }
+
+  // A clip that lost `delta` from its head: its keyframes (the transform's and its effects') count from the new start.
+  void shift_key_times(const std::string &id, const Rational &delta) {
+    const json &n = node_of(id);
+    const auto shift_props = [&](const json &props) {
+      if (!props.is_object())
+        return;
+      for (const auto &[prop, keys] : props.items())
+        for (auto k = keys.begin(); k != keys.end(); ++k)
+          if (const auto t = Rational::parse(k->value("t", std::string("0"))))
+            push({{"op", "replace"}, {"path", k.key() + "/t"}, {"value", minus(*t, delta).to_string()}});
+    };
+    if (n.contains("transform") && n["transform"].contains("keyframes"))
+      shift_props(n["transform"]["keyframes"]);
+    if (n.contains("effects") && n["effects"].is_object())
+      for (const auto &[fx_id, fx] : n["effects"].items())
+        if (fx.contains("keyframes"))
+          shift_props(fx["keyframes"]);
+  }
+
   // Makes room for a transition over a cut. Where the media beyond the cut is short, the clip on that side is trimmed
   // by what is missing (the end of the first clip, the start of the second), so the transition can use the media that
   // used to be on screen. The second clip then moves up to meet the first, and every later clip of its track follows by
-  // the same amount, so no gap opens; linked clips (the sound of a video) are cut and moved with their partners. Clips
-  // on other tracks that are not linked stay where they are.
+  // the same amount, so no gap opens; linked clips (the sound of a video) are cut and moved with their partners.
+  //
+  // The span taken out of the track is [cut - short_a, cut + short_b). Other tracks stay as they are unless the op's
+  // "ripple" names them ("all" or a list of track IDs): then each of their clips is treated like a ripple delete of
+  // that span: before it, nothing; after it, moved up; ending inside it, cut short; starting inside it, its head is cut
+  // (its keyframes count from the new start); wholly inside it, removed; spanning it, shortened by the span when it has no
+  // media of its own (a title, an effect layer, a still), and left alone, with a note, when it does (it would need a split).
   Result<void> make_room_at(const Cut &cut) {
     const auto pairs = linked_pairs(cut.a, cut.b); // read before any change
     std::vector<std::string> side_a{cut.a}, side_b{cut.b};
@@ -645,6 +700,54 @@ private:
       for (const Member &m : linked(id))
         ATM_CHECK(follow(m.id));
     }
+    // Other tracks that ripple with the cut.
+    ATM_TRY(std::vector<std::string> others, ripple_tracks(cut.ra->parent));
+    const Rational span_start = minus(cut.sb.in, short_a), span_end = plus(cut.sb.in, short_b);
+    int other_moved = 0, other_cut = 0, other_removed = 0;
+    std::vector<std::string> left_alone;
+    for (const std::string &tid : others) {
+      const json *t = track(tid);
+      if (!t || !t->contains("clips"))
+        continue;
+      for (auto it = (*t)["clips"].begin(); it != (*t)["clips"].end(); ++it) {
+        const std::string id = it.key();
+        if (seen(id))
+          continue;
+        const Span sp = span_of(*it);
+        const Rational end = sp.end();
+        if (compare(end, span_start) <= 0)
+          continue; // before the span
+        if (compare(sp.in, span_end) >= 0) { // after it: up by the span
+          ATM_CHECK(change(id, {minus(sp.in, shift), sp.duration, sp.source_in}));
+          ++other_moved;
+          continue;
+        }
+        const bool starts_before = compare(sp.in, span_start) < 0, ends_after = compare(end, span_end) > 0;
+        const bool media = it->value("media_ref", json::object()).value("type", "") == "file";
+        const std::string name = it->value("name", id);
+        if (starts_before && ends_after && media) { // would need a split: left as it is
+          left_alone.push_back(name);
+          continue;
+        }
+        drop_transitions(id, tid); // its length changes
+        if (!starts_before && !ends_after) { // wholly inside the span
+          push({{"op", "remove"}, {"path", id}});
+          done.push_back(id);
+          ++other_removed;
+        } else if (starts_before && ends_after) { // spans it
+          ATM_CHECK(change(id, {sp.in, minus(sp.duration, shift), sp.source_in}));
+          ++other_cut;
+        } else if (starts_before) { // ends inside it
+          ATM_CHECK(change(id, {sp.in, minus(span_start, sp.in), sp.source_in}));
+          ++other_cut;
+        } else { // starts inside it: the part in the span is gone, the rest starts where the cut now is
+          const Rational lost = minus(span_end, sp.in);
+          ATM_CHECK(change(id, {span_start, minus(sp.duration, lost), plus(sp.source_in, lost)}));
+          shift_key_times(id, lost);
+          ++other_cut;
+        }
+      }
+    }
     // A transition that already joins these clips at this cut no longer fits: it goes, with a note.
     const auto drop_between = [&](const std::string &from, const std::string &to) {
       const doc::NodeRef *r = doc_.find(from);
@@ -667,6 +770,21 @@ private:
     note += ", and moved " + std::to_string(later) + " later clip" + (later == 1 ? "" : "s") + " " + seconds_text(shift) +
             " s earlier. The track is " + seconds_text(shift) + " s shorter after the cut.";
     out_.notes.push_back(note);
+    if (!others.empty()) {
+      std::string more = "On the other tracks that ripple: moved " + std::to_string(other_moved) + " clip" + (other_moved == 1 ? "" : "s") +
+                         " " + seconds_text(shift) + " s earlier, shortened " + std::to_string(other_cut);
+      if (other_removed > 0)
+        more += ", removed " + std::to_string(other_removed) + " that lay wholly inside the trimmed span";
+      more += ".";
+      out_.notes.push_back(more);
+    }
+    if (!left_alone.empty()) {
+      std::string names;
+      for (const std::string &n : left_alone)
+        names += (names.empty() ? "" : ", ") + n;
+      out_.notes.push_back("Left in place, because it carries media and spans the cut: " + names +
+                           ". Split it at the cut if it should follow.");
+    }
     return {};
   }
 

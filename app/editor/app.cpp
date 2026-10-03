@@ -2491,10 +2491,34 @@ void App::draw_transition_card(const TrackUi &track, const ClipUi &c) {
         ImGui::TextColored(hexv(look::fg3),
                            "Make room trims that off the clips, moves the later clips on this track up, and shortens the track by %.2f s.",
                            double(miss_after + miss_before) / fps());
+        // Other tracks with clips after the cut (titles, effect layers, music): their clips come up with it. All on by default.
+        std::vector<std::string> ripple;
+        const int64_t cut_frame = c.start + c.frames;
+        bool listed = false;
+        for (const TrackUi &other : tracks_) {
+          if (other.id == track.id ||
+              !std::any_of(other.clips.begin(), other.clips.end(), [&](const ClipUi &k) { return k.start + k.frames > cut_frame; }))
+            continue;
+          if (!listed)
+            ImGui::TextColored(hexv(look::fg2), "Move with the cut:");
+          listed = true;
+          bool on = ripple_off_.count(other.id) == 0;
+          if (ImGui::Checkbox((other.name + "##rip_" + other.id).c_str(), &on)) {
+            if (on)
+              ripple_off_.erase(other.id);
+            else
+              ripple_off_.insert(other.id);
+          }
+          ui_mark("check:ripple_" + other.name);
+          if (on)
+            ripple.push_back(other.id);
+        }
         if (soft_button("make_room", "Make room", ImVec2(-1.0f, 28.0f), true, true))
-          pending_ = [this, from, to, total] {
-            timeline_edit(json::array({{{"op", "make_room"}, {"between", json::array({from, to})}, {"duration", frames_text(total)}}}),
-                          "Make room");
+          pending_ = [this, from, to, total, ripple] {
+            json op = {{"op", "make_room"}, {"between", json::array({from, to})}, {"duration", frames_text(total)}};
+            if (!ripple.empty())
+              op["ripple"] = ripple;
+            timeline_edit(json::array({std::move(op)}), "Make room");
           };
       }
       ImGui::BeginDisabled(!fits);

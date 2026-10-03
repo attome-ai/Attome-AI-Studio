@@ -7,6 +7,7 @@
 #include <map>
 #include <mutex>
 #include <set>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -220,6 +221,7 @@ private:
   float gain_db_ = 0.0f, pan_ = 0.0f, audio_fade_in_s_ = 0.0f, audio_fade_out_s_ = 0.0f;
   float amount_ = 1.0f;                    // an adjustment layer's opacity: how much of its effect shows
   std::map<std::string, float> fx_edit_;   // effect sliders being dragged, by "<effect id>/<param>"
+  std::set<std::string> ripple_off_;      // tracks the user switched off in Make room (the others follow the cut)
   int wipe_dir_ = 0;                       // the side a new wipe or push enters from (eval::WipeDirection)
   float zoom_amount_ = float(eval::kZoomDefault); // how much bigger a new zoom grows the picture
 
