@@ -37,6 +37,12 @@ constexpr EffectParam kKey[] = {
     {"smoothness", "Smoothness", 0.0, 1.0, 0.15, false, 1.0}, // the soft edge between removed and kept
 };
 
+constexpr EffectParam kLumaKey[] = {
+    {"level", "Key level", 0.0, 1.0, 0.0, false, 1.0},      // the brightness that is removed: 0 black, 1 white
+    {"tolerance", "Tolerance", 0.0, 1.0, 0.1, false, 1.0}, // how far from that brightness is still removed
+    {"softness", "Softness", 0.0, 1.0, 0.1, false, 1.0},   // the soft edge between removed and kept
+};
+
 constexpr EffectDef kEffects[] = {
     {"gaussian_blur", "Blur", "blur", kBlur},
     {"color_grade", "Color grade", "grade", kGrade},
@@ -45,6 +51,7 @@ constexpr EffectDef kEffects[] = {
     {"film_grain", "Film grain", "grain", kGrain},
     {"lut", "LUT", "", kLut, "file"},
     {"chroma_key", "Chroma key", "key", kKey, "", true},
+    {"luma_key", "Luma key", "luma", kLumaKey, "", true},
 };
 
 constexpr std::array<std::pair<const char *, WipeDirection>, 4> kDirections = {{

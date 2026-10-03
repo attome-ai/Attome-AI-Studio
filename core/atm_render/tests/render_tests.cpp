@@ -7,6 +7,7 @@
 #include <cstring>
 #include <cmath>
 #include <filesystem>
+#include <functional>
 #include <fstream>
 #include <iterator>
 #include <thread>
@@ -1761,8 +1762,8 @@ TEST_CASE("render: a chroma key makes the key colour transparent so the track be
 
 // A green screen as a camera makes it: grain on every pixel, a lighting falloff across the screen, a soft-edged subject
 // with green spill on its rim, then H.264 at a low bitrate. Returns the clip's path.
-static std::string write_noisy_screen(const fs::path &dir, int W, int H, double cx, double cy, double radius) {
-  const std::string path = (dir / "screen.mp4").string();
+static std::string write_noisy_screen(const fs::path &dir, int W, int H, double cx, double cy, double radius, bool dark = false) {
+  const std::string path = (dir / (dark ? "dark.mp4" : "screen.mp4")).string();
   auto encoder = media::Encoder::create({path, W, H, 30, 1, 1'500'000, true});
   REQUIRE(encoder);
   uint32_t rng = 12345;
@@ -1782,8 +1783,10 @@ static std::string write_noisy_screen(const fs::path &dir, int W, int H, double 
         const double a = std::clamp(0.5 - d / 3.0, 0.0, 1.0);                              // 3 px soft edge
         const double light = 0.65 + 0.35 * double(x) / double(W);                           // falls off to the left
         double screen[3] = {0.0 * light, 177.0 * light, 64.0 * light};
+        if (dark) // a black set, lit unevenly
+          screen[0] = screen[1] = screen[2] = 12.0 * light;
         double skin[3] = {224, 172, 140};
-        if (d < 0 && d > -7) { // spill: green light reflected onto the rim
+        if (!dark && d < 0 && d > -7) { // spill: green light reflected onto the rim
           const double k = (1.0 + d / 7.0) * 0.55;
           skin[0] -= 70 * k, skin[1] += 25 * k, skin[2] -= 40 * k;
         }
@@ -1801,12 +1804,14 @@ static std::string write_noisy_screen(const fs::path &dir, int W, int H, double 
   return path;
 }
 
-TEST_CASE("render: a chroma key on noisy footage leaves no speckle, no holes and a narrow soft edge", "[media]") {
+TEST_CASE("render: chroma and luma keys on noisy footage leave no speckle, no holes and a narrow soft edge", "[media]") {
   const fs::path dir = fs::temp_directory_path() / atm::new_id("attome-noisykey");
   fs::create_directories(dir);
   constexpr int W = 640, H = 360;
   constexpr double cx = 320, cy = 180, radius = 110;
-  const std::string screen = write_noisy_screen(dir, W, H, cx, cy, radius);
+  for (const bool luma : {false, true}) { // a green screen with the chroma key, a black set with the luma key
+  INFO((luma ? "luma key on a black set" : "chroma key on a green screen"));
+  const std::string screen = write_noisy_screen(dir, W, H, cx, cy, radius, luma);
   const std::string below = (dir / "magenta.mp4").string();
   write_solid(below, 0xFF00FF, 440.0, 2);
   const auto render = [&](json effects, bool with_top = true) {
@@ -1836,9 +1841,12 @@ TEST_CASE("render: a chroma key on noisy footage leaves no speckle, no holes and
     media::nv12_to_bgrx(nv12.data(), W, H, rgb.data());
     return rgb;
   };
-  const auto fx = [](json params) { return json{{"fx_1", {{"effect", "attome.chroma_key@1.0.0"}, {"enabled", true}, {"params", std::move(params)}}}}; };
+  const auto fx = [&](json params) {
+    return json{{"fx_1", {{"effect", luma ? "attome.luma_key@1.0.0" : "attome.chroma_key@1.0.0"}, {"enabled", true}, {"params", std::move(params)}}}};
+  };
   const auto plain = render(nullptr);
-  const auto keyed = render(fx({{"hue", 120.0}, {"similarity", 0.35}, {"smoothness", 0.15}}));
+  const auto keyed = render(luma ? fx({{"level", 0.0}, {"tolerance", 0.12}, {"softness", 0.05}})
+                                 : fx({{"hue", 120.0}, {"similarity", 0.35}, {"smoothness", 0.15}}));
   const auto magenta = render(nullptr, false); // the background alone
   if (const char *out = std::getenv("ATTOME_DUMP_DIR")) {
     for (const auto &[name, img] : {std::pair{"plain", &plain}, std::pair{"keyed", &keyed}}) {
@@ -1882,7 +1890,338 @@ TEST_CASE("render: a chroma key on noisy footage leaves no speckle, no holes and
   CHECK(speckle < 0.002);
   CHECK(holes < 0.002);
   CHECK(edge_width <= 8);
-  CHECK(rim_green / rim_n < rim_plain_green / rim_n - 8.0); // the spill on the rim is mostly gone
+  if (!luma)
+    CHECK(rim_green / rim_n < rim_plain_green / rim_n - 8.0); // the spill on the rim is mostly gone
+  } // for luma
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}
+
+TEST_CASE("render: a luma key makes the chosen brightness transparent; other brightnesses stay", "[media]") {
+  const fs::path dir = fs::temp_directory_path() / atm::new_id("attome-lumakey");
+  fs::create_directories(dir);
+  const std::string clip = (dir / "clip.mp4").string();
+  write_clip(clip, 320, 240, 30); // red top half (bright), blue bottom half (dark)
+  const std::string below = (dir / "yellow.mp4").string();
+  write_solid(below, 0xFFFF00, 440.0, 2);
+  struct Px { int r, g, b; };
+  const auto shoot = [&](json params) {
+    json top = {{"timing", {{"record_in", "0"}, {"duration", "1"}, {"source_in", "0"}}},
+                {"media_ref", {{"type", "file"}, {"path", clip}}},
+                {"effects", {{"fx_1", {{"effect", "attome.luma_key@1.0.0"}, {"enabled", true}, {"params", std::move(params)}}}}}};
+    const json doc = {
+        {"sequences",
+         {{"seq_1",
+           {{"rate", "30"},
+            {"canvas", {{"width", 320}, {"height", 240}}},
+            {"track_order", {"trk_below", "trk_top"}},
+            {"tracks",
+             {{"trk_below", {{"clips", {{"clp_b", {{"timing", {{"record_in", "0"}, {"duration", "1"}, {"source_in", "0"}}},
+                                                   {"media_ref", {{"type", "file"}, {"path", below}}}}}}}}},
+              {"trk_top", {{"clips", {{"clp_t", top}}}}}}}}}}},
+        {"sequence_order", {"seq_1"}}};
+    auto comp = atm::render::compile(doc);
+    REQUIRE(comp);
+    atm::render::Renderer renderer(*comp, 320, 240);
+    std::vector<uint8_t> nv12(media::nv12_size(320, 240)), rgb(320 * 240 * 4);
+    REQUIRE(renderer.render(10, nv12.data()));
+    media::nv12_to_bgrx(nv12.data(), 320, 240, rgb.data());
+    const auto px = [&](int x, int y) {
+      const uint8_t *p = rgb.data() + (size_t(y) * 320 + size_t(x)) * 4;
+      return Px{p[2], p[1], p[0]};
+    };
+    return std::pair<Px, Px>{px(160, 40), px(160, 200)};
+  };
+  { // the dark half goes (level 0): yellow shows through; the bright red half stays
+    const auto [top, bottom] = shoot({{"level", 0.0}, {"tolerance", 0.1}, {"softness", 0.05}});
+    CHECK(top.r > 200);
+    CHECK(top.g < 60);
+    CHECK(top.b < 60);
+    CHECK(bottom.r > 200);
+    CHECK(bottom.g > 200);
+    CHECK(bottom.b < 80);
+  }
+  { // the key level is white: nothing here is that bright, so nothing is removed
+    const auto [top, bottom] = shoot({{"level", 1.0}, {"tolerance", 0.1}, {"softness", 0.05}});
+    CHECK(top.r > 200);
+    CHECK(top.g < 60);
+    CHECK(bottom.b > 120);
+    CHECK(bottom.r < 60);
+  }
+  { // a wide tolerance takes both halves
+    const auto [top, bottom] = shoot({{"level", 0.0}, {"tolerance", 0.6}, {"softness", 0.05}});
+    CHECK(top.g > 200);
+    CHECK(bottom.g > 200);
+  }
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}
+
+// Footage that is harder than a flat circle: a subject whose silhouette is motion-blurred sideways, with fine hair strands
+// (1.6 px wide, dark) round its top, in front of a screen whose colour drifts across the frame (an uneven cast) - all with
+// grain and low-bitrate H.264. `fn` gives the colour (0..255) of a pixel; noise is added here.
+static std::string write_synth(const fs::path &dir, const char *name, int W, int H, double noise_sigma,
+                               const std::function<void(int, int, double *)> &fn) {
+  const std::string path = (dir / name).string();
+  auto encoder = media::Encoder::create({path, W, H, 30, 1, 1'500'000, true});
+  REQUIRE(encoder);
+  uint32_t rng = 987654;
+  const auto noise = [&] {
+    double sum = 0;
+    for (int i = 0; i < 4; ++i) {
+      rng = rng * 1664525u + 1013904223u;
+      sum += double(rng >> 8) / double(1 << 24) - 0.5;
+    }
+    return sum * 1.73 * noise_sigma;
+  };
+  std::vector<uint8_t> bgrx(size_t(W) * size_t(H) * 4), nv12(media::nv12_size(W, H));
+  for (int f = 0; f < 6; ++f) {
+    for (int y = 0; y < H; ++y)
+      for (int x = 0; x < W; ++x) {
+        double c[3];
+        fn(x, y, c);
+        uint8_t *px = bgrx.data() + (size_t(y) * size_t(W) + size_t(x)) * 4;
+        for (int k = 0; k < 3; ++k)
+          px[2 - k] = uint8_t(std::clamp(c[k] + noise(), 0.0, 255.0));
+        px[3] = 255;
+      }
+    media::bgrx_to_nv12(bgrx.data(), W, H, nv12.data());
+    REQUIRE((*encoder)->video(nv12.data(), f));
+  }
+  REQUIRE((*encoder)->finish());
+  return path;
+}
+
+namespace {
+struct Strand { double x0, y0, x1, y1; };
+// Distance from (x, y) to a segment.
+double seg_distance(double x, double y, const Strand &s) {
+  const double dx = s.x1 - s.x0, dy = s.y1 - s.y0;
+  const double t = std::clamp(((x - s.x0) * dx + (y - s.y0) * dy) / (dx * dx + dy * dy), 0.0, 1.0);
+  return std::hypot(x - (s.x0 + t * dx), y - (s.y0 + t * dy));
+}
+} // namespace
+
+TEST_CASE("render: chroma key on harder footage - blurred silhouette, hair strands, a drifting screen colour", "[media]") {
+  const fs::path dir = fs::temp_directory_path() / atm::new_id("attome-hardkey");
+  fs::create_directories(dir);
+  constexpr int W = 640, H = 360;
+  constexpr double cx = 320, cy = 200, radius = 100;
+  std::vector<Strand> strands; // from the top of the head, fanning out and up, 28 px long
+  for (int i = 0; i < 9; ++i) {
+    const double a = (-150.0 + 15.0 * i) * 3.14159265 / 180.0; // -150 .. -30 degrees: the upper arc
+    strands.push_back({cx + (radius - 2) * std::cos(a), cy + (radius - 2) * std::sin(a), cx + (radius + 28) * std::cos(a), cy + (radius + 28) * std::sin(a)});
+  }
+  const auto body_alpha = [&](double x, double y) { // the head, blurred sideways over 13 px as if it moved
+    double sum = 0;
+    for (int k = -6; k <= 6; ++k)
+      sum += std::clamp(0.5 - (std::hypot(x + k - cx, y - cy) - radius) / 3.0, 0.0, 1.0);
+    return sum / 13.0;
+  };
+  const auto strand_alpha = [&](double x, double y) {
+    double a = 0;
+    for (const Strand &s : strands)
+      a = std::max(a, std::clamp(0.5 - (seg_distance(x, y, s) - 0.8) / 1.0, 0.0, 1.0));
+    return a;
+  };
+  const std::string screen = write_synth(dir, "hard.mp4", W, H, 4.0, [&](int px, int py, double *c) {
+    const double x = px + 0.5, y = py + 0.5;
+    const double light = 0.65 + 0.35 * x / W;
+    const double t = x / W; // the cast: blue creeps into the green from left to right (hue 142 -> 152 degrees)
+    // A wrinkle in the cloth: a soft diagonal shadow band, 20 % darker at its middle and about 24 px wide.
+    const double wd = (x * 0.6 + y * 0.8 - 190.0) / 12.0;
+    const double shade = 1.0 - 0.2 * std::exp(-wd * wd);
+    // A tracking marker: a black tape cross, 2 px arms, 24 px across, at (80, 60).
+    const double marker = (std::fabs(x - 80) < 1.0 && std::fabs(y - 60) < 12.0) || (std::fabs(y - 60) < 1.0 && std::fabs(x - 80) < 12.0) ? 1.0 : 0.0;
+    const double bg[3] = {0.0, 177.0 * light * shade * (1.0 - marker), (64.0 + 30.0 * t) * light * shade * (1.0 - marker)};
+    const double skin[3] = {224, 172, 140}, hair[3] = {45, 32, 24};
+    const double ab = body_alpha(x, y), as = strand_alpha(x, y) * (1.0 - ab);
+    for (int k = 0; k < 3; ++k)
+      c[k] = skin[k] * ab + hair[k] * as + bg[k] * (1.0 - ab - as);
+  });
+  const std::string below = (dir / "magenta.mp4").string();
+  write_solid(below, 0xFF00FF, 440.0, 2);
+  const auto render = [&](json effects, bool with_top = true) {
+    json top = {{"timing", {{"record_in", "0"}, {"duration", "1"}, {"source_in", "0"}}}, {"media_ref", {{"type", "file"}, {"path", screen}}}};
+    if (!effects.is_null())
+      top["effects"] = std::move(effects);
+    json top_track = json::object();
+    top_track["clips"] = json::object();
+    if (with_top)
+      top_track["clips"]["clp_t"] = top;
+    const json doc = {
+        {"sequences",
+         {{"seq_1",
+           {{"rate", "30"},
+            {"canvas", {{"width", W}, {"height", H}}},
+            {"track_order", {"trk_below", "trk_top"}},
+            {"tracks",
+             {{"trk_below", {{"clips", {{"clp_b", {{"timing", {{"record_in", "0"}, {"duration", "1"}, {"source_in", "0"}}},
+                                                   {"media_ref", {{"type", "file"}, {"path", below}}}}}}}}},
+              {"trk_top", top_track}}}}}}},
+        {"sequence_order", {"seq_1"}}};
+    auto comp = atm::render::compile(doc);
+    REQUIRE(comp);
+    atm::render::Renderer renderer(*comp, W, H);
+    std::vector<uint8_t> nv12(media::nv12_size(W, H)), rgb(size_t(W) * H * 4);
+    REQUIRE(renderer.render(3, nv12.data()));
+    media::nv12_to_bgrx(nv12.data(), W, H, rgb.data());
+    return rgb;
+  };
+  const auto fx = [](double hue, double similarity, double smoothness) {
+    return json{{"fx_1", {{"effect", "attome.chroma_key@1.0.0"}, {"enabled", true},
+                          {"params", {{"hue", hue}, {"similarity", similarity}, {"smoothness", smoothness}}}}}};
+  };
+  const auto plain = render(nullptr), bg_only = render(nullptr, false);
+  const auto keyed = render(fx(147.0, 0.35, 0.15)); // the middle of the drifting hue
+  if (const char *out = std::getenv("ATTOME_DUMP_DIR")) {
+    std::ofstream f(fs::path(out) / "hard_keyed.bgrx", std::ios::binary);
+    f.write(reinterpret_cast<const char *>(keyed.data()), std::streamsize(keyed.size()));
+  }
+  const auto at = [&](const std::vector<uint8_t> &img, int x, int y) { return img.data() + (size_t(y) * W + size_t(x)) * 4; };
+  const auto l1 = [&](const uint8_t *a, const uint8_t *b) { return std::abs(int(a[0]) - int(b[0])) + std::abs(int(a[1]) - int(b[1])) + std::abs(int(a[2]) - int(b[2])); };
+  const auto green_excess = [](const uint8_t *p) { return double(p[1]) - (double(p[0]) + double(p[2])) * 0.5; }; // BGRX: p[1] is green
+  int bg_n = 0, bg_bad = 0, in_n = 0, in_bad = 0, strand_n = 0, strand_kept = 0, edge_n = 0, marker_n = 0, marker_kept = 0;
+  double edge_fringe = -1000, strand_fringe = -1000;
+  for (int y = 0; y < H; ++y)
+    for (int x = 0; x < W; ++x) {
+      const double X = x + 0.5, Y = y + 0.5, d = std::hypot(X - cx, Y - cy) - radius;
+      double near_strand = 1e9;
+      for (const Strand &s : strands)
+        near_strand = std::min(near_strand, seg_distance(X, Y, s));
+      const bool at_marker = std::fabs(X - 80) < 14 && std::fabs(Y - 60) < 14;
+      if (at_marker) {
+        ++marker_n;
+        marker_kept += l1(at(keyed, x, y), at(bg_only, x, y)) > 45;
+      } else if (d > 12 && near_strand > 4) { // the screen, with its wrinkle, away from the head (a 6 px blur) and the hair
+        ++bg_n;
+        bg_bad += l1(at(keyed, x, y), at(bg_only, x, y)) > 45;
+      } else if (d < -14) { // inside the head
+        ++in_n;
+        in_bad += l1(at(keyed, x, y), at(plain, x, y)) > 45;
+      } else if (near_strand < 0.5 && d > 4) { // along the centre of a hair strand, clear of the head
+        ++strand_n;
+        strand_kept += l1(at(keyed, x, y), at(bg_only, x, y)) > 60;
+      } else if (near_strand < 3.0 && near_strand > 1.5 && d > 4) { // just beside a strand
+        strand_fringe = std::max(strand_fringe, green_excess(at(keyed, x, y)));
+      }
+      if (std::fabs(d) < 9 && std::fabs(Y - cy) < 4) { // the blurred side edges, middle rows
+        const uint8_t *k = at(keyed, x, y);
+        if (l1(k, at(bg_only, x, y)) > 45 && l1(k, at(plain, x, y)) > 45) {
+          ++edge_n;
+          edge_fringe = std::max(edge_fringe, green_excess(k));
+        }
+      }
+    }
+  const double speckle = double(bg_bad) / bg_n, holes = double(in_bad) / in_n, kept = double(strand_kept) / strand_n;
+  WARN("speckle " << speckle << "  holes " << holes << "  hair kept " << kept << " (" << strand_n << " px)  edge px " << edge_n
+                  << "  green excess: edge " << edge_fringe << ", beside hair " << strand_fringe << "  (skin is -10, the magenta below -255)");
+  WARN("tracking marker (a 2 px black cross): " << marker_kept << " of " << marker_n << " px in its box differ from the background");
+  CHECK(speckle < 0.002); // a drifting screen colour, with a wrinkle across it, is still all removed
+  CHECK(holes < 0.002);
+  // A strand 1.6 px wide shares its 4:2:0 chroma sample with the screen round it, so the chroma matte alone takes it for
+  // screen (a quarter survived); the luma-guided pass keeps the thin dark lines. The price: a dark tracking marker stays too.
+  CHECK(kept > 0.8);
+  CHECK(edge_fringe < 15.0);  // the blurred edge mixes skin and the background below, with no green in it
+  CHECK(strand_fringe < 15.0);
+
+  // The same footage with the key colour off by 30 degrees: this tells where the similarity runs out.
+  const auto off = render(fx(207.0, 0.35, 0.15));
+  int off_bad = 0, off_n = 0; // off_bad: pixels that still differ from the background, i.e. not removed
+  for (int y = 0; y < H; y += 2)
+    for (int x = 0; x < 200; x += 2, ++off_n)
+      off_bad += l1(at(off, x, y), at(bg_only, x, y)) > 45;
+  WARN("key colour 60 degrees off the screen's: " << 100.0 * off_bad / off_n << " % of the left screen is left in place");
+  CHECK(double(off_bad) / off_n > 0.95); // 63 degrees apart in the chroma plane, past the limit of about 38: it is not keyed
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}
+
+TEST_CASE("render: luma key on a dark subject - what survives next to a black set, by tone", "[media]") {
+  const fs::path dir = fs::temp_directory_path() / atm::new_id("attome-darkkey");
+  fs::create_directories(dir);
+  constexpr int W = 640, H = 360;
+  // Three vertical bands of a subject in front of a black set lit unevenly: midtone, shadow, deep shadow. Each band is a
+  // 120 px wide rectangle with a soft left and right edge.
+  const double bands[3] = {140.0, 70.0, 28.0}; // grey level (0..255) of each tone
+  const auto tone_at = [&](double x) { return x < 213 ? 0 : x < 426 ? 1 : 2; };
+  const std::string clip = write_synth(dir, "dark.mp4", W, H, 3.0, [&](int px, int py, double *c) {
+    const double x = px + 0.5, y = py + 0.5;
+    const double set = 12.0 * (0.65 + 0.35 * x / W);
+    const double cxb = 213.0 * (tone_at(x) + 0.5);
+    const double a = std::clamp((60.0 - std::fabs(x - cxb)) / 3.0 + 0.5, 0.0, 1.0) * std::clamp((140.0 - std::fabs(y - 180.0)) / 3.0 + 0.5, 0.0, 1.0);
+    for (int k = 0; k < 3; ++k)
+      c[k] = bands[tone_at(x)] * (k == 0 ? 1.0 : k == 1 ? 0.85 : 0.75) * a + set * (1.0 - a);
+  });
+  const std::string below = (dir / "yellow.mp4").string();
+  write_solid(below, 0xFFFF00, 440.0, 2);
+  const auto render = [&](json params, bool with_top = true) {
+    json top = {{"timing", {{"record_in", "0"}, {"duration", "1"}, {"source_in", "0"}}}, {"media_ref", {{"type", "file"}, {"path", clip}}}};
+    if (!params.is_null())
+      top["effects"] = {{"fx_1", {{"effect", "attome.luma_key@1.0.0"}, {"enabled", true}, {"params", std::move(params)}}}};
+    json top_track = json::object();
+    top_track["clips"] = json::object();
+    if (with_top)
+      top_track["clips"]["clp_t"] = top;
+    const json doc = {
+        {"sequences",
+         {{"seq_1",
+           {{"rate", "30"},
+            {"canvas", {{"width", W}, {"height", H}}},
+            {"track_order", {"trk_below", "trk_top"}},
+            {"tracks",
+             {{"trk_below", {{"clips", {{"clp_b", {{"timing", {{"record_in", "0"}, {"duration", "1"}, {"source_in", "0"}}},
+                                                   {"media_ref", {{"type", "file"}, {"path", below}}}}}}}}},
+              {"trk_top", top_track}}}}}}},
+        {"sequence_order", {"seq_1"}}};
+    auto comp = atm::render::compile(doc);
+    REQUIRE(comp);
+    atm::render::Renderer renderer(*comp, W, H);
+    std::vector<uint8_t> nv12(media::nv12_size(W, H)), rgb(size_t(W) * H * 4);
+    REQUIRE(renderer.render(3, nv12.data()));
+    media::nv12_to_bgrx(nv12.data(), W, H, rgb.data());
+    return rgb;
+  };
+  const auto plain = render(nullptr), yellow = render(nullptr, false);
+  const auto at = [&](const std::vector<uint8_t> &img, int x, int y) { return img.data() + (size_t(y) * W + size_t(x)) * 4; };
+  const auto l1 = [&](const uint8_t *a, const uint8_t *b) { return std::abs(int(a[0]) - int(b[0])) + std::abs(int(a[1]) - int(b[1])) + std::abs(int(a[2]) - int(b[2])); };
+  struct Result { double set_removed, kept[3]; };
+  const auto measure = [&](double tolerance, double softness) {
+    const auto keyed = render({{"level", 0.0}, {"tolerance", tolerance}, {"softness", softness}});
+    Result r{};
+    int set_n = 0, set_ok = 0, n[3] = {0, 0, 0}, ok[3] = {0, 0, 0};
+    for (int y = 0; y < H; y += 2)
+      for (int x = 0; x < W; x += 2) {
+        const int band = tone_at(x + 0.5);
+        const double cxb = 213.0 * (band + 0.5);
+        const bool in_band = std::fabs(x + 0.5 - cxb) < 50 && std::fabs(y + 0.5 - 180.0) < 130;
+        const bool on_set = std::fabs(x + 0.5 - cxb) > 70 || std::fabs(y + 0.5 - 180.0) > 150;
+        if (in_band) {
+          ++n[band];
+          ok[band] += l1(at(keyed, x, y), at(plain, x, y)) < 60;
+        } else if (on_set) {
+          ++set_n;
+          set_ok += l1(at(keyed, x, y), at(yellow, x, y)) < 60;
+        }
+      }
+    r.set_removed = double(set_ok) / set_n;
+    for (int i = 0; i < 3; ++i)
+      r.kept[i] = double(ok[i]) / n[i];
+    return r;
+  };
+  const Result dflt = measure(0.1, 0.1); // the defaults
+  const Result tight = measure(0.07, 0.03);
+  WARN("defaults (tolerance 0.1, softness 0.1): set removed " << dflt.set_removed << ", kept midtone " << dflt.kept[0] << " shadow " << dflt.kept[1]
+                                                               << " deep shadow " << dflt.kept[2]);
+  WARN("tight (tolerance 0.07, softness 0.03): set removed " << tight.set_removed << ", kept midtone " << tight.kept[0] << " shadow "
+                                                              << tight.kept[1] << " deep shadow " << tight.kept[2]);
+  CHECK(dflt.kept[2] < 0.1); // the default tolerance takes a subject tone that dark with the set: a luma key cannot tell them apart
+  CHECK(dflt.set_removed > 0.98);
+  CHECK(dflt.kept[0] > 0.98);
+  CHECK(dflt.kept[1] > 0.98);
+  CHECK(tight.set_removed > 0.9);
+  CHECK(tight.kept[2] >= dflt.kept[2]); // tightening never loses more of the deep shadow
+  CHECK(tight.kept[2] > 0.5);           // and keeps most of it: a tone 2x the set's brightness can be separated
   std::error_code ec;
   fs::remove_all(dir, ec);
 }

@@ -945,3 +945,31 @@ TEST_CASE("effects: a chroma key is for clips with a picture; ranges are checked
                                              {"ops", json::array({{{"op", "set_property"}, {"target", id}, {"path", "params.hue"}, {"value", 400}}})}});
   CHECK_FALSE(bad); // out of range
 }
+
+TEST_CASE("effects: a luma key is for clips with a picture; add_effect takes the name luma", "[effect]") {
+  Fixture f;
+  const auto fx = [](json params) { return json{{"effect", "attome.luma_key@1.0.0"}, {"enabled", true}, {"params", std::move(params)}}; };
+  const auto layer = [&](const Fixture &on, json effect) {
+    return json::array({{{"op", "add"},
+                         {"path", on.track + "/clips/$new:adj"},
+                         {"value",
+                          {{"timing", {{"record_in", "4s"}, {"duration", "2s"}, {"source_in", "0s"}}},
+                           {"media_ref", {{"type", "adjustment"}}},
+                           {"effects", {{"$new:fx", std::move(effect)}}}}}}});
+  };
+  CHECK(f.rule_of(layer(f, fx({{"level", 0.5}}))) == "EFFECT_UNSUPPORTED");
+  Fixture g;
+  auto r = g.engine.call("timeline.edit", {{"project", g.project},
+                                           {"ops", json::array({{{"op", "add_effect"}, {"id", "$new:k"}, {"target", g.a}, {"type", "luma"}, {"level", 1.0}}})}});
+  INFO((r ? "" : r.error().message));
+  REQUIRE(r);
+  const json a = g.engine.call("project.get", {{"project", g.project}, {"id", g.a}})->at("object");
+  const json &k = *a["effects"].begin();
+  CHECK(k["effect"] == "attome.luma_key@1.0.0");
+  CHECK(k["params"]["level"] == 1.0);
+  CHECK(k["params"]["tolerance"] == 0.1);
+  const std::string id = a["effects"].begin().key();
+  auto bad = g.engine.call("timeline.edit", {{"project", g.project},
+                                             {"ops", json::array({{{"op", "set_property"}, {"target", id}, {"path", "params.level"}, {"value", 2}}})}});
+  CHECK_FALSE(bad); // out of range
+}

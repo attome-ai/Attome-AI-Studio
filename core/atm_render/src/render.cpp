@@ -843,23 +843,104 @@ void key_nv12(uint8_t *nv12, uint8_t *cover, int W, int H, float hue, float simi
     }
   });
   const uint8_t *m = matte.data();
-  parallel_for(H, 16, [&](int64_t first, int64_t last) {
-    for (int64_t y = first; y < last; ++y) {
-      const float fy = std::clamp((float(y) + 0.5f) * 0.5f - 0.5f, 0.0f, float(CH - 1));
-      const int y0 = std::min(int(fy), CH - 1), y1 = std::min(y0 + 1, CH - 1);
-      const int ty = int((fy - float(y0)) * 256.0f);
-      uint8_t *row = nv12 + size_t(y) * size_t(W);
-      uint8_t *cov = cover + size_t(y) * size_t(W);
-      for (int px = 0; px < W; ++px) {
-        const float fx = std::clamp((float(px) + 0.5f) * 0.5f - 0.5f, 0.0f, float(CW - 1));
-        const int x0 = std::min(int(fx), CW - 1), x1 = std::min(x0 + 1, CW - 1);
-        const int tx = int((fx - float(x0)) * 256.0f);
-        const int top = int(m[size_t(y0) * size_t(CW) + size_t(x0)]) * (256 - tx) + int(m[size_t(y0) * size_t(CW) + size_t(x1)]) * tx;
-        const int bot = int(m[size_t(y1) * size_t(CW) + size_t(x0)]) * (256 - tx) + int(m[size_t(y1) * size_t(CW) + size_t(x1)]) * tx;
-        const int a = (top * (256 - ty) + bot * ty) >> 16; // 0..255
-        row[px] = uint8_t(16 + ((int(row[px]) - 16) * a + 127) / 255);
-        cov[px] = uint8_t((int(cov[px]) * a + 127) / 255);
+  // Fine detail. The matte above has the resolution of the chroma (a quarter of the pixels), so a strand of hair 2 pixels
+  // wide shares its chroma sample with the screen round it and is taken for screen. The luma has full resolution: where the
+  // matte says "screen" but a pixel is much darker or lighter than the screen round it, and is a thin line (more extreme
+  // than the pixels two steps to either side across it), it is foreground and is kept. The screen's own luma comes from the
+  // keyed-out samples near the pixel (it drifts with the lighting); a soft edge is not a thin line, so it is left to the
+  // matte. The kept pixels have no chroma of their own here (the screen's green is in it), so they come out neutral.
+  // Buffers kept between frames (this runs on the render thread; the workers get references).
+  thread_local std::vector<float> t_ref, t_valid, t_wl, t_ww, t_tl, t_tw;
+  thread_local std::vector<uint8_t> t_alpha;
+  const size_t csize = size_t(CW) * size_t(CH);
+  for (std::vector<float> *v : {&t_ref, &t_valid, &t_wl, &t_ww, &t_tl, &t_tw})
+    v->resize(csize);
+  t_alpha.resize(size_t(W) * size_t(H));
+  std::vector<float> &ref = t_ref, &valid = t_valid, &wl = t_wl, &ww = t_ww, &tl = t_tl, &tw = t_tw;
+  std::vector<uint8_t> &alpha = t_alpha;
+  {
+    ATM_PROFILE_SCOPE("effect.chroma_key.detail");
+    constexpr int R = 3;
+    parallel_for(CH, 16, [&](int64_t first, int64_t last) {
+      for (int64_t cy = first; cy < last; ++cy) {
+        const uint8_t *l0 = nv12 + size_t(2 * cy) * size_t(W), *l1 = l0 + W;
+        for (int cx = 0; cx < CW; ++cx) {
+          const float w = 1.0f - float(m[size_t(cy) * size_t(CW) + size_t(cx)]) * (1.0f / 255.0f);
+          const float l = float(l0[2 * cx] + l0[2 * cx + 1] + l1[2 * cx] + l1[2 * cx + 1]) * 0.25f;
+          ww[size_t(cy) * size_t(CW) + size_t(cx)] = w;
+          wl[size_t(cy) * size_t(CW) + size_t(cx)] = w * l;
+        }
       }
+    });
+    parallel_for(CH, 16, [&](int64_t first, int64_t last) { // box blur along x, a sliding sum per row
+      for (int64_t cy = first; cy < last; ++cy) {
+        const size_t o = size_t(cy) * size_t(CW);
+        float sl = 0.0f, sw = 0.0f;
+        for (int k = -R; k <= R; ++k)
+          sl += wl[o + size_t(std::clamp(k, 0, CW - 1))], sw += ww[o + size_t(std::clamp(k, 0, CW - 1))];
+        for (int cx = 0; cx < CW; ++cx) {
+          tl[o + size_t(cx)] = sl, tw[o + size_t(cx)] = sw;
+          const size_t add = o + size_t(std::min(cx + R + 1, CW - 1)), drop = o + size_t(std::max(cx - R, 0));
+          sl += wl[add] - wl[drop], sw += ww[add] - ww[drop];
+        }
+      }
+    });
+    parallel_for(CW, 16, [&](int64_t first, int64_t last) { // along y, per column; then the screen's luma and how much screen there is
+      for (int64_t cx = first; cx < last; ++cx) {
+        float sl = 0.0f, sw = 0.0f;
+        for (int k = -R; k <= R; ++k) {
+          const size_t i = size_t(std::clamp(k, 0, CH - 1)) * size_t(CW) + size_t(cx);
+          sl += tl[i], sw += tw[i];
+        }
+        for (int cy = 0; cy < CH; ++cy) {
+          const size_t i = size_t(cy) * size_t(CW) + size_t(cx);
+          ref[i] = sl / std::max(sw, 1e-3f);
+          valid[i] = smooth01((sw * (1.0f / float((2 * R + 1) * (2 * R + 1))) - 0.15f) / 0.15f);
+          const size_t add = size_t(std::min(cy + R + 1, CH - 1)) * size_t(CW) + size_t(cx), drop = size_t(std::max(cy - R, 0)) * size_t(CW) + size_t(cx);
+          sl += tl[add] - tl[drop], sw += tw[add] - tw[drop];
+        }
+      }
+    });
+    // The matte for every pixel, from the unchanged luma: the chroma matte read bilinearly, raised where a thin line is. How
+    // far a pixel is from the screen near it is taken from the nearest chroma sample (the screen's luma is smooth).
+    const auto dist = [&](int px, int y) {
+      const size_t i = size_t(y >> 1) * size_t(CW) + size_t(px >> 1);
+      return std::abs(float(nv12[size_t(y) * size_t(W) + size_t(px)]) - ref[i]) * valid[i] * (1.0f / 219.0f);
+    };
+    parallel_for(H, 16, [&](int64_t first, int64_t last) {
+      for (int64_t y = first; y < last; ++y) {
+        const float fy = std::clamp((float(y) + 0.5f) * 0.5f - 0.5f, 0.0f, float(CH - 1));
+        const int y0 = std::min(int(fy), CH - 1), y1 = std::min(y0 + 1, CH - 1);
+        const int ty = int((fy - float(y0)) * 256.0f);
+        const bool inside_y = y >= 2 && y + 2 < H;
+        for (int px = 0; px < W; ++px) {
+          const float fx = std::clamp((float(px) + 0.5f) * 0.5f - 0.5f, 0.0f, float(CW - 1));
+          const int x0 = std::min(int(fx), CW - 1), x1 = std::min(x0 + 1, CW - 1);
+          const int tx = int((fx - float(x0)) * 256.0f);
+          const int top = int(m[size_t(y0) * size_t(CW) + size_t(x0)]) * (256 - tx) + int(m[size_t(y0) * size_t(CW) + size_t(x1)]) * tx;
+          const int bot = int(m[size_t(y1) * size_t(CW) + size_t(x0)]) * (256 - tx) + int(m[size_t(y1) * size_t(CW) + size_t(x1)]) * tx;
+          int a = (top * (256 - ty) + bot * ty) >> 16; // 0..255
+          if (a < 200) { // mostly screen: look for a thin line in it
+            const float d = dist(px, int(y));
+            if (d > 0.10f) {
+              float thin = 0.0f;
+              if (px >= 2 && px + 2 < W)
+                thin = std::max(thin, std::min(d - dist(px - 2, int(y)), d - dist(px + 2, int(y))));
+              if (inside_y)
+                thin = std::max(thin, std::min(d - dist(px, int(y) - 2), d - dist(px, int(y) + 2)));
+              a = std::max(a, int(smooth01((d - 0.10f) / 0.10f) * smooth01((thin - 0.04f) / 0.06f) * 255.0f + 0.5f));
+            }
+          }
+          alpha[size_t(y) * size_t(W) + size_t(px)] = uint8_t(a);
+        }
+      }
+    });
+  }
+  parallel_for(H, 16, [&](int64_t first, int64_t last) {
+    for (size_t i = size_t(first) * size_t(W); i < size_t(last) * size_t(W); ++i) {
+      const int a = alpha[i];
+      nv12[i] = uint8_t(16 + ((int(nv12[i]) - 16) * a + 127) / 255);
+      cover[i] = uint8_t((int(cover[i]) * a + 127) / 255);
     }
   });
   parallel_for(CH, 16, [&](int64_t first, int64_t last) {
@@ -870,6 +951,40 @@ void key_nv12(uint8_t *nv12, uint8_t *cover, int W, int H, float hue, float simi
         for (int k = 0; k < 2; ++k)
           p[k] = uint8_t(128 + ((int(p[k]) - 128) * a + (p[k] >= 128 ? 127 : -127)) / 255);
       }
+  });
+}
+
+// Luma key: removes the pixels whose brightness is near `level` (0 black .. 1 white, of the video range): a title on
+// black, a logo on white, smoke on a dark set. A pixel is kept in full beyond `tolerance + softness` from the level and
+// removed inside `tolerance`; between them it fades. The matte is made per luma pixel from the picture's own luma and
+// multiplies the picture and the coverage like the chroma key's; the chroma of a 2 x 2 block follows the mean matte.
+void luma_key_nv12(uint8_t *nv12, uint8_t *cover, int W, int H, float level, float tolerance, float softness) {
+  ATM_PROFILE_SCOPE("effect.luma_key");
+  uint8_t keep[256]; // opacity 0..255 for each luma code
+  for (int i = 0; i < 256; ++i) {
+    const float l = (float(i) - 16.0f) * (1.0f / 219.0f);
+    keep[i] = uint8_t(std::lround(smooth01((std::fabs(l - level) - tolerance) / (softness + 0.002f)) * 255.0f));
+  }
+  uint8_t *uv = nv12 + size_t(W) * size_t(H);
+  parallel_for(H / 2, 16, [&](int64_t first, int64_t last) { // chroma first: it reads the luma that is still the picture's own
+    for (int64_t cy = first; cy < last; ++cy) {
+      const uint8_t *l0 = nv12 + size_t(2 * cy) * size_t(W), *l1 = l0 + W;
+      uint8_t *row = uv + size_t(cy) * size_t(W);
+      for (int cx = 0; cx < W / 2; ++cx) {
+        const int a = (keep[l0[2 * cx]] + keep[l0[2 * cx + 1]] + keep[l1[2 * cx]] + keep[l1[2 * cx + 1]] + 2) / 4;
+        for (int k = 0; k < 2; ++k) {
+          uint8_t &c = row[2 * cx + k];
+          c = uint8_t(128 + ((int(c) - 128) * a + (c >= 128 ? 127 : -127)) / 255);
+        }
+      }
+    }
+  });
+  parallel_for(H, 16, [&](int64_t first, int64_t last) {
+    for (size_t i = size_t(first) * size_t(W); i < size_t(last) * size_t(W); ++i) {
+      const int a = keep[nv12[i]];
+      nv12[i] = uint8_t(16 + ((int(nv12[i]) - 16) * a + 127) / 255);
+      cover[i] = uint8_t((int(cover[i]) * a + 127) / 255);
+    }
   });
 }
 
@@ -1394,6 +1509,8 @@ void Renderer::draw_isolated(const Layer &l, int64_t frame, uint8_t *out, bool &
         });
         box_vertical(tmp.data(), cover_.data(), W, H, r);
       }
+    } else if (e.kind == "luma_key") {
+      luma_key_nv12(over_black_.data(), cover_.data(), W, H, v[0], v[1], v[2]);
     } else if (e.kind == "chroma_key") {
       key_nv12(over_black_.data(), cover_.data(), W, H, v[0], v[1], v[2], scratch_);
     } else { // a colour effect: apply it, then take back what it changed where the clip is not
