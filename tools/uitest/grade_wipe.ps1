@@ -1,5 +1,5 @@
 # UI test: the Effects panel adds a colour grade and a vignette as adjustment layers, the Color grade card changes a
-# parameter, and the Transition card adds a wipe, a push and a zoom. Virtual input only (uitest.psm1). Needs a build
+# parameter, and the Transition card adds a wipe, a push and a zoom (in and out). Virtual input only (uitest.psm1). Needs a build
 # (build\win-msvc-release\bin). Exit code 0 = pass.
 #   .\tools\uitest\grade_wipe.ps1
 
@@ -115,16 +115,37 @@ try {
       if ($t.Count -ne 1 -or $t[0].type -ne 'attome.zoom' -or [math]::Abs($t[0].params.amount - 1.03) -gt 0.08) { $failed = 'the Transition card did not add a zoom of about 1.03' }
     }
   }
-  if (-not $failed) {
-    $gone = Invoke-EditorScript -Project $proj -SelectFirstClip -Endpoint $run.Endpoint -Script @('click @button:remove_zoom')
-    $failed = $gone.Errors
+  if (-not $failed) { # the zoom in goes, a zoom out comes
+    $zin = Invoke-EditorScript -Project $proj -SelectFirstClip -Endpoint $run.Endpoint -Script @('click @button:remove_zoom')
+    $failed = $zin.Errors
     if (-not $failed) {
       $track = Get-Object $run (@(Get-Tracks $run) | Where-Object { $_.name -eq 'V1' }).id
       if ($track.transitions -and @($track.transitions.PSObject.Properties).Count -ne 0) { $failed = 'the Transition card did not remove the zoom' }
     }
   }
+  if (-not $failed) {
+    $zout = Invoke-EditorScript -Project $proj -SelectFirstClip -Endpoint $run.Endpoint -Script @(
+      'click @button:add_zoom_out'
+      "shot $work\zoom_out_added.jpg"
+    )
+    $failed = $zout.Errors
+    if (-not $failed) {
+      $track = Get-Object $run (@(Get-Tracks $run) | Where-Object { $_.name -eq 'V1' }).id
+      $t = @($track.transitions.PSObject.Properties | ForEach-Object { $_.Value })
+      "transition: $($t | ConvertTo-Json -Compress)"
+      if ($t.Count -ne 1 -or $t[0].type -ne 'attome.zoom' -or $t[0].params.direction -ne 'out') { $failed = 'the Transition card did not add a zoom out' }
+    }
+  }
+  if (-not $failed) {
+    $gone = Invoke-EditorScript -Project $proj -SelectFirstClip -Endpoint $run.Endpoint -Script @('click @button:remove_zoom')
+    $failed = $gone.Errors
+    if (-not $failed) {
+      $track = Get-Object $run (@(Get-Tracks $run) | Where-Object { $_.name -eq 'V1' }).id
+      if ($track.transitions -and @($track.transitions.PSObject.Properties).Count -ne 0) { $failed = 'the Transition card did not remove the zoom out' }
+    }
+  }
 } finally { Stop-Daemon $run }
 
 if ($failed) { Write-Host "FAIL: $failed" -ForegroundColor Red; exit 1 }
-Write-Host "PASS: colour grade and vignette layers, a grade parameter, and a wipe, a push and a zoom added and removed (captures in $work)" -ForegroundColor Green
+Write-Host "PASS: colour grade and vignette layers, a grade parameter, and a wipe, a push, a zoom in and a zoom out added and removed (captures in $work)" -ForegroundColor Green
 exit 0

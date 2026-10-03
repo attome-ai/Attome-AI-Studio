@@ -542,8 +542,12 @@ Result<Composition> compile(const json &project, std::string_view sequence_id) {
         Dissolve d{t.value("from", ""), t.value("to", ""), in_frames, out_frames};
         eval::parse_transition(t.value("type", ""), d.kind);
         if (d.kind == eval::TransitionKind::zoom)
-          if (const auto p = t.find("params"); p != t.end() && p->is_object())
+          if (const auto p = t.find("params"); p != t.end() && p->is_object()) {
             d.amount = float(std::clamp(p->value("amount", eval::kZoomDefault), eval::kZoomMin, eval::kZoomMax));
+            eval::ZoomDirection zdir = eval::ZoomDirection::in;
+            eval::parse_zoom_direction(p->value("direction", std::string("in")), zdir);
+            d.dir = int(zdir);
+          }
         if (eval::transition_has_direction(d.kind)) {
           eval::WipeParams wp;
           if (const auto p = t.find("params"); p != t.end() && p->is_object()) {
@@ -819,29 +823,35 @@ void push_blend(uint8_t *out, const uint8_t *incoming, int W, int H, float progr
   plane(size_t(W) * size_t(H), H / 2, d / 2);
 }
 
-// The zoom of a transition: the outgoing picture (in `out`) grows to (1 + amount) times its size around the centre
-// while the incoming one settles from that size to 1, cross-faded by the same smooth progress. Both are always at least
-// their own size, so no border ever shows. Each plane is resampled bilinearly in fixed point: the source positions
-// depend only on the column or only on the row, so they are worked out once per column and once per row.
-void zoom_blend(uint8_t *out, const uint8_t *incoming, int W, int H, float progress, float amount,
+// The zoom of a transition. Zooming in, the outgoing picture (in `out`) grows to (1 + amount) times its size around the
+// centre while the incoming one settles from that size to 1, cross-faded by the same smooth progress. Both are always at
+// least their own size, so no border ever shows. Zooming out, the outgoing picture shrinks to 1 / (1 + amount) of its size
+// and fades, over the incoming one, which settles the same way as before: where the shrinking picture no longer reaches
+// the edge of the frame, the next scene shows instead of an empty border, and its edge is antialiased by the part of each
+// pixel it covers. Each plane is resampled bilinearly in fixed point: the source positions depend only on the column or
+// only on the row, so they are worked out once per column and once per row.
+void zoom_blend(uint8_t *out, const uint8_t *incoming, int W, int H, float progress, float amount, bool zoom_out,
                 std::vector<uint8_t> &outgoing) {
   ATM_PROFILE_SCOPE("composite.zoom");
   outgoing.assign(out, out + media::nv12_size(W, H)); // `out` is rewritten from the two pictures
   const float e = smooth01(progress);
-  const float scale_out = 1.0f + amount * e, scale_in = 1.0f + amount * (1.0f - e);
+  const float scale_out = zoom_out ? 1.0f / (1.0f + amount * e) : 1.0f + amount * e, scale_in = 1.0f + amount * (1.0f - e);
   const int weight = int(e * 256.0f + 0.5f); // of the incoming picture, 0..256
-  struct Axis { // for each destination sample: the two source samples and the weight of the second (0..256)
-    std::vector<int> a, b, f;
+  struct Axis { // for each destination sample: the two source samples, the weight of the second, and how much of it the picture covers (0..256)
+    std::vector<int> a, b, f, cover;
   };
   const auto axis = [](int n, float scale) {
-    Axis ax{std::vector<int>(size_t(n)), std::vector<int>(size_t(n)), std::vector<int>(size_t(n))};
+    Axis ax{std::vector<int>(size_t(n)), std::vector<int>(size_t(n)), std::vector<int>(size_t(n)), std::vector<int>(size_t(n))};
     const float c = float(n - 1) * 0.5f;
     for (int i = 0; i < n; ++i) {
-      const float p = std::clamp(c + (float(i) - c) / scale, 0.0f, float(n - 1));
+      const float at = c + (float(i) - c) / scale; // where in the source this sample lies; outside 0..n-1 the picture ends
+      const float p = std::clamp(at, 0.0f, float(n - 1));
       const int a = int(p);
       ax.a[size_t(i)] = a;
       ax.b[size_t(i)] = std::min(a + 1, n - 1);
       ax.f[size_t(i)] = int((p - float(a)) * 256.0f + 0.5f);
+      // Inside the picture the whole sample is covered; past its end the cover falls to nothing over one sample.
+      ax.cover[size_t(i)] = int(std::clamp(at + 1.0f, 0.0f, 1.0f) * std::clamp(float(n) - at, 0.0f, 1.0f) * 256.0f + 0.5f);
     }
     return ax;
   };
@@ -859,9 +869,12 @@ void zoom_blend(uint8_t *out, const uint8_t *incoming, int W, int H, float progr
     parallel_for(h, 16, [&](int64_t first, int64_t last) {
       for (int64_t y = first; y < last; ++y) {
         uint8_t *row = dst + size_t(y) * size_t(W);
-        for (int x = 0; x < w; ++x)
+        for (int x = 0; x < w; ++x) {
+          // The weight of the outgoing picture here: what fading leaves of it, where its picture reaches (always, zooming in).
+          const int keep = ((256 - weight) * ((xo.cover[size_t(x)] * yo.cover[size_t(y)]) >> 8)) >> 8;
           for (int k = 0; k < ch; ++k)
-            row[x * ch + k] = uint8_t((sample(old, xo, yo, x, int(y), k) * (256 - weight) + sample(in, xi, yi, x, int(y), k) * weight) >> 8);
+            row[x * ch + k] = uint8_t((sample(old, xo, yo, x, int(y), k) * keep + sample(in, xi, yi, x, int(y), k) * (256 - keep)) >> 8);
+        }
       }
     });
   };
@@ -1192,7 +1205,8 @@ Result<void> Renderer::render(int64_t frame, uint8_t *out) {
     else if (l.mix_kind == eval::TransitionKind::push)
       push_blend(out, mix_.data(), width_, height_, float(progress), eval::WipeDirection(l.mix_dir), scratch_);
     else if (l.mix_kind == eval::TransitionKind::zoom)
-      zoom_blend(out, mix_.data(), width_, height_, float(progress), l.mix_amount, scratch_);
+      zoom_blend(out, mix_.data(), width_, height_, float(progress), l.mix_amount,
+                 eval::ZoomDirection(l.mix_dir) == eval::ZoomDirection::out, scratch_);
     else
       put_rows(out, size_t(width_), mix_.data(), size_t(width_), height_ * 3 / 2, width_,
                std::clamp(int(progress * 256.0 + 0.5), 0, 256));

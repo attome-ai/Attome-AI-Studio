@@ -438,7 +438,7 @@ TEST_CASE("transitions: a zoom takes an amount inside its range, and the same me
   const json &zt = *track["transitions"].begin();
   CHECK(zt["type"] == "attome.zoom");
   CHECK(zt["params"]["amount"] == 0.5);
-  CHECK_FALSE(zt["params"].contains("direction"));
+  CHECK(zt["params"]["direction"] == "in");
 }
 
 TEST_CASE("timeline.edit: make_room trims what a transition lacks and closes the gap on the track", "[timeline]") {
@@ -712,3 +712,27 @@ TEST_CASE("timeline.edit: make_room can ripple other tracks, treating the trimme
     CHECK(track["transitions"].size() == 1);
   }
 }
+
+TEST_CASE("transitions: a zoom goes in or out, in by default, and anything else is refused", "[transition]") {
+  Fixture f;
+  const auto zoom = [&](json params) {
+    json op = f.dissolve(f.a, f.b, "0.5s", "0.5s");
+    op["value"]["type"] = "attome.zoom";
+    op["value"]["params"] = std::move(params);
+    return op;
+  };
+  CHECK(f.rule_of(json::array({zoom({{"direction", "left"}})})) == "TRANSITION_PARAM"); // a side is for wipes and pushes
+  CHECK(f.rule_of(json::array({zoom({{"direction", 1}})})) == "TRANSITION_PARAM");
+  auto out = f.patch(json::array({zoom({{"amount", 0.8}, {"direction", "out"}})}));
+  INFO((out ? "" : out.error().message));
+  REQUIRE(out);
+  CHECK(f.engine.call("project.get", {{"project", f.project}, {"id", (*out)["id_map"]["$new:d"]}})->at("object")["params"]["direction"] == "out");
+  Fixture g; // timeline.edit
+  const auto edit = [&](json op) { return g.engine.call("timeline.edit", {{"project", g.project}, {"ops", json::array({std::move(op)})}}); };
+  CHECK_FALSE(edit({{"op", "add_transition"}, {"between", json::array({g.a, g.b})}, {"type", "zoom"}, {"direction", "sideways"}}));
+  REQUIRE(edit({{"op", "add_transition"}, {"between", json::array({g.a, g.b})}, {"type", "zoom"}, {"direction", "out"}, {"amount", 0.7}}));
+  const json track = g.engine.call("project.get", {{"project", g.project}, {"id", g.track}})->at("object");
+  CHECK((*track["transitions"].begin())["params"]["direction"] == "out");
+  CHECK((*track["transitions"].begin())["params"]["amount"] == 0.7);
+}
+

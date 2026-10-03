@@ -68,7 +68,7 @@ struct TransitionUi { // a dissolve, wipe, push or zoom over [cut - in, cut + ou
   std::string id, from, to;
   int64_t in = 0, out = 0; // frames
   eval::TransitionKind kind = eval::TransitionKind::dissolve;
-  int direction = 0;       // a wipe or push: the eval::WipeDirection the incoming clip enters from
+  int direction = 0;       // a wipe or push: the eval::WipeDirection the incoming clip enters from; a zoom: 0 in, 1 out
   float amount = 0.0f;     // a zoom: how much bigger the picture grows (params.amount)
 };
 

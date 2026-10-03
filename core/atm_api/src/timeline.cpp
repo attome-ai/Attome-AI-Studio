@@ -817,7 +817,11 @@ private:
       if (amount < eval::kZoomMin || amount > eval::kZoomMax)
         return fail("E_PARAM", "\"amount\" must be from " + std::to_string(eval::kZoomMin) + " to " + std::to_string(eval::kZoomMax) + ".",
                     "0.5 is half as big again, 1 doubles the picture.");
-      params = {{"amount", amount}};
+      const std::string direction = op_.value("direction", std::string("in"));
+      eval::ZoomDirection zdir;
+      if (!eval::parse_zoom_direction(direction, zdir))
+        return fail("E_PARAM", "A zoom's \"direction\" must be in or out.", "in: the old picture grows; out: it shrinks away.");
+      params = {{"amount", amount}, {"direction", direction}};
     }
     if (op_.value("make_room", false)) // trim and move up what the transition needs, instead of being refused
       ATM_CHECK(make_room_at(cut));

@@ -56,6 +56,13 @@ enum class TransitionKind { dissolve, wipe, push, zoom };
 
 constexpr double kZoomMin = 0.05, kZoomMax = 2.0, kZoomDefault = 0.5; // params.amount of a zoom
 
+// A zoom goes "in" (the outgoing picture grows, the incoming one settles) or "out" (the outgoing picture shrinks away
+// over the incoming one, which settles from the same size; the edges of the shrinking picture show the next scene, so
+// there is never an empty border). params.direction of a zoom; "in" when it is left out.
+enum class ZoomDirection { in, out };
+bool parse_zoom_direction(std::string_view name, ZoomDirection &out);
+const char *zoom_direction_name(ZoomDirection d);
+
 // "attome.dissolve", "dissolve", "attome.wipe", "wipe", "push", "zoom" (with or without "attome.") -> the id; ""
 // when unknown.
 std::string transition_id(std::string_view type);

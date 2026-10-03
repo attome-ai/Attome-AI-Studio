@@ -157,6 +157,14 @@ void check_transitions(const json &track, const std::string &track_id, const std
     }
     if (kind == "zoom") {
       const json params = t.value("params", json::object());
+      eval::ZoomDirection zdir;
+      if (const auto d = params.is_object() ? params.find("direction") : params.end();
+          d != params.end() && !(d->is_string() && eval::parse_zoom_direction(d->get<std::string>(), zdir))) {
+        problems.push_back(problem("TRANSITION_PARAM", id + "/params/direction", id,
+                                   "The zoom " + id + " has an unknown params.direction.",
+                                   "Use \"in\" (the old picture grows) or \"out\" (it shrinks away); \"in\" is the default."));
+        continue;
+      }
       const auto amount = params.is_object() ? params.find("amount") : params.end();
       if (amount != params.end() && (!amount->is_number() || amount->get<double>() < eval::kZoomMin || amount->get<double>() > eval::kZoomMax)) {
         problems.push_back(problem("TRANSITION_PARAM", id + "/params/amount", id,

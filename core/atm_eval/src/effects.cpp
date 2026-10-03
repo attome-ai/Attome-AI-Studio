@@ -74,6 +74,16 @@ const char *wipe_direction_name(WipeDirection d) {
   return "left";
 }
 
+bool parse_zoom_direction(std::string_view name, ZoomDirection &out) {
+  if (name == "in" || name == "out") {
+    out = name == "out" ? ZoomDirection::out : ZoomDirection::in;
+    return true;
+  }
+  return false;
+}
+
+const char *zoom_direction_name(ZoomDirection d) { return d == ZoomDirection::out ? "out" : "in"; }
+
 std::string transition_id(std::string_view type) {
   type = strip(type);
   return type == "dissolve" || type == "wipe" || type == "push" || type == "zoom" ? std::string(type) : std::string();

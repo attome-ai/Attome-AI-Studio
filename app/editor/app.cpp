@@ -339,8 +339,10 @@ void App::refresh() {
             track.transitions.back().direction = int(dir);
           }
           if (track.transitions.back().kind == eval::TransitionKind::zoom)
-            if (const auto p = t->find("params"); p != t->end() && p->is_object())
+            if (const auto p = t->find("params"); p != t->end() && p->is_object()) {
               track.transitions.back().amount = p->value("amount", float(eval::kZoomDefault));
+              track.transitions.back().direction = p->value("direction", std::string("in")) == "out" ? 1 : 0;
+            }
         }
       tracks_.push_back(std::move(track));
     }
@@ -2350,8 +2352,13 @@ void App::draw_timeline() {
       if (tr.kind == eval::TransitionKind::zoom) { // a zoom: a frame inside a frame, the picture growing
         const ImVec2 mid((bx0 + bx1) * 0.5f, (by0 + by1) * 0.5f);
         const float r = std::min(8.0f, (by1 - by0) * 0.34f);
-        dl->AddRect(ImVec2(mid.x - r, mid.y - r), ImVec2(mid.x + r, mid.y + r), IM_COL32(255, 255, 255, 200), 1.5f, 0, 1.5f);
-        dl->AddRectFilled(ImVec2(mid.x - r * 0.5f, mid.y - r * 0.5f), ImVec2(mid.x + r * 0.5f, mid.y + r * 0.5f), IM_COL32(255, 255, 255, 200), 1.0f);
+        if (tr.direction == 1) { // out: the picture shrinking inside its frame
+          dl->AddRectFilled(ImVec2(mid.x - r, mid.y - r), ImVec2(mid.x + r, mid.y + r), IM_COL32(255, 255, 255, 90), 1.5f);
+          dl->AddRect(ImVec2(mid.x - r * 0.5f, mid.y - r * 0.5f), ImVec2(mid.x + r * 0.5f, mid.y + r * 0.5f), IM_COL32(255, 255, 255, 230), 1.0f, 0, 1.5f);
+        } else { // in: the picture growing past its frame
+          dl->AddRect(ImVec2(mid.x - r, mid.y - r), ImVec2(mid.x + r, mid.y + r), IM_COL32(255, 255, 255, 200), 1.5f, 0, 1.5f);
+          dl->AddRectFilled(ImVec2(mid.x - r * 0.5f, mid.y - r * 0.5f), ImVec2(mid.x + r * 0.5f, mid.y + r * 0.5f), IM_COL32(255, 255, 255, 200), 1.0f);
+        }
       } else if (tr.kind != eval::TransitionKind::dissolve) { // a wipe or push: an arrow in the direction the picture travels
         static const ImVec2 kTravel[] = {ImVec2(1, 0), ImVec2(-1, 0), ImVec2(0, 1), ImVec2(0, -1)};
         const ImVec2 d = kTravel[std::clamp(tr.direction, 0, 3)], n(-d.y, d.x);
@@ -2437,7 +2444,9 @@ void App::draw_transition_card(const TrackUi &track, const ClipUi &c) {
     else if (current->kind == eval::TransitionKind::push)
       ImGui::TextColored(hexv(look::fg2), "Push in from the %s into the next clip, %.2f s", kSide[std::clamp(current->direction, 0, 3)], seconds);
     else if (current->kind == eval::TransitionKind::zoom)
-      ImGui::TextColored(hexv(look::fg2), "Zoom into the next clip, %.0f%% bigger, %.2f s", double(current->amount) * 100.0, seconds);
+      ImGui::TextColored(hexv(look::fg2), current->direction == 1 ? "Zoom out of this clip into the next, %.0f%%, %.2f s"
+                                                                  : "Zoom into the next clip, %.0f%% bigger, %.2f s",
+                         double(current->amount) * 100.0, seconds);
     else
       ImGui::TextColored(hexv(look::fg2), "Dissolve into the next clip, %.2f s", seconds);
     const std::string tid = current->id;
@@ -2555,8 +2564,11 @@ void App::draw_transition_card(const TrackUi &track, const ClipUi &c) {
       ImGui::PushFont(g_fonts.mono, 13.0f);
       ImGui::TextColored(hexv(look::fg2), "+%.0f%%", double(zoom_amount_) * 100.0);
       ImGui::PopFont();
+      const double zoom_by = std::round(double(zoom_amount_) * 100.0) / 100.0;
       if (soft_button("add_zoom", "Zoom into next clip", ImVec2(-1.0f, 28.0f)))
-        add("attome.zoom", "Add zoom", {{"amount", std::round(double(zoom_amount_) * 100.0) / 100.0}});
+        add("attome.zoom", "Add zoom", {{"amount", zoom_by}, {"direction", "in"}});
+      if (soft_button("add_zoom_out", "Zoom out to next clip", ImVec2(-1.0f, 28.0f)))
+        add("attome.zoom", "Add zoom out", {{"amount", zoom_by}, {"direction", "out"}});
       ImGui::EndDisabled();
     }
   }

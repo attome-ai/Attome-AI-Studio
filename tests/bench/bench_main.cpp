@@ -141,7 +141,7 @@ void bench_effects() {
     e.curve[0] = *atm::eval::parse_curve(keys, 1);
     return comp;
   };
-  const auto two_clips = [](atm::eval::TransitionKind kind) { // text clips: no files needed; they are cached after the first frame
+  const auto two_clips = [](atm::eval::TransitionKind kind, int dir = 0) { // text clips: no files needed; they are cached after the first frame
     atm::render::Composition comp;
     comp.frames = 60;
     for (int i = 0; i < 2; ++i) {
@@ -159,6 +159,7 @@ void bench_effects() {
     comp.layers[0].mix_start = 20;
     comp.layers[0].mix_frames = 20;
     comp.layers[0].mix_kind = kind;
+    comp.layers[0].mix_dir = dir;
     return comp;
   };
   report("blur 0.02 (reference), adjustment layer", frame_ms(with_effect("gaussian_blur", 0.02f, 0, 0), 10), "ms", 40.0);
@@ -168,6 +169,7 @@ void bench_effects() {
   report("dissolve (reference), two text clips", frame_ms(two_clips(atm::eval::TransitionKind::dissolve), 30), "ms", 20.0);
   report("wipe, two text clips", frame_ms(two_clips(atm::eval::TransitionKind::wipe), 30), "ms", 4.0);
   report("push, two text clips", frame_ms(two_clips(atm::eval::TransitionKind::push), 30), "ms", 4.0);
+  report("zoom out, two text clips (the outgoing one shrinks over the incoming)", frame_ms(two_clips(atm::eval::TransitionKind::zoom, 1), 30), "ms", 6.0);
   report("zoom, two text clips (two bilinear resamples)", frame_ms(two_clips(atm::eval::TransitionKind::zoom), 30), "ms", 6.0);
 }
 

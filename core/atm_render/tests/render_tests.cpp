@@ -1429,4 +1429,97 @@ TEST_CASE("render: a zoom grows the outgoing picture around the centre while the
   fs::remove_all(dir, ec);
 }
 
+TEST_CASE("render: a zoom out shrinks the outgoing picture over the incoming one, which shows at the edges", "[media]") {
+  const fs::path dir = fs::temp_directory_path() / atm::new_id("attome-zoomout");
+  fs::create_directories(dir);
+  const std::string outgoing = (dir / "edge.mp4").string(), incoming = (dir / "white.mp4").string();
+  { // left quarter (x < 80 of 320) red, the rest blue
+    auto encoder = media::Encoder::create({outgoing, 320, 240, 30, 1, 2'000'000, true});
+    REQUIRE(encoder);
+    std::vector<uint8_t> picture(320 * 240 * 4), nv12(media::nv12_size(320, 240));
+    for (int y = 0; y < 240; ++y)
+      for (int x = 0; x < 320; ++x) {
+        uint8_t *p = picture.data() + (size_t(y) * 320 + size_t(x)) * 4;
+        p[0] = x < 80 ? 0 : 255;
+        p[1] = 0;
+        p[2] = x < 80 ? 255 : 0;
+        p[3] = 255;
+      }
+    media::bgrx_to_nv12(picture.data(), 320, 240, nv12.data());
+    std::vector<float> tone(1600 * 2, 0.25f);
+    for (int f = 0; f < 90; ++f) {
+      REQUIRE((*encoder)->video(nv12.data(), f));
+      REQUIRE((*encoder)->audio(tone.data(), 1600));
+    }
+    REQUIRE((*encoder)->finish());
+  }
+  write_solid(incoming, 0xF0F0F0, 660.0, 3);
+  const auto build = [&](const char *direction) {
+    const json zoom = {{"type", "attome.zoom"}, {"from", "clp_a"}, {"to", "clp_b"}, {"in_offset", "1/2"}, {"out_offset", "1/2"},
+                       {"params", {{"amount", 1.0}, {"direction", direction}}}};
+    const auto clip = [](const std::string &path, const char *in, const char *source_in) {
+      return json{{"timing", {{"record_in", in}, {"duration", "1"}, {"source_in", source_in}}},
+                  {"media_ref", {{"type", "file"}, {"path", path}, {"duration", "3"}}}};
+    };
+    const json doc = {{"sequences",
+                       {{"seq_1",
+                         {{"rate", "30"},
+                          {"canvas", {{"width", 320}, {"height", 240}}},
+                          {"track_order", {"trk_v"}},
+                          {"tracks",
+                           {{"trk_v",
+                             {{"clips", {{"clp_a", clip(outgoing, "0", "0")}, {"clp_b", clip(incoming, "1", "1")}}},
+                              {"transitions", {{"trn_1", zoom}}}}}}}}}}},
+                      {"sequence_order", {"seq_1"}}};
+    auto comp = atm::render::compile(doc);
+    REQUIRE(comp);
+    return std::move(*comp);
+  };
+  struct Rgb {
+    int r, g, b;
+  };
+  const auto at = [&](const char *direction, int64_t frame, int x, int y) {
+    auto comp = build(direction);
+    atm::render::Renderer renderer(comp, 320, 240);
+    std::vector<uint8_t> nv12(media::nv12_size(320, 240)), rgb(320 * 240 * 4);
+    REQUIRE(renderer.render(frame, nv12.data()));
+    media::nv12_to_bgrx(nv12.data(), 320, 240, rgb.data());
+    const uint8_t *p = rgb.data() + (size_t(y) * 320 + size_t(x)) * 4;
+    return Rgb{p[2], p[1], p[0]};
+  };
+  const auto is_white = [](Rgb c) { return c.r > 200 && c.g > 200 && c.b > 200; };
+
+  // The direction is read from the document.
+  CHECK(build("out").layers[0].mix_dir == int(atm::eval::ZoomDirection::out));
+  CHECK(build("in").layers[0].mix_dir == int(atm::eval::ZoomDirection::in));
+  // Before and after the zoom, both directions show the clips as they are.
+  CHECK(at("out", 10, 60, 120).r > 190);
+  CHECK(is_white(at("out", 50, 60, 120)));
+  // In the middle (progress 1/2, amount 1): the outgoing picture is 2/3 of its size, so it spans x 53..267 and y 40..200 and
+  // is half faded. Outside it the incoming picture shows alone, as bright as it is; zooming in, the same pixel is mixed.
+  const Rgb outside = at("out", 30, 20, 120);
+  CHECK(is_white(outside));
+  const Rgb inside = at("out", 30, 60, 120); // inside the shrunken picture: it was red at x = 10 of the source, half mixed with white
+  CHECK(inside.r > 200);
+  CHECK(inside.g > 80);
+  CHECK(inside.g < 170);
+  const Rgb centre = at("out", 30, 160, 120); // blue, half mixed with white
+  CHECK(centre.b > 200);
+  CHECK(centre.r > 80);
+  CHECK(centre.r < 170);
+  // The outgoing picture's edge is at x = 53: a pixel just outside is incoming alone, just inside it is mixed.
+  CHECK(is_white(at("out", 30, 48, 120)));
+  CHECK_FALSE(is_white(at("out", 30, 60, 120)));
+  // No empty border at any frame: the corners show the incoming picture, never black.
+  for (const int64_t frame : {16, 22, 30, 38, 44})
+    for (const auto &[x, y] : {std::pair{0, 0}, std::pair{319, 0}, std::pair{0, 239}, std::pair{319, 239}, std::pair{160, 0}, std::pair{0, 120}}) {
+      const Rgb c = at("out", frame, x, y);
+      CHECK(c.r + c.g + c.b > 150);
+    }
+  // Zooming in is unchanged: the outgoing picture grows, and the pixel that was white in zoom out is a mix here.
+  CHECK_FALSE(is_white(at("in", 30, 20, 120)));
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}
+
 #endif
