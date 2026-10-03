@@ -714,8 +714,13 @@ struct Engine::Impl {
          "goes on a Titles track on top\n"
          "- add_adjustment {at?, duration? (2s), blur? (radius, e.g. 0.02) or effects? [{type, ...params}], opacity?, fade_in?, fade_out?} - changes "
          "everything below; goes on an Effects track under the titles\n"
-         "- add_transition {between: [first, second], type? (dissolve | wipe | push | zoom), direction? (left | right | up | down, for a wipe or push: the side the new clip enters from), softness? (0.01..1, a wipe's edge, 0.1), amount? (0.05..2, a zoom's size, 0.5), duration? (1s), alignment? (center | start | end)} - a dissolve, a wipe (an edge crosses the picture), a push (the old clip slides away, the new one follows) or a zoom (the old picture grows while the new one settles into place); "
+         "- add_transition {between: [first, second], type? (dissolve | wipe | push | zoom), direction? (left | right | up | down, for a wipe or push: the side the new clip enters from), softness? (0.01..1, a wipe's edge, 0.1), amount? (0.05..2, a zoom's size, 0.5), duration? (1s), alignment? (center | start | end), make_room? (true: trim what the media lacks, see make_room)} - a dissolve, a wipe (an edge crosses the picture), a push (the old clip slides away, the new one follows) or a zoom (the old picture grows while the new one settles into place); "
          "the clips must touch, and center needs half the duration of spare media on each side of the cut\n"
+         "- make_room {between: [first, second], duration? (1s), alignment? (center)} - trims what a transition of that length "
+         "would lack: the end of the first clip and the start of the second come in by the missing media, the second clip moves up "
+         "to meet the first, and every later clip of its track (and the clips linked to them) moves up by the same amount, so no "
+         "gap opens and the track gets shorter after the cut. Clips on other tracks that are not linked stay put. add_transition "
+         "with \"make_room\": true does both in one step\n"
          "- add_track {kind (video | audio), name?, position? (top | bottom), below? / above? (track ID)}\n"
          "- delete {clip} or {transition}; ripple_delete {clip} (closes the gap); move {clip, to?, track?}; trim {clip, edge (in | out), to or delta}; "
          "split {clip, at}; slip {clip, delta} (shows another part of its file, stays in place); roll {between: "
@@ -769,7 +774,8 @@ struct Engine::Impl {
          "must go on for out_offset past its end (source_in + duration + out_offset <= file duration), and the "
          "second clip must have source_in >= in_offset. So leave handles: do not use a file up to its very end, and "
          "start the next clip a little into its file. The sound cross-fades with the picture. A refused dissolve "
-         "names the largest offsets that fit. To fade one clip to or from black, use opacity keyframes instead."},
+         "names the largest offsets that fit; timeline.edit make_room (or add_transition with make_room true) trims and moves "
+         "up what is missing instead. To fade one clip to or from black, use opacity keyframes instead."},
         {"keyframes",
          "Animate opacity, position, scale, rotation or anchor with keyframes inside the clip's transform (crop stays "
          "fixed). t is the time from the "

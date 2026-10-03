@@ -441,3 +441,156 @@ TEST_CASE("transitions: a zoom takes an amount inside its range, and the same me
   CHECK_FALSE(zt["params"].contains("direction"));
 }
 
+TEST_CASE("timeline.edit: make_room trims what a transition lacks and closes the gap on the track", "[timeline]") {
+  Fixture f; // a: 0..2 s of a 4 s file from 0 (2 s of media after); b: 2..4 s from 1 s (1 s before)
+  auto added = f.patch(json::array({{{"op", "add"},
+                                     {"path", f.track + "/clips/$new:c"},
+                                     {"value", {{"name", "c"},
+                                                {"timing", {{"record_in", "4s"}, {"duration", "2s"}, {"source_in", "0s"}}},
+                                                {"media_ref", {{"type", "file"}, {"path", "x.mp4"}, {"duration", "4s"}}}}}}}));
+  REQUIRE(added);
+  const std::string c = (*added)["id_map"]["$new:c"];
+  const auto timing = [&](const std::string &id) {
+    return f.engine.call("project.get", {{"project", f.project}, {"id", id}})->at("object")["timing"];
+  };
+  const auto edit = [&](json ops) { return f.engine.call("timeline.edit", {{"project", f.project}, {"ops", std::move(ops)}}); };
+  const auto room = [&](const char *duration) {
+    return edit(json::array({{{"op", "make_room"}, {"between", json::array({f.a, f.b})}, {"duration", duration}}}));
+  };
+  const auto set = [&](const std::string &id, const char *path, json value) {
+    REQUIRE(f.patch(json::array({{{"op", "replace"}, {"path", id + path}, {"value", std::move(value)}}})));
+  };
+
+  SECTION("the second clip lacks media before its in point: its start comes in, the later clips follow") {
+    auto r = room("3s"); // 1.5 s each side: b has 1 s before its in point, so 0.5 s is missing
+    INFO((r ? "" : r.error().message));
+    REQUIRE(r);
+    CHECK(timing(f.a)["duration"] == "2");  // the first clip is untouched
+    CHECK(timing(f.b)["record_in"] == "2");
+    CHECK(timing(f.b)["duration"] == "3/2");
+    CHECK(timing(f.b)["source_in"] == "3/2");
+    CHECK(timing(c)["record_in"] == "7/2"); // the third clip moved up by the 0.5 s that was taken
+    CHECK(timing(c)["duration"] == "2");
+  }
+  SECTION("the first clip lacks media after its out point: its end comes in, the second clip moves up to meet it") {
+    set(f.a, "/media_ref/duration", "2.25s"); // 0.25 s after its out point
+    auto r = room("1s");                      // 0.5 s each side: 0.25 s is missing after a
+    REQUIRE(r);
+    CHECK(timing(f.a)["duration"] == "7/4");
+    CHECK(timing(f.b)["record_in"] == "7/4"); // still touches the first clip
+    CHECK(timing(f.b)["duration"] == "2");
+    CHECK(timing(f.b)["source_in"] == "1");   // its start is not trimmed
+    CHECK(timing(c)["record_in"] == "15/4");
+  }
+  SECTION("both sides lack media; then the transition itself is accepted, and was refused before") {
+    set(f.a, "/media_ref/duration", "2.25s");
+    set(f.b, "/timing/source_in", "0.5s");
+    auto without = edit(json::array({{{"op", "add_transition"}, {"between", json::array({f.a, f.b})}, {"duration", "2s"}}}));
+    REQUIRE_FALSE(without);
+    CHECK(without.error().rule == "TRANSITION_INSUFFICIENT_HANDLES");
+    auto with = edit(json::array({{{"op", "add_transition"}, {"between", json::array({f.a, f.b})}, {"duration", "2s"}, {"make_room", true}}}));
+    INFO((with ? "" : with.error().message));
+    REQUIRE(with);
+    CHECK(timing(f.a)["duration"] == "5/4");     // 0.75 s off the end
+    CHECK(timing(f.b)["record_in"] == "5/4");    // meets the first clip
+    CHECK(timing(f.b)["duration"] == "3/2");     // 0.5 s off the start
+    CHECK(timing(f.b)["source_in"] == "1");
+    CHECK(timing(c)["record_in"] == "11/4");     // 1.25 s earlier in all
+    const json track = f.engine.call("project.get", {{"project", f.project}, {"id", f.track}})->at("object");
+    REQUIRE(track["transitions"].size() == 1);
+    CHECK(with->at("notes").dump().find("Made room") != std::string::npos);
+  }
+  SECTION("nothing is missing: nothing moves, and a note says so") {
+    auto r = room("1s");
+    REQUIRE(r);
+    CHECK(timing(f.a)["duration"] == "2");
+    CHECK(timing(f.b)["record_in"] == "2");
+    CHECK(timing(c)["record_in"] == "4");
+    CHECK(r->at("notes").dump().find("nothing was trimmed") != std::string::npos);
+  }
+  SECTION("more than the clips can give is refused, with nothing changed") {
+    auto r = room("20s");
+    REQUIRE_FALSE(r);
+    CHECK(r.error().rule == "E_MEDIA_RANGE");
+    CHECK(timing(f.b)["record_in"] == "2");
+    CHECK(timing(c)["record_in"] == "4");
+  }
+  SECTION("an existing transition at the cut goes, with a note; the undo restores everything") {
+    REQUIRE(f.patch(json::array({f.dissolve(f.a, f.b, "0.5s", "0.5s")})));
+    auto r = room("3s");
+    REQUIRE(r);
+    const json track = f.engine.call("project.get", {{"project", f.project}, {"id", f.track}})->at("object");
+    CHECK((!track.contains("transitions") || track["transitions"].empty()));
+    CHECK(r->at("notes").dump().find("Removed transition") != std::string::npos);
+    REQUIRE(f.engine.call("project.undo", {{"project", f.project}}));
+    CHECK(timing(f.b)["duration"] == "2");
+    CHECK(timing(c)["record_in"] == "4");
+    const json again = f.engine.call("project.get", {{"project", f.project}, {"id", f.track}})->at("object");
+    CHECK(again["transitions"].size() == 1);
+  }
+  SECTION("linked sound is trimmed and moved with its picture; an unlinked clip on another track stays") {
+    const std::string seq = f.engine.call("project.inspect", {{"project", f.project}})->at("data")["sequences"][0]["id"];
+    const auto audio = [](const char *at, const char *dur, const char *src) {
+      return json{{"name", "snd"},
+                  {"timing", {{"record_in", at}, {"duration", dur}, {"source_in", src}}},
+                  {"media_ref", {{"type", "file"}, {"path", "x.wav"}, {"duration", "4s"}}}};
+    };
+    auto r = f.patch(json::array({{{"op", "add"}, {"path", seq + "/tracks/$new:a1"}, {"value", {{"kind", "audio"}, {"name", "A1"}}}},
+                                  {{"op", "add"}, {"path", "$new:a1/clips/$new:la"}, {"value", audio("0s", "2s", "0s")}},
+                                  {{"op", "add"}, {"path", "$new:a1/clips/$new:lb"}, {"value", audio("2s", "2s", "1s")}},
+                                  {{"op", "add"}, {"path", "$new:a1/clips/$new:lc"}, {"value", audio("4s", "2s", "0s")}},
+                                  {{"op", "add"}, {"path", "$new:a1/clips/$new:music"}, {"value", audio("8s", "2s", "0s")}}}));
+    REQUIRE(r);
+    const std::string la = (*r)["id_map"]["$new:la"], lb = (*r)["id_map"]["$new:lb"], lc = (*r)["id_map"]["$new:lc"],
+                      music = (*r)["id_map"]["$new:music"];
+    REQUIRE(edit(json::array({{{"op", "link"}, {"clips", json::array({f.a, la})}},
+                              {{"op", "link"}, {"clips", json::array({f.b, lb})}},
+                              {{"op", "link"}, {"clips", json::array({c, lc})}}})));
+    auto made = room("3s"); // b and its sound lack 0.5 s before their in point
+    INFO((made ? "" : made.error().message));
+    REQUIRE(made);
+    CHECK(timing(f.b)["duration"] == "3/2");
+    CHECK(timing(lb)["duration"] == "3/2");   // the sound is trimmed the same
+    CHECK(timing(lb)["source_in"] == "3/2");
+    CHECK(timing(lb)["record_in"] == "2");
+    CHECK(timing(c)["record_in"] == "7/2");
+    CHECK(timing(lc)["record_in"] == "7/2");  // and its later clips follow
+    CHECK(timing(music)["record_in"] == "8"); // an unlinked clip on another track does not
+  }
+}
+
+TEST_CASE("timeline.edit: transitions with make_room on several cuts of one call see each other's trims", "[timeline]") {
+  Fixture f;
+  const std::string seq = f.engine.call("project.inspect", {{"project", f.project}})->at("data")["sequences"][0]["id"];
+  const auto whole = [](const char *at) { // a clip that uses its whole 4 s file: no media on either side
+    return json{{"name", "p"},
+                {"timing", {{"record_in", at}, {"duration", "4s"}, {"source_in", "0s"}}},
+                {"media_ref", {{"type", "file"}, {"path", "x.mp4"}, {"duration", "4s"}}}};
+  };
+  auto r = f.patch(json::array({{{"op", "add"}, {"path", seq + "/tracks/$new:t2"}, {"value", {{"kind", "video"}, {"name", "V2"}}}},
+                                {{"op", "add"}, {"path", "$new:t2/clips/$new:p0"}, {"value", whole("0s")}},
+                                {{"op", "add"}, {"path", "$new:t2/clips/$new:p1"}, {"value", whole("4s")}},
+                                {{"op", "add"}, {"path", "$new:t2/clips/$new:p2"}, {"value", whole("8s")}}}));
+  REQUIRE(r);
+  const std::string p0 = (*r)["id_map"]["$new:p0"], p1 = (*r)["id_map"]["$new:p1"], p2 = (*r)["id_map"]["$new:p2"];
+  const auto timing = [&](const std::string &id) {
+    return f.engine.call("project.get", {{"project", f.project}, {"id", id}})->at("object")["timing"];
+  };
+  auto made = f.engine.call("timeline.edit",
+                            {{"project", f.project},
+                             {"ops", json::array({{{"op", "add_transition"}, {"between", json::array({p0, p1})}, {"duration", "1s"}, {"make_room", true}},
+                                                  {{"op", "add_transition"}, {"between", json::array({p1, p2})}, {"type", "wipe"}, {"direction", "up"},
+                                                   {"duration", "1s"}, {"make_room", true}}})}});
+  INFO((made ? "" : made.error().message));
+  REQUIRE(made);
+  CHECK(timing(p0)["duration"] == "7/2");
+  CHECK(timing(p1)["record_in"] == "7/2");  // met the first clip's new end
+  CHECK(timing(p1)["source_in"] == "1/2");
+  CHECK(timing(p1)["duration"] == "3");     // 0.5 s off the start for the first cut, 0.5 s off the end for the second
+  CHECK(timing(p2)["record_in"] == "13/2"); // 12 s of footage became 10 s: two cuts, 1 s each
+  CHECK(timing(p2)["source_in"] == "1/2");
+  CHECK(timing(p2)["duration"] == "7/2");
+  const json track = f.engine.call("project.get", {{"project", f.project}, {"id", (*r)["id_map"]["$new:t2"]}})->at("object");
+  CHECK(track["transitions"].size() == 2);
+  CHECK(made->at("duration")["seconds"] == 10.0);
+}

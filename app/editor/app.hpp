@@ -97,6 +97,7 @@ private:
   // daemon
   bool rpc(const char *method, const json &params, json &result);
   bool patch(json ops, const char *label, json *id_map = nullptr);
+  bool timeline_edit(json ops, const char *label); // timeline.edit: high-level ops, one undoable step
   void refresh();
   void poll(double now);
   void say(std::string text, bool error = false);

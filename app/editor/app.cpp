@@ -381,6 +381,19 @@ bool App::patch(json ops, const char *label, json *id_map) {
   return true;
 }
 
+// Applies timeline.edit ops (the engine's high-level edits) as one undoable step; the first note of the result, if any,
+// is shown as the status (it says what an edit such as make_room actually did).
+bool App::timeline_edit(json ops, const char *label) {
+  ATM_PROFILE_SCOPE("ui.timeline_edit");
+  json result;
+  if (!rpc("timeline.edit", {{"project", project_path_}, {"ops", std::move(ops)}}, result))
+    return false;
+  const auto notes = result.find("notes");
+  say(notes != result.end() && notes->is_array() && !notes->empty() && (*notes)[0].is_string() ? (*notes)[0].get<std::string>() : std::string(label));
+  refresh();
+  return true;
+}
+
 const ClipUi *App::selected(const TrackUi **track) const {
   for (const TrackUi &t : tracks_)
     for (const ClipUi &c : t.clips)
@@ -2441,25 +2454,50 @@ void App::draw_transition_card(const TrackUi &track, const ClipUi &c) {
     const int64_t unlimited = INT64_MAX / 4;
     const int64_t after = c.is_text || c.media_frames <= 0 ? unlimited : c.media_frames - c.source_frames - c.frames;
     const int64_t before = next->is_text ? unlimited : next->source_frames;
-    const int64_t half = std::max<int64_t>(0, std::min({after, before, c.frames, next->frames}));
-    const float max_s = float(double(2 * half) / fps());
-    if (half < 1) {
-      ImGui::TextColored(hexv(look::fg3),
-                         "A dissolve needs media beyond the cut: trim the end of this clip or the start of the next "
-                         "one to leave some.");
-    } else {
-      dissolve_s_ = std::clamp(dissolve_s_, float(1.0 / fps()), max_s);
-      ImGui::TextColored(hexv(look::fg2), "Length");
-      ImGui::SameLine(88.0f);
-      slim_slider("dissolve", &dissolve_s_, float(1.0 / fps()), max_s, ImGui::GetContentRegionAvail().x - 52.0f, "");
-      ImGui::SameLine();
-      ImGui::PushFont(g_fonts.mono, 13.0f);
-      ImGui::TextColored(hexv(look::fg2), "%.2fs", dissolve_s_);
-      ImGui::PopFont();
+    // The slider reaches as far as the two clips are long. What the media does not allow, "Make room" makes: it trims
+    // the missing media off the clips and moves the later clips of the track up (the engine's make_room).
+    const int64_t longest = 2 * std::min(c.frames, next->frames);
+    const float one = float(1.0 / fps());
+    dissolve_s_ = std::clamp(dissolve_s_, one, std::max(float(double(longest) / fps()), 2.0f * one));
+    ImGui::TextColored(hexv(look::fg2), "Length");
+    ImGui::SameLine(88.0f);
+    slim_slider("dissolve", &dissolve_s_, one, std::max(float(double(longest) / fps()), 2.0f * one), ImGui::GetContentRegionAvail().x - 52.0f, "");
+    ImGui::SameLine();
+    ImGui::PushFont(g_fonts.mono, 13.0f);
+    ImGui::TextColored(hexv(look::fg2), "%.2fs", dissolve_s_);
+    ImGui::PopFont();
+    {
       // A new transition is centred on the cut and as long as the slider says; a dissolve and a wipe share the rest.
-      const int64_t total = std::clamp<int64_t>(std::llround(dissolve_s_ * fps()), 1, 2 * half);
+      // A new transition is a whole number of frames on each side of the cut, so its length is even.
+      int64_t total = std::clamp<int64_t>(std::llround(dissolve_s_ * fps()), 2, std::max<int64_t>(2, longest));
+      total += total & 1;
       const int64_t in = total / 2, out = total - in;
+      const int64_t miss_after = after < unlimited ? std::max<int64_t>(0, out - after) : 0;
+      const int64_t miss_before = before < unlimited ? std::max<int64_t>(0, in - before) : 0;
+      const bool fits = miss_after == 0 && miss_before == 0;
       const std::string from = c.id, to = next->id, track_id = track.id;
+      if (!fits) {
+        std::string need;
+        char part[96];
+        if (miss_after > 0) {
+          std::snprintf(part, sizeof part, "%.2f s more media after this clip", double(miss_after) / fps());
+          need = part;
+        }
+        if (miss_before > 0) {
+          std::snprintf(part, sizeof part, "%.2f s more media before the next clip", double(miss_before) / fps());
+          need += (need.empty() ? "" : " and ") + std::string(part);
+        }
+        ImGui::TextColored(hexv(look::fg3), "This length needs %s.", need.c_str());
+        ImGui::TextColored(hexv(look::fg3),
+                           "Make room trims that off the clips, moves the later clips on this track up, and shortens the track by %.2f s.",
+                           double(miss_after + miss_before) / fps());
+        if (soft_button("make_room", "Make room", ImVec2(-1.0f, 28.0f), true, true))
+          pending_ = [this, from, to, total] {
+            timeline_edit(json::array({{{"op", "make_room"}, {"between", json::array({from, to})}, {"duration", frames_text(total)}}}),
+                          "Make room");
+          };
+      }
+      ImGui::BeginDisabled(!fits);
       const auto add = [&](const char *type, const char *label, json params) {
         pending_ = [this, from, to, track_id, in, out, type = std::string(type), label = std::string(label), params] {
           json value = {{"type", type}, {"from", from}, {"to", to}, {"in_offset", frames_text(in)}, {"out_offset", frames_text(out)}};
@@ -2495,6 +2533,7 @@ void App::draw_transition_card(const TrackUi &track, const ClipUi &c) {
       ImGui::PopFont();
       if (soft_button("add_zoom", "Zoom into next clip", ImVec2(-1.0f, 28.0f)))
         add("attome.zoom", "Add zoom", {{"amount", std::round(double(zoom_amount_) * 100.0) / 100.0}});
+      ImGui::EndDisabled();
     }
   }
   ImGui::PopTextWrapPos();

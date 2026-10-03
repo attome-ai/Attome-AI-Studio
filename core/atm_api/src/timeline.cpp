@@ -68,6 +68,8 @@ public:
       return wrap(add_adjustment());
     if (name == "add_transition")
       return wrap(add_transition());
+    if (name == "make_room")
+      return wrap(make_room());
     if (name == "delete" || name == "ripple_delete")
       return wrap(remove(name == "ripple_delete"));
     if (name == "move")
@@ -93,7 +95,7 @@ public:
     if (name == "slide")
       return wrap(slide());
     return fail("E_OP", "\"" + name + "\" is not a timeline op.",
-                "Use add_track, add_clip, add_text, add_adjustment, add_transition, delete, ripple_delete, move, trim, "
+                "Use add_track, add_clip, add_text, add_adjustment, add_transition, make_room, delete, ripple_delete, move, trim, "
                 "split, slip, roll, slide, add_effect, remove_effect, set_effect_enabled, link, unlink or "
                 "set_property (guide.get topic \"timeline\").");
   }
@@ -517,22 +519,166 @@ private:
     return {};
   }
 
-  Result<void> add_transition() {
+  // The two clips of a cut and how far a transition over it reaches before and after the cut.
+  struct Cut {
+    std::string a, b;
+    const doc::NodeRef *ra = nullptr, *rb = nullptr;
+    Span sa, sb;
+    Rational in, out;
+  };
+
+  // Reads "between" ([first clip, second clip], touching on one track), "duration" (1 s) and "alignment" (center, start
+  // or end: where the transition sits on the cut) of an op that works on a cut.
+  Result<Cut> cut_spec(const char *op_name) {
     const auto between = op_.find("between");
     if (between == op_.end() || !between->is_array() || between->size() != 2)
-      return fail("E_PARAM", "add_transition needs \"between\": [first clip, second clip].");
-    const std::string a = (*between)[0].is_string() ? (*between)[0].get<std::string>() : "";
-    const std::string b = (*between)[1].is_string() ? (*between)[1].get<std::string>() : "";
-    const doc::NodeRef *ra = doc_.find(a), *rb = doc_.find(b);
-    if (!ra || !rb || id_prefix(a) != "clp" || id_prefix(b) != "clp")
+      return fail("E_PARAM", std::string(op_name) + " needs \"between\": [first clip, second clip].");
+    Cut c;
+    c.a = (*between)[0].is_string() ? (*between)[0].get<std::string>() : "";
+    c.b = (*between)[1].is_string() ? (*between)[1].get<std::string>() : "";
+    c.ra = doc_.find(c.a);
+    c.rb = doc_.find(c.b);
+    if (!c.ra || !c.rb || id_prefix(c.a) != "clp" || id_prefix(c.b) != "clp")
       return fail("E_UNKNOWN_CLIP", "\"between\" must name two clips.", "Use clip IDs or $new: names of clips made earlier in this call.");
-    if (ra->parent != rb->parent)
-      return fail("TRANSITION_NOT_ADJACENT", "The two clips are on different tracks.", "A dissolve joins two clips on one track.");
-    const Span sa = span_of(*ra->node), sb = span_of(*rb->node);
-    if (compare(sa.end(), sb.in) != 0)
+    if (c.ra->parent != c.rb->parent)
+      return fail("TRANSITION_NOT_ADJACENT", "The two clips are on different tracks.", "A transition joins two clips on one track.");
+    c.sa = span_of(*c.ra->node);
+    c.sb = span_of(*c.rb->node);
+    if (compare(c.sa.end(), c.sb.in) != 0)
       return fail("TRANSITION_NOT_ADJACENT",
-                  "The first clip ends at " + seconds_text(sa.end()) + " s but the second starts at " + seconds_text(sb.in) + " s.",
-                  "Put the second clip at the first one's end (append, or \"at\": \"" + sa.end().to_string() + "\").");
+                  "The first clip ends at " + seconds_text(c.sa.end()) + " s but the second starts at " + seconds_text(c.sb.in) + " s.",
+                  "Put the second clip at the first one's end (append, or \"at\": \"" + c.sa.end().to_string() + "\").");
+    ATM_TRY(Rational d, time_or("duration", Rational::from_int(1)));
+    const std::string alignment = op_.value("alignment", std::string("center"));
+    if (alignment == "center") {
+      c.in = *Rational::make(d.num(), d.den() * 2);
+      c.out = minus(d, c.in);
+    } else if (alignment == "start") { // begins at the cut
+      c.out = d;
+    } else if (alignment == "end") { // ends at the cut
+      c.in = d;
+    } else {
+      return fail("E_PARAM", "\"alignment\" must be center, start or end.");
+    }
+    return c;
+  }
+
+  // The media a clip has before its in point and after its out point; nullopt: no limit (text, stills) or not known.
+  // The rule of the validator (atm_patch handles_of).
+  struct Room {
+    std::optional<Rational> before, after;
+  };
+  static Room room_of(const json &clip, const Span &s) {
+    Room r;
+    const json ref = clip.value("media_ref", json::object());
+    if (const std::string type = ref.value("type", ""); type == "text" || type == "image")
+      return r;
+    r.before = s.source_in;
+    if (const auto total = Rational::parse(ref.value("duration", std::string())); total && total->num() > 0)
+      r.after = minus(*total, plus(s.source_in, s.duration));
+    return r;
+  }
+
+  // Makes room for a transition over a cut. Where the media beyond the cut is short, the clip on that side is trimmed
+  // by what is missing (the end of the first clip, the start of the second), so the transition can use the media that
+  // used to be on screen. The second clip then moves up to meet the first, and every later clip of its track follows by
+  // the same amount, so no gap opens; linked clips (the sound of a video) are cut and moved with their partners. Clips
+  // on other tracks that are not linked stay where they are.
+  Result<void> make_room_at(const Cut &cut) {
+    const auto pairs = linked_pairs(cut.a, cut.b); // read before any change
+    std::vector<std::string> side_a{cut.a}, side_b{cut.b};
+    for (const auto &[la, lb] : pairs) {
+      side_a.push_back(la);
+      side_b.push_back(lb);
+    }
+    Rational short_a, short_b; // what is missing after the first clip's out point, and before the second's in point
+    for (const std::string &id : side_a)
+      if (const Room r = room_of(node_of(id), span_of(node_of(id))); r.after && compare(cut.out, *r.after) > 0)
+        if (const Rational missing = minus(cut.out, *r.after); compare(missing, short_a) > 0)
+          short_a = missing;
+    for (const std::string &id : side_b)
+      if (const Room r = room_of(node_of(id), span_of(node_of(id))); r.before && compare(cut.in, *r.before) > 0)
+        if (const Rational missing = minus(cut.in, *r.before); compare(missing, short_b) > 0)
+          short_b = missing;
+    if (short_a.num() == 0 && short_b.num() == 0) {
+      out_.notes.push_back("There is already enough media on both sides of the cut: nothing was trimmed.");
+      return {};
+    }
+    const Rational shift = plus(short_a, short_b); // how much shorter the track gets after the cut
+    std::vector<std::string> done;
+    const auto seen = [&](const std::string &id) { return std::find(done.begin(), done.end(), id) != done.end(); };
+    const auto change = [&](const std::string &id, Span after) -> Result<void> {
+      if (after.duration.num() <= 0)
+        return fail("E_MEDIA_RANGE", "Clip " + id + " would be empty: making room takes " + seconds_text(short_a) +
+                                         " s off the end of the first clip and " + seconds_text(short_b) +
+                                         " s off the start of the second.",
+                    "Use a shorter transition, or clips with more media beyond the cut.");
+      ATM_CHECK(check_media(node_of(id), id, after));
+      put_span(id, span_of(node_of(id)), after);
+      done.push_back(id);
+      return {};
+    };
+    for (const std::string &id : side_a) { // the end of the first clip comes in
+      const Span s = span_of(node_of(id));
+      ATM_CHECK(change(id, {s.in, minus(s.duration, short_a), s.source_in}));
+    }
+    for (const std::string &id : side_b) { // the start of the second comes in, and it meets the first clip's new end
+      const Span s = span_of(node_of(id));
+      ATM_CHECK(change(id, {minus(s.in, short_a), minus(s.duration, short_b), plus(s.source_in, short_b)}));
+    }
+    int later = 0; // every later clip on the track, and the clips linked to them, moves up by the same amount
+    const auto follow = [&](const std::string &id) -> Result<void> {
+      if (seen(id))
+        return {};
+      const Span s = span_of(node_of(id));
+      ATM_CHECK(change(id, {minus(s.in, shift), s.duration, s.source_in}));
+      ++later;
+      return {};
+    };
+    std::vector<std::string> following;
+    if (const json *t = track(cut.ra->parent); t && t->contains("clips"))
+      for (auto it = (*t)["clips"].begin(); it != (*t)["clips"].end(); ++it)
+        if (!seen(it.key()) && compare(span_of(*it).in, cut.sb.in) > 0)
+          following.push_back(it.key());
+    for (const std::string &id : following) {
+      ATM_CHECK(follow(id));
+      for (const Member &m : linked(id))
+        ATM_CHECK(follow(m.id));
+    }
+    // A transition that already joins these clips at this cut no longer fits: it goes, with a note.
+    const auto drop_between = [&](const std::string &from, const std::string &to) {
+      const doc::NodeRef *r = doc_.find(from);
+      const json *t = r ? track(r->parent) : nullptr;
+      if (t && t->contains("transitions"))
+        for (auto it = (*t)["transitions"].begin(); it != (*t)["transitions"].end(); ++it)
+          if (it->value("from", "") == from && it->value("to", "") == to) {
+            push({{"op", "remove"}, {"path", it.key()}});
+            out_.notes.push_back("Removed transition " + it.key() + ": its cut moved. Add it again with add_transition.");
+          }
+    };
+    drop_between(cut.a, cut.b);
+    for (const auto &[la, lb] : pairs)
+      drop_between(la, lb);
+    std::string note = "Made room for the transition:";
+    if (short_a.num() > 0)
+      note += " trimmed " + seconds_text(short_a) + " s from the end of the first clip";
+    if (short_b.num() > 0)
+      note += std::string(short_a.num() > 0 ? " and " : " ") + "trimmed " + seconds_text(short_b) + " s from the start of the second";
+    note += ", and moved " + std::to_string(later) + " later clip" + (later == 1 ? "" : "s") + " " + seconds_text(shift) +
+            " s earlier. The track is " + seconds_text(shift) + " s shorter after the cut.";
+    out_.notes.push_back(note);
+    return {};
+  }
+
+  // make_room {between: [first, second], duration?, alignment?}: the room a transition of that length would need.
+  Result<void> make_room() {
+    ATM_TRY(Cut cut, cut_spec("make_room"));
+    return make_room_at(cut);
+  }
+
+  Result<void> add_transition() {
+    ATM_TRY(Cut cut, cut_spec("add_transition"));
+    const std::string &a = cut.a, &b = cut.b;
     const std::string type = op_.value("type", std::string("attome.dissolve"));
     const std::string kind = eval::transition_id(type);
     if (kind.empty())
@@ -555,27 +701,16 @@ private:
                     "0.5 is half as big again, 1 doubles the picture.");
       params = {{"amount", amount}};
     }
-    ATM_TRY(Rational d, time_or("duration", Rational::from_int(1)));
-    const std::string alignment = op_.value("alignment", std::string("center"));
-    Rational in, out;
-    if (alignment == "center") {
-      in = *Rational::make(d.num(), d.den() * 2);
-      out = minus(d, in);
-    } else if (alignment == "start") { // begins at the cut
-      out = d;
-    } else if (alignment == "end") { // ends at the cut
-      in = d;
-    } else {
-      return fail("E_PARAM", "\"alignment\" must be center, start or end.");
-    }
+    if (op_.value("make_room", false)) // trim and move up what the transition needs, instead of being refused
+      ATM_CHECK(make_room_at(cut));
     push({{"op", "add"},
-          {"path", ra->parent + "/transitions/" + placeholder()},
-          {"value", transition_value(kind, a, b, in, out, params)}});
+          {"path", cut.ra->parent + "/transitions/" + placeholder()},
+          {"value", transition_value(kind, a, b, cut.in, cut.out, params)}});
     int n = 0; // the linked sound clips that meet at the same cut cross-fade over the same range
     for (const auto &[la, lb] : linked_pairs(a, b))
       push({{"op", "add"},
             {"path", doc_.find(la)->parent + "/transitions/" + placeholder(".audio" + std::to_string(n++))},
-            {"value", {{"type", "attome.dissolve"}, {"from", la}, {"to", lb}, {"in_offset", in.to_string()}, {"out_offset", out.to_string()}}}});
+            {"value", {{"type", "attome.dissolve"}, {"from", la}, {"to", lb}, {"in_offset", cut.in.to_string()}, {"out_offset", cut.out.to_string()}}}});
     return {};
   }
 
