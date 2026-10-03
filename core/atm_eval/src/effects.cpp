@@ -27,6 +27,9 @@ constexpr EffectParam kGrain[] = {
     {"strength", "Strength", 0.0, 1.0, 0.25, false, 1.0},
     {"size", "Size", 1.0, 8.0, 1.5, false, 6.0}, // pixels of one grain on a 1080-line picture
 };
+constexpr EffectParam kLut[] = {
+    {"strength", "Strength", 0.0, 1.0, 1.0, false, 1.0}, // 0 leaves the picture alone, 1 is the full look
+};
 
 constexpr EffectDef kEffects[] = {
     {"gaussian_blur", "Blur", "blur", kBlur},
@@ -34,6 +37,7 @@ constexpr EffectDef kEffects[] = {
     {"vignette", "Vignette", "", kVignette},
     {"sharpen", "Sharpen", "", kSharpen},
     {"film_grain", "Film grain", "grain", kGrain},
+    {"lut", "LUT", "", kLut, "file"},
 };
 
 constexpr std::array<std::pair<const char *, WipeDirection>, 4> kDirections = {{

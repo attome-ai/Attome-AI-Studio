@@ -21,6 +21,10 @@ json effect_object(const eval::EffectDef &def, const json &src) {
     const auto v = src.is_object() ? src.find(p.key) : src.end();
     params[p.key] = v != src.end() && v->is_number() ? v->get<double>() : p.def;
   }
+  // A file parameter (a LUT's .cube) has no default: left out when not given, which the validator then refuses by name.
+  if (def.file_param[0] != '\0' && src.is_object())
+    if (const auto f = src.find(def.file_param); f != src.end() && f->is_string())
+      params[def.file_param] = *f;
   return {{"effect", eval::effect_name(def)}, {"enabled", true}, {"params", std::move(params)}};
 }
 

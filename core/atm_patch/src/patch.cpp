@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cstdio>
 #include <map>
 #include <optional>
@@ -465,6 +466,23 @@ void check_effects(const json &clip, const std::string &clip_id, bool audio_trac
             break;
           }
       }
+    // A file parameter (the LUT's "file") is a non-empty path ending in .cube. The disk is not looked at: a LUT that has
+    // gone missing is a warning when rendering, not a refusal of every edit.
+    if (def->file_param[0] != '\0' && problems.size() < kMaxProblems) {
+      const auto f = params.find(def->file_param);
+      const bool ok = f != params.end() && f->is_string() && f->get<std::string>().size() > 5 &&
+                      [&] {
+                        std::string s = f->get<std::string>();
+                        for (char &c : s)
+                          c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                        return s.ends_with(".cube");
+                      }();
+      if (!ok)
+        problems.push_back(problem("EFFECT_PARAM", id + "/params/" + def->file_param, clip_id,
+                                   "The " + std::string(def->title) + " effect " + id + " needs params." + def->file_param +
+                                       " set to the path of a .cube file.",
+                                   "For example {\"file\": \"C:/luts/teal-orange.cube\", \"strength\": 1}."));
+    }
     for (const eval::EffectParam &p : def->params) {
       const auto v = params.find(p.key);
       const bool missing = v == params.end();

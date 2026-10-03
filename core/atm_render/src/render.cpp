@@ -10,6 +10,7 @@
 #include "atm/base/parallel.hpp"
 #include "atm/base/profiler.hpp"
 #include "atm/base/rational.hpp"
+#include "atm/eval/lut.hpp"
 
 #if defined(_M_X64) || defined(__x86_64__)
 #include <emmintrin.h>
@@ -17,6 +18,14 @@
 #endif
 
 namespace atm::render {
+
+// A look-up table baked onto a grid of kLutGrid^3 nodes over the video-range YUV cube, each holding the table's answer
+// as YUV, so a pixel costs one trilinear lookup instead of a conversion to RGB, a table lookup and a conversion back.
+struct BakedLut {
+  static constexpr int kGrid = 33;
+  std::vector<float> yuv; // kGrid^3 triples, Y fastest, then U, then V (all in 0..255 video-range code values)
+};
+
 namespace {
 
 using json = nlohmann::json;
@@ -431,6 +440,9 @@ Result<Composition> compile(const json &project, std::string_view sequence_id) {
               Effect effect;
               effect.kind = def->id;
               effect.def = def;
+              if (def->file_param[0] != '\0')
+                if (const auto prm = e.find("params"); prm != e.end() && prm->is_object())
+                  effect.file = prm->value(def->file_param, std::string());
               const auto params = e.find("params");
               for (size_t i = 0; i < def->params.size() && i < 3; ++i) {
                 const eval::EffectParam &p = def->params[i];
@@ -927,11 +939,98 @@ void grain_nv12(uint8_t *nv12, int W, int H, float strength, float size, int64_t
   });
 }
 
+// BT.709 video-range YUV <-> display RGB (0..1), the matrix the picture is decoded with.
+void yuv_to_rgb(float y, float u, float v, float rgb[3]) {
+  const float yy = 1.164383f * (y - 16.0f), cb = u - 128.0f, cr = v - 128.0f;
+  rgb[0] = std::clamp((yy + 1.792741f * cr) / 255.0f, 0.0f, 1.0f);
+  rgb[1] = std::clamp((yy - 0.213249f * cb - 0.532909f * cr) / 255.0f, 0.0f, 1.0f);
+  rgb[2] = std::clamp((yy + 2.112402f * cb) / 255.0f, 0.0f, 1.0f);
+}
+
+void rgb_to_yuv(const float rgb[3], float &y, float &u, float &v) {
+  const float l = 0.2126f * rgb[0] + 0.7152f * rgb[1] + 0.0722f * rgb[2];
+  y = 16.0f + 219.0f * l;
+  u = 128.0f + 224.0f * (rgb[2] - l) / 1.8556f;
+  v = 128.0f + 224.0f * (rgb[0] - l) / 1.5748f;
+}
+
+std::shared_ptr<const BakedLut> bake_lut(const eval::Lut &lut) {
+  ATM_PROFILE_SCOPE("effect.lut.bake");
+  constexpr int N = BakedLut::kGrid;
+  auto baked = std::make_shared<BakedLut>();
+  baked->yuv.resize(size_t(N) * N * N * 3);
+  for (int iv = 0; iv < N; ++iv)
+    for (int iu = 0; iu < N; ++iu)
+      for (int iy = 0; iy < N; ++iy) {
+        float rgb[3], out[3], y, u, v;
+        yuv_to_rgb(16.0f + 219.0f * float(iy) / float(N - 1), 16.0f + 224.0f * float(iu) / float(N - 1),
+                   16.0f + 224.0f * float(iv) / float(N - 1), rgb);
+        lut.sample(rgb[0], rgb[1], rgb[2], out);
+        rgb_to_yuv(out, y, u, v);
+        float *node = &baked->yuv[((size_t(iv) * N + size_t(iu)) * N + size_t(iy)) * 3];
+        node[0] = y;
+        node[1] = u;
+        node[2] = v;
+      }
+  return baked;
+}
+
+// The table's look at `strength` (0 = untouched .. 1 = the full table), in place. Chroma is done first, from the luma
+// that is still the picture's own.
+void lut_nv12(uint8_t *nv12, int W, int H, const BakedLut &lut, float strength) {
+  ATM_PROFILE_SCOPE("effect.lut");
+  constexpr int N = BakedLut::kGrid;
+  constexpr float kTop = float(N - 1);
+  const float *g = lut.yuv.data();
+  // Trilinear lookup of the node cell holding (y, u, v).
+  const auto lookup = [&](float y, float u, float v, float out[3]) {
+    const float py = std::clamp((y - 16.0f) * (kTop / 219.0f), 0.0f, kTop), pu = std::clamp((u - 16.0f) * (kTop / 224.0f), 0.0f, kTop),
+                pv = std::clamp((v - 16.0f) * (kTop / 224.0f), 0.0f, kTop);
+    const int y0 = std::min(int(py), N - 2), u0 = std::min(int(pu), N - 2), v0 = std::min(int(pv), N - 2);
+    const float ty = py - float(y0), tu = pu - float(u0), tv = pv - float(v0);
+    const float *n = g + ((size_t(v0) * N + size_t(u0)) * N + size_t(y0)) * 3;
+    constexpr size_t sy = 3, su = size_t(N) * 3, sv = size_t(N) * N * 3;
+    for (int c = 0; c < 3; ++c) {
+      const float c00 = n[c] + (n[sy + c] - n[c]) * ty;
+      const float c10 = n[su + c] + (n[su + sy + c] - n[su + c]) * ty;
+      const float c01 = n[sv + c] + (n[sv + sy + c] - n[sv + c]) * ty;
+      const float c11 = n[sv + su + c] + (n[sv + su + sy + c] - n[sv + su + c]) * ty;
+      out[c] = (c00 + (c10 - c00) * tu) + ((c01 + (c11 - c01) * tu) - (c00 + (c10 - c00) * tu)) * tv;
+    }
+  };
+  uint8_t *uv = nv12 + size_t(W) * size_t(H);
+  // One 2 x 2 block of luma and its chroma pair at a time, all read before any is written: the luma of a pixel looks
+  // up with the block's original chroma, and the chroma with the block's mean luma.
+  parallel_for(H / 2, 16, [&](int64_t first, int64_t last) {
+    for (int64_t cy = first; cy < last; ++cy) {
+      uint8_t *r0 = nv12 + size_t(2 * cy) * size_t(W), *r1 = r0 + W;
+      uint8_t *row = uv + size_t(cy) * size_t(W);
+      for (int cx = 0; cx < W / 2; ++cx) {
+        const float u = float(row[2 * cx]), v = float(row[2 * cx + 1]);
+        uint8_t *px[4] = {r0 + 2 * cx, r0 + 2 * cx + 1, r1 + 2 * cx, r1 + 2 * cx + 1};
+        float sum = 0.0f, o[3];
+        for (uint8_t *p : px) {
+          const float y = float(*p);
+          sum += y;
+          lookup(y, u, v, o);
+          *p = uint8_t(std::clamp(int(y + (o[0] - y) * strength + 0.5f), 16, 235));
+        }
+        lookup(sum * 0.25f, u, v, o);
+        row[2 * cx] = uint8_t(std::clamp(int(u + (o[1] - u) * strength + 0.5f), 16, 240));
+        row[2 * cx + 1] = uint8_t(std::clamp(int(v + (o[2] - v) * strength + 0.5f), 16, 240));
+      }
+    }
+  });
+}
+
 // One effect of a layer on a picture that is not isolated (an adjustment layer's copy of everything below it). `frame`
 // is the frame of the sequence: grain changes with it.
 void apply_effect(const std::string &kind, const std::array<float, 3> &v, uint8_t *nv12, int W, int H,
-                  std::vector<uint8_t> &scratch, int64_t frame) {
-  if (kind == "gaussian_blur") // radius in canvas heights, about two standard deviations
+                  std::vector<uint8_t> &scratch, int64_t frame, const BakedLut *lut = nullptr) {
+  if (kind == "lut") {
+    if (lut && v[0] > 0.0f) // a table that would not load leaves the picture alone (the warning says why)
+      lut_nv12(nv12, W, H, *lut, v[0]);
+  } else if (kind == "gaussian_blur") // radius in canvas heights, about two standard deviations
     blur_nv12(nv12, W, H, v[0] * float(H) * 0.5f, scratch);
   else if (kind == "color_grade")
     grade_nv12(nv12, W, H, v[0], v[1], v[2]);
@@ -1039,6 +1138,20 @@ Pose pose_at(const Layer &l, const Composition &comp, int64_t frame) {
   return p;
 }
 
+const BakedLut *Renderer::lut_for(const Effect &e) {
+  if (e.kind != "lut")
+    return nullptr;
+  const auto found = luts_.find(e.file);
+  if (found != luts_.end())
+    return found->second.get();
+  std::shared_ptr<const BakedLut> baked;
+  if (auto lut = eval::load_cube(e.file))
+    baked = bake_lut(*lut);
+  else if (warning_.empty())
+    warning_ = lut.error().message;
+  return luts_.emplace(e.file, std::move(baked)).first->second.get();
+}
+
 // Draws one layer into `out`. The black background is drawn first only when the layer does not cover it.
 void Renderer::draw(const Layer &l, int64_t frame, uint8_t *out, bool &cleared, std::vector<const std::string *> &used,
                     bool raw) {
@@ -1063,7 +1176,7 @@ void Renderer::draw(const Layer &l, int64_t frame, uint8_t *out, bool &cleared, 
     const size_t size = media::nv12_size(width_, height_);
     adjust_.assign(out, out + size);
     for (const Effect &e : l.effects)
-      apply_effect(e.kind, effect_values(l, e, comp_, frame), adjust_.data(), width_, height_, scratch_, frame);
+      apply_effect(e.kind, effect_values(l, e, comp_, frame), adjust_.data(), width_, height_, scratch_, frame, lut_for(e));
     put_rows(out, pitch, adjust_.data(), pitch, height_ * 3 / 2, width_, int(p.opacity * 256.0f + 0.5f));
     return;
   }
@@ -1195,7 +1308,7 @@ void Renderer::draw_isolated(const Layer &l, int64_t frame, uint8_t *out, bool &
         box_vertical(tmp.data(), cover_.data(), W, H, r);
       }
     } else { // a colour effect: apply it, then take back what it changed where the clip is not
-      apply_effect(e.kind, v, over_black_.data(), W, H, scratch_, frame);
+      apply_effect(e.kind, v, over_black_.data(), W, H, scratch_, frame, lut_for(e));
       remask_nv12(over_black_.data(), cover_.data(), W, H);
     }
   }

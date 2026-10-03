@@ -34,6 +34,7 @@ inline Fonts g_fonts;
 
 struct EffectUi { // one effect of a clip or adjustment layer: its ID, the eval::EffectDef id, and its parameters in table order
   std::string id, kind;
+  std::string file; // a LUT's .cube path
   float v[3] = {0.0f, 0.0f, 0.0f};
   eval::Curve curve[3]; // keyframes of each parameter, clip-local; empty: the plain value in v
 };
@@ -109,7 +110,7 @@ private:
   void import_files(const std::vector<std::string> &paths);
   void add_track();
   void add_title(int preset);
-  void add_adjustment(const eval::EffectDef &def);
+  void add_adjustment(const eval::EffectDef &def, const std::string &file = {});
   void draw_effects_panel();
   void draw_effect_card(const ClipUi &clip, const eval::EffectDef &def, bool show_amount);
   void draw_effect_cards(const ClipUi &clip);
@@ -127,6 +128,9 @@ private:
   void history_step(bool undo);
   void start_export(const std::string &path);
   void ask_import();
+  // Asks for a .cube file. `target` is "" (a new adjustment layer), a clip ID (add the LUT to that clip) or an effect ID
+  // (change the file of that LUT).
+  void ask_lut(const std::string &target);
   void ask_export();
   void ask_project();
   void take_dialog_results();
@@ -244,7 +248,7 @@ private:
   // results of the native dialogs, which may arrive on another thread
   std::mutex dialog_mutex_;
   std::vector<std::string> dialog_import_;
-  std::string dialog_export_, dialog_project_;
+  std::string dialog_export_, dialog_project_, dialog_lut_, lut_target_;
   std::vector<std::string> dropped_;
 };
 

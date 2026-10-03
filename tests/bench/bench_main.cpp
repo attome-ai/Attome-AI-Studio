@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -168,6 +169,22 @@ void bench_effects() {
   report("vignette, strength animated by 50 keys", frame_ms(keyed_vignette(), 10), "ms", 3.0);
   report("sharpen (a blur and a pass over the luma), adjustment layer", frame_ms(with_effect("sharpen", 1.0f, 0.004f, 0), 10), "ms", 8.0);
   report("film grain, adjustment layer", frame_ms(with_effect("film_grain", 0.3f, 1.5f, 0), 10), "ms", 2.0);
+  { // a LUT: a 17-point cube baked onto a YUV grid, one trilinear lookup per pixel
+    const fs::path cube = fs::temp_directory_path() / atm::new_id("attome-bench-lut");
+    {
+      std::string t = "LUT_3D_SIZE 17\n";
+      for (int b = 0; b < 17; ++b)
+        for (int g = 0; g < 17; ++g)
+          for (int r = 0; r < 17; ++r)
+            t += std::to_string(float(r) / 16.0f * 0.9f) + " " + std::to_string(float(g) / 16.0f) + " " + std::to_string(0.1f + float(b) / 16.0f * 0.9f) + "\n";
+      std::ofstream(cube, std::ios::binary) << t;
+    }
+    atm::render::Composition comp = with_effect("lut", 1.0f, 0, 0);
+    comp.layers[0].effects[0].file = cube.string();
+    report("lut (17-point cube), adjustment layer", frame_ms(std::move(comp), 10), "ms", 5.0);
+    std::error_code ec;
+    fs::remove(cube, ec);
+  }
   report("dissolve (reference), two text clips", frame_ms(two_clips(atm::eval::TransitionKind::dissolve), 30), "ms", 20.0);
   report("wipe, two text clips", frame_ms(two_clips(atm::eval::TransitionKind::wipe), 30), "ms", 4.0);
   report("push, two text clips", frame_ms(two_clips(atm::eval::TransitionKind::push), 30), "ms", 4.0);

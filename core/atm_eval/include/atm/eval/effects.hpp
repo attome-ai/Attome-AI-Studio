@@ -27,6 +27,8 @@ struct EffectDef {
   const char *title; // for menus
   const char *alias; // another short name accepted by the timeline ops ("blur"), or ""
   std::span<const EffectParam> params;
+  // The key of a string parameter naming a file ("file" for a LUT), or "". It is not a number, so it is not in params.
+  const char *file_param = "";
   // The name the editor's controls use: the alias when there is one ("blur", "grade"), else the id.
   const char *short_name() const { return alias[0] != '\0' ? alias : id; }
 };

@@ -1626,3 +1626,70 @@ TEST_CASE("render: sharpen steepens an edge and nothing else; film grain is zero
 }
 
 #endif
+
+TEST_CASE("render: a LUT remaps the picture through a .cube file; strength mixes it with the original", "[media]") {
+  const fs::path dir = fs::temp_directory_path() / atm::new_id("attome-lut");
+  fs::create_directories(dir);
+  const std::string clip = (dir / "clip.mp4").string();
+  write_clip(clip, 320, 240, 30); // red top half, blue bottom half
+  const auto write_cube = [&](const char *name, bool invert) {
+    std::string t = "LUT_3D_SIZE 2\n";
+    for (int b = 0; b < 2; ++b)
+      for (int g = 0; g < 2; ++g)
+        for (int r = 0; r < 2; ++r)
+          t += std::to_string(invert ? 1 - r : r) + " " + std::to_string(invert ? 1 - g : g) + " " + std::to_string(invert ? 1 - b : b) + "\n";
+    const fs::path p = dir / name;
+    std::ofstream(p, std::ios::binary) << t;
+    return p.string();
+  };
+  const std::string identity = write_cube("identity.cube", false), invert = write_cube("invert.cube", true);
+  struct Px { int r, g, b; };
+  struct Shot { Px top, bottom; std::string warning; };
+  const auto shoot = [&](json params) {
+    json adjustment = {{"timing", {{"record_in", "0"}, {"duration", "1"}, {"source_in", "0"}}},
+                       {"media_ref", {{"type", "adjustment"}}},
+                       {"effects", {{"fx_1", {{"effect", "attome.lut@1.0.0"}, {"enabled", true}, {"params", std::move(params)}}}}}};
+    const json doc = {
+        {"sequences",
+         {{"seq_1",
+           {{"rate", "30"},
+            {"canvas", {{"width", 320}, {"height", 240}}},
+            {"track_order", {"trk_v", "trk_fx"}},
+            {"tracks",
+             {{"trk_v", {{"clips", {{"clp_v", {{"timing", {{"record_in", "0"}, {"duration", "1"}, {"source_in", "0"}}},
+                                               {"media_ref", {{"type", "file"}, {"path", clip}}}}}}}}},
+              {"trk_fx", {{"clips", {{"clp_adj", adjustment}}}}}}}}}}},
+        {"sequence_order", {"seq_1"}}};
+    auto comp = atm::render::compile(doc);
+    REQUIRE(comp);
+    atm::render::Renderer renderer(*comp, 320, 240);
+    std::vector<uint8_t> nv12(media::nv12_size(320, 240)), rgb(320 * 240 * 4);
+    REQUIRE(renderer.render(10, nv12.data()));
+    media::nv12_to_bgrx(nv12.data(), 320, 240, rgb.data());
+    const auto px = [&](int x, int y) {
+      const uint8_t *p = rgb.data() + (size_t(y) * 320 + size_t(x)) * 4;
+      return Px{p[2], p[1], p[0]};
+    };
+    return Shot{px(160, 40), px(160, 200), renderer.take_warning()};
+  };
+  const Shot plain = shoot({{"file", identity}, {"strength", 0.0}});
+  const Shot same = shoot({{"file", identity}, {"strength", 1.0}});
+  CHECK(std::abs(same.top.r - plain.top.r) <= 3);
+  CHECK(std::abs(same.top.g - plain.top.g) <= 3);
+  CHECK(std::abs(same.top.b - plain.top.b) <= 3);
+  CHECK(std::abs(same.bottom.b - plain.bottom.b) <= 3);
+  const Shot flipped = shoot({{"file", invert}, {"strength", 1.0}});
+  CHECK(flipped.top.r < 70); // red became cyan
+  CHECK(flipped.top.g > 185);
+  CHECK(flipped.top.b > 185);
+  CHECK(flipped.bottom.b < 70); // blue became yellow
+  CHECK(flipped.bottom.r > 185);
+  const Shot half = shoot({{"file", invert}, {"strength", 0.5}});
+  CHECK(std::abs(half.top.r - (plain.top.r + flipped.top.r) / 2) <= 12); // halfway between the two
+  CHECK(std::abs(half.top.g - (plain.top.g + flipped.top.g) / 2) <= 12);
+  const Shot missing = shoot({{"file", (dir / "nope.cube").string()}, {"strength", 1.0}});
+  CHECK(std::abs(missing.top.r - plain.top.r) <= 3); // the picture stays as it was
+  CHECK(missing.warning.find("nope.cube") != std::string::npos);
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}

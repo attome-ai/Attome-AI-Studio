@@ -878,3 +878,42 @@ TEST_CASE("effects: sharpen and film grain are accepted with their parameters, o
   CHECK((*b["effects"].begin())["params"]["strength"] == 0.25);
 }
 
+TEST_CASE("effects: a LUT needs a .cube file name (the disk is not looked at); add_effect and set_property take it", "[effect]") {
+  Fixture f;
+  const auto layer = [](const Fixture &on, json effect) {
+    return json::array({{{"op", "add"},
+                         {"path", on.track + "/clips/$new:adj"},
+                         {"value",
+                          {{"timing", {{"record_in", "4s"}, {"duration", "2s"}, {"source_in", "0s"}}},
+                           {"media_ref", {{"type", "adjustment"}}},
+                           {"effects", {{"$new:fx", std::move(effect)}}}}}}});
+  };
+  const auto fx = [](json params) { return json{{"effect", "attome.lut@1.0.0"}, {"enabled", true}, {"params", std::move(params)}}; };
+  CHECK(f.rule_of(layer(f, fx({{"strength", 1.0}}))) == "EFFECT_PARAM"); // no file
+  CHECK(f.rule_of(layer(f, fx({{"file", ""}}))) == "EFFECT_PARAM");
+  CHECK(f.rule_of(layer(f, fx({{"file", 3}}))) == "EFFECT_PARAM");
+  CHECK(f.rule_of(layer(f, fx({{"file", "look.png"}}))) == "EFFECT_PARAM"); // not a .cube
+  CHECK(f.rule_of(layer(f, fx({{"file", "look.cube"}, {"strength", 1.5}}))) == "EFFECT_PARAM");
+  Fixture g;
+  CHECK(g.patch(layer(g, fx({{"file", "C:/does/not/exist/Look.CUBE"}, {"strength", 0.6}})))); // missing on disk is fine
+  Fixture h;
+  auto r = h.engine.call("timeline.edit", {{"project", h.project},
+                                           {"ops", json::array({{{"op", "add_effect"}, {"id", "$new:l"}, {"target", h.a}, {"type", "lut"},
+                                                                 {"file", "a.cube"}, {"strength", 0.5}}})}});
+  INFO((r ? "" : r.error().message));
+  REQUIRE(r);
+  const json a = h.engine.call("project.get", {{"project", h.project}, {"id", h.a}})->at("object");
+  const auto &fx_obj = *a["effects"].begin();
+  CHECK(fx_obj["effect"] == "attome.lut@1.0.0");
+  CHECK(fx_obj["params"]["file"] == "a.cube");
+  CHECK(fx_obj["params"]["strength"] == 0.5);
+  const std::string fx_id = a["effects"].begin().key();
+  auto set = h.engine.call("timeline.edit", {{"project", h.project},
+                                             {"ops", json::array({{{"op", "set_property"}, {"target", fx_id}, {"path", "params.file"}, {"value", "b.cube"}}})}});
+  INFO((set ? "" : set.error().message));
+  REQUIRE(set);
+  CHECK(h.engine.call("project.get", {{"project", h.project}, {"id", h.a}})->at("object")["effects"][fx_id]["params"]["file"] == "b.cube");
+  auto bad = h.engine.call("timeline.edit", {{"project", h.project},
+                                             {"ops", json::array({{{"op", "add_effect"}, {"target", h.b}, {"type", "lut"}}})}});
+  CHECK_FALSE(bad); // no file
+}

@@ -281,8 +281,10 @@ void App::refresh() {
                 const eval::EffectDef *def = e->is_object() ? eval::find_effect(e->value("effect", std::string())) : nullptr;
                 if (!def)
                   continue;
-                EffectUi ui{e.key(), def->id, {}};
+                EffectUi ui{e.key(), def->id, {}, {}};
                 const json params = e->value("params", json::object());
+                if (def->file_param[0] != '\0' && params.is_object())
+                  ui.file = params.value(def->file_param, std::string());
                 for (size_t i = 0; i < def->params.size() && i < 3; ++i) {
                   ui.v[i] = params.is_object() && params.contains(def->params[i].key) && params[def->params[i].key].is_number()
                                 ? params[def->params[i].key].get<float>()
@@ -775,6 +777,19 @@ void App::ask_import() {
       this, window_, filters, 2, user_folder(SDL_FOLDER_VIDEOS).c_str(), true);
 }
 
+void App::ask_lut(const std::string &target) {
+  static const SDL_DialogFileFilter filters[] = {{"Colour look-up tables", "cube"}, {"All files", "*"}};
+  lut_target_ = target;
+  SDL_ShowOpenFileDialog(
+      [](void *self, const char *const *files, int) {
+        App *app = static_cast<App *>(self);
+        std::lock_guard lock(app->dialog_mutex_);
+        if (files && *files)
+          app->dialog_lut_ = *files;
+      },
+      this, window_, filters, 2, user_folder(SDL_FOLDER_DOCUMENTS).c_str(), false);
+}
+
 void App::ask_export() {
   if (total_frames_ == 0) {
     say("Add a clip before exporting.", true);
@@ -803,14 +818,19 @@ void App::ask_project() {
       this, window_, user_folder(SDL_FOLDER_DOCUMENTS).c_str(), false);
 }
 
+namespace {
+json default_effect(const eval::EffectDef &def, const std::string &file = {}); // below
+} // namespace
+
 void App::take_dialog_results() {
   std::vector<std::string> import;
-  std::string out, project;
+  std::string out, project, lut;
   {
     std::lock_guard lock(dialog_mutex_);
     import.swap(dialog_import_);
     out.swap(dialog_export_);
     project.swap(dialog_project_);
+    lut.swap(dialog_lut_);
   }
   import.insert(import.end(), dropped_.begin(), dropped_.end());
   dropped_.clear();
@@ -818,6 +838,16 @@ void App::take_dialog_results() {
     if (fs::path(std::u8string(project.begin(), project.end())).extension() != ".attome")
       project += "\\Untitled.attome"; // a plain folder was picked: make the project inside it
     open_project(project);
+  }
+  if (!lut.empty()) {
+    const eval::EffectDef *def = eval::find_effect("lut");
+    const std::string target = lut_target_;
+    if (def && target.empty())
+      add_adjustment(*def, lut);
+    else if (def && target.rfind("fx_", 0) == 0)
+      patch(json::array({{{"op", "replace"}, {"path", target + "/params/" + def->file_param}, {"value", lut}}}), "Change LUT file");
+    else if (def)
+      patch(json::array({{{"op", "add"}, {"path", target + "/effects/$new:fx"}, {"value", default_effect(*def, lut)}}}), "Add LUT");
   }
   if (!import.empty())
     import_files(import);
@@ -1537,10 +1567,12 @@ void App::draw_text_panel() {
 
 namespace {
 // The effect object of a table entry with every parameter at its default.
-json default_effect(const eval::EffectDef &def) {
+json default_effect(const eval::EffectDef &def, const std::string &file) {
   json params = json::object();
   for (const eval::EffectParam &p : def.params)
     params[p.key] = p.def;
+  if (def.file_param[0] != '\0')
+    params[def.file_param] = file;
   return {{"effect", eval::effect_name(def)}, {"enabled", true}, {"params", std::move(params)}};
 }
 
@@ -1680,15 +1712,20 @@ void App::draw_effects_panel() {
   ImGui::Spacing();
   static const std::pair<const char *, const char *> kBlurb[] = {
       {"blur", "Softens everything below"}, {"grade", "Brightness, contrast and colour"}, {"vignette", "Darkens the corners"},
-      {"sharpen", "Crisper edges"}, {"grain", "Film grain, new every frame"}};
+      {"sharpen", "Crisper edges"}, {"grain", "Film grain, new every frame"},
+      {"lut", "A look from a .cube file"}};
   for (const eval::EffectDef &def : eval::effect_defs()) {
     const std::string name = def.short_name();
     const ImVec2 p = ImGui::GetCursorScreenPos();
     ImGui::InvisibleButton(("##fx_" + name).c_str(), ImVec2(-1.0f, 78.0f));
     ui_mark("effect:" + name);
     const bool hovered = ImGui::IsItemHovered();
-    if (ImGui::IsItemClicked())
-      add_adjustment(def);
+    if (ImGui::IsItemClicked()) {
+      if (def.file_param[0] != '\0')
+        ask_lut(""); // the layer is made when the file is chosen
+      else
+        add_adjustment(def);
+    }
     const ImVec2 q(p.x + ImGui::GetItemRectSize().x, p.y + 78.0f);
     const ImVec2 c((p.x + q.x) * 0.5f, p.y + 30.0f);
     ImDrawList *dl = ImGui::GetWindowDrawList();
@@ -1705,6 +1742,10 @@ void App::draw_effects_panel() {
       const ImVec2 edge[6] = {ImVec2(c.x - 34.0f, c.y + 10.0f), ImVec2(c.x - 9.0f, c.y + 10.0f), ImVec2(c.x - 7.0f, c.y + 16.0f),
                               ImVec2(c.x - 5.0f, c.y - 16.0f), ImVec2(c.x - 3.0f, c.y - 10.0f), ImVec2(c.x + 34.0f, c.y - 10.0f)};
       dl->AddPolyline(edge, 6, hex(look::adj), 0, 2.2f);
+    } else if (name == "lut") { // a strip of graded colour: the table's cube, flattened
+      for (int i = 0; i < 6; ++i)
+        dl->AddRectFilled(ImVec2(c.x - 36.0f + float(i) * 12.0f, c.y - 14.0f), ImVec2(c.x - 25.0f + float(i) * 12.0f, c.y + 14.0f),
+                          IM_COL32(60 + i * 30, 170 - i * 20, 220 - i * 32, 200), 3.0f);
     } else if (name == "grain") { // scattered specks
       for (int i = 0; i < 70; ++i)
         dl->AddRectFilled(ImVec2(c.x - 34.0f + std::fmod(float(i) * 37.3f, 68.0f), c.y - 22.0f + std::fmod(float(i) * 53.7f, 44.0f)),
@@ -1725,7 +1766,7 @@ void App::draw_effects_panel() {
 
 // Adds a 3-second effect at the playhead on the "Effects" track, made when missing just under the titles, so it changes
 // the video but not the text.
-void App::add_adjustment(const eval::EffectDef &def) {
+void App::add_adjustment(const eval::EffectDef &def, const std::string &file) {
   const TrackUi *effects = nullptr, *titles = nullptr;
   for (const TrackUi &t : tracks_) {
     if (t.name == "Effects")
@@ -1758,7 +1799,7 @@ void App::add_adjustment(const eval::EffectDef &def) {
                   {{"name", def.title},
                    {"timing", {{"record_in", frames_text(at)}, {"duration", frames_text(frames)}, {"source_in", "0"}}},
                    {"media_ref", {{"type", "adjustment"}}},
-                   {"effects", {{"$new:fx", default_effect(def)}}},
+                   {"effects", {{"$new:fx", default_effect(def, file)}}},
                    {"transform", {{"opacity", 1.0}}}}}});
   json ids;
   std::string label = std::string("Add ") + def.title;
@@ -1793,11 +1834,16 @@ void App::draw_effect_cards(const ClipUi &c) {
   for (const eval::EffectDef &def : eval::effect_defs()) {
     if (has(def))
       continue;
-    if (soft_button((std::string("add_") + def.short_name()).c_str(), def.title, ImVec2(-1.0f, 28.0f)))
+    if (soft_button((std::string("add_") + def.short_name()).c_str(), def.title, ImVec2(-1.0f, 28.0f))) {
+      if (def.file_param[0] != '\0') {
+        ask_lut(id);
+        continue;
+      }
       pending_ = [this, id, &def] {
         patch(json::array({{{"op", "add"}, {"path", id + "/effects/$new:fx"}, {"value", default_effect(def)}}}),
               (std::string("Add ") + def.title).c_str());
       };
+    }
   }
   end_card();
 }
@@ -1823,14 +1869,27 @@ void App::draw_effect_card(const ClipUi &c, const eval::EffectDef &def, bool sho
     ImGui::TextColored(hexv(look::fg3), "%s", c.is_adjustment ? ("This adjustment layer has no " + lower + ".").c_str()
                                                               : ("Add " + lower + " to this clip alone.").c_str());
     ImGui::PopTextWrapPos();
-    if (soft_button(("add_" + name).c_str(), ("Add " + lower).c_str(), ImVec2(-1.0f, 28.0f)))
-      pending_ = [this, id, &def, label = "Add " + lower] {
-        patch(json::array({{{"op", "add"}, {"path", id + "/effects/$new:fx"}, {"value", default_effect(def)}}}), label.c_str());
-      };
+    if (soft_button(("add_" + name).c_str(), ("Add " + lower).c_str(), ImVec2(-1.0f, 28.0f))) {
+      if (def.file_param[0] != '\0')
+        ask_lut(id);
+      else
+        pending_ = [this, id, &def, label = "Add " + lower] {
+          patch(json::array({{{"op", "add"}, {"path", id + "/effects/$new:fx"}, {"value", default_effect(def)}}}), label.c_str());
+        };
+    }
     end_card();
     return;
   }
   const std::string fx = found->id;
+  if (def.file_param[0] != '\0') { // the file: its name, and a button to pick another
+    const fs::path file(std::u8string(found->file.begin(), found->file.end()));
+    const std::string shown = found->file.empty() ? std::string("No file") : file.filename().string();
+    ImGui::TextColored(hexv(look::fg2), "File");
+    ImGui::SameLine(88.0f);
+    ImGui::TextColored(hexv(found->file.empty() ? look::fg3 : look::fg), "%s", shown.c_str());
+    if (soft_button(("choose_" + name).c_str(), "Choose a .cube file...", ImVec2(-1.0f, 28.0f)))
+      ask_lut(fx);
+  }
   for (size_t i = 0; i < def.params.size(); ++i) {
     const eval::EffectParam &p = def.params[i];
     const std::string key = fx + "/" + p.key;

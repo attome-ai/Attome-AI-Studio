@@ -34,12 +34,12 @@ What exists today:
 - rotation around an anchor point and cropping of each side, for clips and titles (a quarter turn stands a sideways phone video up)
 - keyframes on opacity, position, scale, rotation and anchor, and on the parameters of effects (a vignette that closes in, a blur that clears; a diamond on each effect slider adds, updates or removes a key at the playhead, with Previous and Next key) (linear, hold and easing presets); the Inspector's Fade card fades a clip in and out, and the timeline draws the opacity curve on the clip
 - sound: music and other sound files on audio tracks, clip gain in dB, pan and fades (equal power or linear), track volume and pan, and mute; the Inspector's Audio card sets them
-- colour grade (brightness, contrast, saturation), vignette, sharpen (an unsharp mask on the luma) and film grain (noise that is new on every frame and repeats exactly in an export), on one clip or on an adjustment layer, from the Effects panel and the Inspector's effect cards
+- colour grade (brightness, contrast, saturation), vignette, sharpen (an unsharp mask on the luma), film grain (noise that is new on every frame and repeats exactly in an export) and LUTs (a .cube colour table, 3D or 1D, at a strength from 0 to 1), on one clip or on an adjustment layer, from the Effects panel and the Inspector's effect cards
 - a Gaussian blur on one clip (its edges soften into what is below it) or on an adjustment layer, which changes everything on the tracks below it; the Effects panel and each clip's Blur card add them
 - linked picture and sound: a video with sound comes in as two linked clips, the picture and its sound on an audio track, so the sound can be cut, faded and mixed on its own while moving, trimming, splitting and deleting keep them together; Unlink separates them
 - an MCP server, `attome mcp --stdio`: an AI agent such as Claude can build a project, look at frames and a contact sheet of it, and render it, see [Connect an AI agent](#connect-an-ai-agent)
 
-Not built yet: AI generation, effects other than the blur, colour grade, vignette, sharpen and film grain, transitions other than the dissolve, the wipe, the push and the zoom, the GPU compositor, JSON Schema validation, Suggested Edits and per-task undo. Decode and encode use the Windows media stack today, so import and export work on Windows only; the macOS and Linux code paths of the rest are written but have only been built and tested on Windows.
+Not built yet: AI generation, effects other than the blur, colour grade, vignette, sharpen, film grain and LUT, transitions other than the dissolve, the wipe, the push and the zoom, the GPU compositor, JSON Schema validation, Suggested Edits and per-task undo. Decode and encode use the Windows media stack today, so import and export work on Windows only; the macOS and Linux code paths of the rest are written but have only been built and tested on Windows.
 
 ### The editor
 

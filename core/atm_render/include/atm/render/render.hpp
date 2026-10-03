@@ -21,11 +21,14 @@
 
 namespace atm::render {
 
+struct BakedLut; // a .cube table resampled onto a grid of video-range YUV (render.cpp)
+
 // An effect of a clip or an adjustment layer (ADR-004). `kind` is the id of an eval::EffectDef and v holds its
 // parameters in that table's order, clamped to their ranges: gaussian_blur {radius}, color_grade {brightness,
 // contrast, saturation}, vignette {strength, radius, softness}. A blur radius is a fraction of the canvas height.
 struct Effect {
   std::string kind;
+  std::string file; // a lut's .cube path (the effect's params.file), else empty
   float v[3] = {0.0f, 0.0f, 0.0f};
   // Keyframes of the parameters (the effect object's "keyframes": {<param>: {...}}), clip-local like the transform's.
   // A parameter with keys follows its curve and ignores its plain value in v; `def` gives the range it is held to.
@@ -153,6 +156,8 @@ private:
   std::vector<uint8_t> adjust_, scratch_;             // an adjustment layer's copy of the picture below it
   std::vector<uint8_t> over_black_, over_white_, cover_; // a clip with effects, drawn on its own (see draw_isolated)
   std::string warning_;
+  std::unordered_map<std::string, std::shared_ptr<const BakedLut>> luts_; // by path; null when the file would not load
+  const BakedLut *lut_for(const Effect &e); // loads and bakes on first use; warns once when the file is missing
   // `raw` draws the layer at full opacity without its effects (the isolated pass of a clip with effects).
   void draw(const Layer &l, int64_t frame, uint8_t *out, bool &cleared, std::vector<const std::string *> &used,
             bool raw = false);
