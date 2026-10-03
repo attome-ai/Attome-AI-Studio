@@ -1,5 +1,5 @@
 # UI test: a clip gets a Chroma key card (the effect is for clips, so the Effects panel has no tile for it): "Add chroma
-# key" adds it, and the Key colour slider sets params.hue (0..360). Virtual input only (uitest.psm1). Needs a build
+# key" adds it, and the Key colour slider and the colour picker (a click in the Monitor) set params.hue (0..360). Virtual input only (uitest.psm1). Needs a build
 # (build\win-msvc-release\bin). Exit code 0 = pass.
 #   .\tools\uitest\chroma_key.ps1
 
@@ -32,6 +32,8 @@ $run = Invoke-EditorScript -Project $proj -Script @(
   'click @button:add_key'
   'expect @slider:key_hue'
   'slide @slider:key_hue 0.6667'        # 0 .. 360 on the slider: 240, blue
+  'click @button:pick_key'              # then pick from the picture instead: the left of the sample is blue-violet
+  'click @monitor@0.15,0.8'
   'wait 800'
   "shot $work\chroma_key_card.jpg"
 )
@@ -42,10 +44,10 @@ try {
     $e = @((Get-Object $run $v1.clip_list[0].id).effects.PSObject.Properties | ForEach-Object { $_.Value })[0]
     "key: $($e.effect) hue=$($e.params.hue) similarity=$($e.params.similarity) smoothness=$($e.params.smoothness)"
     if ($e.effect -notlike 'attome.chroma_key*') { $failed = 'the clip has no chroma key' }
-    elseif ([math]::Abs($e.params.hue - 240) -gt 12) { $failed = 'the Key colour slider did not set about 240' }
+    elseif ($e.params.hue -lt 200 -or $e.params.hue -gt 330) { $failed = 'picking from the picture did not give a blue-violet hue (200 to 330)' }
   }
 } finally { Stop-Daemon $run }
 
 if ($failed) { Write-Host "FAIL: $failed" -ForegroundColor Red; exit 1 }
-Write-Host "PASS: Chroma key card on a clip and its Key colour slider (captures in $work)" -ForegroundColor Green
+Write-Host "PASS: Chroma key card on a clip and picking its colour from the Monitor (captures in $work)" -ForegroundColor Green
 exit 0

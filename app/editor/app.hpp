@@ -119,6 +119,9 @@ private:
   const EffectUi *find_effect_ui(const std::string &fx_id, const ClipUi **clip = nullptr) const;
   float effect_value(const ClipUi &clip, const EffectUi &fx, size_t param) const;
   std::string effect_key_id_at(const std::string &fx_id, const std::string &param, int64_t rel) const;
+  // The key colour picker: while an effect ID is here, the next click in the Monitor sets that chroma key's hue from the
+  // picture under the cursor, as it looks without the key.
+  void pick_key_colour(const std::string &fx_id, float u, float v); // u, v: fractions of the picture
   void write_effect_param(const std::string &fx_id, size_t param, float value, const char *label);
   void toggle_effect_key(const std::string &fx_id, size_t param);
   void jump_effect_key(const ClipUi &clip, const EffectUi &fx, bool forward);
@@ -207,6 +210,7 @@ private:
 
   // moving a clip by dragging the picture in the Monitor
   bool mon_drag_ = false;
+  std::string pick_key_fx_;
   ImVec2 mon_start_{};
   float mon_x0_ = 0.5f, mon_y0_ = 0.5f, mon_x_ = 0.5f, mon_y_ = 0.5f;
   std::string mon_clip_;

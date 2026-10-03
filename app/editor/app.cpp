@@ -1851,6 +1851,63 @@ void App::draw_effect_cards(const ClipUi &c) {
   end_card();
 }
 
+// Sets the hue of a chroma key from the Monitor's picture at (u, v), taken without the key (the keyed picture has the
+// screen cut out of it). The frame is rendered again with that one effect off and the colour averaged over a small
+// square, so grain does not pick a stray hue. What is under the cursor is the picture of all tracks: pick on the clip that
+// is on top at that point.
+void App::pick_key_colour(const std::string &fx_id, float u, float v) {
+  if (!find_effect_ui(fx_id))
+    return;
+  json copy = doc_;
+  bool found = false;
+  const std::function<void(json &)> disable = [&](json &node) {
+    if (node.is_object()) {
+      if (const auto it = node.find(fx_id); it != node.end() && it->is_object() && it->contains("effect")) {
+        (*it)["enabled"] = false;
+        found = true;
+        return;
+      }
+      for (auto &item : node)
+        if (!found)
+          disable(item);
+    } else if (node.is_array()) {
+      for (json &item : node)
+        if (!found)
+          disable(item);
+    }
+  };
+  disable(copy);
+  auto comp = render::compile(copy);
+  if (!found || !comp)
+    return;
+  const double fit = std::min({1.0, 1280.0 / canvas_w_, 720.0 / canvas_h_});
+  const int W = std::max(2, int(canvas_w_ * fit)), H = std::max(2, int(canvas_h_ * fit));
+  render::Renderer renderer(std::move(*comp), W, H);
+  std::vector<uint8_t> nv12(media::nv12_size(renderer.width(), renderer.height())), bgrx(size_t(renderer.width()) * size_t(renderer.height()) * 4);
+  if (!renderer.render(std::clamp<int64_t>(playhead_, 0, std::max<int64_t>(0, total_frames_ - 1)), nv12.data()))
+    return;
+  media::nv12_to_bgrx(nv12.data(), renderer.width(), renderer.height(), bgrx.data());
+  const int cx = std::clamp(int(u * float(renderer.width())), 0, renderer.width() - 1);
+  const int cy = std::clamp(int(v * float(renderer.height())), 0, renderer.height() - 1);
+  double sum[3] = {0, 0, 0};
+  int n = 0;
+  for (int y = std::max(0, cy - 3); y <= std::min(renderer.height() - 1, cy + 3); ++y)
+    for (int x = std::max(0, cx - 3); x <= std::min(renderer.width() - 1, cx + 3); ++x, ++n) {
+      const uint8_t *p = bgrx.data() + (size_t(y) * size_t(renderer.width()) + size_t(x)) * 4;
+      sum[0] += p[2], sum[1] += p[1], sum[2] += p[0];
+    }
+  const double r = sum[0] / n / 255.0, g = sum[1] / n / 255.0, b = sum[2] / n / 255.0;
+  const double hi = std::max({r, g, b}), lo = std::min({r, g, b});
+  if (hi < 0.05 || (hi - lo) / hi < 0.15) {
+    say("That spot has no colour to key. Click on the screen.", true);
+    return;
+  }
+  double hue = hi == r ? std::fmod((g - b) / (hi - lo), 6.0) : hi == g ? (b - r) / (hi - lo) + 2.0 : (r - g) / (hi - lo) + 4.0;
+  hue = std::fmod(hue * 60.0 + 360.0, 360.0);
+  const float value = std::round(float(hue) * 10.0f) / 10.0f;
+  pending_ = [this, fx_id, value] { write_effect_param(fx_id, 0, value, "Pick key colour"); };
+}
+
 // One effect of a clip: its parameters as sliders in the ranges of the effect table, added and removed with a button.
 void App::draw_effect_card(const ClipUi &c, const eval::EffectDef &def, bool show_amount) {
   const std::string name = def.short_name(); // blur, grade, vignette: the controls are named after it
@@ -1884,6 +1941,11 @@ void App::draw_effect_card(const ClipUi &c, const eval::EffectDef &def, bool sho
     return;
   }
   const std::string fx = found->id;
+  if (std::string(def.id) == "chroma_key") { // the colour can be picked from the picture
+    const bool picking = pick_key_fx_ == fx;
+    if (soft_button(("pick_" + name).c_str(), picking ? "Click the screen in the Monitor..." : "Pick colour from picture", ImVec2(-1.0f, 28.0f)))
+      pick_key_fx_ = picking ? std::string() : fx;
+  }
   if (def.file_param[0] != '\0') { // the file: its name, and a button to pick another
     const fs::path file(std::u8string(found->file.begin(), found->file.end()));
     const std::string shown = found->file.empty() ? std::string("No file") : file.filename().string();
@@ -2058,7 +2120,12 @@ void App::draw_viewer() {
     ImGui::InvisibleButton("##picture", size);
     ui_mark("monitor");
     const ImVec2 mouse = ImGui::GetIO().MousePos;
-    if (ImGui::IsItemActivated()) {
+    if (!pick_key_fx_.empty() && ImGui::IsItemHovered())
+      ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+    if (ImGui::IsItemActivated() && !pick_key_fx_.empty()) { // a pick, not a selection or a drag
+      const std::string fx = std::exchange(pick_key_fx_, std::string());
+      pick_key_colour(fx, (mouse.x - p0.x) / size.x, (mouse.y - p0.y) / size.y);
+    } else if (ImGui::IsItemActivated()) {
       const float mx = (mouse.x - p0.x) / k, my = (mouse.y - p0.y) / k; // canvas pixels
       const ClipUi *hit = nullptr;
       const TrackUi *hit_track = nullptr;
