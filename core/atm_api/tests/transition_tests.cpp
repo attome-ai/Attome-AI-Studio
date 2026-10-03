@@ -917,3 +917,31 @@ TEST_CASE("effects: a LUT needs a .cube file name (the disk is not looked at); a
                                              {"ops", json::array({{{"op", "add_effect"}, {"target", h.b}, {"type", "lut"}}})}});
   CHECK_FALSE(bad); // no file
 }
+
+TEST_CASE("effects: a chroma key is for clips with a picture; ranges are checked and add_effect takes the name key", "[effect]") {
+  Fixture f;
+  const auto fx = [](json params) { return json{{"effect", "attome.chroma_key@1.0.0"}, {"enabled", true}, {"params", std::move(params)}}; };
+  const auto layer = [&](const Fixture &on, json effect) { // an adjustment layer
+    return json::array({{{"op", "add"},
+                         {"path", on.track + "/clips/$new:adj"},
+                         {"value",
+                          {{"timing", {{"record_in", "4s"}, {"duration", "2s"}, {"source_in", "0s"}}},
+                           {"media_ref", {{"type", "adjustment"}}},
+                           {"effects", {{"$new:fx", std::move(effect)}}}}}}});
+  };
+  CHECK(f.rule_of(layer(f, fx({{"hue", 120}}))) == "EFFECT_UNSUPPORTED");
+  Fixture g;
+  auto r = g.engine.call("timeline.edit", {{"project", g.project},
+                                           {"ops", json::array({{{"op", "add_effect"}, {"id", "$new:k"}, {"target", g.a}, {"type", "key"}, {"hue", 240}}})}});
+  INFO((r ? "" : r.error().message));
+  REQUIRE(r);
+  const json a = g.engine.call("project.get", {{"project", g.project}, {"id", g.a}})->at("object");
+  const json &k = *a["effects"].begin();
+  CHECK(k["effect"] == "attome.chroma_key@1.0.0");
+  CHECK(k["params"]["hue"] == 240.0);
+  CHECK(k["params"]["similarity"] == 0.35);
+  const std::string id = a["effects"].begin().key();
+  auto bad = g.engine.call("timeline.edit", {{"project", g.project},
+                                             {"ops", json::array({{{"op", "set_property"}, {"target", id}, {"path", "params.hue"}, {"value", 400}}})}});
+  CHECK_FALSE(bad); // out of range
+}

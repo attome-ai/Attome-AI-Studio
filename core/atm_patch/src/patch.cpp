@@ -415,6 +415,13 @@ void check_effects(const json &clip, const std::string &clip_id, bool audio_trac
                                  "Use \"attome.<id>@1.0.0\" with one of: " + eval::effect_ids() + "."));
       continue;
     }
+    if (def->clip_only && clip.value("media_ref", json::object()).value("type", std::string()) == "adjustment") {
+      problems.push_back(problem("EFFECT_UNSUPPORTED", id + "/effect", clip_id,
+                                 "The " + std::string(def->title) + " effect " + id + " works on a clip's own picture; clip " + clip_id +
+                                     " is an adjustment layer.",
+                                 "Put it on the clip that has the picture."));
+      continue;
+    }
     const json params = it->value("params", json::object());
     if (!params.is_object()) {
       problems.push_back(problem("EFFECT_PARAM", id + "/params", clip_id, "params of effect " + id + " must be an object.",

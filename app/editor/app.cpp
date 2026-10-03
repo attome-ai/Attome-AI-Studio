@@ -1715,6 +1715,8 @@ void App::draw_effects_panel() {
       {"sharpen", "Crisper edges"}, {"grain", "Film grain, new every frame"},
       {"lut", "A look from a .cube file"}};
   for (const eval::EffectDef &def : eval::effect_defs()) {
+    if (def.clip_only)
+      continue; // not for an adjustment layer: it is on the clip's own card
     const std::string name = def.short_name();
     const ImVec2 p = ImGui::GetCursorScreenPos();
     ImGui::InvisibleButton(("##fx_" + name).c_str(), ImVec2(-1.0f, 78.0f));
@@ -1824,7 +1826,8 @@ void App::draw_effect_cards(const ClipUi &c) {
     draw_effect_card(c, def, !amount_shown && has(def));
     amount_shown = amount_shown || has(def);
   }
-  if (!c.is_adjustment || std::all_of(eval::effect_defs().begin(), eval::effect_defs().end(), has))
+  if (!c.is_adjustment || std::all_of(eval::effect_defs().begin(), eval::effect_defs().end(),
+                                      [&](const eval::EffectDef &def) { return has(def) || def.clip_only; }))
     return;
   if (!begin_card("##fx_add", c.effects.empty() ? "Effects" : "Add an effect")) {
     end_card();
@@ -1832,7 +1835,7 @@ void App::draw_effect_cards(const ClipUi &c) {
   }
   const std::string id = c.id;
   for (const eval::EffectDef &def : eval::effect_defs()) {
-    if (has(def))
+    if (has(def) || def.clip_only)
       continue;
     if (soft_button((std::string("add_") + def.short_name()).c_str(), def.title, ImVec2(-1.0f, 28.0f))) {
       if (def.file_param[0] != '\0') {

@@ -1265,6 +1265,9 @@ private:
     const eval::EffectDef *def = eval::find_effect(type);
     if (!def)
       return fail("EFFECT_UNSUPPORTED", "The effect \"" + type + "\" is not available.", "Use one of: " + eval::effect_ids() + ".");
+    if (def->clip_only && ref->node->value("media_ref", json::object()).value("type", std::string()) == "adjustment")
+      return fail("EFFECT_UNSUPPORTED", std::string("The ") + def->title + " effect works on a clip's own picture, not on an adjustment layer.",
+                  "Add it to the clip that has the picture.");
     json src = op_; // the parameters sit on the op itself ("radius": 0.02) or in "params"
     if (const auto p = op_.find("params"); p != op_.end() && p->is_object())
       src.update(*p);

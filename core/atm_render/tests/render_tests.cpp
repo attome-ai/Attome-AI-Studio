@@ -1693,3 +1693,196 @@ TEST_CASE("render: a LUT remaps the picture through a .cube file; strength mixes
   std::error_code ec;
   fs::remove_all(dir, ec);
 }
+
+TEST_CASE("render: a chroma key makes the key colour transparent so the track below shows; other colours stay", "[media]") {
+  const fs::path dir = fs::temp_directory_path() / atm::new_id("attome-key");
+  fs::create_directories(dir);
+  const std::string clip = (dir / "clip.mp4").string();
+  write_clip(clip, 320, 240, 30); // red top half, blue bottom half
+  const std::string below = (dir / "yellow.mp4").string();
+  write_solid(below, 0xFFFF00, 440.0, 2);
+  struct Px { int r, g, b; };
+  const auto shoot = [&](json params, bool keyed = true) {
+    json top = {{"timing", {{"record_in", "0"}, {"duration", "1"}, {"source_in", "0"}}},
+                {"media_ref", {{"type", "file"}, {"path", clip}}}};
+    if (keyed)
+      top["effects"] = {{"fx_1", {{"effect", "attome.chroma_key@1.0.0"}, {"enabled", true}, {"params", std::move(params)}}}};
+    const json doc = {
+        {"sequences",
+         {{"seq_1",
+           {{"rate", "30"},
+            {"canvas", {{"width", 320}, {"height", 240}}},
+            {"track_order", {"trk_below", "trk_top"}},
+            {"tracks",
+             {{"trk_below", {{"clips", {{"clp_b", {{"timing", {{"record_in", "0"}, {"duration", "1"}, {"source_in", "0"}}},
+                                                   {"media_ref", {{"type", "file"}, {"path", below}}}}}}}}},
+              {"trk_top", {{"clips", {{"clp_t", top}}}}}}}}}}},
+        {"sequence_order", {"seq_1"}}};
+    auto comp = atm::render::compile(doc);
+    REQUIRE(comp);
+    atm::render::Renderer renderer(*comp, 320, 240);
+    std::vector<uint8_t> nv12(media::nv12_size(320, 240)), rgb(320 * 240 * 4);
+    REQUIRE(renderer.render(10, nv12.data()));
+    media::nv12_to_bgrx(nv12.data(), 320, 240, rgb.data());
+    const auto px = [&](int x, int y) {
+      const uint8_t *p = rgb.data() + (size_t(y) * 320 + size_t(x)) * 4;
+      return Px{p[2], p[1], p[0]};
+    };
+    return std::pair<Px, Px>{px(160, 40), px(160, 200)};
+  };
+  const auto [plain_top, plain_bottom] = shoot({}, false);
+  CHECK(plain_top.r > 180);
+  CHECK(plain_bottom.b > 120);
+  { // blue key (240): the blue half becomes the yellow clip below; the red half is untouched
+    const auto [top, bottom] = shoot({{"hue", 240.0}, {"similarity", 0.5}, {"smoothness", 0.1}});
+    CHECK(std::abs(top.r - plain_top.r) <= 6);
+    CHECK(std::abs(top.g - plain_top.g) <= 6);
+    CHECK(std::abs(top.b - plain_top.b) <= 6);
+    CHECK(bottom.r > 200); // yellow
+    CHECK(bottom.g > 200);
+    CHECK(bottom.b < 80);
+  }
+  { // red key (0): the red half goes, the blue half stays
+    const auto [top, bottom] = shoot({{"hue", 0.0}, {"similarity", 0.5}, {"smoothness", 0.1}});
+    CHECK(top.r > 200);
+    CHECK(top.g > 200);
+    CHECK(top.b < 80);
+    CHECK(std::abs(bottom.b - plain_bottom.b) <= 6);
+    CHECK(std::abs(bottom.r - plain_bottom.r) <= 6);
+  }
+  { // green key: nothing in the picture is near it, so nothing is removed
+    const auto [top, bottom] = shoot({{"hue", 120.0}, {"similarity", 0.2}, {"smoothness", 0.1}});
+    CHECK(std::abs(top.r - plain_top.r) <= 6);
+    CHECK(std::abs(bottom.b - plain_bottom.b) <= 6);
+  }
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}
+
+// A green screen as a camera makes it: grain on every pixel, a lighting falloff across the screen, a soft-edged subject
+// with green spill on its rim, then H.264 at a low bitrate. Returns the clip's path.
+static std::string write_noisy_screen(const fs::path &dir, int W, int H, double cx, double cy, double radius) {
+  const std::string path = (dir / "screen.mp4").string();
+  auto encoder = media::Encoder::create({path, W, H, 30, 1, 1'500'000, true});
+  REQUIRE(encoder);
+  uint32_t rng = 12345;
+  const auto noise = [&] { // roughly normal, sigma about 1: the sum of four uniforms
+    double sum = 0;
+    for (int i = 0; i < 4; ++i) {
+      rng = rng * 1664525u + 1013904223u;
+      sum += double(rng >> 8) / double(1 << 24) - 0.5;
+    }
+    return sum * 1.73;
+  };
+  std::vector<uint8_t> bgrx(size_t(W) * size_t(H) * 4), nv12(media::nv12_size(W, H));
+  for (int f = 0; f < 6; ++f) {
+    for (int y = 0; y < H; ++y)
+      for (int x = 0; x < W; ++x) {
+        const double d = std::hypot(double(x) + 0.5 - cx, double(y) + 0.5 - cy) - radius; // < 0 inside the subject
+        const double a = std::clamp(0.5 - d / 3.0, 0.0, 1.0);                              // 3 px soft edge
+        const double light = 0.65 + 0.35 * double(x) / double(W);                           // falls off to the left
+        double screen[3] = {0.0 * light, 177.0 * light, 64.0 * light};
+        double skin[3] = {224, 172, 140};
+        if (d < 0 && d > -7) { // spill: green light reflected onto the rim
+          const double k = (1.0 + d / 7.0) * 0.55;
+          skin[0] -= 70 * k, skin[1] += 25 * k, skin[2] -= 40 * k;
+        }
+        uint8_t *px = bgrx.data() + (size_t(y) * size_t(W) + size_t(x)) * 4;
+        for (int c = 0; c < 3; ++c) {
+          const double v = skin[c] * a + screen[c] * (1.0 - a) + noise() * 5.0;
+          px[2 - c] = uint8_t(std::clamp(v, 0.0, 255.0));
+        }
+        px[3] = 255;
+      }
+    media::bgrx_to_nv12(bgrx.data(), W, H, nv12.data());
+    REQUIRE((*encoder)->video(nv12.data(), f));
+  }
+  REQUIRE((*encoder)->finish());
+  return path;
+}
+
+TEST_CASE("render: a chroma key on noisy footage leaves no speckle, no holes and a narrow soft edge", "[media]") {
+  const fs::path dir = fs::temp_directory_path() / atm::new_id("attome-noisykey");
+  fs::create_directories(dir);
+  constexpr int W = 640, H = 360;
+  constexpr double cx = 320, cy = 180, radius = 110;
+  const std::string screen = write_noisy_screen(dir, W, H, cx, cy, radius);
+  const std::string below = (dir / "magenta.mp4").string();
+  write_solid(below, 0xFF00FF, 440.0, 2);
+  const auto render = [&](json effects, bool with_top = true) {
+    json top = {{"timing", {{"record_in", "0"}, {"duration", "1"}, {"source_in", "0"}}}, {"media_ref", {{"type", "file"}, {"path", screen}}}};
+    if (!effects.is_null())
+      top["effects"] = std::move(effects);
+    json top_track = json::object();
+    top_track["clips"] = json::object();
+    if (with_top)
+      top_track["clips"]["clp_t"] = top;
+    const json doc = {
+        {"sequences",
+         {{"seq_1",
+           {{"rate", "30"},
+            {"canvas", {{"width", W}, {"height", H}}},
+            {"track_order", {"trk_below", "trk_top"}},
+            {"tracks",
+             {{"trk_below", {{"clips", {{"clp_b", {{"timing", {{"record_in", "0"}, {"duration", "1"}, {"source_in", "0"}}},
+                                                   {"media_ref", {{"type", "file"}, {"path", below}}}}}}}}},
+              {"trk_top", top_track}}}}}}},
+        {"sequence_order", {"seq_1"}}};
+    auto comp = atm::render::compile(doc);
+    REQUIRE(comp);
+    atm::render::Renderer renderer(*comp, W, H);
+    std::vector<uint8_t> nv12(media::nv12_size(W, H)), rgb(size_t(W) * H * 4);
+    REQUIRE(renderer.render(3, nv12.data()));
+    media::nv12_to_bgrx(nv12.data(), W, H, rgb.data());
+    return rgb;
+  };
+  const auto fx = [](json params) { return json{{"fx_1", {{"effect", "attome.chroma_key@1.0.0"}, {"enabled", true}, {"params", std::move(params)}}}}; };
+  const auto plain = render(nullptr);
+  const auto keyed = render(fx({{"hue", 120.0}, {"similarity", 0.35}, {"smoothness", 0.15}}));
+  const auto magenta = render(nullptr, false); // the background alone
+  if (const char *out = std::getenv("ATTOME_DUMP_DIR")) {
+    for (const auto &[name, img] : {std::pair{"plain", &plain}, std::pair{"keyed", &keyed}}) {
+      std::ofstream f(fs::path(out) / (std::string(name) + ".bgrx"), std::ios::binary);
+      f.write(reinterpret_cast<const char *>(img->data()), std::streamsize(img->size()));
+    }
+  }
+  const auto at = [&](const std::vector<uint8_t> &img, int x, int y) { return img.data() + (size_t(y) * W + size_t(x)) * 4; };
+  const auto dist = [&](int x, int y) { return std::hypot(double(x) + 0.5 - cx, double(y) + 0.5 - cy) - radius; };
+  const auto differs = [&](const uint8_t *a, const uint8_t *b, int tolerance) {
+    return std::abs(int(a[0]) - int(b[0])) + std::abs(int(a[1]) - int(b[1])) + std::abs(int(a[2]) - int(b[2])) > tolerance;
+  };
+  int bg_n = 0, bg_bad = 0, in_n = 0, in_bad = 0, rim_n = 0;
+  double rim_green = 0, rim_plain_green = 0;
+  for (int y = 0; y < H; ++y)
+    for (int x = 0; x < W; ++x) {
+      const double d = dist(x, y);
+      if (d > 8) { // the screen: should be the magenta below
+        ++bg_n;
+        bg_bad += differs(at(keyed, x, y), at(magenta, x, y), 45);
+      } else if (d < -12) { // the subject's inside: should be as it was
+        ++in_n;
+        in_bad += differs(at(keyed, x, y), at(plain, x, y), 45);
+      } else if (d < -1 && d > -7) { // the rim: green spill on it. Green above the larger of red and blue
+        ++rim_n;
+        const uint8_t *k = at(keyed, x, y), *p = at(plain, x, y);
+        rim_green += double(k[1]) - double(k[0] + k[2]) * 0.5; // green over the mean of red and blue
+        rim_plain_green += double(p[1]) - double(p[0] + p[2]) * 0.5;
+      }
+    }
+  // The edge: along the row through the centre, pixels that are neither the background nor the subject.
+  int edge_width = 0;
+  for (int x = int(cx + radius) - 20; x < int(cx + radius) + 20; ++x) {
+    const uint8_t *k = at(keyed, x, int(cy)), *m = at(magenta, x, int(cy)), *p = at(plain, x, int(cy));
+    if (differs(k, m, 45) && differs(k, p, 45))
+      ++edge_width;
+  }
+  const double speckle = double(bg_bad) / bg_n, holes = double(in_bad) / in_n;
+  WARN("speckle " << speckle << "  holes " << holes << "  edge " << edge_width << " px  rim green keyed "
+                  << rim_green / rim_n << " plain " << rim_plain_green / rim_n);
+  CHECK(speckle < 0.002);
+  CHECK(holes < 0.002);
+  CHECK(edge_width <= 8);
+  CHECK(rim_green / rim_n < rim_plain_green / rim_n - 8.0); // the spill on the rim is mostly gone
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}

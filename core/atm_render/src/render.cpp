@@ -786,6 +786,93 @@ void remask_nv12(uint8_t *nv12, const uint8_t *cover, int W, int H) {
   });
 }
 
+// Chroma key: removes the pixels whose colour is near the key colour. `nv12` is the picture of the clip alone,
+// premultiplied around black, and `cover` its coverage; the key multiplies both by a matte, so what is keyed out is
+// transparent and the edge is soft. `hue` is in degrees, `similarity` how far round the colour wheel from the key colour
+// is still removed (1 is a quarter turn), `smoothness` the width of the soft edge.
+//
+// The match is made on the hue ANGLE of the chroma (Cb, Cr), not on its distance from one point: the chroma of one
+// colour grows and shrinks with its brightness, so a screen in shadow is the same hue with less chroma and a distance
+// would keep it. A pixel is keyed when its angle is near the key's and it is saturated enough to have a hue at all
+// (greys and near-blacks, whose angle is noise, are kept). The matte is made per chroma sample from the mean luma of its
+// 2 x 2 pixels and read back bilinearly for the luma, so its edge is not blocky. Pixels that stay get the key colour's
+// spill taken out of their chroma (the part along the key direction), strongest near the key's hue.
+void key_nv12(uint8_t *nv12, uint8_t *cover, int W, int H, float hue, float similarity, float smoothness,
+              std::vector<uint8_t> &matte) {
+  ATM_PROFILE_SCOPE("effect.chroma_key");
+  constexpr float kPi = 3.14159265f;
+  // The key colour at full saturation: its chroma direction and how saturated that is (chroma over luma).
+  const float h6 = std::fmod(hue, 360.0f) / 60.0f;
+  const float x = 1.0f - std::fabs(std::fmod(h6, 2.0f) - 1.0f);
+  const int sector = int(h6);
+  const float r = sector == 0 || sector == 5 ? 1.0f : sector == 1 || sector == 4 ? x : 0.0f;
+  const float g = sector == 1 || sector == 2 ? 1.0f : sector == 0 || sector == 3 ? x : 0.0f;
+  const float b = sector == 3 || sector == 4 ? 1.0f : sector == 2 || sector == 5 ? x : 0.0f;
+  const float ly = 0.2126f * r + 0.7152f * g + 0.0722f * b;
+  const float key_cb = (b - ly) / 1.8556f, key_cr = (r - ly) / 1.5748f;
+  const float key_len = std::sqrt(key_cb * key_cb + key_cr * key_cr);
+  const float kx = key_cb / key_len, ky = key_cr / key_len; // unit direction
+  const float key_sat = key_len / std::max(ly, 0.05f);      // chroma per unit of luma, at full saturation
+  const float a0 = similarity * (kPi * 0.5f), a1 = a0 + smoothness * 0.6f + 0.02f;
+  const int CW = W / 2, CH = H / 2;
+  matte.resize(size_t(CW) * size_t(CH));
+  uint8_t *uv = nv12 + size_t(W) * size_t(H);
+  parallel_for(CH, 16, [&](int64_t first, int64_t last) {
+    for (int64_t cy = first; cy < last; ++cy) {
+      const uint8_t *l0 = nv12 + size_t(2 * cy) * size_t(W), *l1 = l0 + W;
+      for (int cx = 0; cx < CW; ++cx) {
+        uint8_t *p = uv + size_t(cy) * size_t(W) + size_t(cx) * 2;
+        const float cb = (float(p[0]) - 128.0f) * (1.0f / 224.0f), cr = (float(p[1]) - 128.0f) * (1.0f / 224.0f);
+        const float y = (float(l0[2 * cx] + l0[2 * cx + 1] + l1[2 * cx] + l1[2 * cx + 1]) * 0.25f - 16.0f) * (1.0f / 219.0f);
+        const float len = std::sqrt(cb * cb + cr * cr);
+        const float along = cb * kx + cr * ky;
+        const float ang = std::atan2(std::fabs(cb * ky - cr * kx), along); // 0 .. pi from the key direction
+        // Saturated enough to have a hue: a tenth of the key's saturation and up, fading in over another tenth, and not
+        // so dark that the chroma is noise.
+        const float sat = len / std::max(y, 0.05f);
+        const float gate = smooth01((sat / key_sat - 0.1f) / 0.1f) * smooth01((y - 0.03f) / 0.05f);
+        const float key = (1.0f - smooth01((ang - a0) / (a1 - a0))) * gate; // 1: fully the key colour
+        matte[size_t(cy) * size_t(CW) + size_t(cx)] = uint8_t(std::lround((1.0f - key) * 255.0f));
+        // Despill what stays: take the part of the chroma that points at the key colour away, near the key's hue.
+        if (along > 0.0f) {
+          const float w = (1.0f - smooth01((ang - a1) / 0.7f)) * (1.0f - key);
+          p[0] = uint8_t(std::clamp(int(128.0f + (cb - along * kx * w) * 224.0f + 0.5f), 16, 240));
+          p[1] = uint8_t(std::clamp(int(128.0f + (cr - along * ky * w) * 224.0f + 0.5f), 16, 240));
+        }
+      }
+    }
+  });
+  const uint8_t *m = matte.data();
+  parallel_for(H, 16, [&](int64_t first, int64_t last) {
+    for (int64_t y = first; y < last; ++y) {
+      const float fy = std::clamp((float(y) + 0.5f) * 0.5f - 0.5f, 0.0f, float(CH - 1));
+      const int y0 = std::min(int(fy), CH - 1), y1 = std::min(y0 + 1, CH - 1);
+      const int ty = int((fy - float(y0)) * 256.0f);
+      uint8_t *row = nv12 + size_t(y) * size_t(W);
+      uint8_t *cov = cover + size_t(y) * size_t(W);
+      for (int px = 0; px < W; ++px) {
+        const float fx = std::clamp((float(px) + 0.5f) * 0.5f - 0.5f, 0.0f, float(CW - 1));
+        const int x0 = std::min(int(fx), CW - 1), x1 = std::min(x0 + 1, CW - 1);
+        const int tx = int((fx - float(x0)) * 256.0f);
+        const int top = int(m[size_t(y0) * size_t(CW) + size_t(x0)]) * (256 - tx) + int(m[size_t(y0) * size_t(CW) + size_t(x1)]) * tx;
+        const int bot = int(m[size_t(y1) * size_t(CW) + size_t(x0)]) * (256 - tx) + int(m[size_t(y1) * size_t(CW) + size_t(x1)]) * tx;
+        const int a = (top * (256 - ty) + bot * ty) >> 16; // 0..255
+        row[px] = uint8_t(16 + ((int(row[px]) - 16) * a + 127) / 255);
+        cov[px] = uint8_t((int(cov[px]) * a + 127) / 255);
+      }
+    }
+  });
+  parallel_for(CH, 16, [&](int64_t first, int64_t last) {
+    for (int64_t cy = first; cy < last; ++cy)
+      for (int cx = 0; cx < CW; ++cx) {
+        uint8_t *p = uv + size_t(cy) * size_t(W) + size_t(cx) * 2;
+        const int a = m[size_t(cy) * size_t(CW) + size_t(cx)];
+        for (int k = 0; k < 2; ++k)
+          p[k] = uint8_t(128 + ((int(p[k]) - 128) * a + (p[k] >= 128 ? 127 : -127)) / 255);
+      }
+  });
+}
+
 // The push of a transition: the outgoing picture (in `out`) slides away towards the side opposite `dir` and the
 // incoming one follows it in from `dir`, so the two pictures meet along a moving line and nothing is mixed. The offset
 // is a whole even number of pixels (chroma is shared by 2 x 2 pixels) and follows a smooth start and stop.
@@ -1307,6 +1394,8 @@ void Renderer::draw_isolated(const Layer &l, int64_t frame, uint8_t *out, bool &
         });
         box_vertical(tmp.data(), cover_.data(), W, H, r);
       }
+    } else if (e.kind == "chroma_key") {
+      key_nv12(over_black_.data(), cover_.data(), W, H, v[0], v[1], v[2], scratch_);
     } else { // a colour effect: apply it, then take back what it changed where the clip is not
       apply_effect(e.kind, v, over_black_.data(), W, H, scratch_, frame, lut_for(e));
       remask_nv12(over_black_.data(), cover_.data(), W, H);

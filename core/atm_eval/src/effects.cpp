@@ -31,6 +31,12 @@ constexpr EffectParam kLut[] = {
     {"strength", "Strength", 0.0, 1.0, 1.0, false, 1.0}, // 0 leaves the picture alone, 1 is the full look
 };
 
+constexpr EffectParam kKey[] = {
+    {"hue", "Key colour", 0.0, 360.0, 120.0, false, 360.0}, // degrees round the colour wheel: 120 green, 240 blue
+    {"similarity", "Similarity", 0.0, 1.0, 0.35, false, 1.0}, // how far from the key colour a pixel is still removed
+    {"smoothness", "Smoothness", 0.0, 1.0, 0.15, false, 1.0}, // the soft edge between removed and kept
+};
+
 constexpr EffectDef kEffects[] = {
     {"gaussian_blur", "Blur", "blur", kBlur},
     {"color_grade", "Color grade", "grade", kGrade},
@@ -38,6 +44,7 @@ constexpr EffectDef kEffects[] = {
     {"sharpen", "Sharpen", "", kSharpen},
     {"film_grain", "Film grain", "grain", kGrain},
     {"lut", "LUT", "", kLut, "file"},
+    {"chroma_key", "Chroma key", "key", kKey, "", true},
 };
 
 constexpr std::array<std::pair<const char *, WipeDirection>, 4> kDirections = {{

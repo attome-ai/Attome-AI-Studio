@@ -29,6 +29,9 @@ struct EffectDef {
   std::span<const EffectParam> params;
   // The key of a string parameter naming a file ("file" for a LUT), or "". It is not a number, so it is not in params.
   const char *file_param = "";
+  // True for an effect that works on the clip's own picture and its transparency (a chroma key): it is refused on an
+  // adjustment layer, which has no picture of its own, and the editor offers it on clips only.
+  bool clip_only = false;
   // The name the editor's controls use: the alias when there is one ("blur", "grade"), else the id.
   const char *short_name() const { return alias[0] != '\0' ? alias : id; }
 };

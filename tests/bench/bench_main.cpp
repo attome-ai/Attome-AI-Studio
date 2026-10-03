@@ -185,6 +185,22 @@ void bench_effects() {
     std::error_code ec;
     fs::remove(cube, ec);
   }
+  { // chroma key: a clip with a key effect is drawn on its own (twice, to get its coverage) and keyed
+    atm::render::Composition comp;
+    comp.frames = 60;
+    atm::render::Layer l;
+    l.clip_id = "clp_t";
+    l.frames = 60;
+    l.is_text = true;
+    l.text = "A";
+    l.text_size = 0.5f;
+    atm::render::Effect e;
+    e.kind = "chroma_key";
+    e.v[0] = 120.0f, e.v[1] = 0.35f, e.v[2] = 0.15f;
+    l.effects.push_back(e);
+    comp.layers.push_back(std::move(l));
+    report("chroma key, text clip (isolated pass included)", frame_ms(std::move(comp), 10), "ms", 12.0);
+  }
   report("dissolve (reference), two text clips", frame_ms(two_clips(atm::eval::TransitionKind::dissolve), 30), "ms", 20.0);
   report("wipe, two text clips", frame_ms(two_clips(atm::eval::TransitionKind::wipe), 30), "ms", 4.0);
   report("push, two text clips", frame_ms(two_clips(atm::eval::TransitionKind::push), 30), "ms", 4.0);
