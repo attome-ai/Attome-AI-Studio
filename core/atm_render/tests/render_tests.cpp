@@ -2,6 +2,7 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
+#include <array>
 #include <chrono>
 #include <cstring>
 #include <cmath>
@@ -1059,6 +1060,167 @@ TEST_CASE("media: still pictures keep their transparency, and picture clips draw
   CHECK_FALSE(logo_clip["media_ref"].contains("stream"));
   const json frames = ok(engine, "see.frames", {{"project", project}, {"times", json::array({"0.5s"})}});
   CHECK(frames.dump().find("warning") == std::string::npos);
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}
+
+TEST_CASE("render: colour grade and vignette change the picture below an adjustment layer", "[media]") {
+  const fs::path dir = fs::temp_directory_path() / atm::new_id("attome-grade");
+  fs::create_directories(dir);
+  const std::string clip = (dir / "clip.mp4").string();
+  write_clip(clip, 320, 240, 30); // red top half, blue bottom half
+
+  // The clip on the bottom track, an adjustment layer above it with the given effects.
+  const auto render_with = [&](json effects) {
+    json adjustment = {{"timing", {{"record_in", "0"}, {"duration", "1"}, {"source_in", "0"}}},
+                       {"media_ref", {{"type", "adjustment"}}},
+                       {"effects", std::move(effects)}};
+    const json doc = {
+        {"sequences",
+         {{"seq_1",
+           {{"rate", "30"},
+            {"canvas", {{"width", 320}, {"height", 240}}},
+            {"track_order", {"trk_v", "trk_fx"}},
+            {"tracks",
+             {{"trk_v", {{"clips", {{"clp_v", {{"timing", {{"record_in", "0"}, {"duration", "1"}, {"source_in", "0"}}},
+                                               {"media_ref", {{"type", "file"}, {"path", clip}}}}}}}}},
+              {"trk_fx", {{"clips", {{"clp_adj", adjustment}}}}}}}}}}},
+        {"sequence_order", {"seq_1"}}};
+    auto comp = atm::render::compile(doc);
+    REQUIRE(comp);
+    atm::render::Renderer renderer(*comp, 320, 240);
+    std::vector<uint8_t> nv12(media::nv12_size(320, 240)), rgb(320 * 240 * 4);
+    REQUIRE(renderer.render(10, nv12.data()));
+    media::nv12_to_bgrx(nv12.data(), 320, 240, rgb.data());
+    return rgb;
+  };
+  const auto px = [](const std::vector<uint8_t> &rgb, int x, int y) { return rgb.data() + (size_t(y) * 320 + size_t(x)) * 4; };
+  const auto fx = [](const char *name, json params) {
+    return json{{"fx_1", {{"effect", name}, {"enabled", true}, {"params", std::move(params)}}}};
+  };
+  const auto plain = render_with(json::object());
+
+  { // saturation 0: the red half goes grey (R, G and B alike), and stays as bright as red's luma allows
+    const auto grey = render_with(fx("attome.color_grade@1.0.0", {{"saturation", 0.0}}));
+    const uint8_t *p = px(grey, 160, 40);
+    CHECK(std::abs(int(p[2]) - int(p[1])) < 14);
+    CHECK(std::abs(int(p[2]) - int(p[0])) < 14);
+    CHECK(p[1] > 20);
+    CHECK(plain[(40 * 320 + 160) * 4 + 1] < 40); // the ungraded red had no green at all
+  }
+  { // brightness lifts black; contrast pulls the extremes towards the middle
+    const auto bright = render_with(fx("attome.color_grade@1.0.0", {{"brightness", 0.3}}));
+    CHECK(int(px(bright, 160, 40)[1]) > int(px(plain, 160, 40)[1]) + 40);
+    const auto flat = render_with(fx("attome.color_grade@1.0.0", {{"contrast", -0.8}}));
+    // Pure red and blue clip in their own channel, so look at green, which a flatter luma lifts in both halves.
+    CHECK(int(px(flat, 160, 40)[1]) > int(px(plain, 160, 40)[1]) + 20);
+    CHECK(int(px(flat, 160, 200)[1]) > int(px(plain, 160, 200)[1]) + 40);
+    const auto same = render_with(fx("attome.color_grade@1.0.0", json::object())); // defaults change nothing
+    CHECK(std::abs(int(px(same, 160, 40)[2]) - int(px(plain, 160, 40)[2])) < 3);
+    CHECK(std::abs(int(px(same, 160, 200)[0]) - int(px(plain, 160, 200)[0])) < 3);
+  }
+  { // vignette: the middle stays, the corners go dark
+    const auto vig = render_with(fx("attome.vignette@1.0.0", {{"strength", 1.0}, {"radius", 0.3}, {"softness", 0.3}}));
+    CHECK(std::abs(int(px(vig, 160, 100)[2]) - int(px(plain, 160, 100)[2])) < 8);
+    CHECK(int(px(plain, 4, 4)[2]) > 200);
+    CHECK(int(px(vig, 4, 4)[2]) < 40);
+    CHECK(int(px(vig, 315, 4)[2]) < 40);
+    CHECK(int(px(vig, 4, 235)[0]) < 40);
+  }
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}
+
+TEST_CASE("render: a colour grade on one clip does not lift the area the clip does not cover", "[media]") {
+  const fs::path dir = fs::temp_directory_path() / atm::new_id("attome-gradeclip");
+  fs::create_directories(dir);
+  const std::string clip = (dir / "clip.mp4").string();
+  write_clip(clip, 320, 240, 30);
+  const auto render_with = [&](bool graded) {
+    json c = {{"timing", {{"record_in", "0"}, {"duration", "1"}, {"source_in", "0"}}},
+              {"media_ref", {{"type", "file"}, {"path", clip}}},
+              {"transform", {{"scale", {0.5, 0.5}}}}};
+    if (graded)
+      c["effects"] = {{"fx_1", {{"effect", "attome.color_grade@1.0.0"}, {"params", {{"brightness", 0.5}}}}}};
+    const json doc = {{"sequences",
+                       {{"seq_1",
+                         {{"rate", "30"},
+                          {"canvas", {{"width", 320}, {"height", 240}}},
+                          {"track_order", {"trk_v"}},
+                          {"tracks", {{"trk_v", {{"clips", {{"clp_v", c}}}}}}}}}}},
+                      {"sequence_order", {"seq_1"}}};
+    auto comp = atm::render::compile(doc);
+    REQUIRE(comp);
+    atm::render::Renderer renderer(*comp, 320, 240);
+    std::vector<uint8_t> nv12(media::nv12_size(320, 240)), rgb(320 * 240 * 4);
+    REQUIRE(renderer.render(10, nv12.data()));
+    media::nv12_to_bgrx(nv12.data(), 320, 240, rgb.data());
+    return rgb;
+  };
+  const auto px = [](const std::vector<uint8_t> &rgb, int x, int y) { return rgb.data() + (size_t(y) * 320 + size_t(x)) * 4; };
+  const auto plain = render_with(false), graded = render_with(true);
+  CHECK(int(px(graded, 160, 90)[1]) > int(px(plain, 160, 90)[1]) + 40); // inside the clip (x 80..240, y 60..180): brighter
+  for (const auto &[x, y] : {std::pair{10, 10}, std::pair{310, 230}, std::pair{20, 120}, std::pair{300, 120}})
+    CHECK(int(px(graded, x, y)[0]) + int(px(graded, x, y)[1]) + int(px(graded, x, y)[2]) < 30); // outside: still black
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}
+
+TEST_CASE("render: a wipe replaces the outgoing clip from the chosen side, with a soft edge", "[media]") {
+  const fs::path dir = fs::temp_directory_path() / atm::new_id("attome-wipe");
+  fs::create_directories(dir);
+  const std::string green = (dir / "green.mp4").string(), white = (dir / "white.mp4").string();
+  write_solid(green, 0x00C000, 440.0, 3);
+  write_solid(white, 0xF0F0F0, 660.0, 3);
+  const auto build = [&](const char *direction) {
+    json t = {{"type", "attome.wipe"}, {"from", "clp_a"}, {"to", "clp_b"}, {"in_offset", "1/2"}, {"out_offset", "1/2"},
+              {"params", {{"direction", direction}, {"softness", 0.1}}}};
+    const auto clip = [](const std::string &path, const char *in, const char *source_in) {
+      return json{{"timing", {{"record_in", in}, {"duration", "1"}, {"source_in", source_in}}},
+                  {"media_ref", {{"type", "file"}, {"path", path}, {"duration", "3"}}}};
+    };
+    const json doc = {{"sequences",
+                       {{"seq_1",
+                         {{"rate", "30"},
+                          {"canvas", {{"width", 320}, {"height", 240}}},
+                          {"track_order", {"trk_v"}},
+                          {"tracks",
+                           {{"trk_v",
+                             {{"clips", {{"clp_a", clip(green, "0", "0")}, {"clp_b", clip(white, "1", "1")}}},
+                              {"transitions", {{"trn_1", t}}}}}}}}}}},
+                      {"sequence_order", {"seq_1"}}};
+    auto comp = atm::render::compile(doc);
+    REQUIRE(comp);
+    return std::move(*comp);
+  };
+  const auto sample = [&](const char *direction, int64_t frame) { // red at four spots: left, right, top, bottom
+    auto comp = build(direction);
+    REQUIRE(comp.layers.size() == 2);
+    atm::render::Renderer renderer(comp, 320, 240);
+    std::vector<uint8_t> nv12(media::nv12_size(320, 240)), rgb(320 * 240 * 4);
+    REQUIRE(renderer.render(frame, nv12.data()));
+    media::nv12_to_bgrx(nv12.data(), 320, 240, rgb.data());
+    const auto red = [&](int x, int y) { return int(rgb[(size_t(y) * 320 + size_t(x)) * 4 + 2]); }; // green has none, white lots
+    return std::array<int, 4>{red(20, 120), red(300, 120), red(160, 20), red(160, 220)};
+  };
+  // The wipe runs frames 15..45; at the middle (30) the edge is halfway across.
+  CHECK(sample("left", 10)[0] < 30);                 // before: all green
+  CHECK(sample("left", 50)[0] > 210);                // after: all white
+  const auto left = sample("left", 30);
+  CHECK(left[0] > 210);                              // entering from the left: the left is already white ...
+  CHECK(left[1] < 40);                               // ... the right is still green
+  const auto right = sample("right", 30);
+  CHECK(right[1] > 210);
+  CHECK(right[0] < 40);
+  const auto up = sample("up", 30);
+  CHECK(up[2] > 210);
+  CHECK(up[3] < 40);
+  const auto down = sample("down", 30);
+  CHECK(down[3] > 210);
+  CHECK(down[2] < 40);
+  const auto start = sample("left", 15), end = sample("left", 44);
+  CHECK(start[0] < 120); // the edge has not entered yet (or only just): still mostly green
+  CHECK(end[1] > 150);   // and has all but left by the end
   std::error_code ec;
   fs::remove_all(dir, ec);
 }

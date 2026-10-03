@@ -20,6 +20,7 @@
 #include "atm/base/profiler.hpp"
 #include "atm/base/rational.hpp"
 #include "atm/media/media.hpp"
+#include "atm/render/render.hpp"
 
 namespace {
 
@@ -101,6 +102,60 @@ void bench_rational() {
     order += compare(a, (i & 1) ? b : t);
   report("compare (128-bit cross-multiply)", ms_since(t0) * 1.0e6 / kN, "ns", 20.0);
   std::printf("  (checksum %s %lld)\n", t.to_string().c_str(), static_cast<long long>(order));
+}
+
+// One 1080p frame of an adjustment layer with each effect, and of a wipe, against their references (a blur, a dissolve).
+// The pixel passes run on the packed NV12 picture the renderer works in, so this is the cost the export pays per frame.
+void bench_effects() {
+  std::printf("\nEffects and wipe (1920 x 1080 frame, p50 of 40)\n");
+  const auto frame_ms = [](atm::render::Composition comp, int64_t frame) {
+    atm::render::Renderer renderer(std::move(comp), 1920, 1080);
+    std::vector<uint8_t> out(atm::media::nv12_size(1920, 1080));
+    (void)renderer.render(frame, out.data()); // the first frame opens fonts and allocates the scratch pictures
+    Series s;
+    for (int i = 0; i < 40; ++i)
+      s.time([&] { (void)renderer.render(frame, out.data()); });
+    return s.pct(0.5) / 1000.0;
+  };
+  const auto with_effect = [](const char *kind, float a, float b, float c) {
+    atm::render::Composition comp;
+    comp.frames = 60;
+    atm::render::Layer adj;
+    adj.clip_id = "clp_adj";
+    adj.frames = 60;
+    adj.is_adjustment = true;
+    atm::render::Effect e;
+    e.kind = kind;
+    e.v[0] = a, e.v[1] = b, e.v[2] = c;
+    adj.effects.push_back(e);
+    comp.layers.push_back(std::move(adj));
+    return comp;
+  };
+  const auto two_clips = [](int wipe_dir) { // text clips: no files needed; they are cached after the first frame
+    atm::render::Composition comp;
+    comp.frames = 60;
+    for (int i = 0; i < 2; ++i) {
+      atm::render::Layer l;
+      l.clip_id = i ? "clp_b" : "clp_a";
+      l.is_text = true;
+      l.text = i ? "B" : "A";
+      l.text_size = 0.5f;
+      l.frames = i ? 40 : 60;
+      l.start_frame = i ? 20 : 0;
+      comp.layers.push_back(std::move(l));
+    }
+    comp.layers[0].mix_with = 1;
+    comp.layers[1].mixed_by = 0;
+    comp.layers[0].mix_start = 20;
+    comp.layers[0].mix_frames = 20;
+    comp.layers[0].wipe_dir = wipe_dir;
+    return comp;
+  };
+  report("blur 0.02 (reference), adjustment layer", frame_ms(with_effect("gaussian_blur", 0.02f, 0, 0), 10), "ms", 40.0);
+  report("color grade, adjustment layer", frame_ms(with_effect("color_grade", 0.1f, 0.2f, 1.2f), 10), "ms", 2.0);
+  report("vignette, adjustment layer", frame_ms(with_effect("vignette", 0.6f, 0.5f, 0.4f), 10), "ms", 3.0);
+  report("dissolve (reference), two text clips", frame_ms(two_clips(-1), 30), "ms", 20.0);
+  report("wipe, two text clips", frame_ms(two_clips(0), 30), "ms", 4.0);
 }
 
 void bench_profiler() {
@@ -242,6 +297,7 @@ int main(int argc, char **argv) {
 
   bench_rational();
   bench_profiler();
+  bench_effects();
   atm::prof::reset();
 
   std::vector<std::string> clips;

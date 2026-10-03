@@ -14,15 +14,18 @@
 #include <vector>
 
 #include "atm/base/error.hpp"
+#include "atm/eval/effects.hpp"
 #include "atm/eval/keyframes.hpp"
 #include "atm/media/media.hpp"
 
 namespace atm::render {
 
-// An effect of an adjustment layer (ADR-004). Only the Gaussian blur so far; radius is a fraction of the canvas height.
+// An effect of a clip or an adjustment layer (ADR-004). `kind` is the id of an eval::EffectDef and v holds its
+// parameters in that table's order, clamped to their ranges: gaussian_blur {radius}, color_grade {brightness,
+// contrast, saturation}, vignette {strength, radius, softness}. A blur radius is a fraction of the canvas height.
 struct Effect {
-  std::string kind; // "gaussian_blur"
-  float radius = 0.0f;
+  std::string kind;
+  float v[3] = {0.0f, 0.0f, 0.0f};
 };
 
 // The static transform of a clip (ADR-021 canvas fractions). Position is where the anchor sits on the canvas, top-left
@@ -77,6 +80,10 @@ struct Layer {
   int mixed_by = -1; // on the incoming clip: the outgoing one
   int64_t mix_start = 0, mix_frames = 0; // on the outgoing clip
   bool mixing_at(int64_t frame) const { return frame >= mix_start && frame < mix_start + mix_frames; }
+  // On the outgoing clip: an attome.wipe instead of a dissolve. The incoming clip enters from `wipe_dir`; the edge is
+  // `wipe_softness` of the picture wide. wipe_dir < 0 means a plain dissolve.
+  int wipe_dir = -1; // an eval::WipeDirection
+  float wipe_softness = 0.1f;
   // Keyframes (transform.keyframes) replace the static values above while they exist. Their times are clip-local:
   // 0 is `origin_frame`, the clip's record_in (start_frame moves earlier when a dissolve leads into the clip).
   int64_t origin_frame = 0;

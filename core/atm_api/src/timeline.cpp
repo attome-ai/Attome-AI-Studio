@@ -7,11 +7,31 @@
 
 #include "atm/base/id.hpp"
 #include "atm/base/time.hpp"
+#include "atm/eval/effects.hpp"
 
 namespace atm::api::timeline {
 namespace {
 
 using doc::Document;
+
+// An effect object for the document from `src`: each parameter of the definition by name, its default when missing.
+json effect_object(const eval::EffectDef &def, const json &src) {
+  json params = json::object();
+  for (const eval::EffectParam &p : def.params) {
+    const auto v = src.is_object() ? src.find(p.key) : src.end();
+    params[p.key] = v != src.end() && v->is_number() ? v->get<double>() : p.def;
+  }
+  return {{"effect", eval::effect_name(def)}, {"enabled", true}, {"params", std::move(params)}};
+}
+
+// A transition object ("dissolve" or "wipe") between two clips; a wipe carries its params.
+json transition_value(const std::string &kind, const std::string &from, const std::string &to, const Rational &in,
+                      const Rational &out, const json &params) {
+  json v = {{"type", "attome." + kind}, {"from", from}, {"to", to}, {"in_offset", in.to_string()}, {"out_offset", out.to_string()}};
+  if (!params.empty())
+    v["params"] = params;
+  return v;
+}
 
 Rational plus(Rational a, Rational b) { return add(a, b).value_or(a); }
 Rational minus(Rational a, Rational b) { return sub(a, b).value_or(a); }
@@ -469,21 +489,22 @@ private:
     ATM_TRY(Rational duration, time_or("duration", *Rational::make(2, 1)));
     json effects = json::object();
     int n = 0;
-    const auto add_blur = [&](double radius) {
-      effects[placeholder(".fx" + std::to_string(n++))] = {
-          {"effect", "attome.gaussian_blur@1.0.0"}, {"enabled", true}, {"params", {{"radius", radius}}}};
+    const auto add_fx = [&](const eval::EffectDef &def, const json &src) {
+      effects[placeholder(".fx" + std::to_string(n++))] = effect_object(def, src);
     };
+    const eval::EffectDef &blur_def = *eval::find_effect("gaussian_blur");
     if (op_.contains("blur"))
-      add_blur(op_.value("blur", 0.02));
+      add_fx(blur_def, json{{"radius", op_.value("blur", 0.02)}});
     if (const auto list = op_.find("effects"); list != op_.end() && list->is_array())
       for (const json &e : *list) {
-        const std::string type = e.value("type", std::string("gaussian_blur"));
-        if (type != "gaussian_blur" && type != "blur" && type != "attome.gaussian_blur")
-          return fail("EFFECT_UNSUPPORTED", "The effect \"" + type + "\" is not available.", "Use gaussian_blur, the one effect so far.");
-        add_blur(e.value("radius", 0.02));
+        const eval::EffectDef *def = eval::find_effect(e.value("type", std::string("gaussian_blur")));
+        if (!def)
+          return fail("EFFECT_UNSUPPORTED", "The effect \"" + e.value("type", std::string()) + "\" is not available.",
+                      "Use one of: " + eval::effect_ids() + ".");
+        add_fx(*def, e);
       }
     if (effects.empty())
-      add_blur(0.02);
+      add_fx(blur_def, json::object());
     json value = {{"name", op_.value("name", std::string("Blur"))},
                   {"timing", {{"record_in", start.to_string()}, {"duration", duration.to_string()}, {"source_in", "0"}}},
                   {"media_ref", {{"type", "adjustment"}}},
@@ -513,8 +534,18 @@ private:
                   "The first clip ends at " + seconds_text(sa.end()) + " s but the second starts at " + seconds_text(sb.in) + " s.",
                   "Put the second clip at the first one's end (append, or \"at\": \"" + sa.end().to_string() + "\").");
     const std::string type = op_.value("type", std::string("attome.dissolve"));
-    if (type != "attome.dissolve" && type != "dissolve")
-      return fail("TRANSITION_UNSUPPORTED", "The transition \"" + type + "\" is not available.", "Use \"dissolve\".");
+    const std::string kind = eval::transition_id(type);
+    if (kind.empty())
+      return fail("TRANSITION_UNSUPPORTED", "The transition \"" + type + "\" is not available.",
+                  "Use one of: " + eval::transition_ids() + ".");
+    json params = json::object(); // a wipe: the side the incoming clip enters from, and the softness of its edge
+    if (kind == "wipe") {
+      const std::string direction = op_.value("direction", std::string("left"));
+      eval::WipeDirection dir;
+      if (!eval::parse_wipe_direction(direction, dir))
+        return fail("E_PARAM", "\"direction\" must be left, right, up or down.");
+      params = {{"direction", direction}, {"softness", op_.value("softness", 0.1)}};
+    }
     ATM_TRY(Rational d, time_or("duration", Rational::from_int(1)));
     const std::string alignment = op_.value("alignment", std::string("center"));
     Rational in, out;
@@ -530,7 +561,7 @@ private:
     }
     push({{"op", "add"},
           {"path", ra->parent + "/transitions/" + placeholder()},
-          {"value", {{"type", "attome.dissolve"}, {"from", a}, {"to", b}, {"in_offset", in.to_string()}, {"out_offset", out.to_string()}}}});
+          {"value", transition_value(kind, a, b, in, out, params)}});
     int n = 0; // the linked sound clips that meet at the same cut cross-fade over the same range
     for (const auto &[la, lb] : linked_pairs(a, b))
       push({{"op", "add"},
@@ -911,12 +942,15 @@ private:
     if (!ref || id_prefix(target) != "clp")
       return fail("E_UNKNOWN_CLIP", "\"target\" must be a clip ID or a $new: name.");
     const std::string type = op_.value("type", std::string("gaussian_blur"));
-    if (type != "gaussian_blur" && type != "blur" && type != "attome.gaussian_blur")
-      return fail("EFFECT_UNSUPPORTED", "The effect \"" + type + "\" is not available.", "Use gaussian_blur, the one effect so far.");
-    push({{"op", "add"},
-          {"path", target + "/effects/" + placeholder()},
-          {"value", {{"effect", "attome.gaussian_blur@1.0.0"}, {"enabled", op_.value("enabled", true)},
-                     {"params", {{"radius", op_.value("radius", 0.02)}}}}}});
+    const eval::EffectDef *def = eval::find_effect(type);
+    if (!def)
+      return fail("EFFECT_UNSUPPORTED", "The effect \"" + type + "\" is not available.", "Use one of: " + eval::effect_ids() + ".");
+    json src = op_; // the parameters sit on the op itself ("radius": 0.02) or in "params"
+    if (const auto p = op_.find("params"); p != op_.end() && p->is_object())
+      src.update(*p);
+    json value = effect_object(*def, src);
+    value["enabled"] = op_.value("enabled", true);
+    push({{"op", "add"}, {"path", target + "/effects/" + placeholder()}, {"value", std::move(value)}});
     return {};
   }
 

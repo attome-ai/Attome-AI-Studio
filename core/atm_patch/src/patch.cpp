@@ -10,6 +10,7 @@
 #include "atm/base/id.hpp"
 #include "atm/base/profiler.hpp"
 #include "atm/base/time.hpp"
+#include "atm/eval/effects.hpp"
 #include "atm/eval/keyframes.hpp"
 
 namespace atm::patch {
@@ -147,11 +148,30 @@ void check_transitions(const json &track, const std::string &track_id, const std
   for (auto it = transitions->begin(); it != transitions->end() && problems.size() < kMaxProblems; ++it) {
     const std::string &id = it.key();
     const json &t = *it;
-    if (t.value("type", "") != "attome.dissolve") {
+    const std::string kind = eval::transition_id(t.value("type", ""));
+    if (kind.empty()) {
       problems.push_back(problem("TRANSITION_UNSUPPORTED", id + "/type", id,
                                  "Transition " + id + " has the type \"" + t.value("type", "") + "\".",
-                                 "Use \"type\": \"attome.dissolve\", the one transition so far."));
+                                 "Use \"type\": \"attome.dissolve\" or \"attome.wipe\" (" + eval::transition_ids() + ")."));
       continue;
+    }
+    if (kind == "wipe") {
+      const json params = t.value("params", json::object());
+      eval::WipeDirection dir;
+      const auto d = params.is_object() ? params.find("direction") : params.end();
+      const auto s = params.is_object() ? params.find("softness") : params.end();
+      if (d != params.end() && !(d->is_string() && eval::parse_wipe_direction(d->get<std::string>(), dir))) {
+        problems.push_back(problem("TRANSITION_PARAM", id + "/params/direction", id,
+                                   "The wipe " + id + " has an unknown params.direction.",
+                                   "Use \"left\", \"right\", \"up\" or \"down\": the side the incoming clip enters from."));
+        continue;
+      }
+      if (s != params.end() && (!s->is_number() || s->get<double>() < 0.01 || s->get<double>() > 1.0)) {
+        problems.push_back(problem("TRANSITION_PARAM", id + "/params/softness", id,
+                                   "The wipe " + id + " needs params.softness from 0.01 to 1.",
+                                   "softness is the width of the soft edge as a fraction of the picture; 0.1 is a good start."));
+        continue;
+      }
     }
     const std::string from = t.value("from", ""), to = t.value("to", "");
     const auto find = [&](const std::string &clip) -> const Span * {
@@ -368,20 +388,32 @@ void check_effects(const json &clip, const std::string &clip_id, bool audio_trac
   for (auto it = fx->begin(); it != fx->end() && problems.size() < kMaxProblems; ++it) {
     const std::string &id = it.key();
     const std::string name = it->is_object() ? it->value("effect", std::string()) : std::string();
-    const bool blur = name == "attome.gaussian_blur" || name.rfind("attome.gaussian_blur@1.", 0) == 0;
-    if (!blur) {
+    const eval::EffectDef *def = eval::find_effect(name);
+    if (!def) {
       problems.push_back(problem("EFFECT_UNSUPPORTED", id + "/effect", clip_id,
                                  "Effect " + id + " is \"" + name + "\", which is not available.",
-                                 "Use \"attome.gaussian_blur@1.0.0\", the one effect so far."));
+                                 "Use \"attome.<id>@1.0.0\" with one of: " + eval::effect_ids() + "."));
       continue;
     }
     const json params = it->value("params", json::object());
-    const auto radius = params.is_object() ? params.find("radius") : params.end();
-    if (!params.is_object() || radius == params.end() || !radius->is_number() || radius->get<double>() < 0.0 ||
-        radius->get<double>() > 0.25)
-      problems.push_back(problem("EFFECT_PARAM", id + "/params/radius", clip_id,
-                                 "The blur " + id + " needs params.radius from 0 to 0.25.",
-                                 "radius is a fraction of the picture height: 0.02 is a soft blur, 0.1 a strong one."));
+    if (!params.is_object()) {
+      problems.push_back(problem("EFFECT_PARAM", id + "/params", clip_id, "params of effect " + id + " must be an object.",
+                                 "Give the parameters by name, for example {\"" + std::string(def->params[0].key) + "\": " +
+                                     std::to_string(def->params[0].def) + "}."));
+      continue;
+    }
+    for (const eval::EffectParam &p : def->params) {
+      const auto v = params.find(p.key);
+      const bool missing = v == params.end();
+      if ((missing && !p.required) || problems.size() >= kMaxProblems)
+        continue;
+      if (missing || !v->is_number() || v->get<double>() < p.lo || v->get<double>() > p.hi)
+        problems.push_back(problem("EFFECT_PARAM", id + "/params/" + p.key, clip_id,
+                                   "The " + std::string(def->title) + " effect " + id + " needs params." + p.key + " from " +
+                                       std::to_string(p.lo) + " to " + std::to_string(p.hi) + ".",
+                                   std::string(p.title) + " defaults to " + std::to_string(p.def) +
+                                       "; a blur radius is a fraction of the picture height (0.02 soft, 0.1 strong)."));
+    }
   }
 }
 

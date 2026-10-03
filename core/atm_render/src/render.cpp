@@ -362,7 +362,9 @@ Result<Composition> compile(const json &project, std::string_view sequence_id) {
     return c;
   struct Dissolve {
     std::string from, to;
-    int64_t in, out; // frames before and after the cut
+    int64_t in, out;       // frames before and after the cut
+    int wipe_dir = -1;     // an eval::WipeDirection for an attome.wipe, -1 for a dissolve
+    float wipe_softness = 0.1f;
   };
   std::vector<Dissolve> dissolves;
   int track_index = 0;
@@ -421,9 +423,22 @@ Result<Composition> compile(const json &project, std::string_view sequence_id) {
               const json &e = (*fx)[fx_id];
               if (!e.is_object() || !e.value("enabled", true))
                 continue;
-              const std::string name = e.value("effect", "");
-              if (name.rfind("attome.gaussian_blur", 0) == 0)
-                l.effects.push_back({"gaussian_blur", std::clamp(e.value("params", json::object()).value("radius", 0.0f), 0.0f, 0.25f)});
+              const eval::EffectDef *def = eval::find_effect(e.value("effect", ""));
+              if (!def)
+                continue; // the validator refuses an unknown effect; one that still gets here is skipped
+              Effect effect;
+              effect.kind = def->id;
+              const auto params = e.find("params");
+              for (size_t i = 0; i < def->params.size() && i < 3; ++i) {
+                const eval::EffectParam &p = def->params[i];
+                const json *v = nullptr;
+                if (params != e.end() && params->is_object())
+                  if (const auto f = params->find(p.key); f != params->end())
+                    v = &*f;
+                const double value = v && v->is_number() ? v->get<double>() : p.def;
+                effect.v[i] = float(std::clamp(value, p.lo, p.hi));
+              }
+              l.effects.push_back(std::move(effect));
             }
           }
         }
@@ -516,7 +531,17 @@ Result<Composition> compile(const json &project, std::string_view sequence_id) {
         ATM_TRY(Rational out_off, rational_field(t, "out_offset", "0"));
         ATM_TRY(int64_t in_frames, to_frames(in_off, rate, Round::nearest_even));
         ATM_TRY(int64_t out_frames, to_frames(out_off, rate, Round::nearest_even));
-        dissolves.push_back({t.value("from", ""), t.value("to", ""), in_frames, out_frames});
+        Dissolve d{t.value("from", ""), t.value("to", ""), in_frames, out_frames};
+        if (eval::transition_id(t.value("type", "")) == "wipe") {
+          eval::WipeParams wp;
+          if (const auto p = t.find("params"); p != t.end() && p->is_object()) {
+            eval::parse_wipe_direction(p->value("direction", std::string("left")), wp.direction);
+            wp.softness = std::clamp(p->value("softness", wp.softness), 0.01f, 1.0f);
+          }
+          d.wipe_dir = int(wp.direction);
+          d.wipe_softness = wp.softness;
+        }
+        dissolves.push_back(std::move(d));
       }
     ++track_index;
   }
@@ -543,6 +568,8 @@ Result<Composition> compile(const json &project, std::string_view sequence_id) {
     b.frames += d.in;
     a.mix_with = ib;
     b.mixed_by = ia;
+    a.wipe_dir = d.wipe_dir;
+    a.wipe_softness = d.wipe_softness;
     a.mix_start = cut - d.in;
     a.mix_frames = d.in + d.out;
   }
@@ -639,6 +666,149 @@ void blur_nv12(uint8_t *nv12, int W, int H, float sigma, std::vector<uint8_t> &t
   }
 }
 
+
+// ---- Colour grade, vignette and wipe: pixel operations on a packed NV12 picture, in place ----
+
+float smooth01(float x) {
+  x = std::clamp(x, 0.0f, 1.0f);
+  return x * x * (3.0f - 2.0f * x);
+}
+
+// Brightness and contrast act on the video-range luma (16..235) around mid grey, saturation scales the chroma around
+// 128. Both are table lookups, one per byte value, so the cost is one pass over the picture.
+void grade_nv12(uint8_t *nv12, int W, int H, float brightness, float contrast, float saturation) {
+  ATM_PROFILE_SCOPE("effect.color_grade");
+  uint8_t luma_lut[256], chroma_lut[256];
+  const float gain = 1.0f + contrast;
+  for (int i = 0; i < 256; ++i) {
+    const float l = (float(i) - 16.0f) / 219.0f;
+    luma_lut[i] = uint8_t(std::lround(16.0f + 219.0f * std::clamp((l - 0.5f) * gain + 0.5f + brightness, 0.0f, 1.0f)));
+    chroma_lut[i] = uint8_t(std::lround(std::clamp(128.0f + (float(i) - 128.0f) * saturation, 16.0f, 240.0f)));
+  }
+  parallel_for(H + H / 2, 16, [&](int64_t first, int64_t last) {
+    for (int64_t y = first; y < last; ++y) {
+      uint8_t *row = nv12 + size_t(y) * size_t(W);
+      const uint8_t *lut = y < H ? luma_lut : chroma_lut; // rows 0..H-1 are luma, the rest chroma
+      for (int x = 0; x < W; ++x)
+        row[x] = lut[row[x]];
+    }
+  });
+}
+
+// Darkens towards the corners: the distance from the centre is 0 in the middle and 1 in the corners (it follows the
+// picture's shape), nothing changes inside `radius`, and the full `strength` is reached `softness` further out. Luma
+// (above 16) and chroma (around 128) scale by the same factor, which is what multiplying RGB by it does, so the
+// corners go to black, not to a dark tint.
+void vignette_nv12(uint8_t *nv12, int W, int H, float strength, float radius, float softness) {
+  ATM_PROFILE_SCOPE("effect.vignette");
+  constexpr int N = 1024;
+  float mask[N + 1];
+  for (int i = 0; i <= N; ++i)
+    mask[i] = 1.0f - strength * smooth01((std::sqrt(float(i) / float(N)) - radius) / softness);
+  std::vector<float> dx2(static_cast<size_t>(W)), dy2(static_cast<size_t>(H)), cx2(static_cast<size_t>(W / 2)),
+      cy2(static_cast<size_t>(H / 2));
+  for (int x = 0; x < W; ++x)
+    dx2[size_t(x)] = std::pow((float(x) + 0.5f) / float(W) * 2.0f - 1.0f, 2.0f) * 0.5f;
+  for (int y = 0; y < H; ++y)
+    dy2[size_t(y)] = std::pow((float(y) + 0.5f) / float(H) * 2.0f - 1.0f, 2.0f) * 0.5f;
+  for (int x = 0; x < W / 2; ++x)
+    cx2[size_t(x)] = std::pow(float(2 * x + 1) / float(W) * 2.0f - 1.0f, 2.0f) * 0.5f;
+  for (int y = 0; y < H / 2; ++y)
+    cy2[size_t(y)] = std::pow(float(2 * y + 1) / float(H) * 2.0f - 1.0f, 2.0f) * 0.5f;
+  const auto at = [&](float d2) { return mask[std::clamp(int(d2 * float(N) + 0.5f), 0, N)]; };
+  parallel_for(H, 16, [&](int64_t first, int64_t last) {
+    for (int64_t y = first; y < last; ++y) {
+      uint8_t *row = nv12 + size_t(y) * size_t(W);
+      for (int x = 0; x < W; ++x)
+        row[x] = uint8_t(16 + int((float(row[x]) - 16.0f) * at(dx2[size_t(x)] + dy2[size_t(y)]) + 0.5f));
+    }
+  });
+  uint8_t *uv = nv12 + size_t(W) * size_t(H);
+  parallel_for(H / 2, 16, [&](int64_t first, int64_t last) {
+    for (int64_t y = first; y < last; ++y) {
+      uint8_t *row = uv + size_t(y) * size_t(W);
+      for (int x = 0; x < W / 2; ++x) {
+        const float m = at(cx2[size_t(x)] + cy2[size_t(y)]);
+        row[2 * x] = uint8_t(std::clamp(int(128.0f + (float(row[2 * x]) - 128.0f) * m + 0.5f), 0, 255));
+        row[2 * x + 1] = uint8_t(std::clamp(int(128.0f + (float(row[2 * x + 1]) - 128.0f) * m + 0.5f), 0, 255));
+      }
+    }
+  });
+}
+
+// A clip drawn on its own is premultiplied around black (16 / 128), so a colour change must not lift the pixels the
+// clip does not cover: scale what the effect changed by the coverage, which restores black where there is none.
+void remask_nv12(uint8_t *nv12, const uint8_t *cover, int W, int H) {
+  parallel_for(H, 16, [&](int64_t first, int64_t last) {
+    for (size_t i = size_t(first) * size_t(W); i < size_t(last) * size_t(W); ++i)
+      nv12[i] = uint8_t(16 + ((int(nv12[i]) - 16) * int(cover[i]) + (nv12[i] >= 16 ? 127 : -127)) / 255);
+  });
+  uint8_t *uv = nv12 + size_t(W) * size_t(H);
+  parallel_for(H / 2, 16, [&](int64_t first, int64_t last) {
+    for (int64_t cy = first; cy < last; ++cy)
+      for (int cx = 0; cx < W / 2; ++cx) {
+        const size_t y0 = size_t(cy) * 2 * size_t(W) + size_t(cx) * 2;
+        const int c = (cover[y0] + cover[y0 + 1] + cover[y0 + size_t(W)] + cover[y0 + size_t(W) + 1] + 2) / 4;
+        uint8_t *p = uv + size_t(cy) * size_t(W) + size_t(cx) * 2;
+        for (int k = 0; k < 2; ++k)
+          p[k] = uint8_t(128 + ((int(p[k]) - 128) * c + (p[k] >= 128 ? 127 : -127)) / 255);
+      }
+  });
+}
+
+// One effect of a layer on a picture that is not isolated (an adjustment layer's copy of everything below it).
+void apply_effect(const Effect &e, uint8_t *nv12, int W, int H, std::vector<uint8_t> &scratch) {
+  if (e.kind == "gaussian_blur") // radius in canvas heights, about two standard deviations
+    blur_nv12(nv12, W, H, e.v[0] * float(H) * 0.5f, scratch);
+  else if (e.kind == "color_grade")
+    grade_nv12(nv12, W, H, e.v[0], e.v[1], e.v[2]);
+  else if (e.kind == "vignette")
+    vignette_nv12(nv12, W, H, e.v[0], e.v[1], e.v[2]);
+}
+
+// The wipe of a transition: `out` (the outgoing clip's picture) becomes `incoming` behind an edge that travels across
+// the picture as `progress` goes 0 -> 1, from the side the incoming clip enters. Each pixel mixes by how far the edge
+// has passed it; the edge is `softness` of the picture wide.
+void wipe_blend(uint8_t *out, const uint8_t *incoming, int W, int H, float progress, eval::WipeDirection dir, float softness) {
+  ATM_PROFILE_SCOPE("composite.wipe");
+  const bool horizontal = dir == eval::WipeDirection::left || dir == eval::WipeDirection::right;
+  const bool reversed = dir == eval::WipeDirection::right || dir == eval::WipeDirection::down;
+  const auto alpha_at = [&](float pos) { // pos 0..1 across the picture, in the direction of travel
+    const float u = reversed ? 1.0f - pos : pos;
+    return int(smooth01((progress * (1.0f + softness) - u) / softness) * 256.0f + 0.5f);
+  };
+  const int span = horizontal ? W : H;
+  std::vector<int> luma_a(static_cast<size_t>(span)), chroma_a(static_cast<size_t>(span / 2));
+  for (int i = 0; i < span; ++i)
+    luma_a[size_t(i)] = alpha_at((float(i) + 0.5f) / float(span));
+  for (int i = 0; i < span / 2; ++i)
+    chroma_a[size_t(i)] = alpha_at(float(2 * i + 1) / float(span));
+  parallel_for(H, 16, [&](int64_t first, int64_t last) {
+    for (int64_t y = first; y < last; ++y) {
+      uint8_t *d = out + size_t(y) * size_t(W);
+      const uint8_t *s = incoming + size_t(y) * size_t(W);
+      const int row_a = horizontal ? 0 : luma_a[size_t(y)];
+      for (int x = 0; x < W; ++x) {
+        const int a = horizontal ? luma_a[size_t(x)] : row_a;
+        d[x] = uint8_t((int(d[x]) * (256 - a) + int(s[x]) * a) >> 8);
+      }
+    }
+  });
+  uint8_t *d_uv = out + size_t(W) * size_t(H);
+  const uint8_t *s_uv = incoming + size_t(W) * size_t(H);
+  parallel_for(H / 2, 16, [&](int64_t first, int64_t last) {
+    for (int64_t y = first; y < last; ++y) {
+      uint8_t *d = d_uv + size_t(y) * size_t(W);
+      const uint8_t *s = s_uv + size_t(y) * size_t(W);
+      for (int x = 0; x < W / 2; ++x) {
+        const int a = horizontal ? chroma_a[size_t(x)] : chroma_a[size_t(y)];
+        d[2 * x] = uint8_t((int(d[2 * x]) * (256 - a) + int(s[2 * x]) * a) >> 8);
+        d[2 * x + 1] = uint8_t((int(d[2 * x + 1]) * (256 - a) + int(s[2 * x + 1]) * a) >> 8);
+      }
+    }
+  });
+}
+
 } // namespace
 
 Pose pose_at(const Layer &l, const Composition &comp, int64_t frame) {
@@ -695,8 +865,7 @@ void Renderer::draw(const Layer &l, int64_t frame, uint8_t *out, bool &cleared, 
     const size_t size = media::nv12_size(width_, height_);
     adjust_.assign(out, out + size);
     for (const Effect &e : l.effects)
-      if (e.kind == "gaussian_blur") // radius in canvas heights, about two standard deviations
-        blur_nv12(adjust_.data(), width_, height_, e.radius * float(height_) * 0.5f, scratch_);
+      apply_effect(e, adjust_.data(), width_, height_, scratch_);
     put_rows(out, pitch, adjust_.data(), pitch, height_ * 3 / 2, width_, int(p.opacity * 256.0f + 0.5f));
     return;
   }
@@ -814,7 +983,7 @@ void Renderer::draw_isolated(const Layer &l, int64_t frame, uint8_t *out, bool &
   });
   for (const Effect &e : l.effects)
     if (e.kind == "gaussian_blur") {
-      const float sigma = e.radius * float(H) * 0.5f;
+      const float sigma = e.v[0] * float(H) * 0.5f;
       blur_nv12(over_black_.data(), W, H, sigma, scratch_);
       // The coverage blurs the same way as the luma plane: run it through the same passes as a one-plane picture.
       std::vector<uint8_t> &tmp = over_white_; // free now
@@ -826,6 +995,9 @@ void Renderer::draw_isolated(const Layer &l, int64_t frame, uint8_t *out, bool &
         });
         box_vertical(tmp.data(), cover_.data(), W, H, r);
       }
+    } else { // a colour effect: apply it, then take back what it changed where the clip is not
+      apply_effect(e, over_black_.data(), W, H, scratch_);
+      remask_nv12(over_black_.data(), cover_.data(), W, H);
     }
   if (!cleared)
     media::fill_black(out, W, H);
@@ -878,8 +1050,11 @@ Result<void> Renderer::render(int64_t frame, uint8_t *out) {
     draw(comp_.layers[size_t(l.mix_with)], frame, mix_.data(), cleared, used);
     // Progress at the frame centre, so a 1-frame dissolve shows the 50 % mix.
     const double progress = (double(frame - l.mix_start) + 0.5) / double(l.mix_frames);
-    put_rows(out, size_t(width_), mix_.data(), size_t(width_), height_ * 3 / 2, width_,
-             std::clamp(int(progress * 256.0 + 0.5), 0, 256));
+    if (l.wipe_dir >= 0)
+      wipe_blend(out, mix_.data(), width_, height_, float(progress), eval::WipeDirection(l.wipe_dir), l.wipe_softness);
+    else
+      put_rows(out, size_t(width_), mix_.data(), size_t(width_), height_ * 3 / 2, width_,
+               std::clamp(int(progress * 256.0 + 0.5), 0, 256));
   }
   if (!cleared)
     media::fill_black(out, width_, height_);

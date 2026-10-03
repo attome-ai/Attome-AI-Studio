@@ -14,6 +14,7 @@
 #include <imgui.h>
 
 #include "atm/base/rational.hpp"
+#include "atm/eval/effects.hpp"
 #include "atm/eval/keyframes.hpp"
 #include "audio.hpp"
 #include "client.hpp"
@@ -29,6 +30,11 @@ struct Fonts {
   bool lucide = false; // icons from the bundled Lucide font rather than Segoe Fluent Icons
 };
 inline Fonts g_fonts;
+
+struct EffectUi { // one effect of a clip or adjustment layer: its ID, the eval::EffectDef id, and its parameters in table order
+  std::string id, kind;
+  float v[3] = {0.0f, 0.0f, 0.0f};
+};
 
 struct ClipUi {
   std::string id, name, path;
@@ -52,14 +58,15 @@ struct ClipUi {
   float gain_db = 0.0f, pan = 0.0f;         // the clip's "audio" object
   bool is_adjustment = false;               // an adjustment layer: its effects change the tracks below it
   std::string link_group, stream;           // linked picture and sound clips share a group; stream "video" / "audio"
-  std::string blur_id;                      // its Gaussian blur effect, when it has one
-  float blur_radius = 0.0f;
+  std::vector<EffectUi> effects;            // its effects (blur, colour grade, vignette)
   int64_t audio_fade_in = 0, audio_fade_out = 0; // frames
 };
 
-struct TransitionUi { // a dissolve over [cut - in, cut + out), where `to` starts
+struct TransitionUi { // a dissolve or wipe over [cut - in, cut + out), where `to` starts
   std::string id, from, to;
   int64_t in = 0, out = 0; // frames
+  bool wipe = false;       // an attome.wipe; `direction` is the eval::WipeDirection it enters from
+  int direction = 0;
 };
 
 struct TrackUi {
@@ -96,9 +103,10 @@ private:
   void import_files(const std::vector<std::string> &paths);
   void add_track();
   void add_title(int preset);
-  void add_adjustment();
+  void add_adjustment(const eval::EffectDef &def);
   void draw_effects_panel();
-  void draw_blur_card(const ClipUi &clip);
+  void draw_effect_card(const ClipUi &clip, const eval::EffectDef &def, bool show_amount);
+  void draw_effect_cards(const ClipUi &clip);
   void draw_text_panel();
   void delete_selected();
   void split_at_playhead();
@@ -199,7 +207,9 @@ private:
   float dissolve_s_ = 1.0f; // length of a new dissolve, seconds
   float fade_in_s_ = 0.0f, fade_out_s_ = 0.0f;
   float gain_db_ = 0.0f, pan_ = 0.0f, audio_fade_in_s_ = 0.0f, audio_fade_out_s_ = 0.0f;
-  float blur_radius_ = 0.02f, blur_amount_ = 1.0f;
+  float amount_ = 1.0f;                    // an adjustment layer's opacity: how much of its effect shows
+  std::map<std::string, float> fx_edit_;   // effect sliders being dragged, by "<effect id>/<param>"
+  int wipe_dir_ = 0;                       // the side a new wipe enters from (eval::WipeDirection)
 
   // inspector
   std::string insp_for_;

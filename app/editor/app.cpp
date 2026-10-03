@@ -275,11 +275,18 @@ void App::refresh() {
           c.stream = ref.value("stream", std::string());
           {
             if (const auto fx = cit->find("effects"); fx != cit->end() && fx->is_object())
-              for (auto e = fx->begin(); e != fx->end(); ++e)
-                if (e->is_object() && e->value("effect", std::string()).rfind("attome.gaussian_blur", 0) == 0) {
-                  c.blur_id = e.key();
-                  c.blur_radius = e->value("params", json::object()).value("radius", 0.0f);
-                }
+              for (auto e = fx->begin(); e != fx->end(); ++e) {
+                const eval::EffectDef *def = e->is_object() ? eval::find_effect(e->value("effect", std::string())) : nullptr;
+                if (!def)
+                  continue;
+                EffectUi ui{e.key(), def->id, {}};
+                const json params = e->value("params", json::object());
+                for (size_t i = 0; i < def->params.size() && i < 3; ++i)
+                  ui.v[i] = params.is_object() && params.contains(def->params[i].key) && params[def->params[i].key].is_number()
+                                ? params[def->params[i].key].get<float>()
+                                : float(def->params[i].def);
+                c.effects.push_back(std::move(ui));
+              }
           }
           if (ref.value("type", "") == "text") {
             c.is_text = true;
@@ -316,8 +323,17 @@ void App::refresh() {
         }
       if (const auto trs = tit->find("transitions"); trs != tit->end() && trs->is_object())
         for (auto t = trs->begin(); t != trs->end(); ++t)
+        {
           track.transitions.push_back({t.key(), t->value("from", ""), t->value("to", ""),
                                        frames_of(*t, "in_offset", rate_), frames_of(*t, "out_offset", rate_)});
+          if (eval::transition_id(t->value("type", "")) == "wipe") {
+            eval::WipeDirection dir = eval::WipeDirection::left;
+            if (const auto p = t->find("params"); p != t->end() && p->is_object())
+              eval::parse_wipe_direction(p->value("direction", std::string("left")), dir);
+            track.transitions.back().wipe = true;
+            track.transitions.back().direction = int(dir);
+          }
+        }
       tracks_.push_back(std::move(track));
     }
   playhead_ = std::clamp<int64_t>(playhead_, 0, std::max<int64_t>(0, total_frames_));
@@ -1446,6 +1462,16 @@ void App::draw_text_panel() {
   }
 }
 
+namespace {
+// The effect object of a table entry with every parameter at its default.
+json default_effect(const eval::EffectDef &def) {
+  json params = json::object();
+  for (const eval::EffectParam &p : def.params)
+    params[p.key] = p.def;
+  return {{"effect", eval::effect_name(def)}, {"enabled", true}, {"params", std::move(params)}};
+}
+} // namespace
+
 void App::draw_effects_panel() {
   ImGui::PushFont(g_fonts.bold, 15.0f);
   ImGui::TextUnformatted("Effects");
@@ -1458,25 +1484,43 @@ void App::draw_effects_panel() {
   ImGui::Spacing();
   section_label("ADJUSTMENT LAYERS");
   ImGui::Spacing();
-  const ImVec2 p = ImGui::GetCursorScreenPos();
-  ImGui::InvisibleButton("##blur", ImVec2(-1.0f, 78.0f));
-  ui_mark("effect:blur");
-  const bool hovered = ImGui::IsItemHovered();
-  if (ImGui::IsItemClicked())
-    add_adjustment();
-  const ImVec2 q(p.x + ImGui::GetItemRectSize().x, p.y + 78.0f);
-  ImDrawList *dl = ImGui::GetWindowDrawList();
-  dl->AddRectFilled(p, q, hex(hovered ? look::panel2 : look::bg), 12.0f);
-  dl->AddRect(p, q, hex(hovered ? look::accent : look::line), 12.0f, 0, 1.2f);
-  for (int i = 0; i < 5; ++i) // soft rings: a sign for blur
-    dl->AddCircle(ImVec2((p.x + q.x) * 0.5f, p.y + 30.0f), 6.0f + float(i) * 4.0f, hex(look::adj, 200 - i * 40), 0, 2.0f);
-  dl->AddText(ImVec2(p.x + 12.0f, q.y - 22.0f), hex(look::fg2), "Blur");
-  dl->AddText(ImVec2(p.x + 20.0f + text_size("Blur").x, q.y - 22.0f), hex(look::fg3), "Softens everything below");
+  static const char *const kBlurb[] = {"Softens everything below", "Brightness, contrast and colour", "Darkens the corners"};
+  int index = 0;
+  for (const eval::EffectDef &def : eval::effect_defs()) {
+    const std::string name = def.short_name();
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    ImGui::InvisibleButton(("##fx_" + name).c_str(), ImVec2(-1.0f, 78.0f));
+    ui_mark("effect:" + name);
+    const bool hovered = ImGui::IsItemHovered();
+    if (ImGui::IsItemClicked())
+      add_adjustment(def);
+    const ImVec2 q(p.x + ImGui::GetItemRectSize().x, p.y + 78.0f);
+    const ImVec2 c((p.x + q.x) * 0.5f, p.y + 30.0f);
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(p, q, hex(hovered ? look::panel2 : look::bg), 12.0f);
+    dl->AddRect(p, q, hex(hovered ? look::accent : look::line), 12.0f, 0, 1.2f);
+    if (name == "blur") { // soft rings
+      for (int i = 0; i < 5; ++i)
+        dl->AddCircle(c, 6.0f + float(i) * 4.0f, hex(look::adj, 200 - i * 40), 0, 2.0f);
+    } else if (name == "grade") { // three overlapping colour discs
+      dl->AddCircleFilled(ImVec2(c.x - 9.0f, c.y + 5.0f), 15.0f, IM_COL32(230, 70, 70, 130));
+      dl->AddCircleFilled(ImVec2(c.x + 9.0f, c.y + 5.0f), 15.0f, IM_COL32(70, 200, 110, 130));
+      dl->AddCircleFilled(ImVec2(c.x, c.y - 10.0f), 15.0f, IM_COL32(80, 130, 240, 130));
+    } else { // vignette: a frame whose edges fade to dark
+      for (int i = 0; i < 5; ++i)
+        dl->AddRect(ImVec2(c.x - 30.0f + float(i) * 3.0f, c.y - 20.0f + float(i) * 2.0f),
+                    ImVec2(c.x + 30.0f - float(i) * 3.0f, c.y + 20.0f - float(i) * 2.0f), hex(look::adj, 60 + i * 40), 8.0f, 0, 2.0f);
+    }
+    dl->AddText(ImVec2(p.x + 12.0f, q.y - 22.0f), hex(look::fg2), def.title);
+    dl->AddText(ImVec2(p.x + 20.0f + text_size(def.title).x, q.y - 22.0f), hex(look::fg3), kBlurb[std::min(index, 2)]);
+    ImGui::Dummy(ImVec2(0.0f, 4.0f));
+    ++index;
+  }
 }
 
-// Adds a 3-second blur at the playhead on the "Effects" track, made when missing just under the titles, so it blurs
+// Adds a 3-second effect at the playhead on the "Effects" track, made when missing just under the titles, so it changes
 // the video but not the text.
-void App::add_adjustment() {
+void App::add_adjustment(const eval::EffectDef &def) {
   const TrackUi *effects = nullptr, *titles = nullptr;
   for (const TrackUi &t : tracks_) {
     if (t.name == "Effects")
@@ -1506,78 +1550,128 @@ void App::add_adjustment() {
   ops.push_back({{"op", "add"},
                  {"path", track + "/clips/$new:adj"},
                  {"value",
-                  {{"name", "Blur"},
+                  {{"name", def.title},
                    {"timing", {{"record_in", frames_text(at)}, {"duration", frames_text(frames)}, {"source_in", "0"}}},
                    {"media_ref", {{"type", "adjustment"}}},
-                   {"effects", {{"$new:blur", {{"effect", "attome.gaussian_blur@1.0.0"}, {"enabled", true}, {"params", {{"radius", 0.02}}}}}}},
+                   {"effects", {{"$new:fx", default_effect(def)}}},
                    {"transform", {{"opacity", 1.0}}}}}});
   json ids;
-  if (patch(std::move(ops), "Add blur", &ids)) {
+  std::string label = std::string("Add ") + def.title;
+  std::transform(label.begin() + 4, label.end(), label.begin() + 4, [](unsigned char ch) { return char(std::tolower(ch)); });
+  if (patch(std::move(ops), label.c_str(), &ids)) {
     selected_clip_ = ids.value("$new:adj", "");
     seek(at + frames / 2);
   }
 }
 
-// Radius and amount of an adjustment layer's blur. The amount is the layer's opacity: how much of the blurred picture
-// replaces the sharp one.
-void App::draw_blur_card(const ClipUi &c) {
-  if (!begin_card("##blur", "Blur")) {
+// The effect cards of a clip or adjustment layer. A clip shows a card for every effect (an empty one offers to add it).
+// An adjustment layer shows the effects it has, and one row of buttons for the others. The layer's amount (its opacity:
+// how much of the changed picture replaces the original) sits once, in the card of the first effect it has.
+void App::draw_effect_cards(const ClipUi &c) {
+  const auto has = [&](const eval::EffectDef &def) {
+    return std::any_of(c.effects.begin(), c.effects.end(), [&](const EffectUi &e) { return e.kind == def.id; });
+  };
+  bool amount_shown = !c.is_adjustment;
+  for (const eval::EffectDef &def : eval::effect_defs()) {
+    if (c.is_adjustment && !has(def))
+      continue;
+    draw_effect_card(c, def, !amount_shown && has(def));
+    amount_shown = amount_shown || has(def);
+  }
+  if (!c.is_adjustment || std::all_of(eval::effect_defs().begin(), eval::effect_defs().end(), has))
+    return;
+  if (!begin_card("##fx_add", c.effects.empty() ? "Effects" : "Add an effect")) {
     end_card();
     return;
   }
-  const std::string id = c.id, fx = c.blur_id;
-  if (fx.empty()) {
+  const std::string id = c.id;
+  for (const eval::EffectDef &def : eval::effect_defs()) {
+    if (has(def))
+      continue;
+    if (soft_button((std::string("add_") + def.short_name()).c_str(), def.title, ImVec2(-1.0f, 28.0f)))
+      pending_ = [this, id, &def] {
+        patch(json::array({{{"op", "add"}, {"path", id + "/effects/$new:fx"}, {"value", default_effect(def)}}}),
+              (std::string("Add ") + def.title).c_str());
+      };
+  }
+  end_card();
+}
+
+// One effect of a clip: its parameters as sliders in the ranges of the effect table, added and removed with a button.
+void App::draw_effect_card(const ClipUi &c, const eval::EffectDef &def, bool show_amount) {
+  const std::string name = def.short_name(); // blur, grade, vignette: the controls are named after it
+  if (!begin_card(("##fx_" + name).c_str(), def.title)) {
+    end_card();
+    return;
+  }
+  const EffectUi *found = nullptr;
+  for (const EffectUi &e : c.effects)
+    if (e.kind == def.id) {
+      found = &e;
+      break;
+    }
+  const std::string id = c.id;
+  std::string lower = def.title;
+  std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char ch) { return char(std::tolower(ch)); });
+  if (!found) {
     ImGui::PushTextWrapPos(0.0f);
-    ImGui::TextColored(hexv(look::fg3), "%s", c.is_adjustment ? "This adjustment layer has no blur."
-                                                              : "Soften this clip; its edges blend into what is below.");
+    ImGui::TextColored(hexv(look::fg3), "%s", c.is_adjustment ? ("This adjustment layer has no " + lower + ".").c_str()
+                                                              : ("Add " + lower + " to this clip alone.").c_str());
     ImGui::PopTextWrapPos();
-    if (soft_button("add_blur", "Add blur", ImVec2(-1.0f, 28.0f)))
-      pending_ = [this, id] {
-        patch(json::array({{{"op", "add"},
-                            {"path", id + "/effects/$new:blur"},
-                            {"value", {{"effect", "attome.gaussian_blur@1.0.0"}, {"enabled", true}, {"params", {{"radius", 0.02}}}}}}}),
-              "Add blur");
+    if (soft_button(("add_" + name).c_str(), ("Add " + lower).c_str(), ImVec2(-1.0f, 28.0f)))
+      pending_ = [this, id, &def, label = "Add " + lower] {
+        patch(json::array({{{"op", "add"}, {"path", id + "/effects/$new:fx"}, {"value", default_effect(def)}}}), label.c_str());
       };
     end_card();
     return;
   }
-  ImGui::TextColored(hexv(look::fg2), "Radius");
-  ImGui::SameLine(88.0f);
-  slim_slider("blur_radius", &blur_radius_, 0.0f, 0.1f, ImGui::GetContentRegionAvail().x - 60.0f, "");
-  if (ImGui::IsItemDeactivatedAfterEdit()) {
-    const float v = std::round(blur_radius_ * 1000.0f) / 1000.0f;
-    pending_ = [this, fx, v] {
-      patch(json::array({{{"op", "replace"}, {"path", fx + "/params/radius"}, {"value", v}}}), "Change blur");
-    };
+  const std::string fx = found->id;
+  for (size_t i = 0; i < def.params.size(); ++i) {
+    const eval::EffectParam &p = def.params[i];
+    const std::string key = fx + "/" + p.key;
+    float v = found->v[i];
+    if (const auto it = fx_edit_.find(key); it != fx_edit_.end())
+      v = it->second;
+    ImGui::TextColored(hexv(look::fg2), "%s", p.title);
+    ImGui::SameLine(88.0f);
+    if (slim_slider((name + "_" + p.key).c_str(), &v, float(p.lo), float(p.ui_hi), ImGui::GetContentRegionAvail().x - 60.0f, ""))
+      fx_edit_[key] = v;
+    if (ImGui::IsItemDeactivatedAfterEdit()) {
+      const float rounded = std::round(v * 1000.0f) / 1000.0f;
+      fx_edit_.erase(key);
+      pending_ = [this, fx, rounded, param = std::string(p.key), label = "Change " + lower] {
+        patch(json::array({{{"op", "replace"}, {"path", fx + "/params/" + param}, {"value", rounded}}}), label.c_str());
+      };
+    }
+    ImGui::SameLine();
+    ImGui::PushFont(g_fonts.mono, 13.0f);
+    ImGui::TextColored(hexv(look::fg2), "%.3f", v);
+    ImGui::PopFont();
   }
-  ImGui::SameLine();
-  ImGui::PushFont(g_fonts.mono, 13.0f);
-  ImGui::TextColored(hexv(look::fg2), "%.3f", blur_radius_);
-  ImGui::PopFont();
-  if (!c.is_adjustment) { // a clip's own opacity is in its Transform card
-    if (soft_button("remove_blur", "Remove blur", ImVec2(-1.0f, 28.0f)))
-      pending_ = [this, fx] { patch(json::array({{{"op", "remove"}, {"path", fx}}}), "Remove blur"); };
-    end_card();
-    return;
+  if (!c.is_adjustment || c.effects.size() > 1) { // an adjustment layer with a single effect keeps it: remove the layer instead
+    if (soft_button(("remove_" + name).c_str(), ("Remove " + lower).c_str(), ImVec2(-1.0f, 28.0f)))
+      pending_ = [this, fx, label = "Remove " + lower] { patch(json::array({{{"op", "remove"}, {"path", fx}}}), label.c_str()); };
   }
-  ImGui::TextColored(hexv(look::fg2), "Amount");
-  ImGui::SameLine(88.0f);
-  slim_slider("blur_amount", &blur_amount_, 0.0f, 1.0f, ImGui::GetContentRegionAvail().x - 60.0f, "");
-  if (ImGui::IsItemDeactivatedAfterEdit()) {
-    const float v = std::round(blur_amount_ * 100.0f) / 100.0f;
-    const ClipUi clip = c;
-    pending_ = [this, clip, v] {
-      json ops = json::array({{{"op", "replace"}, {"path", clip.id + "/transform/opacity"}, {"value", v}}});
-      if (!clip.opacity_keys.empty() && clip.fades_only) // the fades rise to the new amount
-        for (json &op : fade_ops(clip, clip.fade_in, clip.fade_out, clip.frames, v))
-          ops.push_back(std::move(op));
-      patch(std::move(ops), "Change blur amount");
-    };
+  if (show_amount) {
+    ImGui::TextColored(hexv(look::fg2), "Amount");
+    ImGui::SameLine(88.0f);
+    slim_slider((name + "_amount").c_str(), &amount_, 0.0f, 1.0f, ImGui::GetContentRegionAvail().x - 60.0f, "");
+    if (ImGui::IsItemDeactivatedAfterEdit()) {
+      const float v = std::round(amount_ * 100.0f) / 100.0f;
+      const ClipUi clip = c;
+      pending_ = [this, clip, v] {
+        json ops = json::array({{{"op", "replace"}, {"path", clip.id + "/transform/opacity"}, {"value", v}}});
+        if (!clip.opacity_keys.empty() && clip.fades_only) // the fades rise to the new amount
+          for (json &op : fade_ops(clip, clip.fade_in, clip.fade_out, clip.frames, v))
+            ops.push_back(std::move(op));
+        patch(std::move(ops), "Change effect amount");
+      };
+    }
+    ImGui::SameLine();
+    ImGui::PushFont(g_fonts.mono, 13.0f);
+    ImGui::TextColored(hexv(look::fg2), "%3.0f%%", amount_ * 100.0f);
+    ImGui::PopFont();
   }
-  ImGui::SameLine();
-  ImGui::PushFont(g_fonts.mono, 13.0f);
-  ImGui::TextColored(hexv(look::fg2), "%3.0f%%", blur_amount_ * 100.0f);
-  ImGui::PopFont();
   end_card();
 }
 
@@ -2025,7 +2119,7 @@ void App::draw_timeline() {
       handle("#l", x0, edge, 3);
       handle("#r", x1 - edge, edge, 2);
     }
-    // Dissolves: a band over the cut with a cross, the usual sign for a mix of two clips.
+    // Transitions: a band over the cut.
     for (const TransitionUi &tr : track.transitions) {
       const auto to = std::find_if(track.clips.begin(), track.clips.end(), [&](const ClipUi &k) { return k.id == tr.to; });
       if (to == track.clips.end() || drag_id_ == tr.to || drag_id_ == tr.from)
@@ -2033,8 +2127,18 @@ void App::draw_timeline() {
       const float bx0 = x_of(double(to->start - tr.in)), bx1 = std::max(bx0 + 4.0f, x_of(double(to->start + tr.out)));
       const float by0 = origin.y + ruler_h + float(ti) * row_h + 4.0f, by1 = by0 + row_h - 8.0f;
       dl->AddRectFilled(ImVec2(bx0, by0), ImVec2(bx1, by1), IM_COL32(10, 12, 18, 150), 4.0f);
-      dl->AddLine(ImVec2(bx0, by0), ImVec2(bx1, by1), IM_COL32(255, 255, 255, 170), 1.5f);
-      dl->AddLine(ImVec2(bx0, by1), ImVec2(bx1, by0), IM_COL32(255, 255, 255, 170), 1.5f);
+      if (tr.wipe) { // a wipe: an arrow in the direction the edge travels (the incoming clip enters from `direction`)
+        static const ImVec2 kTravel[] = {ImVec2(1, 0), ImVec2(-1, 0), ImVec2(0, 1), ImVec2(0, -1)};
+        const ImVec2 d = kTravel[std::clamp(tr.direction, 0, 3)], n(-d.y, d.x);
+        const ImVec2 mid((bx0 + bx1) * 0.5f, (by0 + by1) * 0.5f);
+        const float r = std::min(7.0f, (by1 - by0) * 0.3f);
+        dl->AddTriangleFilled(ImVec2(mid.x + d.x * r * 1.3f, mid.y + d.y * r * 1.3f),
+                              ImVec2(mid.x - d.x * r + n.x * r, mid.y - d.y * r + n.y * r),
+                              ImVec2(mid.x - d.x * r - n.x * r, mid.y - d.y * r - n.y * r), IM_COL32(255, 255, 255, 200));
+      } else { // a dissolve: a cross, the usual sign for a mix of two clips
+        dl->AddLine(ImVec2(bx0, by0), ImVec2(bx1, by1), IM_COL32(255, 255, 255, 170), 1.5f);
+        dl->AddLine(ImVec2(bx0, by1), ImVec2(bx1, by0), IM_COL32(255, 255, 255, 170), 1.5f);
+      }
       dl->AddRect(ImVec2(bx0, by0), ImVec2(bx1, by1), IM_COL32(255, 255, 255, 120), 4.0f);
     }
   }
@@ -2093,10 +2197,16 @@ void App::draw_transition_card(const TrackUi &track, const ClipUi &c) {
   }
   ImGui::PushTextWrapPos(0.0f);
   if (current != track.transitions.end()) {
-    ImGui::TextColored(hexv(look::fg2), "Dissolve into the next clip, %.2f s", double(current->in + current->out) / fps());
+    static const char *const kSide[] = {"left", "right", "top", "bottom"}; // eval::WipeDirection order
+    const double seconds = double(current->in + current->out) / fps();
+    if (current->wipe)
+      ImGui::TextColored(hexv(look::fg2), "Wipe from the %s into the next clip, %.2f s", kSide[std::clamp(current->direction, 0, 3)], seconds);
+    else
+      ImGui::TextColored(hexv(look::fg2), "Dissolve into the next clip, %.2f s", seconds);
     const std::string tid = current->id;
-    if (soft_button("remove_dissolve", "Remove dissolve", ImVec2(-1.0f, 28.0f)))
-      pending_ = [this, tid] { patch(json::array({{{"op", "remove"}, {"path", tid}}}), "Remove dissolve"); };
+    const char *kind = current->wipe ? "wipe" : "dissolve";
+    if (soft_button((std::string("remove_") + kind).c_str(), (std::string("Remove ") + kind).c_str(), ImVec2(-1.0f, 28.0f)))
+      pending_ = [this, tid, label = std::string("Remove ") + kind] { patch(json::array({{{"op", "remove"}, {"path", tid}}}), label.c_str()); };
   } else if (next == track.clips.end()) {
     ImGui::TextColored(hexv(look::fg3), "No clip starts where this one ends, so there is nothing to dissolve into.");
   } else {
@@ -2119,19 +2229,33 @@ void App::draw_transition_card(const TrackUi &track, const ClipUi &c) {
       ImGui::PushFont(g_fonts.mono, 13.0f);
       ImGui::TextColored(hexv(look::fg2), "%.2fs", dissolve_s_);
       ImGui::PopFont();
-      if (soft_button("add_dissolve", "Dissolve into next clip", ImVec2(-1.0f, 28.0f))) {
-        const int64_t total = std::clamp<int64_t>(std::llround(dissolve_s_ * fps()), 1, 2 * half);
-        const int64_t in = total / 2, out = total - in;
-        const std::string from = c.id, to = next->id, track_id = track.id;
-        pending_ = [this, from, to, track_id, in, out] {
-          patch(json::array({{{"op", "add"},
-                              {"path", track_id + "/transitions/$new:dissolve"},
-                              {"value",
-                               {{"type", "attome.dissolve"}, {"from", from}, {"to", to},
-                                {"in_offset", frames_text(in)}, {"out_offset", frames_text(out)}}}}}),
-                "Add dissolve");
+      // A new transition is centred on the cut and as long as the slider says; a dissolve and a wipe share the rest.
+      const int64_t total = std::clamp<int64_t>(std::llround(dissolve_s_ * fps()), 1, 2 * half);
+      const int64_t in = total / 2, out = total - in;
+      const std::string from = c.id, to = next->id, track_id = track.id;
+      const auto add = [&](const char *type, const char *label, json params) {
+        pending_ = [this, from, to, track_id, in, out, type = std::string(type), label = std::string(label), params] {
+          json value = {{"type", type}, {"from", from}, {"to", to}, {"in_offset", frames_text(in)}, {"out_offset", frames_text(out)}};
+          if (!params.empty())
+            value["params"] = params;
+          patch(json::array({{{"op", "add"}, {"path", track_id + "/transitions/$new:t"}, {"value", std::move(value)}}}), label.c_str());
         };
+      };
+      if (soft_button("add_dissolve", "Dissolve into next clip", ImVec2(-1.0f, 28.0f)))
+        add("attome.dissolve", "Add dissolve", json::object());
+      ImGui::TextColored(hexv(look::fg2), "Wipe from");
+      ImGui::SameLine(88.0f);
+      static const char *const kSideName[] = {"Left", "Right", "Top", "Bottom"};
+      static const char *const kSideId[] = {"wipe_left", "wipe_right", "wipe_up", "wipe_down"};
+      const float button_w = (ImGui::GetContentRegionAvail().x - 18.0f) / 4.0f;
+      for (int i = 0; i < 4; ++i) {
+        if (i)
+          ImGui::SameLine(0.0f, 6.0f);
+        if (soft_button(kSideId[i], kSideName[i], ImVec2(button_w, 26.0f), true, wipe_dir_ == i))
+          wipe_dir_ = i;
       }
+      if (soft_button("add_wipe", "Wipe into next clip", ImVec2(-1.0f, 28.0f)))
+        add("attome.wipe", "Add wipe", {{"direction", eval::wipe_direction_name(eval::WipeDirection(wipe_dir_))}, {"softness", 0.1}});
     }
   }
   ImGui::PopTextWrapPos();
@@ -2259,8 +2383,7 @@ void App::draw_inspector() {
     opacity_ = c->opacity;
     fade_in_s_ = float(double(c->fade_in) / fps());
     gain_db_ = c->gain_db;
-    blur_radius_ = c->blur_radius;
-    blur_amount_ = c->opacity;
+    amount_ = c->opacity;
     pan_ = c->pan;
     audio_fade_in_s_ = float(double(c->audio_fade_in) / fps());
     audio_fade_out_s_ = float(double(c->audio_fade_out) / fps());
@@ -2388,8 +2511,8 @@ void App::draw_inspector() {
   }
 
   const bool picture = track->kind != "audio" && !c->is_adjustment; // sound clips and adjustment layers have no picture
-  if (c->is_adjustment) // the blur is what an adjustment layer is for: first
-    draw_blur_card(*c);
+  if (c->is_adjustment) // effects are what an adjustment layer is for: first
+    draw_effect_cards(*c);
   if (picture && begin_card("##look", "Transform")) {
     // Position is shown in canvas pixels from the centre; the document stores canvas fractions (ADR-021).
     ImGui::TextColored(hexv(look::fg2), "Position");
@@ -2545,7 +2668,7 @@ void App::draw_inspector() {
   }
   if (picture) {
     end_card();
-    draw_blur_card(*c); // a blur on this clip alone
+    draw_effect_cards(*c); // effects on this clip alone
   }
   if (picture || c->is_adjustment) // an adjustment layer's fades fade its effect
     draw_fade_card(*c);
