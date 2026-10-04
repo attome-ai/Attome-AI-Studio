@@ -19,6 +19,17 @@ constexpr const char *kCatalog = R"json({
       "licence": "MiniMax H3 Community License: the weights are free to download; commercial use of what you generate needs a paid licence.",
       "licence_url": "https://huggingface.co/MiniMaxAI/MiniMax-H3",
       "notes": "33 B video and sound model, pruned int8 build, with the official 8-step Turbo add-on. Needs a 24 GB GPU or larger.",
+      "declares": {
+        "kinds": ["generate_video", "encode_prompt", "sample", "decode"],
+        "accepts": ["start_image", "end_image"],
+        "seconds": {"min": 1, "max": 15},
+        "sizes": {"multiple": 32, "max_pixels": 2088960},
+        "settings": {
+          "steps": {"type": "integer", "min": 1, "max": 50, "default": 8},
+          "sampler": {"type": "choice", "options": ["res_multistep", "euler"], "default": "res_multistep"},
+          "attention": {"type": "choice", "options": ["int8", "default"], "default": "int8"}
+        }
+      },
       "files": [
         {"path": "vae/minimax_h3_audio_vae_fp32.safetensors", "size": 605254808,
          "sha256": "8e505d95dd1561d47abd43d4238fd40d9bb1ae9e147ed0a4cba778d76ae4db48",

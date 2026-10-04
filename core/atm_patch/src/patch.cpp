@@ -13,6 +13,7 @@
 #include "atm/base/time.hpp"
 #include "atm/eval/effects.hpp"
 #include "atm/eval/keyframes.hpp"
+#include "atm/gen/graph.hpp"
 
 namespace atm::patch {
 namespace {
@@ -584,6 +585,46 @@ void check_track(const doc::Document &doc, const std::string &track_id, json &pr
   check_transitions(*ref->node, track_id, spans, problems);
 }
 
+// Clip Workflows and the clips that use them (atm_gen). `tracks` limits the clips looked at; null = every clip. The
+// workflows are always checked whole: there are few, and a change to one can break a clip anywhere.
+void check_generative(const doc::Document &doc, const std::set<std::string> *tracks, bool workflows_too, json &problems) {
+  ATM_PROFILE_SCOPE("patch.validate.workflows");
+  const json &root = doc.root();
+  static const json none = json::object();
+  const auto wit = root.find("workflows");
+  const json &workflows = wit != root.end() && wit->is_object() ? *wit : none;
+  std::vector<gen::Problem> found;
+  if (workflows_too)
+    for (auto it = workflows.begin(); it != workflows.end(); ++it)
+      gen::check_workflow(workflows, it.key(), found);
+  const gen::ClipLookup lookup = [&](string_view id) -> const json * {
+    const NodeRef *ref = id_prefix(id) == "clp" ? doc.find(id) : nullptr;
+    return ref ? ref->node : nullptr;
+  };
+  const auto check_clips = [&](const json &track) {
+    const auto clips = track.find("clips");
+    if (clips == track.end() || !clips->is_object())
+      return;
+    for (auto c = clips->begin(); c != clips->end(); ++c)
+      gen::check_clip(workflows, c.key(), *c, lookup, found);
+  };
+  if (tracks) {
+    for (const std::string &id : *tracks)
+      if (const NodeRef *ref = doc.find(id))
+        check_clips(*ref->node);
+  } else if (const auto seqs = root.find("sequences"); seqs != root.end() && seqs->is_object()) {
+    for (auto s = seqs->begin(); s != seqs->end(); ++s)
+      if (const auto ts = s->find("tracks"); ts != s->end() && ts->is_object())
+        for (auto t = ts->begin(); t != ts->end(); ++t)
+          check_clips(*t);
+  }
+  for (gen::Problem &p : found) {
+    if (problems.size() >= kMaxProblems)
+      break;
+    problems.push_back(problem(p.rule, std::move(p.path), p.target, std::move(p.message), std::move(p.hint)));
+  }
+}
+
 tl::unexpected<Error> rejected(json problems) {
   Error e;
   e.code = ErrorCode::SchemaViolation;
@@ -658,6 +699,23 @@ public:
     json problems = json::array();
     for (const std::string &t : tracks)
       check_track(doc_, t, problems);
+    // A change to a workflow, or a clip taken away, can break a generative clip on any track: look at them all.
+    bool workflows = false, everywhere = false;
+    const auto touches = [&](const std::string &id) {
+      const string_view prefix = id_prefix(id);
+      workflows = workflows || prefix == "cwf" || prefix == "nod" || prefix == "lnk";
+    };
+    for (const std::string &id : res_.created)
+      touches(id);
+    for (const std::string &id : res_.modified)
+      touches(id);
+    for (const std::string &id : res_.deleted) {
+      touches(id);
+      everywhere = everywhere || id_prefix(id) == "clp";
+    }
+    everywhere = (everywhere || workflows) && doc_.root().contains("workflows");
+    if (everywhere || !tracks.empty())
+      check_generative(doc_, everywhere ? nullptr : &tracks, workflows, problems);
     if (!problems.empty())
       return rejected(std::move(problems));
     return {};
@@ -1350,6 +1408,7 @@ json validate_document(const doc::Document &doc) {
       check_track(doc, t.key(), problems);
     }
   }
+  check_generative(doc, nullptr, true, problems);
   return problems;
 }
 

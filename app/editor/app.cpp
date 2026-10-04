@@ -111,7 +111,8 @@ void App::shutdown() {
 }
 
 bool App::busy() const {
-  return playing_ || !drag_id_.empty() || !job_id_.empty() || audio_mixer_.busy() || (rail_tab_ == 6 && models_busy_);
+  return playing_ || !drag_id_.empty() || !job_id_.empty() || audio_mixer_.busy() || !gen_job_.empty() ||
+         (models_busy_ && (rail_tab_ == 6 || gen_problems_.contains(selected_clip_)));
 }
 
 void App::select_first_clip() {
@@ -275,6 +276,13 @@ void App::refresh() {
           c.media_w = ref.value("width", 0);
           c.media_h = ref.value("height", 0);
           c.is_adjustment = ref.value("type", "") == "adjustment";
+          c.is_generative = ref.value("type", "") == "workflow";
+          c.workflow = c.is_generative ? ref.value("workflow", std::string()) : std::string();
+          if (const auto inputs = ref.find("inputs"); c.is_generative && inputs != ref.end() && inputs->is_object())
+            if (const auto prompt = inputs->find("prompt"); prompt != inputs->end() && prompt->is_string()) {
+              c.prompt = prompt->get<std::string>();
+              c.has_prompt = true;
+            }
           c.link_group = cit->value("link_group", std::string());
           c.stream = ref.value("stream", std::string());
           {
@@ -355,6 +363,7 @@ void App::refresh() {
   playhead_ = std::clamp<int64_t>(playhead_, 0, std::max<int64_t>(0, total_frames_));
   if (!selected_clip_.empty() && !selected())
     selected_clip_.clear();
+  refresh_gen_status();
 
   // The viewer renders a fitted, smaller picture of the canvas.
   if (auto comp = render::compile(doc_)) {
@@ -365,6 +374,18 @@ void App::refresh() {
 }
 
 void App::poll(double now) {
+  if (!gen_job_.empty() && now >= next_gen_job_poll_) { // a generation started here: its progress, whatever is selected
+    next_gen_job_poll_ = now + 0.2;
+    json job;
+    RpcError error;
+    if (client_.call("jobs.get", {{"job_id", gen_job_}}, job, error)) {
+      gen_job_state_ = std::move(job);
+      if (gen_job_state_.value("state", "") != "running")
+        gen_job_.clear();
+    } else {
+      gen_job_.clear();
+    }
+  }
   if (project_path_.empty() || now < next_poll_)
     return;
   next_poll_ = now + 0.3;
@@ -895,7 +916,7 @@ namespace look {
 constexpr uint32_t txt = 0xb5437a, bg = 0x0d0f15, rail = 0x0a0c11, panel = 0x141821, panel2 = 0x1a1f2b, raised = 0x232a39,
                    line = 0x242b3a, line2 = 0x333c50, fg = 0xeceff6, fg2 = 0x9ba4b9, fg3 = 0x636d85,
                    accent = 0xff7a3d, accent2 = 0xffb04a, accent_ink = 0x1d0b02, vid = 0x3a5bd9, aud = 0x1f8a70,
-                   adj = 0x7a5af8, ok = 0x3fd28a, stage_a = 0x171c28, stage_b = 0x0a0c11;
+                   adj = 0x7a5af8, gen = 0x2f9bb3, blocked = 0xc0392b, ok = 0x3fd28a, stage_a = 0x171c28, stage_b = 0x0a0c11;
 }
 
 ImU32 hex(uint32_t rgb, int a = 255) { return IM_COL32((rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255, a); }
@@ -1040,6 +1061,12 @@ bool slim_slider(const char *id, float *value, float lo, float hi, float width, 
   (void)fmt;
   ImGui::PopID();
   return changed;
+}
+
+// Did the last download job of this model end in a failure?
+bool job_failed(const std::map<std::string, json> &jobs, const std::string &model) {
+  const auto it = jobs.find(model);
+  return it != jobs.end() && it->second.value("state", "") == "failed";
 }
 
 // A card of the Inspector: rounded, a slightly lighter panel, with a title.
@@ -1770,33 +1797,204 @@ void App::draw_effects_panel() {
   }
 }
 
-// The model store: what can be downloaded, what is on disk, and the download itself. The download runs in the daemon,
-// so it goes on when this panel is closed; a stopped one continues from where it stopped.
-void App::draw_models_panel() {
-  if (clock_ >= next_models_poll_) {
-    next_models_poll_ = clock_ + 0.5;
-    json listed;
-    if (rpc("models.list", json::object(), listed))
-      models_ = std::move(listed);
-    models_busy_ = false;
-    for (const json &e : models_.value("entries", json::array())) {
-      const std::string id = e.value("id", "");
-      // The running job, or the last look at one that has just ended (to show why it failed).
-      std::string job_id = e.value("job_id", "");
-      const auto known = model_jobs_.find(id);
-      if (job_id.empty() && known != model_jobs_.end() && known->second.value("state", "") == "running")
-        job_id = known->second.value("job", "");
-      if (job_id.empty())
-        continue;
-      json state;
-      if (rpc("jobs.get", {{"job_id", job_id}}, state)) {
-        models_busy_ = models_busy_ || state.value("state", "") == "running";
-        model_jobs_[id] = std::move(state);
-      } else {
-        model_jobs_.erase(id);
+// The clips whose workflow cannot run on this computer, and why. Asked again when the project changes and while a
+// download that would fix one is running.
+void App::refresh_gen_status() {
+  gen_problems_.clear();
+  gen_state_.clear();
+  bool any = false;
+  for (const TrackUi &t : tracks_)
+    for (const ClipUi &c : t.clips)
+      any = any || c.is_generative;
+  json status;
+  if (!any || !rpc("gen.status", {{"project", project_path_}}, status))
+    return;
+  for (const json &c : status.value("clips", json::array())) {
+    gen_state_[c.value("clip", "")] = c;
+    if (!c.value("ready", true))
+      gen_problems_[c.value("clip", "")] = c.value("problems", json::array());
+  }
+}
+
+void App::start_generation(json params) {
+  params["project"] = project_path_;
+  json started;
+  gen_job_state_ = json::object();
+  if (!rpc("gen.run", params, started))
+    return;
+  refresh(); // a new Take's seed is an edit
+  if (started.value("job_id", json()).is_string()) {
+    gen_job_ = started["job_id"].get<std::string>();
+    gen_job_state_ = {{"state", "running"}, {"progress", 0.0}};
+    next_gen_job_poll_ = 0.0;
+  }
+}
+
+// A generative clip's card. A node whose model is missing is the common case on a project from another computer: the
+// card says which model, how large the download is, and starts it.
+void App::draw_generate_card(const ClipUi &c) {
+  const auto found = gen_problems_.find(c.id);
+  if (!begin_card("##generate", "Generate", found == gen_problems_.end() ? nullptr : "cannot run yet")) {
+    end_card();
+    return;
+  }
+  if (found == gen_problems_.end()) {
+    // Ready to run: the prompt, what state the clip is in, and the buttons that generate.
+    const std::string id = c.id;
+    if (c.has_prompt) {
+      ImGui::PushStyleColor(ImGuiCol_FrameBg, hexv(look::raised));
+      ImGui::InputTextMultiline("##prompt", prompt_buf_, sizeof prompt_buf_, ImVec2(-1.0f, 92.0f));
+      ui_mark("field:prompt");
+      ImGui::PopStyleColor();
+      if (ImGui::IsItemDeactivatedAfterEdit() && c.prompt != prompt_buf_) {
+        const std::string value = prompt_buf_;
+        pending_ = [this, id, value] {
+          if (!patch(json::array({{{"op", "replace"}, {"path", id + "/media_ref/inputs/prompt"}, {"value", value}}}), "Edit prompt"))
+            insp_rev_ = 0;
+        };
       }
     }
+    const auto known = gen_state_.find(c.id);
+    const json st = known != gen_state_.end() ? known->second : json::object();
+    const std::string state = st.value("state", "empty");
+    const int takes = st.value("takes", 0);
+    ImGui::PushTextWrapPos(0.0f);
+    if (state == "clean")
+      ImGui::TextColored(hexv(look::ok), "Up to date, %d %s", takes, takes == 1 ? "take" : "takes");
+    else if (state == "dirty")
+      ImGui::TextColored(hexv(look::accent2), "Out of date: %s", st.value("reason", "something changed").c_str());
+    else if (state == "locked")
+      ImGui::TextColored(hexv(look::fg2), st.value("out_of_step", false) ? "Locked; its inputs have moved on" : "Locked");
+    else
+      ImGui::TextColored(hexv(look::fg2), "Not generated yet");
+    if (!gen_job_.empty()) {
+      ImGui::PushStyleColor(ImGuiCol_PlotHistogram, hexv(look::accent));
+      ImGui::ProgressBar(float(gen_job_state_.value("progress", 0.0)), ImVec2(-1.0f, 6.0f), "");
+      ImGui::PopStyleColor();
+      ImGui::TextColored(hexv(look::fg3), "%s", gen_job_state_.value("detail", "Starting").c_str());
+      if (soft_button("gen_stop_run", "Stop", ImVec2(96.0f, 30.0f))) {
+        json unused;
+        rpc("jobs.cancel", {{"job_id", gen_job_}}, unused);
+      }
+    } else {
+      if (gen_job_state_.value("state", "") == "failed") {
+        const json error = gen_job_state_.value("error", json::object());
+        ImGui::TextColored(kError, "%s", error.value("message", "The generation failed.").c_str());
+      }
+      int waiting = 0; // dirty or empty clips in the whole project
+      for (const auto &[clip, other] : gen_state_)
+        waiting += other.value("state", "") == "dirty" || other.value("state", "") == "empty" ? 1 : 0;
+      const bool needs = state == "dirty" || state == "empty";
+      if (soft_button("gen_run", needs ? "Generate" : "New take", ImVec2(110.0f, 30.0f), state != "locked", needs))
+        pending_ = [this, id, needs] { start_generation({{"clips", json::array({id})}, {"new_take", !needs}}); };
+      if (waiting > (needs ? 1 : 0)) {
+        const std::string label = "Generate all out of date (" + std::to_string(waiting) + ")";
+        if (soft_button("gen_run_dirty", label.c_str(), ImVec2(0.0f, 30.0f)))
+          pending_ = [this] { start_generation({{"scope", "dirty"}}); };
+      }
+    }
+    ImGui::PopTextWrapPos();
+    end_card();
+    return;
   }
+  poll_models();
+  if (clock_ >= next_gen_poll_) { // a download may have finished
+    next_gen_poll_ = clock_ + 1.0;
+    if (!pending_) // after the panels are drawn: it replaces the map this card is reading
+      pending_ = [this] { refresh_gen_status(); };
+  }
+  const auto gb = [](int64_t bytes) {
+    char text[32];
+    if (bytes >= 995000000)
+      std::snprintf(text, sizeof text, "%.1f GB", double(bytes) / 1e9);
+    else
+      std::snprintf(text, sizeof text, "%.0f MB", double(bytes) / 1e6);
+    return std::string(text);
+  };
+  std::set<std::string> offered; // one download button per model, however many nodes use it
+  ImGui::PushTextWrapPos(0.0f);
+  for (const json &p : found->second) {
+    const std::string rule = p.value("rule", ""), model = p.value("model", "");
+    if (rule == "G_MODEL_MISSING" && !offered.insert(model).second)
+      continue;
+    ImGui::TextColored(kError, "%s", rule == "G_MODEL_MISSING"
+                                         ? (p.value("title", model) + " is not installed on this computer.").c_str()
+                                         : p.value("message", "").c_str());
+    if (rule != "G_MODEL_MISSING" || !p.value("can_download", false)) {
+      ImGui::TextColored(hexv(look::fg3), "%s", p.value("hint", "").c_str());
+      ImGui::Spacing();
+      continue;
+    }
+    // The download: its state comes from the Models panel's list, so the two always agree.
+    json entry;
+    for (const json &e : models_.value("entries", json::array()))
+      if (e.value("id", "") == model)
+        entry = e;
+    const int64_t size = entry.value("size", p.value("size", int64_t(0)));
+    const int64_t bytes = entry.is_object() ? entry.value("bytes", int64_t(0)) : size - p.value("bytes_missing", size);
+    ImGui::PushID(model.c_str());
+    if (entry.value("state", "") == "downloading") {
+      const auto job = model_jobs_.find(model);
+      const double rate = job != model_jobs_.end() ? job->second.value("bytes_per_second", 0.0) : 0.0;
+      ImGui::PushStyleColor(ImGuiCol_PlotHistogram, hexv(look::accent));
+      ImGui::ProgressBar(size > 0 ? float(double(bytes) / double(size)) : 0.0f, ImVec2(-1.0f, 6.0f), "");
+      ImGui::PopStyleColor();
+      ImGui::TextColored(hexv(look::fg2), "%s of %s, %.1f MB/s", gb(bytes).c_str(), gb(size).c_str(), rate / 1e6);
+      if (soft_button("gen_stop", "Stop", ImVec2(96.0f, 30.0f))) {
+        json unused;
+        rpc("jobs.cancel", {{"job_id", entry.value("job_id", "")}}, unused);
+        next_models_poll_ = 0.0;
+      }
+    } else {
+      if (job_failed(model_jobs_, model))
+        ImGui::TextColored(kError, "%s", model_jobs_[model].value("error", json::object()).value("message", "The download failed.").c_str());
+      const std::string label = (bytes > 0 ? "Continue download, " : "Download, ") + gb(size - bytes);
+      if (soft_button("gen_download", label.c_str(), ImVec2(0.0f, 30.0f), true, true)) {
+        json started;
+        model_jobs_.erase(model);
+        if (rpc("models.fetch", {{"id", model}}, started))
+          model_jobs_[model] = {{"job", started.value("job_id", "")}, {"state", "running"}};
+        next_models_poll_ = 0.0;
+      }
+    }
+    ImGui::PopID();
+    ImGui::Spacing();
+  }
+  ImGui::PopTextWrapPos();
+  end_card();
+}
+
+// The model store: what can be downloaded, what is on disk, and the download itself. The download runs in the daemon,
+// so it goes on when this panel is closed; a stopped one continues from where it stopped.
+void App::poll_models() {
+  if (clock_ < next_models_poll_)
+    return;
+  next_models_poll_ = clock_ + 0.5;
+  json listed;
+  if (rpc("models.list", json::object(), listed))
+    models_ = std::move(listed);
+  models_busy_ = false;
+  for (const json &e : models_.value("entries", json::array())) {
+    const std::string id = e.value("id", "");
+    // The running job, or the last look at one that has just ended (to show why it failed).
+    std::string job_id = e.value("job_id", "");
+    const auto known = model_jobs_.find(id);
+    if (job_id.empty() && known != model_jobs_.end() && known->second.value("state", "") == "running")
+      job_id = known->second.value("job", "");
+    if (job_id.empty())
+      continue;
+    json state;
+    if (rpc("jobs.get", {{"job_id", job_id}}, state)) {
+      models_busy_ = models_busy_ || state.value("state", "") == "running";
+      model_jobs_[id] = std::move(state);
+    } else {
+      model_jobs_.erase(id);
+    }
+  }
+}
+
+void App::draw_models_panel() {
+  poll_models();
   const auto gb = [](int64_t bytes) {
     char text[32];
     if (bytes >= 995000000)
@@ -2564,10 +2762,19 @@ void App::draw_timeline() {
       const float x0 = x_of(double(start)), x1 = std::max(x0 + 2.0f, x_of(double(start + frames)));
       const float cy = origin.y + ruler_h + float(row) * row_h + 4.0f, ch = row_h - 8.0f;
       const bool is_selected = c.id == selected_clip_;
-      const uint32_t base = c.is_adjustment ? look::adj : c.is_text ? look::txt : track.kind == "audio" ? look::aud : look::vid;
+      const bool blocked = c.is_generative && gen_problems_.contains(c.id); // its model is not here: red, like a missing node
+      const uint32_t base = blocked ? look::blocked : c.is_generative ? look::gen : c.is_adjustment ? look::adj : c.is_text ? look::txt
+                            : track.kind == "audio" ? look::aud : look::vid;
       const int alpha = int(120.0f + c.opacity * 135.0f);
       dl->AddRectFilled(ImVec2(x0, cy), ImVec2(x1 - 1.0f, cy + ch), hex(base, alpha), 5.0f);
       dl->AddRectFilled(ImVec2(x0, cy), ImVec2(x1 - 1.0f, cy + 3.0f), IM_COL32(255, 255, 255, 70), 5.0f, ImDrawFlags_RoundCornersTop);
+      if (const auto st = gen_state_.find(c.id); c.is_generative && !blocked && st != gen_state_.end()) {
+        const std::string state = st->second.value("state", ""); // an amber bar along the bottom: out of date or not made yet
+        if (state == "dirty" || state == "empty")
+          dl->AddRectFilled(ImVec2(x0 + 2.0f, cy + ch - 5.0f), ImVec2(x1 - 3.0f, cy + ch - 1.0f), hex(look::accent2), 2.0f);
+      }
+      if (blocked && !is_selected)
+        dl->AddRect(ImVec2(x0, cy), ImVec2(x1 - 1.0f, cy + ch), IM_COL32(255, 110, 100, 255), 5.0f, 0, 1.5f);
       if (is_selected)
         dl->AddRect(ImVec2(x0, cy), ImVec2(x1 - 1.0f, cy + ch), hex(look::accent), 5.0f, 0, 2.0f);
       if (is_selected) // the keys of its effects' parameters: a small diamond at each key time
@@ -3039,6 +3246,7 @@ void App::draw_inspector() {
     insp_for_ = c->id;
     insp_rev_ = revision_;
     copy_to(name_buf_, sizeof name_buf_, c->name);
+    copy_to(prompt_buf_, sizeof prompt_buf_, c->prompt);
     copy_to(in_buf_, sizeof in_buf_, timecode(c->start));
     copy_to(dur_buf_, sizeof dur_buf_, timecode(c->frames));
     opacity_ = c->opacity;
@@ -3118,6 +3326,8 @@ void App::draw_inspector() {
     end_card();
   }
 
+  if (c->is_generative)
+    draw_generate_card(*c);
 
   if (c->is_text) {
     if (begin_card("##text", "Text")) {

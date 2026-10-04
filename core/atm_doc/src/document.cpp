@@ -21,6 +21,7 @@ constexpr CollectionInfo kCollections[] = {
     {"pipelines", "pip", true},     {"replies", "cmt", true},       {"markers", "mrk", false},
     {"comments", "cmt", false},     {"variables", "var", false},    {"bindings", "bnd", false},
     {"assets", "ast", false},       {"consent_records", "con", false}, {"transitions", "trn", false},
+    {"workflows", "cwf", false},    {"nodes", "nod", false},        {"links", "lnk", false}, // Clip Workflows (atm_gen)
 };
 
 const CollectionInfo *collection_info(std::string_view name) {

@@ -78,18 +78,21 @@ public:
                   "A download address starts with https://.");
     const bool https = parts.nScheme == INTERNET_SCHEME_HTTPS;
 
-    const std::wstring proxy = env_proxy(https);
-    Handle session(proxy.empty() ? WinHttpOpen(L"Attome/0.1", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME,
+    const std::wstring name(host, parts.dwHostNameLength);
+    const bool local = name == L"127.0.0.1" || name == L"localhost" || name == L"::1" || name == L"[::1]";
+    const std::wstring proxy = local ? std::wstring() : env_proxy(https);
+    Handle session(local           ? WinHttpOpen(L"Attome/0.1", WINHTTP_ACCESS_TYPE_NO_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0)
+                   : proxy.empty() ? WinHttpOpen(L"Attome/0.1", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME,
                                                WINHTTP_NO_PROXY_BYPASS, 0)
-                                 : WinHttpOpen(L"Attome/0.1", WINHTTP_ACCESS_TYPE_NAMED_PROXY, proxy.c_str(),
-                                               WINHTTP_NO_PROXY_BYPASS, 0));
+                   : WinHttpOpen(L"Attome/0.1", WINHTTP_ACCESS_TYPE_NAMED_PROXY, proxy.c_str(), WINHTTP_NO_PROXY_BYPASS, 0));
     if (!session)
       return net_error("start the HTTP client", request.url);
     WinHttpSetTimeouts(session.h, 15000, 15000, 30000, 60000); // resolve, connect, send, receive (ms)
     Handle connection(WinHttpConnect(session.h, host, parts.nPort, 0));
     if (!connection)
       return net_error("connect", request.url);
-    Handle req(WinHttpOpenRequest(connection.h, L"GET", path, nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
+    const bool post = !request.body.empty();
+    Handle req(WinHttpOpenRequest(connection.h, post ? L"POST" : L"GET", path, nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
                                   https ? WINHTTP_FLAG_SECURE : 0));
     if (!req)
       return net_error("open the request", request.url);
@@ -97,7 +100,12 @@ public:
       const std::wstring range = L"Range: bytes=" + std::to_wstring(request.range_start) + L"-";
       WinHttpAddRequestHeaders(req.h, range.c_str(), DWORD(-1), WINHTTP_ADDREQ_FLAG_ADD);
     }
-    if (!WinHttpSendRequest(req.h, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
+    if (post) {
+      const std::wstring type = L"Content-Type: " + widen(request.content_type.empty() ? std::string("application/json") : request.content_type);
+      WinHttpAddRequestHeaders(req.h, type.c_str(), DWORD(-1), WINHTTP_ADDREQ_FLAG_ADD);
+    }
+    if (!WinHttpSendRequest(req.h, WINHTTP_NO_ADDITIONAL_HEADERS, 0, post ? const_cast<char *>(request.body.data()) : WINHTTP_NO_REQUEST_DATA,
+                            DWORD(request.body.size()), DWORD(request.body.size()), 0) ||
         !WinHttpReceiveResponse(req.h, nullptr))
       return net_error("reach the server", request.url);
 
@@ -142,6 +150,23 @@ public:
 #endif
 
 } // namespace
+
+Result<Reply> fetch(Transport &transport, const std::string &url, const std::string &body, const std::string &content_type) {
+  Request request;
+  request.url = url;
+  request.body = body;
+  request.content_type = content_type;
+  Reply reply;
+  const auto response = transport.get(
+      request, nullptr, [&](const uint8_t *data, size_t size) {
+        reply.body.append(reinterpret_cast<const char *>(data), size);
+        return reply.body.size() < (size_t(64) << 20); // an answer, not a download
+      });
+  if (!response)
+    return tl::unexpected(response.error());
+  reply.status = response->status;
+  return reply;
+}
 
 std::unique_ptr<Transport> system_transport() {
 #ifdef _WIN32

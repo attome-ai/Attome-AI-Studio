@@ -17,6 +17,8 @@ namespace atm::net {
 struct Request {
   std::string url;
   int64_t range_start = 0; // first byte wanted; 0 asks for the whole file
+  // For talking to a local service (the user's ComfyUI): a body makes the request a POST of that content type.
+  std::string body, content_type;
 };
 
 struct Response {
@@ -37,7 +39,14 @@ public:
   virtual Result<Response> get(const Request &request, const OnResponse &on_response, const Sink &sink) = 0;
 };
 
-// The operating system's HTTP client. On a system without one built in, every get() fails with N_UNSUPPORTED.
+// One request whose whole answer is wanted as text: the status and the body. A POST when `body` is not empty.
+struct Reply {
+  int status = 0;
+  std::string body;
+};
+Result<Reply> fetch(Transport &transport, const std::string &url, const std::string &body = {}, const std::string &content_type = "application/json");
+
+// The operating system's HTTP client. A server on this machine (127.0.0.1, localhost) is reached directly, never through a proxy. On a system without one built in, every get() fails with N_UNSUPPORTED.
 std::unique_ptr<Transport> system_transport();
 
 } // namespace atm::net

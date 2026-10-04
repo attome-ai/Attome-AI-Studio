@@ -413,6 +413,72 @@ int main(int argc, char **argv) {
     exit_status = finish(opt, outcome);
   });
 
+  // attome gen: the generative clips of a project, and generating them (it waits and shows the step that is running).
+  std::string gen_scope = "dirty";
+  std::vector<std::string> gen_clips;
+  bool gen_dry = false, gen_new_take = false;
+  auto *cmd_gen = app.add_subcommand("gen", "Generative clips: attome gen status Demo.attome, attome gen run Demo.attome");
+  cmd_gen->require_subcommand(1);
+  auto *cmd_gen_status = cmd_gen->add_subcommand("status", "Each generative clip: clean, dirty (and why), empty or locked, and whether it can run here");
+  cmd_gen_status->add_option("project", project)->required();
+  cmd_gen_status->callback([&] { exit_status = finish(opt, call(opt, "gen.status", {{"project", abs_path(project)}})); });
+  cmd_gen->add_subcommand("engines", "The engines that can run models here, and whether each answers")
+      ->callback([&] { exit_status = finish(opt, call(opt, "gen.engines", json::object())); });
+  auto *cmd_gen_run = cmd_gen->add_subcommand("run", "Generate: the dirty clips, or --scope all, or --clip <id> (repeatable)");
+  cmd_gen_run->add_option("project", project)->required();
+  cmd_gen_run->add_option("--scope", gen_scope, "dirty (default), all, selected, selected_and_after");
+  cmd_gen_run->add_option("--clip", gen_clips, "A clip to generate; makes the scope \"selected\" unless --scope is given");
+  cmd_gen_run->add_flag("--new-take", gen_new_take, "Another Take of the named clips, with the next seed");
+  cmd_gen_run->add_flag("--dry-run", gen_dry, "Print the plan and run nothing");
+  cmd_gen_run->callback([&] {
+    const bool remote = opt.daemon != "never" && bool(atm::api::connect(opt.endpoint));
+    std::unique_ptr<atm::api::Engine> local = remote ? nullptr : std::make_unique<atm::api::Engine>();
+    const auto invoke = [&](const char *tool, const json &p) -> json {
+      if (remote)
+        return call(opt, tool, p, false);
+      auto r = local->call(tool, p);
+      if (r)
+        return {{"ok", true}, {"result", std::move(*r)}};
+      return {{"ok", false}, {"error", atm::error_to_json(r.error())}};
+    };
+    json params = {{"project", abs_path(project)}, {"dry_run", gen_dry}, {"new_take", gen_new_take}};
+    if (!gen_clips.empty())
+      params["clips"] = gen_clips;
+    if (cmd_gen_run->count("--scope") > 0 || gen_clips.empty())
+      params["scope"] = gen_scope;
+    json outcome = invoke("gen.run", params);
+    if (outcome.value("ok", false) && outcome["result"]["job_id"].is_string()) {
+      const json plan = outcome["result"];
+      const json job = {{"job_id", plan["job_id"]}};
+      for (;;) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        outcome = invoke("jobs.get", job);
+        if (!outcome.value("ok", false))
+          break;
+        const json &state = outcome["result"];
+        if (!opt.as_json)
+          std::fprintf(stderr, "\r%5.1f%%  step %lld of %lld  %-70.70s", state.value("progress", 0.0) * 100.0,
+                       static_cast<long long>(state.value("units_done", int64_t(0))),
+                       static_cast<long long>(state.value("units_total", int64_t(0))), state.value("detail", std::string()).c_str());
+        if (state.value("state", "") == "running")
+          continue;
+        if (!opt.as_json)
+          std::fputc('\n', stderr);
+        (void)invoke("gen.status", {{"project", abs_path(project)}}); // puts the last Take on its clip
+        if (!remote)
+          local->save_all();
+        if (state.value("state", "") != "done") { // exit 13: the job failed (MODULES §M16)
+          json error = state.value("error", json{{"code", 1600}, {"message", "The generation was stopped."}});
+          error["exit"] = 13;
+          error["result"] = state.value("result", json::object());
+          outcome = {{"ok", false}, {"error", std::move(error)}};
+        }
+        break;
+      }
+    }
+    exit_status = finish(opt, outcome);
+  });
+
   auto *cmd_sample = app.add_subcommand(
       "sample", "Write a synthetic test clip (moving bar, beeps): attome sample a.mp4, or sound only: attome sample m.wav");
   cmd_sample->add_option("file", file)->required();

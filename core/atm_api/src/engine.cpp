@@ -1,4 +1,6 @@
 #include "atm/api/engine.hpp"
+#include "atm/api/gen_comfy.hpp"
+#include "atm/api/gen_mock.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -8,6 +10,7 @@
 #include <filesystem>
 #include <map>
 #include <mutex>
+#include <set>
 #include <thread>
 #include <unordered_map>
 
@@ -16,12 +19,15 @@
 #include "atm/base/profiler.hpp"
 #include "atm/base/time.hpp"
 #include "atm/doc/document.hpp"
+#include "atm/gen/models.hpp"
+#include "atm/gen/plan.hpp"
 #include "atm/models/models.hpp"
 #include "atm/net/http.hpp"
 #include "atm/patch/history.hpp"
 #include "atm/patch/patch.hpp"
 #include "atm/render/render.hpp"
 #include "atm/storage/file.hpp"
+#include "generate.hpp"
 #include "timeline.hpp"
 
 #if defined(_WIN32)
@@ -92,9 +98,62 @@ struct Job {
   Error error;
   std::string warning;
   double seconds = 0.0;
+  json result; // what the job made, when it is more than one file (a generation: how each clip ended); guarded by `mutex`
   Clock::time_point started = Clock::now();
   std::thread thread;
 };
+
+// Takes that job threads finished. The document has one writer, so a Take is put on its clip by the engine's own
+// thread, at its next call.
+struct Finished {
+  std::string project, clip, name;
+  json take;
+};
+struct FinishedQueue {
+  std::mutex mutex;
+  std::vector<Finished> items;
+};
+
+// A generation as a job: units are steps (cached ones count at once), `detail` says which clip and step is running.
+void run_gen(const std::shared_ptr<Job> &job, GenRun run, std::shared_ptr<FinishedQueue> queue, std::string project) {
+  prof::set_thread_name("atm-generate");
+  GenProgress progress;
+  progress.done = &job->units_done;
+  progress.cancel = &job->cancel;
+  progress.on_detail = [&](const std::string &text) {
+    std::lock_guard lock(job->mutex);
+    job->detail = text;
+  };
+  progress.on_clip = [&](const GenOutcome &out) {
+    if (out.state != "done")
+      return;
+    std::lock_guard lock(queue->mutex);
+    queue->items.push_back({project, out.clip, out.name, out.take});
+  };
+  const std::vector<GenOutcome> outcomes = run_generation(run, progress);
+  json clips = json::array();
+  const Error *first = nullptr;
+  bool cancelled = false;
+  for (const GenOutcome &out : outcomes) {
+    json c = {{"clip", out.clip}, {"name", out.name}, {"state", out.state}, {"steps_run", out.ran}, {"steps_cached", out.cached}, {"seconds", out.seconds}};
+    if (out.state == "skipped")
+      c["why"] = out.why;
+    if (out.state == "failed") {
+      c["error"] = error_to_json(out.error);
+      if (!first)
+        first = &out.error;
+    }
+    cancelled = cancelled || out.state == "cancelled";
+    clips.push_back(std::move(c));
+  }
+  std::lock_guard lock(job->mutex);
+  job->result = {{"clips", std::move(clips)}};
+  job->detail.clear();
+  job->seconds = std::chrono::duration<double>(Clock::now() - job->started).count();
+  if (first)
+    job->error = *first;
+  job->state.store(cancelled ? Job::cancelled : first ? Job::failed : Job::done);
+}
 
 // A model download as a job: units are bytes, `detail` says which file is being downloaded or checked. Stopping it
 // keeps what arrived; the next models.fetch of the same entry continues from there.
@@ -289,6 +348,8 @@ struct Engine::Impl {
   bool shutdown = false;
   Clock::time_point started = Clock::now();
   std::map<std::string, std::shared_ptr<Job>> jobs;
+  std::vector<std::shared_ptr<gen::Provider>> providers;
+  std::shared_ptr<FinishedQueue> finished = std::make_shared<FinishedQueue>();
 
   ~Impl() {
     for (auto &[id, job] : jobs) {
@@ -672,7 +733,13 @@ struct Engine::Impl {
     ATM_TRY(Project *pr, project(params));
     json errors = patch::validate_document(pr->doc);
     const bool ok = errors.empty();
-    return json{{"ok", ok}, {"errors", std::move(errors)}, {"revision", pr->revision}};
+    // Not errors: the project is valid, but a workflow cannot run here until its model is chosen or installed.
+    json warnings = json::array();
+    if (const auto workflows = pr->doc.root().find("workflows"); workflows != pr->doc.root().end() && workflows->is_object())
+      for (auto it = workflows->begin(); it != workflows->end(); ++it)
+        for (json &w : ready_problems(*pr, it.key()))
+          warnings.push_back(std::move(w));
+    return json{{"ok", ok}, {"errors", std::move(errors)}, {"warnings", std::move(warnings)}, {"revision", pr->revision}};
   }
 
   Result<json> project_save(const json &params) {
@@ -1224,6 +1291,337 @@ struct Engine::Impl {
     return res;
   }
 
+  // ---- gen.* (Clip Workflows: what can run here) -----------------------------------------------------------------
+
+  // Every file of the model is in the models folder. A model that is not in the catalog has no files to look for.
+  bool model_installed(std::string_view id) const {
+    const models::CatalogEntry *entry = models::find_entry(models::builtin_catalog(), id);
+    if (!entry)
+      return false;
+    const fs::path dir = models_dir();
+    for (const models::CatalogFile &f : entry->files)
+      if (models::file_status(f, dir).state != models::FileState::installed)
+        return false;
+    return true;
+  }
+
+  // What keeps a workflow from running on this machine (a model not chosen, not known, or not installed), as JSON,
+  // with the model's ID and, for one that can be downloaded, its title and what is still missing.
+  json model_warnings(const Project &pr, const std::string &workflow_id) const {
+    static const json none = json::object();
+    const json &root = pr.doc.root();
+    const auto wit = root.find("workflows");
+    std::vector<gen::Problem> found;
+    gen::check_models(wit != root.end() && wit->is_object() ? *wit : none, workflow_id,
+                      [&](std::string_view id) { return model_installed(id); }, found);
+    json out = json::array();
+    for (gen::Problem &p : found) {
+      json w = {{"rule", p.rule}, {"path", p.path}, {"target", p.target}, {"message", p.message}, {"hint", p.hint}};
+      const std::string node = p.path.substr(0, p.path.find('/'));
+      if (const doc::NodeRef *ref = pr.doc.find(node); ref && ref->node->contains("model") && (*ref->node)["model"].is_string()) {
+        const std::string model = (*ref->node)["model"].get<std::string>();
+        w["model"] = model;
+        if (const models::CatalogEntry *entry = models::find_entry(models::builtin_catalog(), model)) {
+          int64_t on_disk = 0;
+          const fs::path dir = models_dir();
+          for (const models::CatalogFile &f : entry->files)
+            on_disk += models::file_status(f, dir).bytes;
+          w["title"] = entry->title;
+          w["size"] = entry->size();
+          w["bytes_missing"] = entry->size() - on_disk;
+          w["can_download"] = true;
+        }
+      }
+      out.push_back(std::move(w));
+    }
+    return out;
+  }
+
+  // What a model is on this machine, for cache keys: the engine that runs it and the hashes of its files.
+  gen::KeyContext key_context() const {
+    gen::KeyContext context;
+    context.model_identity = [this](std::string_view model) {
+      std::string identity;
+      for (const auto &p : providers)
+        identity += p->fingerprint(model);
+      if (const models::CatalogEntry *entry = models::find_entry(models::builtin_catalog(), model))
+        for (const models::CatalogFile &f : entry->files)
+          identity += ":" + f.sha256;
+      return identity;
+    };
+    return context;
+  }
+
+  static fs::path gen_dir(const Project &pr) { return pr.dir / ".attome" / "gen"; }
+
+  // The generative clips of a project, in timeline order.
+  static std::vector<gen::ClipIn> gen_clips(const Project &pr) {
+    std::vector<gen::ClipIn> out;
+    const json &root = pr.doc.root();
+    const auto seqs = root.find("sequences");
+    if (seqs == root.end() || !seqs->is_object())
+      return out;
+    for (auto s = seqs->begin(); s != seqs->end(); ++s) {
+      const auto tracks = s->find("tracks");
+      if (tracks == s->end() || !tracks->is_object())
+        continue;
+      for (auto t = tracks->begin(); t != tracks->end(); ++t) {
+        const auto clips = t->find("clips");
+        if (clips == t->end() || !clips->is_object())
+          continue;
+        for (auto c = clips->begin(); c != clips->end(); ++c) {
+          const auto ref = c->find("media_ref");
+          if (ref == c->end() || !ref->is_object() || ref->value("type", std::string()) != "workflow")
+            continue;
+          int64_t order = 0;
+          if (const auto timing = c->find("timing"); timing != c->end() && timing->is_object())
+            if (const auto in = Rational::parse(timing->value("record_in", std::string("0"))))
+              order = int64_t(in->to_seconds_lossy() * 1000.0);
+          out.push_back(gen::ClipIn{c.key(), c->value("name", c.key()), &*ref, order});
+        }
+      }
+    }
+    return out;
+  }
+
+  std::vector<gen::ClipPlan> gen_plan(const Project &pr, gen::PlanOptions options) const {
+    static const json none = json::object();
+    const json &root = pr.doc.root();
+    const auto wit = root.find("workflows");
+    options.present = [](const json &take) { // every file the Take recorded is still there
+      const auto outputs = take.find("outputs");
+      if (outputs == take.end() || !outputs->is_object())
+        return false;
+      for (const json &o : *outputs)
+        if (!storage::exists(to_path(o.value("path", std::string()))))
+          return false;
+      return !outputs->empty();
+    };
+    return gen::plan(wit != root.end() && wit->is_object() ? *wit : none, gen_clips(pr), key_context(), options);
+  }
+
+  static json plan_json(const gen::ClipPlan &p) {
+    json c = {{"clip", p.id}, {"name", p.name}, {"workflow", p.workflow}, {"state", gen::clip_state_name(p.state)}, {"run", p.run},
+              {"depends_on", p.depends}};
+    if (!p.reason.empty())
+      c["reason"] = p.reason;
+    if (!p.skip.empty())
+      c["skip"] = p.skip;
+    if (p.out_of_step)
+      c["out_of_step"] = true;
+    return c;
+  }
+
+  // A model is chosen, known and installed, but nothing here runs it.
+  void engine_warnings(const Project &pr, const std::string &workflow_id, json &out, std::set<std::string> &seen) const {
+    const json &root = pr.doc.root();
+    const auto all = root.find("workflows");
+    if (all == root.end() || !all->is_object() || !seen.insert(workflow_id).second)
+      return;
+    const auto wf = all->find(workflow_id);
+    const auto nodes = wf == all->end() || !wf->is_object() ? json::const_iterator() : wf->find("nodes");
+    if (wf == all->end() || !wf->is_object() || nodes == wf->end() || !nodes->is_object())
+      return;
+    for (auto it = nodes->begin(); it != nodes->end(); ++it) {
+      const std::string kind = it->value("kind", std::string());
+      if (gen::is_workflow_kind(kind)) {
+        engine_warnings(pr, it->value("workflow", std::string()), out, seen);
+        continue;
+      }
+      const gen::KindDef *def = gen::find_kind(kind);
+      const std::string model = it->contains("model") && (*it)["model"].is_string() ? (*it)["model"].get<std::string>() : std::string();
+      const gen::ModelDecl *decl = def ? gen::find_model(model) : nullptr;
+      if (!decl || (decl->needs_files && !model_installed(model)) || provider_for(providers, model, def->id))
+        continue;
+      out.push_back({{"rule", "G_ENGINE_MISSING"}, {"path", it.key() + "/model"}, {"target", workflow_id}, {"model", model},
+                     {"message", "Nothing on this computer runs the model " + model + " yet."},
+                     {"hint", "Attome's own engine for this model arrives in a later version."}});
+    }
+  }
+
+  json ready_problems(const Project &pr, const std::string &workflow_id) const {
+    json problems = model_warnings(pr, workflow_id);
+    std::set<std::string> seen;
+    engine_warnings(pr, workflow_id, problems, seen);
+    return problems;
+  }
+
+  Result<json> gen_status(const json &params) {
+    ATM_TRY(Project *pr, project(params));
+    std::map<std::string, json> by_workflow; // each workflow is looked at once, however many clips use it
+    json clips = json::array();
+    const std::vector<gen::ClipIn> all = gen_clips(*pr);
+    for (const gen::ClipPlan &p : gen_plan(*pr, {})) {
+      auto known = by_workflow.find(p.workflow);
+      if (known == by_workflow.end())
+        known = by_workflow.emplace(p.workflow, ready_problems(*pr, p.workflow)).first;
+      json c = plan_json(p);
+      c.erase("run");
+      c["ready"] = known->second.empty();
+      c["problems"] = known->second;
+      for (const gen::ClipIn &in : all)
+        if (in.id == p.id) {
+          c["takes"] = in.ref->contains("takes") && (*in.ref)["takes"].is_object() ? (*in.ref)["takes"].size() : size_t(0);
+          c["selected"] = in.ref->contains("selected") ? (*in.ref)["selected"] : json(nullptr);
+        }
+      clips.push_back(std::move(c));
+    }
+    return json{{"clips", std::move(clips)}, {"revision", pr->revision}};
+  }
+
+  Result<json> gen_run(const json &params) {
+    ATM_TRY(Project *pr, project(params));
+    gen::PlanOptions options;
+    const std::string scope = params.value("scope", std::string(params.contains("clips") ? "selected" : "dirty"));
+    if (scope == "dirty")
+      options.scope = gen::Scope::dirty;
+    else if (scope == "all")
+      options.scope = gen::Scope::all;
+    else if (scope == "selected")
+      options.scope = gen::Scope::selected;
+    else if (scope == "selected_and_after")
+      options.scope = gen::Scope::selected_and_after;
+    else
+      return bad_param("scope", "must be dirty, all, selected or selected_and_after");
+    if (const auto clips = params.find("clips"); clips != params.end()) {
+      if (!clips->is_array())
+        return bad_param("clips", "must be a list of clip IDs");
+      for (const json &c : *clips)
+        if (c.is_string())
+          options.clips.push_back(c.get<std::string>());
+    }
+    const bool named = options.scope == gen::Scope::selected || options.scope == gen::Scope::selected_and_after;
+    if (named && options.clips.empty())
+      return bad_param("clips", "is required for the scopes selected and selected_and_after");
+    const bool dry_run = params.value("dry_run", false);
+    for (const auto &[id, job] : jobs)
+      if (job->kind == "gen.run" && job->output == to_utf8(pr->dir) && job->state.load() == Job::running && !dry_run)
+        return fail(ErrorCode::InvalidArgument, "G_BUSY", "A generation is already running for this project.", {},
+                    "Follow it with jobs.get " + id + ", or stop it with jobs.cancel.");
+
+    // A new Take of the named clips: the same inputs with the next seed.
+    if (params.value("new_take", false) && !dry_run) {
+      if (!named)
+        return bad_param("new_take", "needs \"clips\": the clips to make another Take of");
+      json ops = json::array();
+      for (const gen::ClipIn &c : gen_clips(*pr)) {
+        if (std::find(options.clips.begin(), options.clips.end(), c.id) == options.clips.end())
+          continue;
+        const json inputs = c.ref->value("inputs", json::object());
+        const bool has = inputs.contains("seed") && inputs["seed"].is_number_integer();
+        ops.push_back({{"op", inputs.contains("seed") ? "replace" : "add"}, {"path", c.id + "/media_ref/inputs/seed"},
+                       {"value", has ? inputs["seed"].get<int64_t>() + 1 : int64_t(1)}});
+      }
+      if (!ops.empty())
+        ATM_CHECK(project_patch({{"project", to_utf8(pr->dir)}, {"patch", {{"ops", std::move(ops)}, {"label", "New take"}}}}).map([](const json &) {}));
+    }
+
+    const std::vector<gen::ClipPlan> plans = gen_plan(*pr, options);
+    GenRun run;
+    json listed = json::array();
+    std::set<std::string> checked;
+    for (const gen::ClipPlan &p : plans) {
+      listed.push_back(plan_json(p));
+      if (!p.run)
+        continue;
+      if (checked.insert(p.workflow).second) // refused before anything runs: a model that is not here
+        if (const json problems = ready_problems(*pr, p.workflow); !problems.empty()) {
+          Error e;
+          e.code = ErrorCode::InvalidArgument;
+          e.rule = "G_NOT_READY";
+          e.path = p.id;
+          e.message = p.name + " cannot be generated: " + problems[0].value("message", std::string());
+          e.hint = problems[0].value("hint", std::string());
+          e.errors = problems;
+          return tl::unexpected(std::move(e));
+        }
+      GenClip clip;
+      clip.id = p.id;
+      clip.name = p.name;
+      clip.workflow = p.workflow;
+      clip.key = p.key;
+      clip.inputs = p.inputs;
+      clip.depends = p.depends;
+      if (const doc::NodeRef *ref = pr->doc.find(p.id))
+        clip.written = ref->node->value("media_ref", json::object()).value("inputs", json::object());
+      run.clips.push_back(std::move(clip));
+    }
+    run.workflows = pr->doc.root().value("workflows", json::object());
+    run.dir = gen_dir(*pr);
+    run.providers = providers;
+    run.context = key_context();
+    const StepCount count = count_steps(run);
+    json out = {{"plan", std::move(listed)}, {"clips", run.clips.size()}, {"steps", count.total}, {"steps_cached", count.cached}};
+    if (dry_run || run.clips.empty()) {
+      out["job_id"] = nullptr;
+      return out;
+    }
+    ATM_CHECK(storage::make_dirs(run.dir));
+    auto job = std::make_shared<Job>();
+    job->id = new_id("job");
+    job->kind = "gen.run";
+    job->output = to_utf8(pr->dir);
+    job->units_total.store(count.total);
+    jobs[job->id] = job;
+    job->thread = std::thread(run_gen, job, std::move(run), finished, to_utf8(pr->dir));
+    out["job_id"] = job->id;
+    return out;
+  }
+
+  // Puts the Takes that job threads finished on their clips, each as one undoable edit that also selects it.
+  void apply_finished() {
+    std::vector<Finished> items;
+    {
+      std::lock_guard lock(finished->mutex);
+      items.swap(finished->items);
+    }
+    for (Finished &f : items) {
+      const auto pr = project({{"project", f.project}});
+      const doc::NodeRef *ref = pr ? (*pr)->doc.find(f.clip) : nullptr;
+      if (!ref)
+        continue; // the clip was deleted while it was being generated
+      const json media = ref->node->value("media_ref", json::object());
+      const bool had = media.contains("selected");
+      // The same result again (everything came from the cache): the Take that already holds it is selected, not doubled.
+      std::string same;
+      const json takes = media.value("takes", json::object());
+      for (auto t = takes.begin(); t != takes.end(); ++t)
+        if (t->value("key", std::string()) == f.take.value("key", std::string()) && t->value("outputs", json()) == f.take.value("outputs", json()))
+          same = t.key();
+      if (!same.empty() && media.value("selected", json()) == json(same))
+        continue;
+      json ops = json::array();
+      if (same.empty())
+        ops.push_back({{"op", "add"}, {"path", f.clip + "/media_ref/takes/$new:take"}, {"value", std::move(f.take)}});
+      ops.push_back({{"op", had ? "replace" : "add"}, {"path", f.clip + "/media_ref/selected"}, {"value", same.empty() ? std::string("$new:take") : same}});
+      (void)project_patch({{"project", f.project}, {"patch", {{"ops", std::move(ops)}, {"label", "Generate " + f.name}}}});
+    }
+  }
+
+  Result<json> gen_engines(const json &) {
+    json list = json::array();
+    for (const auto &p : providers)
+      list.push_back(p->status());
+    return json{{"engines", std::move(list)}};
+  }
+
+  Result<json> gen_select_take(const json &params) {
+    ATM_TRY(Project *pr, project(params));
+    ATM_TRY(const std::string *clip, string_param(params, "clip"));
+    ATM_TRY(const std::string *take, string_param(params, "take"));
+    const doc::NodeRef *ref = pr->doc.find(*clip);
+    const json media = ref ? ref->node->value("media_ref", json::object()) : json::object();
+    const json takes = media.value("takes", json::object());
+    if (!takes.contains(*take))
+      return fail(ErrorCode::UnknownId, "G_TAKE", "Clip " + *clip + " has no Take \"" + *take + "\".", *clip + "/media_ref/takes",
+                  "List the clip's Takes with project.get.");
+    // The clip's inputs go back to what made that Take, so the clip is clean with it and clips after it follow.
+    json ops = json::array({{{"op", media.contains("selected") ? "replace" : "add"}, {"path", *clip + "/media_ref/selected"}, {"value", *take}}});
+    if (const json then = takes[*take].value("inputs", json::object()); then != media.value("inputs", json::object()))
+      ops.push_back({{"op", media.contains("inputs") ? "replace" : "add"}, {"path", *clip + "/media_ref/inputs"}, {"value", then}});
+    return project_patch({{"project", to_utf8(pr->dir)}, {"patch", {{"ops", std::move(ops)}, {"label", "Select take"}}}});
+  }
+
   // ---- models.* (the model store: what can be downloaded, what is on disk) --------------------------------------
 
   fs::path models_dir() const { return cfg.models_dir.empty() ? models::default_models_dir() : to_path(cfg.models_dir); }
@@ -1314,7 +1712,7 @@ struct Engine::Impl {
                 {"frames_total", total},
                 {"units_done", done},
                 {"units_total", total},
-                {"unit", job->kind == "models.fetch" ? "bytes" : "frames"},
+                {"unit", job->kind == "models.fetch" ? "bytes" : job->kind == "gen.run" ? "steps" : "frames"},
                 {"output", job->output}};
     std::lock_guard lock(job->mutex);
     const double seconds = state == Job::running
@@ -1330,6 +1728,8 @@ struct Engine::Impl {
       out["warning"] = job->warning;
     if (!job->detail.empty())
       out["detail"] = job->detail;
+    if (!job->result.is_null())
+      out["result"] = job->result;
     if (!job->encoder.empty())
       out["encoder"] = job->encoder;
     if (state != Job::running && job->thread.joinable())
@@ -1492,6 +1892,32 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
        "overwrite":{"type":"boolean","description":"Default true"},"sequence":{"type":"string"}},
        "required":["project","output"]})",
      &Impl::render_sequence},
+    {"gen.status", "gen", false,
+     "The generative clips of a project, in the order they would run: each one's state (clean, dirty with the reason, empty, locked), "
+     "its Takes, and whether it can run on this computer: a clip is not ready while a node of its "
+     "workflow has no model chosen (G_MODEL_UNSET), a model this version does not know (G_MODEL_UNKNOWN) or one that is not "
+     "installed (G_MODEL_MISSING, with the model's title and the bytes still to download: start it with models.fetch).",
+     R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"}},"required":["project"]})", &Impl::gen_status},
+    {"gen.run", "gen", true,
+     "Generate clips as a background job (units are steps; follow it with jobs.get, stop it with jobs.cancel). scope: \"dirty\" "
+     "(default: every clip whose Take is not what its inputs ask for, or that has none), \"all\", \"selected\" (clips: [...], plus what "
+     "they need upstream that is itself dirty) or \"selected_and_after\" (and every clip that starts from them). Clips run in "
+     "dependency order; a step whose result is in the cache is not run again; a locked clip never runs. new_take: true makes "
+     "another Take of the named clips with the next seed. dry_run: true returns the plan only: for every clip its state (clean, "
+     "dirty, empty, locked), the reason, whether it runs, and the number of steps. A finished clip gets a Take and selects it.",
+     R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},
+       "scope":{"type":"string","enum":["dirty","all","selected","selected_and_after"]},
+       "clips":{"type":"array","items":{"type":"string"}},"new_take":{"type":"boolean"},"dry_run":{"type":"boolean"}},
+       "required":["project"]})",
+     &Impl::gen_run},
+    {"gen.engines", "gen", false,
+     "The engines that can run models here (the user's ComfyUI when its address is set), each with whether it answers, its version and device.",
+     "", &Impl::gen_engines},
+    {"gen.select_take", "gen", true,
+     "Choose which Take of a generative clip plays. The clip's inputs go back to what made that Take; clips that start from it become dirty.",
+     R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},
+       "clip":{"type":"string"},"take":{"type":"string"}},"required":["project","clip","take"]})",
+     &Impl::gen_select_take},
     {"models.list", "models", false,
      "The models this version can download, with their size, licence and what is already on disk (installed, partial, downloading, missing).",
      "", &Impl::models_list},
@@ -1528,8 +1954,25 @@ Result<json> Engine::Impl::tools_list(const json &) {
 
 Engine::Engine(EngineConfig config) : impl_(std::make_unique<Impl>()) {
   impl_->cfg = config;
+  impl_->providers = config.providers;
+  if (impl_->providers.empty() && std::getenv("ATTOME_MOCK_ENGINE"))
+    impl_->providers.push_back(std::make_shared<MockProvider>());
+  std::string comfyui = config.comfyui;
+  if (const char *address = std::getenv("ATTOME_COMFYUI"); comfyui.empty() && address)
+    comfyui = address;
+  if (!comfyui.empty())
+    impl_->providers.push_back(std::make_shared<ComfyProvider>(
+        comfyui, config.transport ? config.transport : std::shared_ptr<net::Transport>(net::system_transport())));
   for (const Impl::Tool &tool : Impl::kTools)
     impl_->by_name.emplace(tool.name, &tool);
+  // What each catalog model declares, for the validator: known whether or not the files are on this machine.
+  for (const models::CatalogEntry &entry : models::builtin_catalog())
+    if (entry.declares.is_object() && !gen::find_model(entry.id)) {
+      json declaration = entry.declares;
+      declaration["id"] = entry.id;
+      if (auto model = gen::parse_model(declaration))
+        gen::register_model(std::move(*model));
+    }
 }
 
 Engine::~Engine() = default;
@@ -1540,6 +1983,7 @@ Result<json> Engine::call(std::string_view tool, const json &params) {
     return fail(ErrorCode::NotFound, "RPC_METHOD_NOT_FOUND", "There is no Tool named \"" + std::string(tool) + "\".",
                 {}, "List the Tools with: attome tools");
   ATM_PROFILE_SCOPE(it->second->name);
+  impl_->apply_finished();
   static const json empty = json::object();
   if (!params.is_object() && !params.is_null())
     return bad_param("params", "must be an object");

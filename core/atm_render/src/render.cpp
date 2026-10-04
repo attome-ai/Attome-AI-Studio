@@ -395,9 +395,22 @@ Result<Composition> compile(const json &project, std::string_view sequence_id) {
         const json &clip = *it;
         const auto ref = clip.find("media_ref");
         const auto timing = clip.find("timing");
-        const std::string type = ref == clip.end() ? "" : ref->value("type", "");
+        std::string type = ref == clip.end() ? "" : ref->value("type", "");
+        std::string take_path; // a generative clip plays the video of its selected Take; with none it shows nothing
+        if (type == "workflow") {
+          const auto takes = ref->find("takes");
+          const auto selected = ref->find("selected");
+          if (takes != ref->end() && takes->is_object() && selected != ref->end() && selected->is_string())
+            if (const auto take = takes->find(selected->get_ref<const std::string &>()); take != takes->end() && take->is_object())
+              if (const auto outputs = take->find("outputs"); outputs != take->end() && outputs->is_object())
+                if (const auto made = outputs->find("video"); made != outputs->end() && made->is_object())
+                  take_path = made->value("path", std::string());
+          if (take_path.empty())
+            continue;
+          type = "file";
+        }
         if (timing == clip.end() ||
-            !(type == "text" || type == "adjustment" || ((type == "file" || type == "image") && ref->contains("path"))))
+            !(type == "text" || type == "adjustment" || ((type == "file" || type == "image") && (ref->contains("path") || !take_path.empty()))))
           continue;
         ATM_TRY(Rational in, rational_field(*timing, "record_in", "0"));
         ATM_TRY(Rational duration, rational_field(*timing, "duration", "0"));
@@ -405,7 +418,7 @@ Result<Composition> compile(const json &project, std::string_view sequence_id) {
         Layer l;
         l.clip_id = it.key();
         if (type == "file" || type == "image")
-          l.path = (*ref)["path"].get<std::string>();
+          l.path = take_path.empty() ? (*ref)["path"].get<std::string>() : take_path;
         l.is_image = type == "image";
         if (type == "text") {
           l.is_text = true;

@@ -6,11 +6,15 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "atm/base/error.hpp"
 
 namespace atm::net {
 class Transport;
+}
+namespace atm::gen {
+class Provider;
 }
 
 namespace atm::api {
@@ -26,6 +30,12 @@ struct EngineConfig {
   std::string models_dir;
   // What downloads go through; null = the operating system's HTTP client. Tests pass a server in memory.
   std::shared_ptr<net::Transport> transport;
+  // The engines that run models for generative clips, asked in order. Tests pass a mock; with none given, the mock
+  // engine is added when ATTOME_MOCK_ENGINE is set.
+  std::vector<std::shared_ptr<gen::Provider>> providers;
+  // The address of the user's own ComfyUI, used as one more engine ("http://127.0.0.1:8188"); empty = ATTOME_COMFYUI,
+  // and when that is not set either, no ComfyUI is used.
+  std::string comfyui;
 };
 
 class Engine {

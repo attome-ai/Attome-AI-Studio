@@ -25,7 +25,7 @@ $env:ATTOME_MODELS_DIR = $models
 try {
   $run = Invoke-EditorScript -Project $proj -Script @(
     'click @rail:Models'
-    'wait 0.8'                         # the panel asks the daemon twice a second
+    'wait 800'                         # the panel asks the daemon twice a second
     'expect @button:models_folder'
     'expect @button:model_fetch'       # "Continue, ... left"
     'expect @button:model_licence'

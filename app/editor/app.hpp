@@ -60,6 +60,10 @@ struct ClipUi {
   json keyframes;                           // the clip's transform.keyframes, for split
   float gain_db = 0.0f, pan = 0.0f;         // the clip's "audio" object
   bool is_adjustment = false;               // an adjustment layer: its effects change the tracks below it
+  bool is_generative = false;               // its picture is made by a Clip Workflow (media_ref.type "workflow")
+  std::string workflow;                     // the workflow's ID
+  std::string prompt;                       // its "prompt" input, when it has one as plain text
+  bool has_prompt = false;
   std::string link_group, stream;           // linked picture and sound clips share a group; stream "video" / "audio"
   std::vector<EffectUi> effects;            // its effects (blur, colour grade, vignette)
   int64_t audio_fade_in = 0, audio_fade_out = 0; // frames
@@ -127,6 +131,8 @@ private:
   void jump_effect_key(const ClipUi &clip, const EffectUi &fx, bool forward);
   void draw_text_panel();
   void draw_models_panel();
+  void poll_models();                       // models.list and the download jobs, twice a second while something shows them
+  void draw_generate_card(const ClipUi &clip); // a generative clip: why it cannot run here, and the download that fixes it
   void delete_selected();
   void split_at_playhead();
   void history_step(bool undo);
@@ -252,6 +258,17 @@ private:
   std::map<std::string, json> model_jobs_; // by entry ID
   double next_models_poll_ = 0.0;
   bool models_busy_ = false; // a download is running: the panel keeps polling
+  // generative clips that cannot run here, by clip ID: the problems gen.status reports (a model not chosen, not
+  // known, or not installed). A clip that is not in the map is ready.
+  std::map<std::string, json> gen_problems_;
+  std::map<std::string, json> gen_state_; // every generative clip as gen.status reports it: state, reason, takes
+  std::string gen_job_;                   // the generation that is running, started here
+  json gen_job_state_ = json::object();   // as jobs.get last reported it; kept after the end to show a failure
+  double next_gen_job_poll_ = 0.0;
+  char prompt_buf_[2048] = {};
+  void start_generation(json params);     // gen.run; the Takes arrive by themselves as the project changes
+  double next_gen_poll_ = 0.0;
+  void refresh_gen_status();
 
   // profiler
   json daemon_profile_, local_profile_;

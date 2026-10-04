@@ -103,6 +103,11 @@ Result<std::vector<CatalogEntry>> parse_catalog(const json &catalog) {
     entry.licence = e.value("licence", std::string());
     entry.licence_url = e.value("licence_url", std::string());
     entry.notes = e.value("notes", std::string());
+    if (const auto declares = e.find("declares"); declares != e.end()) {
+      if (!declares->is_object())
+        return catalog_error(at + "/declares", "\"declares\" of a catalog entry must be an object.", "Give it \"kinds\" and \"settings\".");
+      entry.declares = *declares;
+    }
     const bool id_ok = !entry.id.empty() && std::all_of(entry.id.begin(), entry.id.end(), [](char c) {
       return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' || c == '-' || c == '_';
     });

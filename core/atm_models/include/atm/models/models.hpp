@@ -33,6 +33,9 @@ struct CatalogEntry {
   std::string licence; // one sentence a user should read before downloading
   std::string licence_url;
   std::string notes;
+  // What the model does, for the nodes that use it: the kinds, the settings and their ranges (atm_gen reads it; see
+  // atm/gen/models.hpp). Null for an entry that is not a model a node can run.
+  nlohmann::json declares;
   std::vector<CatalogFile> files;
   int64_t size() const;
 };
