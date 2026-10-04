@@ -47,13 +47,13 @@ int64_t frames_of(const json &obj, const char *key, Rational rate) {
 }
 
 // The frame a clip ends on: record_in + duration, rounded once, as the renderer does.
-int64_t end_frame_of(const json &timing, Rational rate) {
+int64_t end_frame_of(const json &timing, Rational rate, Round round = Round::nearest_even) {
   const auto in = Rational::parse(timing.value("record_in", std::string("0")));
   const auto dur = Rational::parse(timing.value("duration", std::string("0")));
   if (!in || !dur)
     return 0;
   const auto end = add(*in, *dur);
-  return end ? to_frames(*end, rate, Round::nearest_even).value_or(0) : 0;
+  return end ? to_frames(*end, rate, round).value_or(0) : 0;
 }
 
 void copy_to(char *buffer, size_t size, const std::string &text) { std::snprintf(buffer, size, "%s", text.c_str()); }
@@ -249,6 +249,7 @@ void App::refresh() {
           c.path = ref.value("path", "");
           c.start = frames_of(timing, "record_in", rate_);
           c.frames = std::max<int64_t>(1, end_frame_of(timing, rate_) - c.start); // the renderer's rounding
+          c.end_ceil = std::max(c.start + c.frames, end_frame_of(timing, rate_, Round::ceil));
           c.source_frames = frames_of(timing, "source_in", rate_);
           c.media_frames = frames_of(ref, "duration", rate_);
           if (cit->contains("transform")) {
@@ -727,11 +728,12 @@ void App::commit_drag(const TrackUi &track, const ClipUi &c, int mode, int64_t d
     // Dropped on top of another clip of the track: it goes to the nearest free space on the right, after that clip,
     // instead of the move being refused and the clip springing back.
     int64_t start = std::max<int64_t>(0, c.start + d);
+    const int64_t length = std::max(c.frames, c.end_ceil - c.start); // the clip's own end rounded up too
     for (bool moved = true; moved;) {
       moved = false;
       for (const ClipUi &o : to.clips)
-        if (o.id != c.id && o.start < start + c.frames && start < o.start + o.frames) {
-          start = o.start + o.frames;
+        if (o.id != c.id && o.start < start + length && start < o.end_ceil) {
+          start = o.end_ceil;
           moved = true;
         }
     }
@@ -1826,7 +1828,7 @@ void App::add_generative_clip(const std::string &model, const std::string &track
   if (!track.empty())
     params["track"] = track;
   if (at >= 0)
-    params["at"] = frames_text(at);
+    params["at"] = frames_text(at); // a place a clip already holds is moved right by the engine
   if (gen_chain_ && track.empty())
     params["start_from"] = "previous";
   json made;
@@ -2947,7 +2949,9 @@ void App::draw_timeline() {
       selected_track_ = track.id;
       selected_clip_.clear();
     }
-    if (ImGui::BeginDragDropTarget()) { // a model card from the Generate panel
+    // A model card from the Generate panel: the whole row takes it, over the clips too (a target of its own, not the
+    // row's button, which a clip or the header would cover).
+    if (ImGui::BeginDragDropTargetCustom(ImRect(ImVec2(win.x, y), ImVec2(win.x + view_w, y + row_h)), ImGui::GetID(("##drop" + track.id).c_str()))) {
       if (const ImGuiPayload *drop = ImGui::AcceptDragDropPayload("ATM_GEN_MODEL")) {
         const std::string model = static_cast<const char *>(drop->Data);
         const int64_t at = std::max<int64_t>(0, std::llround((mouse.x - origin.x - header_w) / pps_ * rate));

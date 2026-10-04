@@ -42,6 +42,7 @@ struct EffectUi { // one effect of a clip or adjustment layer: its ID, the eval:
 struct ClipUi {
   std::string id, name, path;
   int64_t start = 0, frames = 0; // in sequence frames
+  int64_t end_ceil = 0;          // the exact end rounded up: the first frame at which another clip may start without overlapping
   int64_t source_frames = 0;     // frames of the file before the clip's first frame
   int64_t media_frames = 0;      // length of the file; 0 when unknown
   float opacity = 1.0f, volume = 1.0f;

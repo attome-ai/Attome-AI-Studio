@@ -297,8 +297,26 @@ void UiDriver::before_frame() {
           const float n = float(std::atof(v.c_str()));
           return !v.empty() && v.back() == '%' ? n / 100.0f * extent : n;
         };
-        const float dx = offset(arg(2), size.x), dy = offset(arg(3), size.y);
+        float dx = offset(arg(2), size.x), dy = offset(arg(3), size.y);
+        if (arg(2).rfind('@', 0) == 0) { // drag <from> @<to>: release over the other mark's middle (a card onto a clip)
+          const auto to = d.resolve(arg(2), error, -1.0f, nullptr);
+          if (!error.empty()) {
+            fail(c.line, error);
+            return;
+          }
+          if (!to) {
+            finished = false;
+            if (Clock::now() > d.deadline) {
+              fail(c.line, arg(2) + " did not appear");
+              return;
+            }
+          } else {
+            dx = to->x - p->x;
+            dy = to->y - p->y;
+          }
+        }
         const ImVec2 from = *p;
+        if (finished) {
         d.frames.push_back([&d, from](ImGuiIO &) { d.mouse = from; });
         d.frames.push_back([](ImGuiIO &in) { in.AddMouseButtonEvent(0, true); });
         constexpr int kSteps = 12;
@@ -309,6 +327,7 @@ void UiDriver::before_frame() {
         d.frames.push_back([](ImGuiIO &in) { in.AddMouseButtonEvent(0, false); });
         d.frames.push_back([](ImGuiIO &) {});
         d.frames.push_back([](ImGuiIO &) {});
+        }
       }
     } else {
       fail(c.line, "unknown command \"" + op + "\"");
