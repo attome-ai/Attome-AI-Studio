@@ -98,7 +98,8 @@ struct McpServer::Impl {
     for (const json &tool : outcome["result"]["tools"]) {
       const std::string name = tool.value("name", "");
       // The daemon's own controls and the registry listing are not for agents.
-      if (tool.value("group", "") == "daemon" || name == "tools.list")
+      // Nor is starting a download of many gigabytes: that is the person's decision (models.list stays visible).
+      if (tool.value("group", "") == "daemon" || name == "tools.list" || name == "models.fetch")
         continue;
       tools[mcp_name(name)] = name;
       list.push_back({{"name", mcp_name(name)},

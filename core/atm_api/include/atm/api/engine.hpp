@@ -4,9 +4,14 @@
 
 #include <chrono>
 #include <memory>
+#include <string>
 #include <string_view>
 
 #include "atm/base/error.hpp"
+
+namespace atm::net {
+class Transport;
+}
 
 namespace atm::api {
 
@@ -17,6 +22,10 @@ inline constexpr int kProtocolVersion = 1;
 
 struct EngineConfig {
   bool fsync = true; // a mutating call returns only after its journal record is on disk
+  // Where downloaded models live; empty = models::default_models_dir() (ATTOME_MODELS_DIR or the per-user folder).
+  std::string models_dir;
+  // What downloads go through; null = the operating system's HTTP client. Tests pass a server in memory.
+  std::shared_ptr<net::Transport> transport;
 };
 
 class Engine {

@@ -1,5 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <cstdint>
 #include <limits>
 #include <set>
@@ -160,3 +161,18 @@ TEST_CASE("profiler: zones nest, count and follow the runtime switch", "[base]")
   CHECK((*zone(atm::prof::snapshot(), "prof-test", "outer"))["calls"] == 11);
 }
 #endif
+
+TEST_CASE("sha256: the standard vectors, and feeding in pieces gives the same hash", "[base]") {
+  CHECK(atm::sha256_hex("") == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+  CHECK(atm::sha256_hex("abc") == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+  CHECK(atm::sha256_hex("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq") ==
+        "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1");
+  const std::string million(1000000, 'a');
+  CHECK(atm::sha256_hex(million) == "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0");
+  for (const size_t piece : {size_t(1), size_t(63), size_t(64), size_t(65), size_t(4096)}) { // across the 64-byte block edge
+    atm::Sha256 s;
+    for (size_t at = 0; at < million.size(); at += piece)
+      s.update(million.data() + at, std::min(piece, million.size() - at));
+    CHECK(s.hex() == "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0");
+  }
+}

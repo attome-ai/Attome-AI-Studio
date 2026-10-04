@@ -126,6 +126,7 @@ private:
   void toggle_effect_key(const std::string &fx_id, size_t param);
   void jump_effect_key(const ClipUi &clip, const EffectUi &fx, bool forward);
   void draw_text_panel();
+  void draw_models_panel();
   void delete_selected();
   void split_at_playhead();
   void history_step(bool undo);
@@ -222,7 +223,7 @@ private:
   std::set<std::string> audio_only_; // media files without a picture
   char media_filter_[128] = {};
   int inspector_tab_ = 0;
-  int rail_tab_ = 0; // 0 Media, 2 Text, 3 Effects
+  int rail_tab_ = 0; // 0 Media, 2 Text, 3 Effects, 6 Models
   char text_buf_[1024] = {};
   float text_size_ = 0.08f, text_col_[3] = {1.0f, 1.0f, 1.0f};
   bool text_bold_ = false;
@@ -245,6 +246,12 @@ private:
   std::string job_id_;
   json job_;
   bool export_open_ = false;
+
+  // models panel: the catalog with what is on disk, and each entry's download job as jobs.get last reported it
+  json models_;
+  std::map<std::string, json> model_jobs_; // by entry ID
+  double next_models_poll_ = 0.0;
+  bool models_busy_ = false; // a download is running: the panel keeps polling
 
   // profiler
   json daemon_profile_, local_profile_;

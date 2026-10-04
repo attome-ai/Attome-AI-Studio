@@ -363,6 +363,56 @@ int main(int argc, char **argv) {
     exit_status = finish(opt, outcome);
   });
 
+  // attome models: what can be downloaded, and the download itself (it waits and shows progress; Ctrl+C stops it and a
+  // later run continues from the same byte).
+  std::string model_id;
+  auto *cmd_models = app.add_subcommand("models", "Downloadable models: attome models list, attome models fetch <id>");
+  cmd_models->require_subcommand(1);
+  auto *cmd_models_list = cmd_models->add_subcommand("list", "The catalog, with sizes and what is on disk");
+  cmd_models_list->callback([&] { exit_status = finish(opt, call(opt, "models.list", json::object())); });
+  auto *cmd_models_fetch = cmd_models->add_subcommand("fetch", "Download a model; continues a download that was stopped");
+  cmd_models_fetch->add_option("id", model_id, "An id from attome models list")->required();
+  cmd_models_fetch->callback([&] {
+    // The job must outlive the call that starts it, so without a daemon one Engine serves the whole command.
+    const bool remote = opt.daemon != "never" && bool(atm::api::connect(opt.endpoint));
+    std::unique_ptr<atm::api::Engine> local = remote ? nullptr : std::make_unique<atm::api::Engine>();
+    const auto invoke = [&](const char *tool, const json &p) -> json {
+      if (remote)
+        return call(opt, tool, p, false);
+      auto r = local->call(tool, p);
+      if (r)
+        return {{"ok", true}, {"result", std::move(*r)}};
+      return {{"ok", false}, {"error", atm::error_to_json(r.error())}};
+    };
+    json outcome = invoke("models.fetch", {{"id", model_id}});
+    if (outcome.value("ok", false)) {
+      const json job = {{"job_id", outcome["result"]["job_id"]}};
+      for (;;) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        outcome = invoke("jobs.get", job);
+        if (!outcome.value("ok", false))
+          break;
+        const json &state = outcome["result"];
+        if (!opt.as_json) {
+          const double done = state.value("units_done", 0.0), total = state.value("units_total", 0.0);
+          std::fprintf(stderr, "\r%5.1f%%  %.2f of %.2f GB  %5.1f MB/s  %-60.60s", state.value("progress", 0.0) * 100.0, done / 1e9,
+                       total / 1e9, state.value("bytes_per_second", 0.0) / 1e6, state.value("detail", std::string()).c_str());
+        }
+        if (state.value("state", "") == "running")
+          continue;
+        if (!opt.as_json)
+          std::fputc('\n', stderr);
+        if (state.value("state", "") != "done") { // exit 13: the job failed (MODULES §M16)
+          json error = state.value("error", json{{"code", 1600}, {"message", "The download was stopped."}});
+          error["exit"] = 13;
+          outcome = {{"ok", false}, {"error", std::move(error)}};
+        }
+        break;
+      }
+    }
+    exit_status = finish(opt, outcome);
+  });
+
   auto *cmd_sample = app.add_subcommand(
       "sample", "Write a synthetic test clip (moving bar, beeps): attome sample a.mp4, or sound only: attome sample m.wav");
   cmd_sample->add_option("file", file)->required();

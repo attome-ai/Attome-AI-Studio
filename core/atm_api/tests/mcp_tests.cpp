@@ -99,6 +99,8 @@ TEST_CASE("mcp: handshake, tool list from the registry, and errors as tool resul
     CHECK(by_name.count(name) == 1);
   CHECK(by_name.count("daemon_shutdown") == 0); // the daemon's controls are not for agents
   CHECK(by_name.count("tools_list") == 0);
+  CHECK(by_name.count("models_list") == 1);  // an agent may see what can be downloaded ...
+  CHECK(by_name.count("models_fetch") == 0); // ... but starting a download of many gigabytes is the person's decision
   CHECK(by_name["project_patch"]["inputSchema"]["required"] == json::array({"project", "patch"}));
   CHECK(by_name["project_inspect"]["annotations"]["readOnlyHint"] == true);
   CHECK(by_name["project_patch"]["annotations"]["readOnlyHint"] == false);

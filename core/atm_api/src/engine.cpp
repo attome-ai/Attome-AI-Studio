@@ -16,6 +16,8 @@
 #include "atm/base/profiler.hpp"
 #include "atm/base/time.hpp"
 #include "atm/doc/document.hpp"
+#include "atm/models/models.hpp"
+#include "atm/net/http.hpp"
 #include "atm/patch/history.hpp"
 #include "atm/patch/patch.hpp"
 #include "atm/render/render.hpp"
@@ -81,8 +83,10 @@ struct Project {
 struct Job {
   enum State { running, done, failed, cancelled };
   std::string id, kind, output, encoder;
+  std::string detail; // what the job is doing now, in words (a download: which file); guarded by `mutex`
   std::atomic<int> state{running};
   std::atomic<int64_t> units_done{0}, units_total{0};
+  std::atomic<int64_t> fetched{0}; // a download: bytes that arrived in this run (units_done also counts what was on disk)
   std::atomic<bool> cancel{false};
   std::mutex mutex; // guards error, warning, seconds
   Error error;
@@ -91,6 +95,33 @@ struct Job {
   Clock::time_point started = Clock::now();
   std::thread thread;
 };
+
+// A model download as a job: units are bytes, `detail` says which file is being downloaded or checked. Stopping it
+// keeps what arrived; the next models.fetch of the same entry continues from there.
+void run_fetch(const std::shared_ptr<Job> &job, models::CatalogEntry entry, fs::path dir, std::shared_ptr<net::Transport> transport) {
+  prof::set_thread_name("atm-fetch");
+  models::FetchProgress progress;
+  progress.done = &job->units_done;
+  progress.fetched = &job->fetched;
+  progress.cancel = &job->cancel;
+  progress.on_phase = [&](const std::string &text) {
+    std::lock_guard lock(job->mutex);
+    job->detail = text;
+  };
+  const auto result = models::fetch_entry(*transport, entry, dir, progress);
+  std::lock_guard lock(job->mutex);
+  job->seconds = std::chrono::duration<double>(Clock::now() - job->started).count();
+  if (result) {
+    job->detail = "Installed";
+    job->state.store(Job::done);
+  } else if (result.error().code == ErrorCode::Cancelled) {
+    job->detail = "Stopped; start it again to continue";
+    job->state.store(Job::cancelled);
+  } else {
+    job->error = result.error();
+    job->state.store(Job::failed);
+  }
+}
 
 // The export runs as a pipeline: this thread renders frames into a few slots while "atm-encode" converts and
 // encodes the previous ones, so the two never wait for each other. The encoder starts (hardware set-up, about half a
@@ -1193,6 +1224,75 @@ struct Engine::Impl {
     return res;
   }
 
+  // ---- models.* (the model store: what can be downloaded, what is on disk) --------------------------------------
+
+  fs::path models_dir() const { return cfg.models_dir.empty() ? models::default_models_dir() : to_path(cfg.models_dir); }
+
+  Result<json> models_list(const json &) {
+    const fs::path dir = models_dir();
+    json entries = json::array();
+    for (const models::CatalogEntry &e : models::builtin_catalog()) {
+      json files = json::array();
+      int64_t on_disk = 0;
+      bool all = true;
+      for (const models::CatalogFile &f : e.files) {
+        const models::FileStatus st = models::file_status(f, dir);
+        on_disk += st.bytes;
+        all = all && st.state == models::FileState::installed;
+        files.push_back({{"path", f.path},
+                         {"size", f.size},
+                         {"bytes", st.bytes},
+                         {"state", st.state == models::FileState::installed ? "installed" : st.state == models::FileState::partial ? "partial" : "missing"}});
+      }
+      std::string job_id; // a download of this entry that is running now
+      for (const auto &[id, job] : jobs)
+        if (job->kind == "models.fetch" && job->output == e.id && job->state.load() == Job::running)
+          job_id = id;
+      json entry = {{"id", e.id},       {"title", e.title},       {"kind", e.kind},     {"licence", e.licence},
+                    {"licence_url", e.licence_url}, {"notes", e.notes}, {"size", e.size()},   {"bytes", on_disk},
+                    {"state", all ? "installed" : !job_id.empty() ? "downloading" : on_disk > 0 ? "partial" : "missing"},
+                    {"files", std::move(files)}};
+      if (!job_id.empty())
+        entry["job_id"] = job_id;
+      entries.push_back(std::move(entry));
+    }
+    return json{{"models_dir", to_utf8(dir)}, {"entries", std::move(entries)}};
+  }
+
+  Result<json> models_fetch(const json &params) {
+    ATM_TRY(const std::string *id, string_param(params, "id"));
+    const models::CatalogEntry *entry = models::find_entry(models::builtin_catalog(), *id);
+    if (!entry) {
+      std::string ids;
+      for (const models::CatalogEntry &e : models::builtin_catalog())
+        ids += (ids.empty() ? "" : ", ") + e.id;
+      return fail(ErrorCode::NotFound, "M_UNKNOWN_MODEL", "There is no model \"" + *id + "\" in the catalog.", {}, "Use one of: " + ids + ".");
+    }
+    for (const auto &[job_id, job] : jobs)
+      if (job->kind == "models.fetch" && job->output == entry->id && job->state.load() == Job::running)
+        return json{{"job_id", job_id}, {"id", entry->id}, {"bytes_total", entry->size()}, {"already_running", true}};
+    const fs::path dir = models_dir();
+    // Room on the disk for what is still missing, before any byte is fetched.
+    int64_t missing = 0;
+    for (const models::CatalogFile &f : entry->files)
+      missing += f.size - models::file_status(f, dir).bytes;
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    const fs::space_info space = fs::space(dir, ec);
+    if (!ec && int64_t(space.available) < missing)
+      return fail(ErrorCode::IoError, "M_DISK", entry->title + " needs " + std::to_string(missing / 1000000000) + " GB more, and " +
+                                                    to_utf8(dir) + " has " + std::to_string(int64_t(space.available) / 1000000000) + " GB free.",
+                  {}, "Free some space, or set ATTOME_MODELS_DIR to a folder on a larger disk.");
+    auto job = std::make_shared<Job>();
+    job->id = new_id("job");
+    job->kind = "models.fetch";
+    job->output = entry->id;
+    job->units_total.store(entry->size());
+    jobs[job->id] = job;
+    job->thread = std::thread(run_fetch, job, *entry, dir, cfg.transport ? cfg.transport : std::shared_ptr<net::Transport>(net::system_transport()));
+    return json{{"job_id", job->id}, {"id", entry->id}, {"bytes_total", entry->size()}, {"bytes_missing", missing}, {"models_dir", to_utf8(dir)}};
+  }
+
   Result<std::shared_ptr<Job>> job_param(const json &params) {
     ATM_TRY(const std::string *id, string_param(params, "job_id"));
     const auto it = jobs.find(*id);
@@ -1212,6 +1312,9 @@ struct Engine::Impl {
                 {"progress", total > 0 ? double(done) / double(total) : 0.0},
                 {"frames_done", done},
                 {"frames_total", total},
+                {"units_done", done},
+                {"units_total", total},
+                {"unit", job->kind == "models.fetch" ? "bytes" : "frames"},
                 {"output", job->output}};
     std::lock_guard lock(job->mutex);
     const double seconds = state == Job::running
@@ -1219,10 +1322,14 @@ struct Engine::Impl {
                                : job->seconds;
     out["seconds"] = seconds;
     out["fps"] = seconds > 0.0 ? double(done) / seconds : 0.0;
+    if (job->kind == "models.fetch")
+      out["bytes_per_second"] = seconds > 0.0 ? double(job->fetched.load()) / seconds : 0.0;
     if (state == Job::failed)
       out["error"] = error_to_json(job->error);
     if (!job->warning.empty())
       out["warning"] = job->warning;
+    if (!job->detail.empty())
+      out["detail"] = job->detail;
     if (!job->encoder.empty())
       out["encoder"] = job->encoder;
     if (state != Job::running && job->thread.joinable())
@@ -1385,6 +1492,13 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
        "overwrite":{"type":"boolean","description":"Default true"},"sequence":{"type":"string"}},
        "required":["project","output"]})",
      &Impl::render_sequence},
+    {"models.list", "models", false,
+     "The models this version can download, with their size, licence and what is already on disk (installed, partial, downloading, missing).",
+     "", &Impl::models_list},
+    {"models.fetch", "models", false,
+     "Download a model from the catalog as a background job (units are bytes; follow it with jobs.get, stop it with jobs.cancel). "
+     "A stopped or interrupted download continues from where it was; every file is checked against its SHA-256 before it is put in place.",
+     R"({"type":"object","properties":{"id":{"type":"string","description":"An id from models.list"}},"required":["id"]})", &Impl::models_fetch},
     {"jobs.get", "core", false, "State and progress of a job.",
      R"({"type":"object","properties":{"job_id":{"type":"string"}},"required":["job_id"]})", &Impl::jobs_get},
     {"jobs.cancel", "core", false, "Stop a running job.",
