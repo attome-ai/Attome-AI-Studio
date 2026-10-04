@@ -47,6 +47,9 @@ try {
     'expect @button:gen_run'             # the new clip is selected; its card is back from "Stop" when the run has ended
     'wait 1500'
     "shot $work\panel_done.jpg"
+    'click @clip:Shot_1'                 # the pointer rests on the clip: its prompt shows as a tooltip
+    'wait 900'
+    "shot $work\panel_tooltip.jpg"
   )
   $failed = $run.Errors
   try {
@@ -54,6 +57,7 @@ try {
       $clips = @((Invoke-Attome $run --json gen status $proj | ConvertFrom-Json).result.clips)
       "clips: $(($clips | ForEach-Object { "'$($_.name)' $($_.state) takes=$($_.takes) depends=$(@($_.depends_on).Count)" }) -join '; ')"
       if ($clips.Count -ne 2) { $failed = "expected two generative clips, found $($clips.Count)" }
+      elseif ($clips[0].name -ne 'Shot 1' -or $clips[1].name -ne 'Shot 2') { $failed = 'the clips are not named Shot 1 and Shot 2' }
       elseif (@($clips | Where-Object { $_.state -ne 'clean' -or $_.takes -ne 1 }).Count) { $failed = 'both clips are not generated' }
       elseif ($clips[0].workflow -ne $clips[1].workflow) { $failed = 'the two clips do not share one Shot workflow' }
       elseif (@($clips[1].depends_on).Count -ne 1 -or $clips[1].depends_on[0] -ne $clips[0].clip) { $failed = 'the second clip does not start from the first' }

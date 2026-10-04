@@ -1797,12 +1797,12 @@ struct Engine::Impl {
                          {"outputs", {{"video", {"$new:gen", "video"}}, {"audio", {"$new:gen", "audio"}}, {"last_frame", {"$new:gen", "last_frame"}}}}}}}}});
     }
     std::string name = params.value("name", std::string());
-    if (name.empty()) { // the first words of the prompt
-      name = prompt->substr(0, prompt->find_first_of(".,;:\n"));
-      if (name.size() > 28)
-        name = name.substr(0, name.find_last_of(' ', 28)) ;
-      if (name.empty())
-        name = "Shot";
+    if (name.empty()) { // "Shot N": the next number no generative clip of the project has. A prompt makes a poor name: it
+      int next = 1;     // often starts with the style, and any cut of it reads as broken.
+      for (const gen::ClipIn &c : gen_clips(*pr))
+        if (c.name.size() > 5 && c.name.rfind("Shot ", 0) == 0 && c.name.find_first_not_of("0123456789", 5) == std::string::npos)
+          next = std::max(next, std::atoi(c.name.c_str() + 5) + 1);
+      name = "Shot " + std::to_string(next);
     }
     char length[32];
     std::snprintf(length, sizeof length, "%.3fs", seconds);

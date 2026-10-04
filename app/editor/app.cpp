@@ -2962,6 +2962,18 @@ void App::draw_timeline() {
         if (mode == 1) { // the clip's body, by name and by ID
           ui_mark("clip:" + c.name);
           ui_mark("clip:" + c.id);
+          if (c.name.find(' ') != std::string::npos) { // a script's words end at a space: "Shot 1" is @clip:Shot_1
+            std::string joined = c.name;
+            std::replace(joined.begin(), joined.end(), ' ', '_');
+            ui_mark("clip:" + joined);
+          }
+          if (c.has_prompt && !c.prompt.empty() && ImGui::IsItemHovered() && drag_id_.empty()) { // what the shot is
+            ImGui::BeginTooltip();
+            ImGui::PushTextWrapPos(360.0f);
+            ImGui::TextUnformatted(c.prompt.c_str());
+            ImGui::PopTextWrapPos();
+            ImGui::EndTooltip();
+          }
         }
         if (mode != 1 && (ImGui::IsItemHovered() || ImGui::IsItemActive()))
           ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
