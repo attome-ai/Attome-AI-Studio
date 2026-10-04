@@ -150,7 +150,13 @@ int main(int argc, char **argv) {
   std::unique_ptr<atm::editor::UiDriver> driver = atm::editor::UiDriver::from_env();
   SDL_Window *window = SDL_CreateWindow(
       "Attome", 1600, 960,
-      SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY | (driver ? SDL_WINDOW_NOT_FOCUSABLE : SDL_WINDOW_MAXIMIZED));
+      SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY |
+          (driver ? SDL_WINDOW_NOT_FOCUSABLE | SDL_WINDOW_UTILITY : SDL_WINDOW_MAXIMIZED));
+  // A script-driven window is a test fixture: it sits far off to the side (and has no taskbar button), so a test run does
+  // not get in the way of whoever is using the computer, and cannot be minimized by accident. The picture is read back
+  // from the renderer, not from the screen, so nothing needs it to be visible. ATTOME_EDITOR_SHOW=1 keeps it on screen.
+  if (window && driver && !std::getenv("ATTOME_EDITOR_SHOW"))
+    SDL_SetWindowPosition(window, -30000, 40);
   SDL_Renderer *renderer = window ? SDL_CreateRenderer(window, nullptr) : nullptr;
   if (!renderer) {
     SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Attome", SDL_GetError(), nullptr);

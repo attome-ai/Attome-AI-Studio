@@ -816,6 +816,7 @@ void key_nv12(uint8_t *nv12, uint8_t *cover, int W, int H, float hue, float simi
   const float key_len = std::sqrt(key_cb * key_cb + key_cr * key_cr);
   const float kx = key_cb / key_len, ky = key_cr / key_len; // unit direction
   const float key_sat = key_len / std::max(ly, 0.05f);      // chroma per unit of luma, at full saturation
+  const float yk = std::max(ly, 0.15f);                     // how bright the key colour is: dark means dark for that colour
   const float a0 = similarity * (kPi * 0.5f), a1 = a0 + smoothness * 0.6f + 0.02f;
   const int CW = W / 2, CH = H / 2;
   matte.resize(size_t(CW) * size_t(CH));
@@ -833,7 +834,13 @@ void key_nv12(uint8_t *nv12, uint8_t *cover, int W, int H, float hue, float simi
         // Saturated enough to have a hue: a tenth of the key's saturation and up, fading in over another tenth, and not
         // so dark that the chroma is noise.
         const float sat = len / std::max(y, 0.05f);
-        const float gate = smooth01((sat / key_sat - 0.1f) / 0.1f) * smooth01((y - 0.03f) / 0.05f);
+        // A pixel is only taken for screen when it is bright enough and coloured enough for its hue to mean something. Near
+        // black the faint tint that video compression leaves in blocks has a hue like any other (found on real footage: a
+        // black jacket in front of a green screen came out with holes); the real screen was never darker than 0.58 or
+        // less coloured than 0.4, the tint of those pixels at most 0.05. The luma threshold follows the key colour's own
+        // brightness, so a blue screen (dark by nature) is not shut out.
+        const float gate = smooth01((sat / key_sat - 0.1f) / 0.1f) * smooth01((y - 0.12f * yk) / (0.12f * yk)) *
+                           smooth01((len / key_len - 0.12f) / 0.12f);
         const float key = (1.0f - smooth01((ang - a0) / (a1 - a0))) * gate; // 1: fully the key colour
         matte[size_t(cy) * size_t(CW) + size_t(cx)] = uint8_t(std::lround((1.0f - key) * 255.0f));
         // Despill what stays: take the part of the chroma that points at the key colour away, near the key's hue.

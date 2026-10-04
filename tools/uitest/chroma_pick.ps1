@@ -9,7 +9,7 @@ Import-Module (Join-Path $PSScriptRoot 'uitest.psm1') -Force -DisableNameCheckin
 Add-Type -AssemblyName System.Drawing
 $root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $bin = Join-Path $root 'build\win-msvc-release\bin'
-$work = Join-Path $env:TEMP 'attome-uitest'
+$work = Join-Path $env:TEMP ('attome-uitest\' + [IO.Path]::GetFileNameWithoutExtension($PSCommandPath))
 New-Item -ItemType Directory -Force $work | Out-Null
 $proj = Join-Path $work 'ChromaPick.attome'
 Remove-Item $proj -Recurse -Force -ErrorAction SilentlyContinue

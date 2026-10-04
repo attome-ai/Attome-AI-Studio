@@ -2034,7 +2034,10 @@ TEST_CASE("render: chroma key on harder footage - blurred silhouette, hair stran
     // A tracking marker: a black tape cross, 2 px arms, 24 px across, at (80, 60).
     const double marker = (std::fabs(x - 80) < 1.0 && std::fabs(y - 60) < 12.0) || (std::fabs(y - 60) < 1.0 && std::fabs(x - 80) < 12.0) ? 1.0 : 0.0;
     const double bg[3] = {0.0, 177.0 * light * shade * (1.0 - marker), (64.0 + 30.0 * t) * light * shade * (1.0 - marker)};
-    const double skin[3] = {224, 172, 140}, hair[3] = {45, 32, 24};
+    // A dark jacket with the faint green tint that video compression leaves in near-black blocks (and green light off the
+    // screen): a 60 x 60 patch inside the head's circle. Found on real footage, where such pixels came out as holes.
+    const bool dark_patch = std::fabs(x - cx) < 30 && y > cy + 20 && y < cy + 80;
+    const double skin[3] = {dark_patch ? 16.0 : 224.0, dark_patch ? 24.0 : 172.0, dark_patch ? 14.0 : 140.0}, hair[3] = {45, 32, 24};
     const double ab = body_alpha(x, y), as = strand_alpha(x, y) * (1.0 - ab);
     for (int k = 0; k < 3; ++k)
       c[k] = skin[k] * ab + hair[k] * as + bg[k] * (1.0 - ab - as);
@@ -2146,8 +2149,10 @@ TEST_CASE("render: chroma key on harder footage - blurred silhouette, hair stran
     const auto off = count(render(fx(147.0, 0.35, 0.15, 0.0)));
     const auto mid = count(render(fx(147.0, 0.35, 0.15, 0.5)));
     WARN("detail 0: hair kept " << off.first << ", marker px " << off.second << "   detail 0.5: hair kept " << mid.first << ", marker px " << mid.second);
-    CHECK(off.second < 8);   // off: the marker is keyed out with the screen
-    CHECK(off.first < 0.4);  // and the fine hair is lost as before
+    // Off: only the chroma matte. Near-black pixels are no longer taken for screen (see key_nv12), so part of the marker and
+    // more of the hair stay even then; the thin-line pass adds the rest.
+    CHECK(off.second < marker_kept); // fewer marker pixels than with the pass
+    CHECK(off.first < 0.8);          // and the fine hair is not all there
     CHECK(mid.first <= kept + 1e-9); // a lower sensitivity never keeps more
   }
   // The same footage with the key colour off by 30 degrees: this tells where the similarity runs out.

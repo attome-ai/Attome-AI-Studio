@@ -6,7 +6,7 @@ $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'uitest.psm1') -Force -DisableNameChecking
 $root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $bin = Join-Path $root 'build\win-msvc-release\bin'
-$work = Join-Path $env:TEMP 'attome-uitest'
+$work = Join-Path $env:TEMP ('attome-uitest\' + [IO.Path]::GetFileNameWithoutExtension($PSCommandPath))
 New-Item -ItemType Directory -Force $work | Out-Null
 $proj = Join-Path $work 'Transform.attome'
 Remove-Item $proj -Recurse -Force -ErrorAction SilentlyContinue
@@ -14,7 +14,7 @@ Remove-Item $proj -Recurse -Force -ErrorAction SilentlyContinue
 # A 960 x 540 clip on a 1920 x 1080 canvas at scale 0.4: upright it covers y 324..756; turned a quarter, y 156..924.
 $env:ATTOME_ENDPOINT = "\\.\pipe\attome-uitest-setup-$PID"
 try {
-  & "$bin\attome.exe" sample "$work\a.mp4" --seconds 4 --height 540 | Out-Null
+  New-Sample "$work\a.mp4" "--seconds 4 --height 540"
   & "$bin\attome.exe" new $proj --rate 30 | Out-Null
   $seq = (& "$bin\attome.exe" --json inspect $proj | ConvertFrom-Json).result.data.sequences[0].id
   $a = ("$work\a.mp4").Replace('\', '\\')

@@ -7,7 +7,7 @@ $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'uitest.psm1') -Force -DisableNameChecking
 $root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $bin = Join-Path $root 'build\win-msvc-release\bin'
-$work = Join-Path $env:TEMP 'attome-uitest'
+$work = Join-Path $env:TEMP ('attome-uitest\' + [IO.Path]::GetFileNameWithoutExtension($PSCommandPath))
 New-Item -ItemType Directory -Force $work | Out-Null
 
 # Two 3-second clips that touch at 3 s, each with media to spare beyond the cut. Returns the project's path.
@@ -16,8 +16,8 @@ function New-Project($name) {
   Remove-Item $proj -Recurse -Force -ErrorAction SilentlyContinue
   $env:ATTOME_ENDPOINT = "\\.\pipe\attome-uitest-setup-$PID"
   try {
-    & "$bin\attome.exe" sample "$work\a.mp4" --seconds 6 --height 540 | Out-Null
-    & "$bin\attome.exe" sample "$work\b.mp4" --seconds 6 --height 540 | Out-Null
+    New-Sample "$work\a.mp4" "--seconds 6 --height 540"
+    New-Sample "$work\b.mp4" "--seconds 6 --height 540"
     & "$bin\attome.exe" new $proj --rate 30 | Out-Null
     $seq = (& "$bin\attome.exe" --json inspect $proj | ConvertFrom-Json).result.data.sequences[0].id
     $a = ("$work\a.mp4").Replace('\', '\\')

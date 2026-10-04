@@ -60,6 +60,20 @@ function Invoke-EditorScript {
   [pscustomobject]@{ Endpoint = $Endpoint; Project = $Project; ExitCode = $p.ExitCode; Errors = ($errors -split "`n" | Where-Object { $_ -match 'uitest|did not finish' }) -join "`n" }
 }
 
+# `attome sample <path> <args>` (a synthetic clip), encoded once and copied afterwards: the same clip is asked for by many
+# tests and encoding it takes more than half a second.
+function New-Sample([string]$Path, [string]$SampleArgs) {
+  $cache = Join-Path $env:TEMP 'attome-uitest-cache'
+  New-Item -ItemType Directory -Force $cache | Out-Null
+  $key = ($SampleArgs -replace '[^0-9a-z]+', '_').Trim('_')
+  $cached = Join-Path $cache ("$key" + [IO.Path]::GetExtension($Path))
+  if (-not (Test-Path $cached)) {
+    $env:ATTOME_ENDPOINT = "\\.\pipe\attome-uitest-sample-$PID"
+    try { & (Join-Path (Get-BinDir) 'attome.exe') sample $cached @($SampleArgs -split ' ' | Where-Object { $_ }) | Out-Null } finally { Remove-Item Env:\ATTOME_ENDPOINT -ErrorAction SilentlyContinue }
+  }
+  Copy-Item $cached $Path -Force
+}
+
 function Stop-Daemon($Run) {
   $ErrorActionPreference = 'Continue' # "no daemon running" is fine
   Invoke-Attome $Run daemon stop 2>&1 | Out-Null
@@ -77,4 +91,4 @@ function ConvertFrom-Rational([string]$T) {
   if ($T -match '/') { $p = $T -split '/'; [double]$p[0] / [double]$p[1] } else { [double]$T }
 }
 
-Export-ModuleMember -Function Invoke-EditorScript, Invoke-Attome, Stop-Daemon, Get-Tracks, Get-Object, ConvertFrom-Rational
+Export-ModuleMember -Function New-Sample, Invoke-EditorScript, Invoke-Attome, Stop-Daemon, Get-Tracks, Get-Object, ConvertFrom-Rational
