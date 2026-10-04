@@ -62,7 +62,7 @@ json call(const Options &opt, const char *tool, json params, bool allow_local = 
     return {{"ok", false},
             {"error", {{"code", 0}, {"message", "No Attome daemon is running."}, {"exit", kExitDaemonUnavailable},
                        {"data", {{"hint", "Start one with: attome daemon start"}}}}}};
-  atm::api::Engine engine;
+  atm::api::Engine engine({.user_settings = true});
   auto result = engine.call(tool, params);
   engine.save_all(); // one-shot mode: project.json is written before exit
   if (result)
@@ -157,7 +157,7 @@ int serve_mcp(const Options &opt) {
   };
   const auto local_call = [&](const std::string &tool, const json &params) -> json {
     if (!local)
-      local = std::make_unique<atm::api::Engine>();
+      local = std::make_unique<atm::api::Engine>(atm::api::EngineConfig{.user_settings = true});
     auto r = local->call(tool, params);
     local->save_all();
     if (r)
@@ -327,7 +327,7 @@ int main(int argc, char **argv) {
       params["height"] = height;
     // The job must outlive the call that starts it, so without a daemon one Engine serves the whole command.
     const bool remote = opt.daemon != "never" && bool(atm::api::connect(opt.endpoint));
-    std::unique_ptr<atm::api::Engine> local = remote ? nullptr : std::make_unique<atm::api::Engine>();
+    std::unique_ptr<atm::api::Engine> local = remote ? nullptr : std::make_unique<atm::api::Engine>(atm::api::EngineConfig{.user_settings = true});
     const auto invoke = [&](const char *tool, const json &p) -> json {
       if (remote)
         return call(opt, tool, p, false);
@@ -375,7 +375,7 @@ int main(int argc, char **argv) {
   cmd_models_fetch->callback([&] {
     // The job must outlive the call that starts it, so without a daemon one Engine serves the whole command.
     const bool remote = opt.daemon != "never" && bool(atm::api::connect(opt.endpoint));
-    std::unique_ptr<atm::api::Engine> local = remote ? nullptr : std::make_unique<atm::api::Engine>();
+    std::unique_ptr<atm::api::Engine> local = remote ? nullptr : std::make_unique<atm::api::Engine>(atm::api::EngineConfig{.user_settings = true});
     const auto invoke = [&](const char *tool, const json &p) -> json {
       if (remote)
         return call(opt, tool, p, false);
@@ -432,7 +432,7 @@ int main(int argc, char **argv) {
   cmd_gen_run->add_flag("--dry-run", gen_dry, "Print the plan and run nothing");
   cmd_gen_run->callback([&] {
     const bool remote = opt.daemon != "never" && bool(atm::api::connect(opt.endpoint));
-    std::unique_ptr<atm::api::Engine> local = remote ? nullptr : std::make_unique<atm::api::Engine>();
+    std::unique_ptr<atm::api::Engine> local = remote ? nullptr : std::make_unique<atm::api::Engine>(atm::api::EngineConfig{.user_settings = true});
     const auto invoke = [&](const char *tool, const json &p) -> json {
       if (remote)
         return call(opt, tool, p, false);

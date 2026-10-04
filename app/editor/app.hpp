@@ -266,6 +266,10 @@ private:
   json gen_job_state_ = json::object();   // as jobs.get last reported it; kept after the end to show a failure
   double next_gen_job_poll_ = 0.0;
   char prompt_buf_[2048] = {};
+  // engines (the Models panel): the ComfyUI address being typed, and what the daemon last said about it
+  char comfy_buf_[256] = {};
+  json comfy_status_ = json::object();
+  bool engines_loaded_ = false;
   void start_generation(json params);     // gen.run; the Takes arrive by themselves as the project changes
   double next_gen_poll_ = 0.0;
   void refresh_gen_status();

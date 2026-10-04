@@ -159,7 +159,7 @@ std::vector<GenOutcome> run_generation(const GenRun &run, const GenProgress &pro
           request.outputs[port.name] = to_utf8(part / gen::output_file(port.name));
       request.progress = [&](std::string_view phase, int at, int of) {
         if (progress.on_detail)
-          progress.on_detail(label + ": " + std::string(phase) + " " + std::to_string(at) + " of " + std::to_string(of));
+          progress.on_detail(label + ": " + std::string(phase) + (of > 0 ? " " + std::to_string(at) + " of " + std::to_string(of) : ""));
       };
       if (progress.on_detail)
         progress.on_detail(label + ": " + kind);

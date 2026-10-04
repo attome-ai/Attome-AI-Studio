@@ -241,6 +241,13 @@ void UiDriver::before_frame() {
       }
     } else if (op == "shot") {
       d.shot = arg(1);
+    } else if (op == "type") {
+      std::string text;
+      for (size_t i = 1; i < c.words.size(); ++i)
+        text += (i > 1 ? " " : "") + c.words[i];
+      d.frames.push_back([=](ImGuiIO &in) { in.AddInputCharactersUTF8(text.c_str()); });
+      d.frames.push_back([](ImGuiIO &) {});
+      d.frames.push_back([](ImGuiIO &) {});
     } else if (op == "key") {
       const auto key = key_named(arg(1));
       if (!key) {

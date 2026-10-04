@@ -2025,6 +2025,44 @@ void App::draw_models_panel() {
     }
     ImGui::Spacing();
   }
+  // Engines: what runs the models. For now the user's own ComfyUI, by its address.
+  if (!engines_loaded_) {
+    engines_loaded_ = true;
+    json engines;
+    if (rpc("gen.engines", json::object(), engines)) {
+      copy_to(comfy_buf_, sizeof comfy_buf_, engines.value("comfyui", std::string()));
+      for (const json &e : engines.value("engines", json::array()))
+        if (e.value("name", "") == "comfyui")
+          comfy_status_ = e;
+    }
+  }
+  section_label("COMFYUI");
+  ImGui::PushStyleColor(ImGuiCol_FrameBg, hexv(look::raised));
+  ImGui::SetNextItemWidth(-1.0f);
+  ImGui::InputTextWithHint("##comfyui", "http://127.0.0.1:8188", comfy_buf_, sizeof comfy_buf_);
+  ui_mark("field:comfyui");
+  ImGui::PopStyleColor();
+  if (soft_button("comfy_test", "Use and test", ImVec2(0.0f, 26.0f))) {
+    json set;
+    comfy_status_ = json::object();
+    if (rpc("gen.set_comfyui", {{"address", std::string(comfy_buf_)}}, set)) {
+      copy_to(comfy_buf_, sizeof comfy_buf_, set.value("comfyui", std::string()));
+      comfy_status_ = set.value("status", json{{"off", true}});
+      pending_ = [this] { refresh_gen_status(); }; // clips that waited for an engine can run now
+    }
+  }
+  ImGui::PushTextWrapPos(0.0f);
+  if (comfy_status_.value("off", false))
+    ImGui::TextColored(hexv(look::fg3), "ComfyUI is not used.");
+  else if (comfy_status_.value("reachable", false))
+    ImGui::TextColored(hexv(look::ok), "Connected: ComfyUI %s, %s", comfy_status_.value("version", "?").c_str(),
+                       comfy_status_.value("device", "").c_str());
+  else if (comfy_status_.contains("message"))
+    ImGui::TextColored(kError, "No answer. %s", comfy_status_.value("hint", "").c_str());
+  else
+    ImGui::TextColored(hexv(look::fg3), "Your own ComfyUI can run the models. Give its address.");
+  ImGui::PopTextWrapPos();
+  ImGui::Spacing();
   section_label("AVAILABLE");
   ImGui::Spacing();
   ImGui::BeginChild("##models", ImVec2(0.0f, 0.0f));

@@ -36,6 +36,9 @@ struct EngineConfig {
   // The address of the user's own ComfyUI, used as one more engine ("http://127.0.0.1:8188"); empty = ATTOME_COMFYUI,
   // and when that is not set either, no ComfyUI is used.
   std::string comfyui;
+  // Read and write the user's settings file (the ComfyUI address): ATTOME_SETTINGS, or settings.json beside the
+  // models folder's default place. Off for tests, on for the daemon and the command line.
+  bool user_settings = false;
 };
 
 class Engine {

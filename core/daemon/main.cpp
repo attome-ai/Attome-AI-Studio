@@ -60,7 +60,7 @@ int main(int argc, char **argv) {
   if (const char *env = std::getenv("ATTOME_PROFILE"); no_profile || (env && env[0] == '0'))
     atm::prof::set_enabled(false);
 
-  atm::api::Engine engine({.fsync = !no_fsync});
+  atm::api::Engine engine({.fsync = !no_fsync, .user_settings = true});
   atm::api::Server server(engine);
 
   if (stdio) {

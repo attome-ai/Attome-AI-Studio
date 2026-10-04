@@ -156,7 +156,7 @@ json ComfyProvider::status() {
   const auto reply = net::fetch(*transport_, address_ + "/system_stats");
   if (!reply || reply->status != 200) {
     out["message"] = reply ? "ComfyUI answered with status " + std::to_string(reply->status) + "." : reply.error().message;
-    out["hint"] = "Start ComfyUI, or set its address (ATTOME_COMFYUI, for example http://127.0.0.1:8188).";
+    out["hint"] = "Start ComfyUI, or correct the address (usually http://127.0.0.1:8188).";
     return out;
   }
   const json stats = json::parse(reply->body, nullptr, false);
@@ -177,7 +177,7 @@ Result<gen::StepResult> ComfyProvider::run(const gen::StepRequest &r) {
   if (!offers(r.model, r.kind))
     return engine_error("E_UNSUPPORTED", "ComfyUI is not set up here to run \"" + r.kind + "\" for the model " + r.model + ".");
   const auto unreachable = [&](const Error &e) {
-    return engine_error("E_UNREACHABLE", "ComfyUI at " + address_ + " did not answer: " + e.message, "Start ComfyUI, or correct its address (ATTOME_COMFYUI).");
+    return engine_error("E_UNREACHABLE", "ComfyUI at " + address_ + " did not answer: " + e.message, "Start ComfyUI, or correct its address in the Models panel.");
   };
   const auto cancelled = [&] { return r.cancel && r.cancel->load(); };
 
@@ -220,7 +220,7 @@ Result<gen::StepResult> ComfyProvider::run(const gen::StepRequest &r) {
   }
   const std::string id = answer["prompt_id"].get<std::string>();
   if (r.progress)
-    r.progress("running in ComfyUI", 0, r.settings.value("steps", 8));
+    r.progress("running in ComfyUI", 0, 0); // it is polled, not followed: the step it is at is not known
 
   json outputs;
   for (;;) {

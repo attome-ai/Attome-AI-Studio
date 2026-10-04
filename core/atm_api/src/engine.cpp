@@ -349,6 +349,7 @@ struct Engine::Impl {
   Clock::time_point started = Clock::now();
   std::map<std::string, std::shared_ptr<Job>> jobs;
   std::vector<std::shared_ptr<gen::Provider>> providers;
+  std::string comfyui_address;
   std::shared_ptr<FinishedQueue> finished = std::make_shared<FinishedQueue>();
 
   ~Impl() {
@@ -1598,11 +1599,67 @@ struct Engine::Impl {
     }
   }
 
+  // The user's settings: one small JSON file, read when asked for. An empty path = none (tests).
+  fs::path settings_path() const {
+    if (!cfg.user_settings)
+      return {};
+    if (const char *path = std::getenv("ATTOME_SETTINGS"); path && *path)
+      return to_path(path);
+#ifdef _WIN32
+    if (const char *local = std::getenv("LOCALAPPDATA"); local && *local)
+      return to_path(local) / "Attome" / "settings.json";
+#else
+    if (const char *home = std::getenv("HOME"); home && *home)
+      return to_path(home) / ".config" / "attome" / "settings.json";
+#endif
+    return {};
+  }
+
+  json settings() const {
+    const fs::path path = settings_path();
+    if (path.empty())
+      return json::object();
+    const auto text = storage::read_file(path);
+    const json parsed = text ? json::parse(*text, nullptr, false) : json();
+    return parsed.is_object() ? parsed : json::object();
+  }
+
+  // The ComfyUI engine at this address replaces the one there was; an empty address removes it.
+  void set_comfyui(const std::string &address) {
+    std::erase_if(providers, [](const std::shared_ptr<gen::Provider> &p) { return p->name() == "comfyui"; });
+    comfyui_address = address;
+    if (!address.empty())
+      providers.push_back(std::make_shared<ComfyProvider>(
+          address, cfg.transport ? cfg.transport : std::shared_ptr<net::Transport>(net::system_transport())));
+  }
+
   Result<json> gen_engines(const json &) {
     json list = json::array();
     for (const auto &p : providers)
       list.push_back(p->status());
-    return json{{"engines", std::move(list)}};
+    return json{{"engines", std::move(list)}, {"comfyui", comfyui_address}};
+  }
+
+  Result<json> gen_set_comfyui(const json &params) {
+    ATM_TRY(const std::string *address, string_param(params, "address"));
+    std::string trimmed = *address;
+    while (!trimmed.empty() && (trimmed.back() == ' ' || trimmed.back() == '/'))
+      trimmed.pop_back();
+    while (!trimmed.empty() && trimmed.front() == ' ')
+      trimmed.erase(trimmed.begin());
+    if (!trimmed.empty() && trimmed.find("://") == std::string::npos)
+      trimmed = "http://" + trimmed;
+    set_comfyui(trimmed);
+    if (const fs::path path = settings_path(); !path.empty()) {
+      json all = settings();
+      all["comfyui"] = trimmed;
+      ATM_CHECK(storage::make_dirs(path.parent_path()));
+      ATM_CHECK(storage::atomic_write(path, all.dump(2) + "\n"));
+    }
+    json out = {{"comfyui", trimmed}};
+    if (!trimmed.empty())
+      out["status"] = providers.back()->status();
+    return out;
   }
 
   Result<json> gen_select_take(const json &params) {
@@ -1913,6 +1970,10 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
     {"gen.engines", "gen", false,
      "The engines that can run models here (the user's ComfyUI when its address is set), each with whether it answers, its version and device.",
      "", &Impl::gen_engines},
+    {"gen.set_comfyui", "gen", false,
+     "Set the address of the user's own ComfyUI (for example http://127.0.0.1:8188), used as an engine; \"\" stops using it. "
+     "The address is remembered. Returns whether ComfyUI answers there, its version and device.",
+     R"({"type":"object","properties":{"address":{"type":"string"}},"required":["address"]})", &Impl::gen_set_comfyui},
     {"gen.select_take", "gen", true,
      "Choose which Take of a generative clip plays. The clip's inputs go back to what made that Take; clips that start from it become dirty.",
      R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},
@@ -1960,9 +2021,9 @@ Engine::Engine(EngineConfig config) : impl_(std::make_unique<Impl>()) {
   std::string comfyui = config.comfyui;
   if (const char *address = std::getenv("ATTOME_COMFYUI"); comfyui.empty() && address)
     comfyui = address;
-  if (!comfyui.empty())
-    impl_->providers.push_back(std::make_shared<ComfyProvider>(
-        comfyui, config.transport ? config.transport : std::shared_ptr<net::Transport>(net::system_transport())));
+  if (comfyui.empty())
+    comfyui = impl_->settings().value("comfyui", std::string());
+  impl_->set_comfyui(comfyui);
   for (const Impl::Tool &tool : Impl::kTools)
     impl_->by_name.emplace(tool.name, &tool);
   // What each catalog model declares, for the validator: known whether or not the files are on this machine.
