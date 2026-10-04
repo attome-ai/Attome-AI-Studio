@@ -131,6 +131,7 @@ private:
   void jump_effect_key(const ClipUi &clip, const EffectUi &fx, bool forward);
   void draw_text_panel();
   void draw_models_panel();
+  void draw_generate_panel();
   void poll_models();                       // models.list and the download jobs, twice a second while something shows them
   void draw_generate_card(const ClipUi &clip); // a generative clip: why it cannot run here, and the download that fixes it
   void delete_selected();
@@ -229,7 +230,7 @@ private:
   std::set<std::string> audio_only_; // media files without a picture
   char media_filter_[128] = {};
   int inspector_tab_ = 0;
-  int rail_tab_ = 0; // 0 Media, 2 Text, 3 Effects, 6 Models
+  int rail_tab_ = 0; // 0 Media, 2 Text, 3 Effects, 4 Generate, 6 Models
   char text_buf_[1024] = {};
   float text_size_ = 0.08f, text_col_[3] = {1.0f, 1.0f, 1.0f};
   bool text_bold_ = false;
@@ -268,6 +269,13 @@ private:
   char prompt_buf_[2048] = {};
   // engines (the Models panel): the ComfyUI address being typed, and what the daemon last said about it
   char comfy_buf_[256] = {};
+  // the Generate panel: what a new generative clip is made from
+  json gen_models_ = json::array();
+  std::string gen_model_;
+  bool gen_models_loaded_ = false, gen_model_ready_ = false, gen_chain_ = false;
+  double next_gen_models_poll_ = 0.0;
+  char gen_prompt_buf_[2048] = {};
+  float gen_seconds_ = 5.0f;
   json comfy_status_ = json::object();
   bool engines_loaded_ = false;
   void start_generation(json params);     // gen.run; the Takes arrive by themselves as the project changes

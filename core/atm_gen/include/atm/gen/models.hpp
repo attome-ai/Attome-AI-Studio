@@ -57,6 +57,7 @@ Result<ModelDecl> parse_model(const json &declaration);
 void register_model(ModelDecl declaration);
 const ModelDecl *find_model(std::string_view id); // stays valid until the id is registered again
 void clear_models();                              // for tests
+std::vector<std::string> model_ids();             // every registered model, sorted
 
 // What is wrong with a setting's value, or empty: "must be a whole number", "is 80; the model takes 1 to 50".
 std::string setting_problem(const SettingDecl &setting, const json &value);

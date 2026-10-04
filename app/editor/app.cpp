@@ -998,7 +998,7 @@ bool soft_button(const char *id, const char *label, ImVec2 size, bool enabled = 
   ui_mark(std::string("button:") + id);
   const bool hovered = enabled && ImGui::IsItemHovered(), held = enabled && ImGui::IsItemActive();
   ImDrawList *dl = ImGui::GetWindowDrawList();
-  ImU32 bg = primary ? hex(look::accent) : hex(fill);
+  ImU32 bg = primary && enabled ? hex(look::accent) : hex(fill); // a disabled primary button is not orange
   if (hovered)
     bg = primary ? hex(look::accent2) : hex(look::line2);
   if (held && !primary)
@@ -1401,7 +1401,7 @@ void App::draw_rail() {
     };
     for (const Item &it : items) {
       const std::string name = it.label;
-      const int tab = name == "Media" ? 0 : name == "Text" ? 2 : name == "Effects" ? 3 : name == "Models" ? 6 : -1; // panels so far
+      const int tab = name == "Media" ? 0 : name == "Text" ? 2 : name == "Effects" ? 3 : name == "Generate" ? 4 : name == "Models" ? 6 : -1; // panels so far
       if (place(it, tab >= 0 && rail_tab_ == tab, tab >= 0 ? nullptr : "Not built yet") && tab >= 0)
         rail_tab_ = tab;
     }
@@ -1427,11 +1427,13 @@ void App::draw_media() {
   ImGui::Begin("Media", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoScrollbar);
   ImGui::PopStyleVar();
   ImGui::PopStyleColor();
-  if (rail_tab_ == 2 || rail_tab_ == 3 || rail_tab_ == 6) {
+  if (rail_tab_ == 2 || rail_tab_ == 3 || rail_tab_ == 4 || rail_tab_ == 6) {
     if (rail_tab_ == 2)
       draw_text_panel();
     else if (rail_tab_ == 3)
       draw_effects_panel();
+    else if (rail_tab_ == 4)
+      draw_generate_panel();
     else
       draw_models_panel();
     ImGui::End();
@@ -1795,6 +1797,101 @@ void App::draw_effects_panel() {
         dl->AddText(ImVec2(p.x + 20.0f + text_size(def.title).x, q.y - 22.0f), hex(look::fg3), blurb);
     ImGui::Dummy(ImVec2(0.0f, 4.0f));
   }
+}
+
+// The Generate panel: a prompt, a model and a length become a generative clip at the end of the picture track.
+void App::draw_generate_panel() {
+  if (!gen_models_loaded_ || clock_ >= next_gen_models_poll_) { // which models can run changes with downloads and engines
+    gen_models_loaded_ = true;
+    next_gen_models_poll_ = clock_ + 2.0;
+    json listed;
+    if (rpc("gen.models", json::object(), listed))
+      gen_models_ = listed.value("models", json::array());
+    if (gen_model_.empty())
+      for (const json &m : gen_models_)
+        if (gen_model_.empty() || (m.value("ready", false) && !gen_model_ready_)) {
+          gen_model_ = m.value("id", "");
+          gen_model_ready_ = m.value("ready", false);
+        }
+  }
+  json model = json::object();
+  for (const json &m : gen_models_)
+    if (m.value("id", "") == gen_model_)
+      model = m;
+  ImGui::PushFont(g_fonts.bold, 15.0f);
+  ImGui::TextUnformatted("Generate");
+  ImGui::PopFont();
+  ImGui::Spacing();
+  ImGui::PushTextWrapPos(0.0f);
+  ImGui::TextColored(hexv(look::fg3), "Describe a shot. It is added to the timeline as a clip you can generate, redo and chain.");
+  ImGui::PopTextWrapPos();
+  ImGui::Spacing();
+  section_label("MODEL");
+  ImGui::PushStyleColor(ImGuiCol_FrameBg, hexv(look::raised));
+  ImGui::SetNextItemWidth(-1.0f);
+  if (ImGui::BeginCombo("##genmodel", model.value("title", gen_model_.empty() ? std::string("No model") : gen_model_).c_str())) {
+    for (const json &m : gen_models_) {
+      const std::string id = m.value("id", "");
+      if (ImGui::Selectable((m.value("title", id) + "##" + id).c_str(), id == gen_model_))
+        gen_model_ = id;
+      ui_mark("model:" + id);
+    }
+    ImGui::EndCombo();
+  }
+  ui_mark("combo:gen_model");
+  ImGui::PushTextWrapPos(0.0f);
+  if (!model.empty() && !model.value("installed", false))
+    ImGui::TextColored(kError, "Not installed. Download it in the Models panel.");
+  else if (!model.empty() && !model.value("engine", false))
+    ImGui::TextColored(kError, "Nothing here runs it yet. Set your ComfyUI address in the Models panel.");
+  if (!model.empty() && !model.value("ready", false))
+    ui_mark("note:gen_model");
+  ImGui::PopTextWrapPos();
+  ImGui::Spacing();
+  section_label("PROMPT");
+  ImGui::InputTextMultiline("##genprompt", gen_prompt_buf_, sizeof gen_prompt_buf_, ImVec2(-1.0f, 130.0f));
+  ui_mark("field:gen_prompt");
+  ImGui::PopStyleColor();
+  ImGui::Spacing();
+  const json range = model.value("seconds", json::object());
+  const float lo = std::max(1.0f, range.value("min", 1.0f)), hi = range.value("max", 0.0f) > 0.0f ? range.value("max", 15.0f) : 15.0f;
+  gen_seconds_ = std::clamp(gen_seconds_, lo, hi);
+  ImGui::TextColored(hexv(look::fg2), "Length");
+  ImGui::SameLine(88.0f);
+  slim_slider("gen_seconds", &gen_seconds_, lo, hi, ImGui::GetContentRegionAvail().x - 52.0f, "");
+  ImGui::SameLine();
+  ImGui::PushFont(g_fonts.mono, 13.0f);
+  ImGui::TextColored(hexv(look::fg2), "%4.1fs", gen_seconds_);
+  ImGui::PopFont();
+  bool can_chain = false; // the model takes a start picture
+  for (const json &a : model.value("accepts", json::array()))
+    can_chain = can_chain || a == "start_image";
+  ImGui::BeginDisabled(!can_chain);
+  ImGui::Checkbox("Start from the clip before", &gen_chain_);
+  ui_mark("check:gen_chain");
+  ImGui::EndDisabled();
+  ImGui::Spacing();
+  const bool has_prompt = gen_prompt_buf_[0] != '\0' && !gen_model_.empty();
+  const auto add = [this](bool run) {
+    json made;
+    json params = {{"project", project_path_}, {"prompt", std::string(gen_prompt_buf_)}, {"model", gen_model_},
+                   {"seconds", std::round(gen_seconds_ * 2.0f) / 2.0f}};
+    if (gen_chain_)
+      params["start_from"] = "previous";
+    if (!rpc("gen.create_clip", params, made))
+      return;
+    say("Add generative clip");
+    refresh();
+    selected_clip_ = made.value("clip", "");
+    gen_prompt_buf_[0] = '\0';
+    if (run && !selected_clip_.empty())
+      start_generation({{"clips", json::array({selected_clip_})}});
+  };
+  if (soft_button("gen_add", "Add to timeline", ImVec2(0.0f, 32.0f), has_prompt))
+    pending_ = [add] { add(false); };
+  ImGui::SameLine();
+  if (soft_button("gen_add_run", "Add and generate", ImVec2(0.0f, 32.0f), has_prompt && model.value("ready", false), true))
+    pending_ = [add] { add(true); };
 }
 
 // The clips whose workflow cannot run on this computer, and why. Asked again when the project changes and while a

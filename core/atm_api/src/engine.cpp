@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <condition_variable>
 #include <cstring>
 #include <deque>
@@ -1662,6 +1663,166 @@ struct Engine::Impl {
     return out;
   }
 
+  // The models a generative clip can be made with, each with whether it can run here now.
+  Result<json> gen_models(const json &) {
+    json list = json::array();
+    for (const std::string &id : gen::model_ids()) {
+      const gen::ModelDecl *decl = gen::find_model(id);
+      if (!decl || !decl->does("generate_video"))
+        continue;
+      const models::CatalogEntry *entry = models::find_entry(models::builtin_catalog(), id);
+      const bool installed = !decl->needs_files || model_installed(id);
+      const bool engine = provider_for(providers, id, "generate_video") != nullptr;
+      list.push_back({{"id", id}, {"title", entry ? entry->title : id}, {"installed", installed}, {"engine", engine},
+                      {"ready", installed && engine}, {"accepts", decl->accepts},
+                      {"seconds", {{"min", decl->seconds_min}, {"max", decl->seconds_max}}}});
+    }
+    return json{{"models", std::move(list)}};
+  }
+
+  // Adds a generative clip: the built-in "Shot" workflow for the model (made once per project and model, then shared)
+  // and a clip that uses it, at the end of the picture track unless a place is given.
+  Result<json> gen_create_clip(const json &params) {
+    ATM_TRY(Project *pr, project(params));
+    ATM_TRY(const std::string *prompt, string_param(params, "prompt"));
+    ATM_TRY(const std::string *model, string_param(params, "model"));
+    const gen::ModelDecl *decl = gen::find_model(*model);
+    if (!decl || !decl->does("generate_video"))
+      return fail(ErrorCode::NotFound, "G_MODEL", "\"" + *model + "\" is not a model that generates video here.", {},
+                  "List the models with gen.models.");
+    const json &root = pr->doc.root();
+    const std::string project_ref = to_utf8(pr->dir);
+    std::string seq = params.value("sequence", std::string());
+    if (seq.empty() && root.contains("sequence_order") && !root["sequence_order"].empty())
+      seq = root["sequence_order"][0].get<std::string>();
+    const doc::NodeRef *seq_ref = pr->doc.find(seq);
+    if (!seq_ref)
+      return fail(ErrorCode::UnknownId, "P_UNKNOWN_ID", "The project has no sequence \"" + seq + "\".");
+    const json &sequence = *seq_ref->node;
+
+    // The size: what was asked for, else the canvas's shape at about 0.9 megapixels, on the model's grid.
+    const json canvas = sequence.value("canvas", json::object());
+    const double cw = canvas.value("width", 1920), ch = canvas.value("height", 1080);
+    const int grid = std::max(1, decl->size_multiple);
+    const double fit = std::sqrt(901120.0 / std::max(1.0, cw * ch));
+    const auto on_grid = [&](double v) { return std::max(grid, int(std::lround(v / grid)) * grid); };
+    const int width = params.value("width", on_grid(cw * fit)), height = params.value("height", on_grid(ch * fit));
+    double seconds = params.value("seconds", 5.0);
+    seconds = std::max(seconds, decl->seconds_min);
+    if (decl->seconds_max > 0.0)
+      seconds = std::min(seconds, decl->seconds_max);
+    static std::atomic<uint32_t> counter{uint32_t(std::chrono::steady_clock::now().time_since_epoch().count())};
+    const int64_t seed = params.value("seed", int64_t((counter.fetch_add(2654435761u) >> 8) % 1000000));
+
+    // The track: the one named, else the lowest picture track that is not for titles or effects, else a new one.
+    json ops = json::array();
+    std::string track = params.value("track", std::string());
+    const json &tracks = sequence.contains("tracks") ? sequence["tracks"] : json::object();
+    if (track.empty())
+      for (const json &id : sequence.value("track_order", json::array())) {
+        const auto t = tracks.find(id.get<std::string>());
+        if (t != tracks.end() && t->value("kind", std::string("video")) != "audio" && t->value("name", std::string()) != "Titles" &&
+            t->value("name", std::string()) != "Effects") {
+          track = id.get<std::string>();
+          break;
+        }
+      }
+    const json *track_node = nullptr;
+    if (track.empty()) {
+      track = "$new:track";
+      json add = {{"op", "add"}, {"path", seq + "/tracks/$new:track"}, {"value", {{"kind", "video"}, {"name", "V1"}}}};
+      if (const json order = sequence.value("track_order", json::array()); !order.empty())
+        add["anchor"] = {{"before", order[0]}};
+      ops.push_back(std::move(add));
+    } else if (const auto t = tracks.find(track); t != tracks.end()) {
+      track_node = &*t;
+    } else {
+      return fail(ErrorCode::UnknownId, "P_UNKNOWN_ID", "The sequence has no track \"" + track + "\".");
+    }
+
+    // Where: the end of the track, and the clip that ends there (what "start from the clip before" means).
+    Rational end = Rational::from_int(0);
+    std::string before;
+    if (track_node && track_node->contains("clips"))
+      for (auto c = (*track_node)["clips"].begin(); c != (*track_node)["clips"].end(); ++c) {
+        const json timing = c->value("timing", json::object());
+        const auto in = Rational::parse(timing.value("record_in", std::string("0")));
+        const auto dur = Rational::parse(timing.value("duration", std::string("0")));
+        const auto out = in && dur ? add(*in, *dur) : Result<Rational>(Rational::from_int(0));
+        if (out && compare(*out, end) > 0) {
+          end = *out;
+          before = c.key();
+        }
+      }
+    json inputs = {{"prompt", *prompt}, {"seed", seed}, {"seconds", seconds}, {"width", width}, {"height", height}};
+    if (const std::string from = params.value("start_from", std::string()); !from.empty()) {
+      const std::string source = from == "previous" ? before : from;
+      const doc::NodeRef *ref = source.empty() ? nullptr : pr->doc.find(source);
+      if (!ref || ref->node->value("media_ref", json::object()).value("type", std::string()) != "workflow")
+        return fail(ErrorCode::InvalidArgument, "G_CLIP_LINK",
+                    from == "previous" ? "There is no generative clip before this one on the track to start from."
+                                       : "\"" + from + "\" is not a generative clip.",
+                    {}, "Add the first clip without start_from, or name a generative clip.");
+      if (!decl->takes("start_image"))
+        return fail(ErrorCode::InvalidArgument, "G_SETTING", "The model " + *model + " cannot start from a picture.", {},
+                    "Pick a model that accepts a start picture.");
+      inputs["start_image"] = {{"from", source}, {"output", "last_frame"}};
+    }
+
+    // The workflow: the project's Shot for this model, or a new one.
+    std::string workflow;
+    if (const auto all = root.find("workflows"); all != root.end() && all->is_object())
+      for (auto w = all->begin(); w != all->end(); ++w)
+        if (w->value("builtin", std::string()) == "shot:" + *model)
+          workflow = w.key();
+    if (workflow.empty()) {
+      workflow = "$new:shot";
+      json settings = json::object();
+      for (const gen::SettingDecl &s : decl->settings)
+        if (!s.def.is_null())
+          settings[s.name] = s.def;
+      json open = {{"prompt", {"$new:gen", "prompt"}}, {"seed", {"$new:gen", "seed"}}, {"seconds", {"$new:gen", "seconds"}},
+                   {"width", {"$new:gen", "width"}}, {"height", {"$new:gen", "height"}}};
+      for (const char *optional : {"start_image", "end_image", "references"})
+        if (decl->takes(optional))
+          open[optional] = {"$new:gen", optional};
+      ops.push_back({{"op", "add"},
+                     {"path", pr->doc.id() + "/workflows/$new:shot"},
+                     {"value",
+                      {{"name", "Shot"},
+                       {"builtin", "shot:" + *model},
+                       {"nodes", {{"$new:gen", {{"kind", "attome.generate_video"}, {"model", *model}, {"settings", std::move(settings)}}}}},
+                       {"exposed",
+                        {{"inputs", std::move(open)},
+                         {"outputs", {{"video", {"$new:gen", "video"}}, {"audio", {"$new:gen", "audio"}}, {"last_frame", {"$new:gen", "last_frame"}}}}}}}}});
+    }
+    std::string name = params.value("name", std::string());
+    if (name.empty()) { // the first words of the prompt
+      name = prompt->substr(0, prompt->find_first_of(".,;:\n"));
+      if (name.size() > 28)
+        name = name.substr(0, name.find_last_of(' ', 28)) ;
+      if (name.empty())
+        name = "Shot";
+    }
+    char length[32];
+    std::snprintf(length, sizeof length, "%.3fs", seconds);
+    // The model's grid rarely gives the canvas's exact size (1264 x 704 for 1280 x 720): the clip is scaled to cover the
+    // canvas, losing a sliver at two edges rather than showing a border.
+    const double fill = std::round(std::max(cw / double(width), ch / double(height)) * 10000.0) / 10000.0;
+    ops.push_back({{"op", "add"},
+                   {"path", track + "/clips/$new:clip"},
+                   {"value",
+                    {{"name", name},
+                     {"timing", {{"record_in", params.contains("at") ? params["at"] : json(end.to_string())}, {"duration", length}, {"source_in", "0"}}},
+                     {"media_ref", {{"type", "workflow"}, {"workflow", workflow}, {"inputs", std::move(inputs)}, {"width", width}, {"height", height}}},
+                     {"transform", {{"position", {0.5, 0.5}}, {"scale", {fill, fill}}, {"opacity", 1}}}}}});
+    ATM_TRY(json applied, project_patch({{"project", project_ref}, {"patch", {{"ops", std::move(ops)}, {"label", "Add generative clip"}}}}));
+    const json &ids = applied["id_map"];
+    return json{{"clip", ids.value("$new:clip", std::string())}, {"workflow", ids.value("$new:shot", workflow)},
+                {"track", ids.value("$new:track", track)}, {"width", width}, {"height", height}, {"seconds", seconds},
+                {"seed", seed}, {"revision", applied["revision"]}};
+  }
+
   Result<json> gen_select_take(const json &params) {
     ATM_TRY(Project *pr, project(params));
     ATM_TRY(const std::string *clip, string_param(params, "clip"));
@@ -1974,6 +2135,20 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
      "Set the address of the user's own ComfyUI (for example http://127.0.0.1:8188), used as an engine; \"\" stops using it. "
      "The address is remembered. Returns whether ComfyUI answers there, its version and device.",
      R"({"type":"object","properties":{"address":{"type":"string"}},"required":["address"]})", &Impl::gen_set_comfyui},
+    {"gen.models", "gen", false,
+     "The models a generative clip can be made with: each with its title, whether its files are installed, whether an engine here "
+     "runs it, the optional inputs it accepts and the clip lengths it makes.",
+     "", &Impl::gen_models},
+    {"gen.create_clip", "gen", true,
+     "Add a generative clip: a prompt and a model. It goes at the end of the picture track (or at: a time), uses the project's "
+     "built-in Shot workflow for that model, and is not generated yet: run gen.run. start_from: \"previous\" (or a clip ID) makes "
+     "it start on the last frame of that clip. Size defaults to the canvas's shape at about 0.9 megapixels on the model's grid.",
+     R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},
+       "prompt":{"type":"string"},"model":{"type":"string","description":"An id from gen.models"},"seconds":{"type":"number"},
+       "width":{"type":"integer"},"height":{"type":"integer"},"seed":{"type":"integer"},"name":{"type":"string"},
+       "start_from":{"type":"string","description":"\"previous\" or a generative clip's ID"},"at":{"type":"string"},
+       "track":{"type":"string"},"sequence":{"type":"string"}},"required":["project","prompt","model"]})",
+     &Impl::gen_create_clip},
     {"gen.select_take", "gen", true,
      "Choose which Take of a generative clip plays. The clip's inputs go back to what made that Take; clips that start from it become dirty.",
      R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},

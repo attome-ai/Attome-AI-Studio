@@ -175,6 +175,15 @@ const ModelDecl *find_model(std::string_view id) {
   return it == r.models.end() ? nullptr : it->second.get();
 }
 
+std::vector<std::string> model_ids() {
+  Registry &r = registry();
+  std::lock_guard lock(r.mutex);
+  std::vector<std::string> out;
+  for (const auto &[id, model] : r.models)
+    out.push_back(id);
+  return out;
+}
+
 void clear_models() {
   Registry &r = registry();
   std::lock_guard lock(r.mutex);
