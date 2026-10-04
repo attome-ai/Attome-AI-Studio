@@ -1,6 +1,8 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <atomic>
+#include <mutex>
 #include <filesystem>
 
 #include "atm/api/gen_comfy.hpp"
@@ -18,6 +20,16 @@ struct FakeComfy final : atm::net::Transport {
   json graph;
   int history_calls = 0;
   bool refuse_models = false, fail_run = false;
+  // What a real ComfyUI says while it runs; then the socket closes.
+  atm::Result<void> listen(const std::string &url, const std::function<bool(std::string_view)> &on_text, const std::atomic<bool> *) override {
+    listened = url.substr(url.find('/', 8));
+    for (const char *message : {R"({"type":"status","data":{"status":{}}})", R"({"type":"executing","data":{"node":"unet"}})",
+                                R"({"type":"executing","data":{"node":"sample"}})", R"({"type":"progress","data":{"node":"sample","value":3,"max":8}})",
+                                R"({"type":"executing","data":{"node":"dec"}})"})
+      on_text(message);
+    return {};
+  }
+  std::string listened;
   atm::Result<atm::net::Response> get(const atm::net::Request &request, const atm::net::OnResponse &on_response, const atm::net::Sink &sink) override {
     urls.push_back(request.url.substr(request.url.find('/', 8)));
     const std::string &path = urls.back();
@@ -81,8 +93,20 @@ TEST_CASE("comfyui: one generate_video step becomes one ComfyUI graph, and its v
   request.settings = {{"steps", 8}, {"attention", "int8"}};
   request.inputs = {{"prompt", "A robot walks"}, {"seed", 7}, {"seconds", 5}, {"width", 1280}, {"height", 704}, {"start_image", (dir / "start.jpg").string()}};
   request.outputs = {{"video", (dir / "video.mp4").string()}, {"last_frame", (dir / "last_frame.jpg").string()}};
+  std::mutex said_mutex;
+  std::vector<std::string> said;
+  request.progress = [&](std::string_view phase, int at, int of) {
+    std::lock_guard lock(said_mutex);
+    said.push_back(std::string(phase) + (of > 0 ? " " + std::to_string(at) + "/" + std::to_string(of) : ""));
+  };
   REQUIRE(comfy.run(request));
   CHECK(*atm::storage::read_file(dir / "video.mp4") == "NOT REALLY A VIDEO");
+  // What was heard on the WebSocket became progress: the node that runs, and the sampler's step.
+  CHECK(server->listened == "/ws?clientId=run_1");
+  CHECK(std::find(said.begin(), said.end(), "loading the model") != said.end());
+  CHECK(std::find(said.begin(), said.end(), "sampling 3/8") != said.end());
+  CHECK(std::find(said.begin(), said.end(), "decoding") != said.end());
+  request.progress = nullptr;
   CHECK(server->history_calls == 2);
   // The graph: the catalog's file names, the Turbo add-on, INT8 attention, the model's frame grid, the start picture.
   const json &g = server->graph;

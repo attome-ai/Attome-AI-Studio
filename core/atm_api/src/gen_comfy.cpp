@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
+#include <atomic>
 #include <fstream>
 #include <thread>
 #include <vector>
@@ -204,6 +205,45 @@ Result<gen::StepResult> ComfyProvider::run(const gen::StepRequest &r) {
   ATM_TRY(std::string first, upload("start_image"));
   ATM_TRY(std::string last, upload("end_image"));
 
+  // ComfyUI tells the client that queued a prompt which node runs and how far the sampler is, over its WebSocket.
+  // It is listened to beside the run; without it the run still works, with no step shown.
+  std::atomic<bool> stop_listening{false}, heard{false};
+  struct Listener {
+    std::thread thread;
+    std::atomic<bool> &stop;
+    ~Listener() {
+      stop.store(true);
+      if (thread.joinable())
+        thread.join();
+    }
+  } listener{std::thread([&] {
+               (void)transport_->listen(
+                   address_ + "/ws?clientId=" + url_encode(r.run_id),
+                   [&](std::string_view text) {
+                     const json m = json::parse(text, nullptr, false);
+                     if (!m.is_object() || !r.progress)
+                       return true;
+                     const std::string type = m.value("type", std::string());
+                     const json data = m.value("data", json::object());
+                     const std::string node = data.is_object() && data.contains("node") && data["node"].is_string() ? data["node"].get<std::string>() : "";
+                     if (type == "progress" && node == "sample") {
+                       heard.store(true);
+                       r.progress("sampling", data.value("value", 0), data.value("max", 0));
+                     } else if (type == "executing" && !node.empty()) {
+                       heard.store(true);
+                       const char *phase = node == "sample"                                        ? "sampling"
+                                           : node == "dec" || node == "adec"                       ? "decoding"
+                                           : node == "video" || node == "save"                     ? "saving"
+                                           : node == "cond"                                        ? "encoding the prompt"
+                                                                                                   : "loading the model";
+                       r.progress(phase, 0, 0);
+                     }
+                     return true;
+                   },
+                   &stop_listening);
+             }),
+             stop_listening};
+
   const std::string prefix = "attome/" + r.run_id;
   const json request = {{"prompt", h3_graph(r, first, last, prefix)}, {"client_id", r.run_id}};
   const auto queued = net::fetch(*transport_, address_ + "/prompt", request.dump());
@@ -219,8 +259,8 @@ Result<gen::StepResult> ComfyProvider::run(const gen::StepRequest &r) {
     return engine_error("E_INTERNAL", "ComfyUI refused the request (status " + std::to_string(queued->status) + "): " + text);
   }
   const std::string id = answer["prompt_id"].get<std::string>();
-  if (r.progress)
-    r.progress("running in ComfyUI", 0, 0); // it is polled, not followed: the step it is at is not known
+  if (r.progress && !heard.load())
+    r.progress("running in ComfyUI", 0, 0); // nothing heard on the WebSocket (yet): the step it is at is not known
 
   json outputs;
   for (;;) {

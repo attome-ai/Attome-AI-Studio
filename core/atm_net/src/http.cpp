@@ -1,6 +1,8 @@
 #include "atm/net/http.hpp"
 
+#include <chrono>
 #include <cstdlib>
+#include <thread>
 #include <vector>
 
 #include "atm/base/profiler.hpp"
@@ -134,6 +136,70 @@ public:
         break;
     }
     return response;
+  }
+
+  Result<void> listen(const std::string &address, const std::function<bool(std::string_view text)> &on_text,
+                      const std::atomic<bool> *stop) override {
+    const std::wstring url = widen(address);
+    URL_COMPONENTS parts{};
+    parts.dwStructSize = sizeof parts;
+    wchar_t host[256], path[4096];
+    parts.lpszHostName = host;
+    parts.dwHostNameLength = 256;
+    parts.lpszUrlPath = path;
+    parts.dwUrlPathLength = 4096;
+    if (!WinHttpCrackUrl(url.c_str(), DWORD(url.size()), 0, &parts))
+      return fail(ErrorCode::InvalidArgument, "N_URL", "\"" + address + "\" is not a web address.");
+    const bool https = parts.nScheme == INTERNET_SCHEME_HTTPS;
+    const std::wstring name(host, parts.dwHostNameLength);
+    const bool local = name == L"127.0.0.1" || name == L"localhost" || name == L"::1" || name == L"[::1]";
+    Handle session(WinHttpOpen(L"Attome/0.1", local ? WINHTTP_ACCESS_TYPE_NO_PROXY : WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+                               WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0));
+    if (!session)
+      return net_error("start the HTTP client", address);
+    Handle connection(WinHttpConnect(session.h, host, parts.nPort, 0));
+    if (!connection)
+      return net_error("connect", address);
+    Handle req(WinHttpOpenRequest(connection.h, L"GET", path, nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
+                                  https ? WINHTTP_FLAG_SECURE : 0));
+    if (!req || !WinHttpSetOption(req.h, WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET, nullptr, 0) ||
+        !WinHttpSendRequest(req.h, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
+        !WinHttpReceiveResponse(req.h, nullptr))
+      return net_error("open the WebSocket", address);
+    const HINTERNET socket = WinHttpWebSocketCompleteUpgrade(req.h, 0);
+    if (!socket)
+      return net_error("open the WebSocket", address);
+    // A read blocks until a message comes. To stop while none does, a watcher closes the socket, which ends the read.
+    std::atomic<bool> finished{false}, closed{false};
+    std::thread watcher([&] {
+      while (!finished.load() && !(stop && stop->load()))
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      if (!finished.load() && !closed.exchange(true))
+        WinHttpCloseHandle(socket);
+    });
+    std::string message;
+    std::vector<char> buffer(1 << 16);
+    for (;;) {
+      DWORD got = 0;
+      WINHTTP_WEB_SOCKET_BUFFER_TYPE type{};
+      if (WinHttpWebSocketReceive(socket, buffer.data(), DWORD(buffer.size()), &got, &type) != ERROR_SUCCESS ||
+          type == WINHTTP_WEB_SOCKET_CLOSE_BUFFER_TYPE)
+        break; // closed by the server, by the watcher, or lost
+      if (type == WINHTTP_WEB_SOCKET_BINARY_MESSAGE_BUFFER_TYPE || type == WINHTTP_WEB_SOCKET_BINARY_FRAGMENT_BUFFER_TYPE)
+        continue; // previews: not wanted
+      message.append(buffer.data(), got);
+      if (type != WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE)
+        continue; // a fragment: the rest follows
+      const bool more = !on_text || on_text(message);
+      message.clear();
+      if (!more)
+        break;
+    }
+    finished.store(true);
+    watcher.join();
+    if (!closed.exchange(true))
+      WinHttpCloseHandle(socket);
+    return {};
   }
 };
 
