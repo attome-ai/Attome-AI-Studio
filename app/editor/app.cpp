@@ -723,8 +723,19 @@ void App::commit_drag(const TrackUi &track, const ClipUi &c, int mode, int64_t d
   json ops = json::array();
   const char *label = "Move clip";
   if (mode == 1) {
-    const int64_t start = std::max<int64_t>(0, c.start + d);
     const TrackUi &to = tracks_[size_t(std::clamp(target_track, 0, int(tracks_.size()) - 1))];
+    // Dropped on top of another clip of the track: it goes to the nearest free space on the right, after that clip,
+    // instead of the move being refused and the clip springing back.
+    int64_t start = std::max<int64_t>(0, c.start + d);
+    for (bool moved = true; moved;) {
+      moved = false;
+      for (const ClipUi &o : to.clips)
+        if (o.id != c.id && o.start < start + c.frames && start < o.start + o.frames) {
+          start = o.start + o.frames;
+          moved = true;
+        }
+    }
+    d = start - c.start; // linked clips follow by the same distance
     if (to.id != track.id)
       ops.push_back({{"op", "move"}, {"path", c.id}, {"to", to.id + "/clips"}});
     if (start != c.start)
@@ -1807,7 +1818,28 @@ void App::draw_effects_panel() {
   }
 }
 
-// The Generate panel: a prompt, a model and a length become a generative clip at the end of the picture track.
+// Makes a generative clip with `model`: at `at` frames on `track` when given (a card dropped on the timeline), else at the
+// end of the picture track. Its prompt is written afterwards, in the Inspector.
+void App::add_generative_clip(const std::string &model, const std::string &track, int64_t at) {
+  json params = {{"project", project_path_}, {"prompt", std::string()}, {"model", model},
+                 {"seconds", std::round(gen_seconds_ * 2.0f) / 2.0f}};
+  if (!track.empty())
+    params["track"] = track;
+  if (at >= 0)
+    params["at"] = frames_text(at);
+  if (gen_chain_ && track.empty())
+    params["start_from"] = "previous";
+  json made;
+  if (!rpc("gen.create_clip", params, made))
+    return;
+  say("Add generative clip");
+  refresh();
+  selected_clip_ = made.value("clip", "");
+  insp_rev_ = 0;
+}
+
+// The Generate panel: one card per model, grouped by the kind of clip it makes (video, image, ...) and, within a kind, by
+// family (SD 1.5, SDXL, ...). A card is dragged onto the timeline, or clicked to add its clip at the end.
 void App::draw_generate_panel() {
   if (!gen_models_loaded_ || clock_ >= next_gen_models_poll_) { // which models can run changes with downloads and engines
     gen_models_loaded_ = true;
@@ -1815,54 +1847,79 @@ void App::draw_generate_panel() {
     json listed;
     if (rpc("gen.models", json::object(), listed))
       gen_models_ = listed.value("models", json::array());
-    if (gen_model_.empty())
-      for (const json &m : gen_models_)
-        if (gen_model_.empty() || (m.value("ready", false) && !gen_model_ready_)) {
-          gen_model_ = m.value("id", "");
-          gen_model_ready_ = m.value("ready", false);
-        }
   }
-  json model = json::object();
-  for (const json &m : gen_models_)
-    if (m.value("id", "") == gen_model_)
-      model = m;
   ImGui::PushFont(g_fonts.bold, 15.0f);
   ImGui::TextUnformatted("Generate");
   ImGui::PopFont();
   ImGui::Spacing();
   ImGui::PushTextWrapPos(0.0f);
-  ImGui::TextColored(hexv(look::fg3), "Describe a shot. It is added to the timeline as a clip you can generate, redo and chain.");
+  ImGui::TextColored(hexv(look::fg3), "Drag a clip type onto the timeline, then write its prompt in the Inspector. A clip you can "
+                                      "generate, redo and chain.");
   ImGui::PopTextWrapPos();
   ImGui::Spacing();
-  section_label("MODEL");
-  ImGui::PushStyleColor(ImGuiCol_FrameBg, hexv(look::raised));
-  ImGui::SetNextItemWidth(-1.0f);
-  if (ImGui::BeginCombo("##genmodel", model.value("title", gen_model_.empty() ? std::string("No model") : gen_model_).c_str())) {
+  const auto type_title = [](const std::string &t) {
+    return t == "video" ? std::string("VIDEO") : t == "image" ? std::string("IMAGE") : t == "audio" ? std::string("AUDIO") : t;
+  };
+  std::vector<std::string> types;
+  for (const json &m : gen_models_)
+    if (const std::string t = m.value("clip_type", "video"); std::find(types.begin(), types.end(), t) == types.end())
+      types.push_back(t);
+  for (const std::string &type : types) {
+    section_label(type_title(type).c_str());
+    ImGui::Spacing();
+    std::string family = "";
     for (const json &m : gen_models_) {
+      if (m.value("clip_type", "video") != type)
+        continue;
+      if (const std::string f = m.value("family", ""); f != family) {
+        family = f;
+        if (!f.empty())
+          section_label(f.c_str());
+      }
       const std::string id = m.value("id", "");
-      if (ImGui::Selectable((m.value("title", id) + "##" + id).c_str(), id == gen_model_))
-        gen_model_ = id;
+      const bool ready = m.value("ready", false);
+      const ImVec2 p = ImGui::GetCursorScreenPos();
+      ImGui::InvisibleButton(("##genmodel_" + id).c_str(), ImVec2(-1.0f, 96.0f));
       ui_mark("model:" + id);
+      const bool hovered = ImGui::IsItemHovered();
+      static bool dragged = false; // a press that became a drag is not a click
+      if (ImGui::IsItemActivated())
+        dragged = false;
+      if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
+        dragged = true;
+        ImGui::SetDragDropPayload("ATM_GEN_MODEL", id.c_str(), id.size() + 1);
+        ImGui::TextUnformatted(m.value("title", id).c_str());
+        ImGui::EndDragDropSource();
+      }
+      if (ImGui::IsItemDeactivated() && hovered && !dragged)
+        pending_ = [this, id] { add_generative_clip(id); };
+      const ImVec2 q(p.x + ImGui::GetItemRectSize().x, p.y + 96.0f);
+      const ImVec2 c((p.x + q.x) * 0.5f, p.y + 34.0f);
+      ImDrawList *dl = ImGui::GetWindowDrawList();
+      dl->AddRectFilled(p, q, hex(hovered ? look::panel2 : look::bg), 12.0f);
+      dl->AddRect(p, q, hex(hovered ? look::accent : look::line), 12.0f, 0, 1.2f);
+      if (type == "video") { // a frame with a play triangle
+        dl->AddRect(ImVec2(c.x - 30.0f, c.y - 20.0f), ImVec2(c.x + 30.0f, c.y + 20.0f), hex(look::gen), 6.0f, 0, 2.2f);
+        dl->AddTriangleFilled(ImVec2(c.x - 7.0f, c.y - 10.0f), ImVec2(c.x - 7.0f, c.y + 10.0f), ImVec2(c.x + 11.0f, c.y), hex(look::gen));
+      } else { // a picture: frame, sun and hills
+        dl->AddRect(ImVec2(c.x - 30.0f, c.y - 20.0f), ImVec2(c.x + 30.0f, c.y + 20.0f), hex(look::gen), 6.0f, 0, 2.2f);
+        dl->AddCircleFilled(ImVec2(c.x + 14.0f, c.y - 8.0f), 5.0f, hex(look::gen));
+        dl->AddTriangleFilled(ImVec2(c.x - 24.0f, c.y + 16.0f), ImVec2(c.x - 8.0f, c.y - 4.0f), ImVec2(c.x + 6.0f, c.y + 16.0f), hex(look::gen));
+      }
+      dl->PushClipRect(ImVec2(p.x + 8.0f, p.y), ImVec2(q.x - 8.0f, q.y), true);
+      dl->AddText(ImVec2(p.x + 12.0f, q.y - 40.0f), hex(look::fg2), m.value("title", id).c_str());
+      const char *note = !m.value("installed", false) ? "Not installed. Download it in the Models panel."
+                         : !m.value("engine", false)  ? "Nothing runs it yet. Set ComfyUI in the Models panel."
+                                                      : "Ready";
+      dl->AddText(ImVec2(p.x + 12.0f, q.y - 22.0f), ready ? hex(look::fg3) : ImGui::ColorConvertFloat4ToU32(kError), note);
+      dl->PopClipRect();
+      ImGui::Dummy(ImVec2(0.0f, 4.0f));
     }
-    ImGui::EndCombo();
   }
-  ui_mark("combo:gen_model");
-  ImGui::PushTextWrapPos(0.0f);
-  if (!model.empty() && !model.value("installed", false))
-    ImGui::TextColored(kError, "Not installed. Download it in the Models panel.");
-  else if (!model.empty() && !model.value("engine", false))
-    ImGui::TextColored(kError, "Nothing here runs it yet. Set your ComfyUI address in the Models panel.");
-  if (!model.empty() && !model.value("ready", false))
-    ui_mark("note:gen_model");
-  ImGui::PopTextWrapPos();
   ImGui::Spacing();
-  section_label("PROMPT");
-  ImGui::InputTextMultiline("##genprompt", gen_prompt_buf_, sizeof gen_prompt_buf_, ImVec2(-1.0f, 130.0f));
-  ui_mark("field:gen_prompt");
-  ImGui::PopStyleColor();
+  section_label("NEW CLIP");
   ImGui::Spacing();
-  const json range = model.value("seconds", json::object());
-  const float lo = std::max(1.0f, range.value("min", 1.0f)), hi = range.value("max", 0.0f) > 0.0f ? range.value("max", 15.0f) : 15.0f;
+  float lo = 1.0f, hi = 15.0f; // the length a new clip starts with, within what every video model can do
   gen_seconds_ = std::clamp(gen_seconds_, lo, hi);
   ImGui::TextColored(hexv(look::fg2), "Length");
   ImGui::SameLine(88.0f);
@@ -1871,35 +1928,8 @@ void App::draw_generate_panel() {
   ImGui::PushFont(g_fonts.mono, 13.0f);
   ImGui::TextColored(hexv(look::fg2), "%4.1fs", gen_seconds_);
   ImGui::PopFont();
-  bool can_chain = false; // the model takes a start picture
-  for (const json &a : model.value("accepts", json::array()))
-    can_chain = can_chain || a == "start_image";
-  ImGui::BeginDisabled(!can_chain);
   ImGui::Checkbox("Start from the clip before", &gen_chain_);
   ui_mark("check:gen_chain");
-  ImGui::EndDisabled();
-  ImGui::Spacing();
-  const bool has_prompt = gen_prompt_buf_[0] != '\0' && !gen_model_.empty();
-  const auto add = [this](bool run) {
-    json made;
-    json params = {{"project", project_path_}, {"prompt", std::string(gen_prompt_buf_)}, {"model", gen_model_},
-                   {"seconds", std::round(gen_seconds_ * 2.0f) / 2.0f}};
-    if (gen_chain_)
-      params["start_from"] = "previous";
-    if (!rpc("gen.create_clip", params, made))
-      return;
-    say("Add generative clip");
-    refresh();
-    selected_clip_ = made.value("clip", "");
-    gen_prompt_buf_[0] = '\0';
-    if (run && !selected_clip_.empty())
-      start_generation({{"clips", json::array({selected_clip_})}});
-  };
-  if (soft_button("gen_add", "Add to timeline", ImVec2(0.0f, 32.0f), has_prompt))
-    pending_ = [add] { add(false); };
-  ImGui::SameLine();
-  if (soft_button("gen_add_run", "Add and generate", ImVec2(0.0f, 32.0f), has_prompt && model.value("ready", false), true))
-    pending_ = [add] { add(true); };
 }
 
 // The clips whose workflow cannot run on this computer, and why. Asked again when the project changes and while a
@@ -2916,6 +2946,15 @@ void App::draw_timeline() {
     if (ImGui::InvisibleButton(("##row" + track.id).c_str(), ImVec2(content_w - header_w, row_h))) {
       selected_track_ = track.id;
       selected_clip_.clear();
+    }
+    if (ImGui::BeginDragDropTarget()) { // a model card from the Generate panel
+      if (const ImGuiPayload *drop = ImGui::AcceptDragDropPayload("ATM_GEN_MODEL")) {
+        const std::string model = static_cast<const char *>(drop->Data);
+        const int64_t at = std::max<int64_t>(0, std::llround((mouse.x - origin.x - header_w) / pps_ * rate));
+        const std::string target = track.kind == "audio" ? std::string() : track.id; // sound tracks cannot hold a picture
+        pending_ = [this, model, target, at] { add_generative_clip(model, target, at); };
+      }
+      ImGui::EndDragDropTarget();
     }
     const ClipUi *sel_clip = selected();
     const std::string sel_link = sel_clip ? sel_clip->link_group : std::string();

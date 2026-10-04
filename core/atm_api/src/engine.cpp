@@ -1674,7 +1674,10 @@ struct Engine::Impl {
       const models::CatalogEntry *entry = models::find_entry(models::builtin_catalog(), id);
       const bool installed = !decl->needs_files || model_installed(id);
       const bool engine = provider_for(providers, id, "generate_video") != nullptr;
-      list.push_back({{"id", id}, {"title", entry ? entry->title : id}, {"installed", installed}, {"engine", engine},
+      // The kind of clip the model makes (the Generate panel groups by it) and, within it, the model family
+      // (SD 1.5, SDXL, ...). Only video models exist so far; image models will say theirs.
+      list.push_back({{"id", id}, {"title", entry ? entry->title : id}, {"clip_type", "video"}, {"family", ""},
+                      {"installed", installed}, {"engine", engine},
                       {"ready", installed && engine}, {"accepts", decl->accepts},
                       {"seconds", {{"min", decl->seconds_min}, {"max", decl->seconds_max}}}});
     }

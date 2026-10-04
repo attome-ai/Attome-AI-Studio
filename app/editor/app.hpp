@@ -117,6 +117,7 @@ private:
   void import_files(const std::vector<std::string> &paths);
   void add_track();
   void add_title(int preset);
+  void add_generative_clip(const std::string &model, const std::string &track = {}, int64_t at = -1);
   void add_adjustment(const eval::EffectDef &def, const std::string &file = {});
   void draw_effects_panel();
   void draw_effect_card(const ClipUi &clip, const eval::EffectDef &def, bool show_amount);
@@ -274,10 +275,8 @@ private:
   char comfy_buf_[256] = {};
   // the Generate panel: what a new generative clip is made from
   json gen_models_ = json::array();
-  std::string gen_model_;
-  bool gen_models_loaded_ = false, gen_model_ready_ = false, gen_chain_ = false;
+  bool gen_models_loaded_ = false, gen_chain_ = false;
   double next_gen_models_poll_ = 0.0;
-  char gen_prompt_buf_[2048] = {};
   float gen_seconds_ = 5.0f;
   json comfy_status_ = json::object();
   bool engines_loaded_ = false;
