@@ -834,13 +834,18 @@ void key_nv12(uint8_t *nv12, uint8_t *cover, int W, int H, float hue, float simi
         // Saturated enough to have a hue: a tenth of the key's saturation and up, fading in over another tenth, and not
         // so dark that the chroma is noise.
         const float sat = len / std::max(y, 0.05f);
-        // A pixel is only taken for screen when it is bright enough and coloured enough for its hue to mean something. Near
-        // black the faint tint that video compression leaves in blocks has a hue like any other (found on real footage: a
-        // black jacket in front of a green screen came out with holes); the real screen was never darker than 0.58 or
-        // less coloured than 0.4, the tint of those pixels at most 0.05. The luma threshold follows the key colour's own
-        // brightness, so a blue screen (dark by nature) is not shut out.
-        const float gate = smooth01((sat / key_sat - 0.1f) / 0.1f) * smooth01((y - 0.12f * yk) / (0.12f * yk)) *
-                           smooth01((len / key_len - 0.12f) / 0.12f);
+        // A pixel is only taken for screen when its hue means something. Near black the faint tint that video compression
+        // leaves in blocks has a hue like any other (found on real footage: a black jacket in front of a green screen came
+        // out with holes; the real screen was never darker than luma 0.58, the tint of those pixels at most 0.05 chroma).
+        // A dark pixel therefore counts only if it is clearly coloured: that is what tells a screen in shadow (a blue one
+        // at a quarter of the light: luma 0.05, chroma 0.06 of a key colour whose own chroma is 0.43) from a black jacket
+        // of the same luma (chroma 0.006 typically, at most 0.05). A bright pixel needs no such proof. The brightness
+        // threshold follows the key colour's own brightness, so a blue screen (dark by nature) is not shut out. Below all
+        // of it, a floor: no chroma at all is no hue.
+        const float bright = smooth01((y - 0.12f * yk) / (0.12f * yk));
+        const float coloured = smooth01((len / key_len - 0.08f) / 0.06f);
+        const float gate = smooth01((sat / key_sat - 0.1f) / 0.1f) * std::max(bright, coloured) *
+                           smooth01((len / key_len - 0.05f) / 0.07f);
         const float key = (1.0f - smooth01((ang - a0) / (a1 - a0))) * gate; // 1: fully the key colour
         matte[size_t(cy) * size_t(CW) + size_t(cx)] = uint8_t(std::lround((1.0f - key) * 255.0f));
         // Despill what stays: take the part of the chroma that points at the key colour away, near the key's hue.

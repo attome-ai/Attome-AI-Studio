@@ -196,7 +196,7 @@ void bench_effects() {
     l.text_size = 0.5f;
     atm::render::Effect e;
     e.kind = "chroma_key";
-    e.v[0] = 120.0f, e.v[1] = 0.35f, e.v[2] = 0.15f, e.v[3] = 1.0f;
+    e.v[0] = 120.0f, e.v[1] = 0.25f, e.v[2] = 0.15f, e.v[3] = 1.0f;
     l.effects.push_back(e);
     comp.layers.push_back(std::move(l));
     atm::render::Composition no_detail = comp;

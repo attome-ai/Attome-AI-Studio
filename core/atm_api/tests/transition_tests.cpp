@@ -939,7 +939,7 @@ TEST_CASE("effects: a chroma key is for clips with a picture; ranges are checked
   const json &k = *a["effects"].begin();
   CHECK(k["effect"] == "attome.chroma_key@1.0.0");
   CHECK(k["params"]["hue"] == 240.0);
-  CHECK(k["params"]["similarity"] == 0.35);
+  CHECK(k["params"]["similarity"] == 0.25);
   CHECK(k["params"]["detail"] == 1.0); // the fourth parameter takes its default
   const std::string id = a["effects"].begin().key();
   auto bad = g.engine.call("timeline.edit", {{"project", g.project},

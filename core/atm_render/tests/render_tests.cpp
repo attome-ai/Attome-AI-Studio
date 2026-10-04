@@ -2330,3 +2330,74 @@ TEST_CASE("render: a slide brings the incoming clip over the outgoing one, which
   std::error_code ec;
   fs::remove_all(dir, ec);
 }
+
+TEST_CASE("render: a blue screen is removed in the light and in deep shadow alike", "[media]") {
+  const fs::path dir = fs::temp_directory_path() / atm::new_id("attome-blueshadow");
+  fs::create_directories(dir);
+  constexpr int W = 640, H = 360;
+  constexpr double cx = 400, cy = 180, radius = 90;
+  // A blue cloth (22, 68, 205) with a soft fall-off, a band of heavy shadow over the left third (25 % of the light: a dark blue
+  // with little chroma) and a subject whose edge is soft, then grain and low-bitrate H.264.
+  const std::string clip = write_synth(dir, "blue.mp4", W, H, 4.0, [&](int px, int py, double *c) {
+    const double x = px + 0.5, y = py + 0.5;
+    const double a = std::clamp(0.5 - (std::hypot(x - cx, y - cy) - radius) / 3.0, 0.0, 1.0);
+    const double light = (0.8 + 0.2 * x / W) * (x < W / 3.0 ? 0.25 : 1.0);
+    const double screen[3] = {22.0 * light, 68.0 * light, 205.0 * light}, skin[3] = {224, 172, 140};
+    for (int k = 0; k < 3; ++k)
+      c[k] = skin[k] * a + screen[k] * (1.0 - a);
+  });
+  const std::string below = (dir / "magenta.mp4").string();
+  write_solid(below, 0xFF00FF, 440.0, 2);
+  const auto render = [&](bool keyed, bool with_clip = true) {
+    json top = {{"timing", {{"record_in", "0"}, {"duration", "1"}, {"source_in", "0"}}}, {"media_ref", {{"type", "file"}, {"path", clip}}}};
+    if (keyed)
+      top["effects"] = {{"fx_1", {{"effect", "attome.chroma_key@1.0.0"}, {"enabled", true},
+                                  {"params", {{"hue", 223.0}, {"similarity", 0.35}, {"smoothness", 0.15}, {"detail", 1.0}}}}}};
+    const json doc = {
+        {"sequences",
+         {{"seq_1",
+           {{"rate", "30"},
+            {"canvas", {{"width", W}, {"height", H}}},
+            {"track_order", {"trk_below", "trk_top"}},
+            {"tracks",
+             {{"trk_below", {{"clips", {{"clp_b", {{"timing", {{"record_in", "0"}, {"duration", "1"}, {"source_in", "0"}}},
+                                                   {"media_ref", {{"type", "file"}, {"path", below}}}}}}}}},
+              {"trk_top", {{"clips", with_clip ? json{{"clp_t", top}} : json::object()}}}}}}}}},
+        {"sequence_order", {"seq_1"}}};
+    auto comp = atm::render::compile(doc);
+    REQUIRE(comp);
+    atm::render::Renderer renderer(*comp, W, H);
+    std::vector<uint8_t> nv12(media::nv12_size(W, H)), rgb(size_t(W) * H * 4);
+    REQUIRE(renderer.render(3, nv12.data()));
+    media::nv12_to_bgrx(nv12.data(), W, H, rgb.data());
+    return rgb;
+  };
+  const auto keyed = render(true), backdrop = render(false, false); // the backdrop alone: magenta, with black side bars
+  const auto at = [&](int x, int y) { return keyed.data() + (size_t(y) * W + size_t(x)) * 4; };
+  const auto is_magenta = [&](int x, int y) { // as the backdrop alone shows this pixel
+    const uint8_t *p = at(x, y), *q = backdrop.data() + (size_t(y) * W + size_t(x)) * 4;
+    return std::abs(int(p[0]) - int(q[0])) + std::abs(int(p[1]) - int(q[1])) + std::abs(int(p[2]) - int(q[2])) < 45;
+  };
+  int lit_n = 0, lit_bad = 0, shadow_n = 0, shadow_bad = 0, subject_n = 0, subject_bad = 0;
+  for (int y = 0; y < H; ++y)
+    for (int x = 0; x < W; ++x) {
+      const double d = std::hypot(x + 0.5 - cx, y + 0.5 - cy) - radius;
+      if (d > 10 && x > W / 3 + 12) {
+        ++lit_n;
+        lit_bad += !is_magenta(x, y);
+      } else if (d > 10 && x < W / 3 - 12) {
+        ++shadow_n;
+        shadow_bad += !is_magenta(x, y);
+      } else if (d < -10) {
+        ++subject_n;
+        subject_bad += is_magenta(x, y);
+      }
+    }
+  WARN("screen left: lit " << 100.0 * lit_bad / lit_n << " %, deep shadow " << 100.0 * shadow_bad / shadow_n << " %; holes in the subject "
+                           << 100.0 * subject_bad / subject_n << " %");
+  CHECK(double(lit_bad) / lit_n < 0.002);
+  CHECK(double(shadow_bad) / shadow_n < 0.002); // most of the shadow stayed with a chroma floor of 0.12 to 0.24 of the key colour's own chroma
+  CHECK(double(subject_bad) / subject_n < 0.002);
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}
