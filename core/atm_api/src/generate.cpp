@@ -205,7 +205,8 @@ std::vector<GenOutcome> run_generation(const GenRun &run, const GenProgress &pro
       const gen::Made made = gen::output_key(run.workflows, clip.workflow, clip.inputs, port.name, run.context);
       const fs::path file = step_dir(run.dir, made.key) / gen::output_file(made.port);
       if (!made.key.empty() && storage::exists(file))
-        outputs[port.name] = {{"key", made.key}, {"port", made.port}, {"path", to_utf8(file)}};
+        outputs[port.name] = {{"key", made.key}, {"port", made.port},
+                              {"path", to_utf8(run.project.empty() ? file : file.lexically_relative(run.project))}};
     }
     out.take = {{"key", clip.key}, {"made", utc_now_iso8601()}, {"inputs", clip.written}, {"outputs", std::move(outputs)}};
     finish("done");

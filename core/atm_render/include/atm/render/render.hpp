@@ -123,7 +123,9 @@ struct Composition {
 };
 
 // Reads a Sequence of a Project Document (the first one when `sequence_id` is empty).
-Result<Composition> compile(const nlohmann::json &project, std::string_view sequence_id = {});
+// `project_dir` is the project folder: the files of generated Takes are recorded relative to it, so a project can be
+// moved. Without it such a path is used as it is.
+Result<Composition> compile(const nlohmann::json &project, std::string_view sequence_id = {}, const std::string &project_dir = {});
 
 class Renderer {
 public:

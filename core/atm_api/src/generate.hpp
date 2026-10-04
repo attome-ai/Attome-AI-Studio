@@ -29,6 +29,7 @@ struct GenRun {
   nlohmann::json workflows;
   std::vector<GenClip> clips; // in run order
   std::filesystem::path dir;  // the cache folder
+  std::filesystem::path project; // the project folder: a Take records its files relative to it
   std::vector<std::shared_ptr<gen::Provider>> providers;
   gen::KeyContext context;
 };

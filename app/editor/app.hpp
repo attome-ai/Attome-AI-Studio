@@ -64,6 +64,9 @@ struct ClipUi {
   std::string workflow;                     // the workflow's ID
   std::string prompt;                       // its "prompt" input, when it has one as plain text
   bool has_prompt = false;
+  std::vector<std::string> takes;           // its Takes, oldest first (media_ref.take_order)
+  std::string selected_take;
+  bool locked = false;                      // the selected Take is pinned: the clip is never regenerated
   std::string link_group, stream;           // linked picture and sound clips share a group; stream "video" / "audio"
   std::vector<EffectUi> effects;            // its effects (blur, colour grade, vignette)
   int64_t audio_fade_in = 0, audio_fade_out = 0; // frames

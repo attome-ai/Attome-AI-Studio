@@ -278,6 +278,14 @@ void App::refresh() {
           c.is_adjustment = ref.value("type", "") == "adjustment";
           c.is_generative = ref.value("type", "") == "workflow";
           c.workflow = c.is_generative ? ref.value("workflow", std::string()) : std::string();
+          if (c.is_generative) {
+            for (const json &take : ref.value("take_order", json::array()))
+              if (take.is_string())
+                c.takes.push_back(take.get<std::string>());
+            if (const auto sel = ref.find("selected"); sel != ref.end() && sel->is_string())
+              c.selected_take = sel->get<std::string>();
+            c.locked = ref.value("locked", false);
+          }
           if (const auto inputs = ref.find("inputs"); c.is_generative && inputs != ref.end() && inputs->is_object())
             if (const auto prompt = inputs->find("prompt"); prompt != inputs->end() && prompt->is_string()) {
               c.prompt = prompt->get<std::string>();
@@ -366,7 +374,7 @@ void App::refresh() {
   refresh_gen_status();
 
   // The viewer renders a fitted, smaller picture of the canvas.
-  if (auto comp = render::compile(doc_)) {
+  if (auto comp = render::compile(doc_, {}, project_path_)) {
     const double fit = std::min({1.0, 1280.0 / canvas_w_, 720.0 / canvas_h_});
     audio_mixer_.set_composition(*comp);
     preview_.set_composition(std::move(*comp), int(canvas_w_ * fit), int(canvas_h_ * fit));
@@ -1964,6 +1972,38 @@ void App::draw_generate_card(const ClipUi &c) {
       ImGui::TextColored(hexv(look::fg2), st.value("out_of_step", false) ? "Locked; its inputs have moved on" : "Locked");
     else
       ImGui::TextColored(hexv(look::fg2), "Not generated yet");
+    // The Takes: every version made so far; a click plays that one. Lock pins the one that plays.
+    if (!c.takes.empty() && gen_job_.empty()) {
+      ImGui::TextColored(hexv(look::fg2), "Takes");
+      const float right = ImGui::GetWindowPos().x + ImGui::GetContentRegionMax().x;
+      for (size_t i = 0; i < c.takes.size(); ++i) {
+        const std::string label = std::to_string(i + 1), take = c.takes[i];
+        const bool current = take == c.selected_take;
+        ImGui::SameLine();
+        if (ImGui::GetCursorScreenPos().x + 30.0f > right) // a new row when the card is full
+          ImGui::NewLine();
+        if (soft_button(("take_" + label).c_str(), label.c_str(), ImVec2(30.0f, 26.0f), !c.locked || current, current) && !current)
+          pending_ = [this, id, take] {
+            json unused;
+            if (rpc("gen.select_take", {{"project", project_path_}, {"clip", id}, {"take", take}}, unused)) {
+              say("Select take");
+              refresh();
+            }
+          };
+      }
+      bool locked = c.locked;
+      const bool toggled = ImGui::Checkbox("Lock this take", &locked);
+      ui_mark("check:gen_lock");
+      if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("A locked clip is never generated again, and clips that start from it keep this take.");
+      if (toggled)
+        pending_ = [this, id, locked, had = c.locked] {
+          if (locked)
+            patch(json::array({{{"op", "add"}, {"path", id + "/media_ref/locked"}, {"value", true}}}), "Lock take");
+          else if (had)
+            patch(json::array({{{"op", "remove"}, {"path", id + "/media_ref/locked"}}}), "Unlock take");
+        };
+    }
     if (!gen_job_.empty()) {
       ImGui::PushStyleColor(ImGuiCol_PlotHistogram, hexv(look::accent));
       ImGui::ProgressBar(float(gen_job_state_.value("progress", 0.0)), ImVec2(-1.0f, 6.0f), "");
@@ -2374,7 +2414,7 @@ void App::pick_key_colour(const std::string &fx_id, float u, float v) {
     }
   };
   disable(copy);
-  auto comp = render::compile(copy);
+  auto comp = render::compile(copy, {}, project_path_);
   if (!found || !comp)
     return;
   const double fit = std::min({1.0, 1280.0 / canvas_w_, 720.0 / canvas_h_});

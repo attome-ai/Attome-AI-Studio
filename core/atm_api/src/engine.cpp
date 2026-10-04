@@ -996,7 +996,7 @@ struct Engine::Impl {
   Result<json> render_sequence(const json &params) {
     ATM_TRY(Project *pr, project(params));
     ATM_TRY(const std::string *output, string_param(params, "output"));
-    ATM_TRY(render::Composition comp, render::compile(pr->doc.root(), params.value("sequence", std::string())));
+    ATM_TRY(render::Composition comp, render::compile(pr->doc.root(), params.value("sequence", std::string()), to_utf8(pr->dir)));
     if (comp.frames <= 0)
       return fail(ErrorCode::InvalidArgument, "R_EMPTY", "The sequence has no media clips to render.", {},
                   "Add a clip whose media_ref is {\"type\": \"file\", \"path\": …} first.");
@@ -1058,7 +1058,7 @@ struct Engine::Impl {
   // Shared set-up: the compiled sequence and an emptied output folder. Earlier pictures are removed, so the folder
   // never grows; a client reads the files before its next see.* call.
   Result<std::pair<render::Composition, fs::path>> see_setup(Project &pr, const json &params) {
-    ATM_TRY(render::Composition comp, render::compile(pr.doc.root(), params.value("sequence", std::string())));
+    ATM_TRY(render::Composition comp, render::compile(pr.doc.root(), params.value("sequence", std::string()), to_utf8(pr.dir)));
     if (comp.frames <= 0)
       return fail(ErrorCode::InvalidArgument, "R_EMPTY", "The sequence is empty, so there is nothing to see.", {},
                   "Add clips with project.patch first.");
@@ -1390,12 +1390,12 @@ struct Engine::Impl {
     static const json none = json::object();
     const json &root = pr.doc.root();
     const auto wit = root.find("workflows");
-    options.present = [](const json &take) { // every file the Take recorded is still there
+    options.present = [&pr](const json &take) { // every file the Take recorded is still there
       const auto outputs = take.find("outputs");
       if (outputs == take.end() || !outputs->is_object())
         return false;
       for (const json &o : *outputs)
-        if (!storage::exists(to_path(o.value("path", std::string()))))
+        if (const fs::path file = to_path(o.value("path", std::string())); !storage::exists(file.is_absolute() ? file : pr.dir / file))
           return false;
       return !outputs->empty();
     };
@@ -1550,6 +1550,7 @@ struct Engine::Impl {
     }
     run.workflows = pr->doc.root().value("workflows", json::object());
     run.dir = gen_dir(*pr);
+    run.project = pr->dir;
     run.providers = providers;
     run.context = key_context();
     const StepCount count = count_steps(run);
@@ -1808,7 +1809,9 @@ struct Engine::Impl {
     std::snprintf(length, sizeof length, "%.3fs", seconds);
     // The model's grid rarely gives the canvas's exact size (1264 x 704 for 1280 x 720): the clip is scaled to cover the
     // canvas, losing a sliver at two edges rather than showing a border.
-    const double fill = std::round(std::max(cw / double(width), ch / double(height)) * 10000.0) / 10000.0;
+    // Scale 1 is the picture fitted inside the canvas, so the factor is how much more it takes to cover it.
+    const double across = cw / double(width), down = ch / double(height);
+    const double fill = std::round(std::max(across, down) / std::min(across, down) * 10000.0) / 10000.0;
     ops.push_back({{"op", "add"},
                    {"path", track + "/clips/$new:clip"},
                    {"value",

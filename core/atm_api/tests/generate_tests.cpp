@@ -168,14 +168,16 @@ TEST_CASE("generate: dirty clips run in dependency order, a second run does no w
   CHECK(ref_a["take_order"] == json::array({take_a}));
   const json first = ref_a["takes"][take_a];
   CHECK(first["inputs"]["seed"] == 7);
-  CHECK(fs::file_size(fs::path(first["outputs"]["video"]["path"].get<std::string>())) > 1000);
-  CHECK(fs::exists(fs::path(first["outputs"]["last_frame"]["path"].get<std::string>())));
+  const fs::path video = first["outputs"]["video"]["path"].get<std::string>();
+  CHECK(video.is_relative()); // recorded relative to the project, so the project can be moved
+  CHECK(fs::file_size(fs::path(f.project) / video) > 1000);
+  CHECK(fs::exists(fs::path(f.project) / first["outputs"]["last_frame"]["path"].get<std::string>()));
   CHECK(ok(*f.engine, "project.validate", {{"project", f.project}})["ok"] == true);
 
   // The renderer plays the Takes: two clips of one second at 24 frames per second.
   ok(*f.engine, "project.save", {{"project", f.project}});
   const json saved = json::parse(*atm::storage::read_file(fs::path(f.project) / "project.json"));
-  const auto comp = atm::render::compile(saved);
+  const auto comp = atm::render::compile(saved, {}, f.project);
   REQUIRE(comp);
   CHECK(comp->frames == 48);
 
@@ -242,6 +244,28 @@ TEST_CASE("generate: dirty clips run in dependency order, a second run does no w
   CHECK(f.status_of(f.a)["reason"] == "the files of its Take are gone");
   CHECK(f.wait(f.run())["state"] == "done");
   CHECK(f.states() == "First=clean Second=clean");
+}
+
+TEST_CASE("generate: a project that is moved keeps its Takes", "[gen][generate]") {
+  Film f;
+  REQUIRE(f.wait(f.run())["state"] == "done");
+  ok(*f.engine, "project.save", {{"project", f.project}});
+  f.engine.reset(); // lets go of the project folder
+  const std::string moved = (f.dir / "Elsewhere.attome").string();
+  fs::rename(f.project, moved);
+  f.project = moved;
+  atm::api::EngineConfig cfg;
+  cfg.providers = {f.mock};
+  f.engine = std::make_unique<Engine>(cfg);
+  CHECK(f.states() == "First=clean Second=clean");
+  const json saved = json::parse(*atm::storage::read_file(fs::path(moved) / "project.json"));
+  const auto comp = atm::render::compile(saved, {}, moved);
+  REQUIRE(comp);
+  REQUIRE(comp->frames == 48);
+  REQUIRE_FALSE(comp->layers.empty());
+  CHECK(fs::exists(fs::path(comp->layers[0].path))); // the renderer finds the video in the new place
+  CHECK(f.run()["clips"] == 0);                      // and nothing has to be generated again
+  CHECK(f.mock->samples == 2);
 }
 
 TEST_CASE("generate: a failed clip stops the clips that start from it; a stopped run leaves nothing half-made", "[gen][generate]") {

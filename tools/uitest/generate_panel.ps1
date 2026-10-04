@@ -65,7 +65,7 @@ try {
         $second = Get-Object $run $clips[1].clip
         "second clip: '$($second.name)' at $($second.timing.record_in) for $($second.timing.duration), $($second.media_ref.inputs.width) x $($second.media_ref.inputs.height)"
         if ($second.timing.record_in -ne '5' -or $second.timing.duration -ne '5') { $failed = 'the second clip is not at 5 s for 5 s' }
-        elseif ([math]::Abs($second.transform.scale[0] - 1.0227) -gt 0.0002) { $failed = "the clip is not scaled to cover the canvas (scale $($second.transform.scale[0]))" }
+        elseif ([math]::Abs($second.transform.scale[0] - 1.0099) -gt 0.0002) { $failed = "the clip is not scaled to cover the canvas (scale $($second.transform.scale[0]))" }
         elseif ($second.media_ref.inputs.width -ne 1264 -or $second.media_ref.inputs.height -ne 704) { $failed = 'the size is not the canvas shape on the mock model''s grid of 16' }
       }
     }

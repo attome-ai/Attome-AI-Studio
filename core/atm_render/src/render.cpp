@@ -334,7 +334,7 @@ void draw_text(uint8_t *out, int W, int H, const media::TextBitmap &m, const Pla
 
 } // namespace
 
-Result<Composition> compile(const json &project, std::string_view sequence_id) {
+Result<Composition> compile(const json &project, std::string_view sequence_id, const std::string &project_dir) {
   ATM_PROFILE_SCOPE("render.compile");
   const auto no_sequence = [] {
     return fail(ErrorCode::NotFound, "R_NO_SEQUENCE", "The project has no such sequence.", {},
@@ -407,6 +407,8 @@ Result<Composition> compile(const json &project, std::string_view sequence_id) {
                   take_path = made->value("path", std::string());
           if (take_path.empty())
             continue;
+          if (!project_dir.empty() && !std::filesystem::path(std::u8string(take_path.begin(), take_path.end())).is_absolute())
+            take_path = project_dir + "/" + take_path;
           type = "file";
         }
         if (timing == clip.end() ||
