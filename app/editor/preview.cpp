@@ -39,14 +39,29 @@ void Preview::request(int64_t frame) {
   wake_.notify_all();
 }
 
-void Preview::set_transform(const std::string &clip_id, const render::Transform &xf) {
+void Preview::live(std::function<void(render::Renderer &)> edit) {
   {
     std::lock_guard lock(mutex_);
-    std::erase_if(xf_, [&](const Xf &x) { return x.id == clip_id; });
-    xf_.push_back({clip_id, xf});
+    live_.push_back(std::move(edit));
     dirty_ = true;
   }
   wake_.notify_all();
+}
+
+void Preview::set_transform(const std::string &clip_id, const render::Transform &xf) {
+  live([clip_id, xf](render::Renderer &r) { r.set_transform(clip_id, xf); });
+}
+
+void Preview::set_effect_param(const std::string &effect_id, int param, float value) {
+  live([effect_id, param, value](render::Renderer &r) { r.set_effect_param(effect_id, param, value); });
+}
+
+void Preview::set_opacity(const std::string &clip_id, float opacity) {
+  live([clip_id, opacity](render::Renderer &r) { r.set_opacity(clip_id, opacity); });
+}
+
+void Preview::set_text_style(const std::string &clip_id, float size, uint32_t color) {
+  live([clip_id, size, color](render::Renderer &r) { r.set_text_style(clip_id, size, color); });
 }
 
 std::pair<int, int> Preview::extent(const std::string &clip_id) const {
@@ -83,12 +98,12 @@ void Preview::run() {
       if (new_comp_) {
         renderer = std::make_unique<render::Renderer>(std::move(*new_comp_), new_width_, new_height_);
         new_comp_.reset();
-        xf_.clear(); // a rebuilt composition already holds the saved transforms
+        live_.clear(); // a rebuilt composition already holds the saved values
       }
       if (renderer)
-        for (const Xf &x : xf_)
-          renderer->set_transform(x.id, x.xf);
-      xf_.clear();
+        for (auto &edit : live_)
+          edit(*renderer);
+      live_.clear();
       frame = wanted_;
     }
     if (!renderer || frame < 0)

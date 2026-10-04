@@ -453,6 +453,7 @@ Result<Composition> compile(const json &project, std::string_view sequence_id, c
               if (!def)
                 continue; // the validator refuses an unknown effect; one that still gets here is skipped
               Effect effect;
+              effect.id = fx_id;
               effect.kind = def->id;
               effect.def = def;
               if (def->file_param[0] != '\0')
@@ -639,6 +640,32 @@ void Renderer::set_transform(const std::string &clip_id, const Transform &xf) {
   for (Layer &l : comp_.layers)
     if (l.clip_id == clip_id)
       l.xf = xf;
+}
+
+void Renderer::set_effect_param(const std::string &effect_id, int param, float value) {
+  for (Layer &l : comp_.layers)
+    for (Effect &e : l.effects)
+      if (e.id == effect_id && e.def && param >= 0 && size_t(param) < e.def->params.size() && param < eval::kMaxEffectParams) {
+        const eval::EffectParam &p = e.def->params[size_t(param)];
+        e.v[param] = float(std::clamp(double(value), p.lo, p.hi));
+        e.curve[param] = {};
+      }
+}
+
+void Renderer::set_opacity(const std::string &clip_id, float opacity) {
+  for (Layer &l : comp_.layers)
+    if (l.clip_id == clip_id) {
+      l.opacity = opacity;
+      l.opacity_keys = {};
+    }
+}
+
+void Renderer::set_text_style(const std::string &clip_id, float size, uint32_t color) {
+  for (Layer &l : comp_.layers)
+    if (l.clip_id == clip_id && l.is_text) {
+      l.text_size = size;
+      l.text_color = color;
+    }
 }
 
 namespace {

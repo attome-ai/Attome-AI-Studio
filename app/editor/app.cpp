@@ -2509,8 +2509,10 @@ void App::draw_effect_card(const ClipUi &c, const eval::EffectDef &def, bool sho
     ImGui::SameLine(36.0f); // offsets count from the window edge; the card content starts 14 px in
     ImGui::TextColored(hexv(look::fg2), "%s", p.title);
     ImGui::SameLine(120.0f);
-    if (slim_slider((name + "_" + p.key).c_str(), &v, float(p.lo), float(p.ui_hi), ImGui::GetContentRegionAvail().x - 60.0f, ""))
+    if (slim_slider((name + "_" + p.key).c_str(), &v, float(p.lo), float(p.ui_hi), ImGui::GetContentRegionAvail().x - 60.0f, "")) {
       fx_edit_[key] = v;
+      preview_.set_effect_param(fx, int(i), v); // the Monitor follows while the slider moves
+    }
     if (ImGui::IsItemDeactivatedAfterEdit()) {
       const float rounded = std::round(v * 1000.0f) / 1000.0f;
       fx_edit_.erase(key);
@@ -2546,7 +2548,8 @@ void App::draw_effect_card(const ClipUi &c, const eval::EffectDef &def, bool sho
     ImGui::TextColored(hexv(look::fg2), "Amount");
     ImGui::SameLine(88.0f);
     // the layer's amount: its own ID, because an effect may have a parameter called "amount" (sharpen), "<name>_amount"
-    slim_slider((name + "_layer_amount").c_str(), &amount_, 0.0f, 1.0f, ImGui::GetContentRegionAvail().x - 60.0f, "");
+    if (slim_slider((name + "_layer_amount").c_str(), &amount_, 0.0f, 1.0f, ImGui::GetContentRegionAvail().x - 60.0f, ""))
+      preview_.set_opacity(id, amount_);
     if (ImGui::IsItemDeactivatedAfterEdit()) {
       const float v = std::round(amount_ * 100.0f) / 100.0f;
       const ClipUi clip = c;
@@ -3532,7 +3535,12 @@ void App::draw_inspector() {
       ImGui::TextColored(hexv(look::fg2), "Size");
       ImGui::SameLine(88.0f);
       const float sw = ImGui::GetContentRegionAvail().x - 52.0f;
-      slim_slider("textsize", &text_size_, 0.02f, 0.30f, sw, "");
+      const auto text_rgb = [&] {
+        return (uint32_t(std::lround(text_col_[0] * 255.0f)) << 16) | (uint32_t(std::lround(text_col_[1] * 255.0f)) << 8) |
+               uint32_t(std::lround(text_col_[2] * 255.0f));
+      };
+      if (slim_slider("textsize", &text_size_, 0.02f, 0.30f, sw, ""))
+        preview_.set_text_style(id, text_size_, text_rgb());
       if (ImGui::IsItemDeactivatedAfterEdit()) {
         const float v = std::round(text_size_ * 1000.0f) / 1000.0f;
         pending_ = [this, id, v] {
@@ -3545,7 +3553,8 @@ void App::draw_inspector() {
       ImGui::PopFont();
       ImGui::TextColored(hexv(look::fg2), "Color");
       ImGui::SameLine(88.0f);
-      ImGui::ColorEdit3("##textcolor", text_col_, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel);
+      if (ImGui::ColorEdit3("##textcolor", text_col_, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel))
+        preview_.set_text_style(id, text_size_, text_rgb());
       if (ImGui::IsItemDeactivatedAfterEdit()) {
         char hexs[8];
         std::snprintf(hexs, sizeof hexs, "#%02x%02x%02x", int(std::lround(text_col_[0] * 255.0f)),
@@ -3691,7 +3700,8 @@ void App::draw_inspector() {
     ImGui::TextColored(hexv(look::fg2), "Opacity");
     ImGui::SameLine(88.0f);
     const float avail = ImGui::GetContentRegionAvail().x - 52.0f;
-    slim_slider("opacity", &opacity_, 0.0f, 1.0f, avail, "");
+    if (slim_slider("opacity", &opacity_, 0.0f, 1.0f, avail, ""))
+      preview_.set_opacity(id, opacity_);
     if (ImGui::IsItemDeactivatedAfterEdit()) {
       const float v = std::round(opacity_ * 100.0f) / 100.0f;
       const ClipUi clip = *c;

@@ -27,6 +27,7 @@ struct BakedLut; // a .cube table resampled onto a grid of video-range YUV (rend
 // parameters in that table's order, clamped to their ranges: gaussian_blur {radius}, color_grade {brightness,
 // contrast, saturation}, vignette {strength, radius, softness}. A blur radius is a fraction of the canvas height.
 struct Effect {
+  std::string id;   // the effect's id in the document (the key of the clip's "effects")
   std::string kind;
   std::string file; // a lut's .cube path (the effect's params.file), else empty
   float v[eval::kMaxEffectParams] = {};
@@ -142,6 +143,11 @@ public:
   std::pair<int, int> text_extent(const std::string &clip_id) const;
   // Changes the transform of one clip in place; decoders stay open, so this is cheap enough to do on every mouse move.
   void set_transform(const std::string &clip_id, const Transform &xf);
+  // The same for the other sliders of the Inspector: one parameter of an effect (its keys are dropped, the live value
+  // holds), a clip's opacity (or an adjustment layer's amount), a text clip's size and colour.
+  void set_effect_param(const std::string &effect_id, int param, float value);
+  void set_opacity(const std::string &clip_id, float opacity);
+  void set_text_style(const std::string &clip_id, float size, uint32_t color);
 
 private:
   Composition comp_;

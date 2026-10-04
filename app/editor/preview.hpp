@@ -4,6 +4,7 @@
 // ring from the daemon (F5-E1-T4) replaces this class, not the Viewer.
 
 #include <condition_variable>
+#include <functional>
 #include <map>
 #include <utility>
 #include <cstdint>
@@ -26,6 +27,10 @@ public:
   void request(int64_t frame); // the newest request wins; older ones are skipped
   // Shows a clip with another transform right away, before the edit is saved (live drag in the Monitor).
   void set_transform(const std::string &clip_id, const render::Transform &xf);
+  // The same for the other Inspector sliders: an effect parameter, a clip's opacity, a text clip's size and colour.
+  void set_effect_param(const std::string &effect_id, int param, float value);
+  void set_opacity(const std::string &clip_id, float opacity);
+  void set_text_style(const std::string &clip_id, float size, uint32_t color);
 
   // Hands over the newest finished NV12 picture when there is one the caller has not seen. Returns false otherwise.
   bool take(std::vector<uint8_t> &nv12, int &width, int &height, int64_t &frame, std::string &warning);
@@ -44,11 +49,8 @@ private:
   int new_width_ = 0, new_height_ = 0;
   int64_t wanted_ = -1;
   bool dirty_ = false;
-  struct Xf {
-    std::string id;
-    render::Transform xf;
-  };
-  std::vector<Xf> xf_;
+  std::vector<std::function<void(render::Renderer &)>> live_; // unsaved edits, applied in order before the next frame
+  void live(std::function<void(render::Renderer &)> edit);
   std::map<std::string, std::pair<int, int>> extents_;
   // Finished.
   std::vector<uint8_t> done_;
