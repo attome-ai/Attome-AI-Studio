@@ -25,6 +25,16 @@ std::vector<std::string> builtin_workflow_ids();
 // is a copy of. Null when there is no such Clip Workflow.
 json instantiate(std::string_view source_id);
 
+// A fresh copy of a workflow of the project's library (or of a clip's Instance) ready to be put into the document: every node
+// and link ID is a "$new:" placeholder, and the IDs inside links, Exposed Inputs and Outputs follow. `source` is what the copy
+// says it was made from ("cwf_…" for a library workflow, "" for none). The copy has nothing of the original's IDs, so editing
+// it, or the original, changes the other not at all.
+json fresh_copy(const json &workflow, std::string_view source);
+
+// The model a workflow's nodes run that generates video (or samples), when there is one: what the size and the lengths of a
+// clip made from it are held to. Null when no node names a model this build knows.
+const ModelDecl *main_model(const json &workflow);
+
 // The Shot of a model: one "generate video" node with the model, its settings at their defaults, fed its size by a Project
 // node and its length by a Clip node, and the Exposed Inputs and Outputs the model supports: the prompt, the pictures it
 // takes, the seed; the video and the audio.

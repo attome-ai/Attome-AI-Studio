@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <filesystem>
+#include <set>
 
 #include "atm/api/engine.hpp"
 #include "atm/api/gen_mock.hpp"
@@ -377,4 +378,120 @@ TEST_CASE("workflow: a clip made by gen.create_clip has its own copy of the buil
   CHECK(chained["exposed"]["inputs"]["start_image"].contains("to") == false); // kept, unlinked
   CHECK_FALSE(ok(e, "project.get", {{"project", project}, {"id", third["clip"]}})["object"]["media_ref"]["inputs"].contains("start_image"));
   CHECK(ok(e, "project.validate", {{"project", project}})["ok"] == true);
+}
+
+TEST_CASE("workflow: a clip's workflow is saved to the library, clips are made from it, and a clip can be reset to where it came from", "[gen][engine][library]") {
+  TempDir tmp;
+  const std::string project = tmp.project();
+  atm::api::EngineConfig cfg;
+  cfg.providers = {std::make_shared<atm::api::MockProvider>()};
+  Engine e(cfg);
+  const json created = ok(e, "project.create", {{"path", project}, {"rate", "24"}, {"canvas", "320x176"}});
+  const std::string root = created["project"];
+  const auto make = [&](json extra) {
+    json params = {{"project", project}, {"prompt", "A robot walks"}, {"seconds", 2}};
+    params.update(extra);
+    return ok(e, "gen.create_clip", params);
+  };
+  const auto clip_media = [&](const json &made) { return ok(e, "project.get", {{"project", project}, {"id", made["clip"]}})["object"]["media_ref"]; };
+  const auto node_ids = [](const json &workflow) {
+    std::set<std::string> ids;
+    for (auto it = workflow["nodes"].begin(); it != workflow["nodes"].end(); ++it)
+      ids.insert(it.key());
+    return ids;
+  };
+  const auto node_of = [](const json &workflow, const char *kind) {
+    for (auto it = workflow["nodes"].begin(); it != workflow["nodes"].end(); ++it)
+      if (it->value("kind", std::string()) == kind)
+        return it.key();
+    return std::string();
+  };
+
+  // A clip is made and edited: a setting changed, an input of its own added with a value.
+  const json first = make({{"model", atm::api::kMockModel}});
+  const std::string first_id = first["clip"];
+  const json built = clip_media(first)["workflow"];
+  const std::string gen = node_of(built, "attome.generate_video");
+  ok(e, "project.patch",
+     patch_of(project, json::array({{{"op", built["nodes"][gen].contains("settings") ? "replace" : "add"}, {"path", gen + "/settings"}, {"value", {{"steps", 3}}}},
+                                    {{"op", "add"}, {"path", first_id + "/media_ref/workflow/exposed/inputs/mood"}, {"value", {{"type", "text"}, {"label", "Mood"}}}},
+                                    {{"op", "add"}, {"path", first_id + "/media_ref/inputs/mood"}, {"value", "calm"}}})));
+
+  // Saved to the library: a new Clip Workflow with IDs of its own, a name, nothing of the clip's values.
+  const json saved = ok(e, "gen.save_to_library", {{"project", project}, {"clip", first_id}, {"name", "Calm shot"}});
+  const std::string library_id = saved["workflow"];
+  CHECK(atm::id_prefix(library_id) == "cwf");
+  const json library = ok(e, "project.get", {{"project", project}, {"id", root}})["object"]["workflows"];
+  REQUIRE(library.contains(library_id));
+  const json entry = library[library_id];
+  CHECK(entry["name"] == "Calm shot");
+  CHECK_FALSE(entry.contains("source"));
+  CHECK(entry["nodes"].size() == 3);
+  const std::set<std::string> clip_ids = node_ids(clip_media(first)["workflow"]);
+  for (const std::string &id : node_ids(entry))
+    CHECK_FALSE(clip_ids.contains(id)); // not one of the clip's IDs
+  CHECK(entry["exposed"]["inputs"].contains("mood"));
+  CHECK(entry["exposed"]["inputs"]["prompt"]["to"][0][0] == node_of(entry, "attome.generate_video")); // the IDs inside follow
+  CHECK(ok(e, "project.validate", {{"project", project}})["ok"] == true);
+
+  // Clips made from it: each has its own Instance, which remembers where it came from.
+  const json second = make({{"workflow", library_id}, {"prompt", "It rains"}});
+  const json third = make({{"workflow", library_id}, {"prompt", "It snows"}});
+  const json inst_2 = clip_media(second)["workflow"], inst_3 = clip_media(third)["workflow"];
+  CHECK(inst_2["source"] == library_id);
+  CHECK(inst_2["name"] == "Calm shot");
+  CHECK(inst_2["nodes"].size() == 3);
+  CHECK(node_of(inst_2, "attome.generate_video") != node_of(inst_3, "attome.generate_video"));
+  CHECK(node_of(inst_2, "attome.generate_video") != node_of(entry, "attome.generate_video"));
+  CHECK(inst_2["nodes"][node_of(inst_2, "attome.generate_video")]["settings"] == json{{"steps", 3}}); // as it was saved
+  CHECK(clip_media(second)["inputs"]["prompt"] == "It rains");
+  CHECK_FALSE(clip_media(second)["inputs"].contains("mood")); // values are not part of a Clip Workflow
+  CHECK(ok(e, "project.validate", {{"project", project}})["ok"] == true);
+  // A clip made from a workflow can start on the last frame of the clip before, as any other.
+  const json chained = make({{"workflow", library_id}, {"start_from", "previous"}});
+  CHECK(clip_media(chained)["workflow"]["nodes"].size() == 5);
+
+  // Editing one clip's workflow changes no other clip and not the library; and the library changing changes no clip.
+  const std::string gen_2 = node_of(inst_2, "attome.generate_video");
+  ok(e, "project.patch", patch_of(project, json::array({{{"op", "replace"}, {"path", gen_2 + "/settings/steps"}, {"value", 9}}})));
+  CHECK(clip_media(third)["workflow"] == inst_3);
+  CHECK(ok(e, "project.get", {{"project", project}, {"id", root}})["object"]["workflows"][library_id] == entry);
+  ok(e, "project.patch", patch_of(project, json::array({{{"op", "replace"}, {"path", library_id + "/name"}, {"value", "Renamed"}}})));
+  CHECK(clip_media(third)["workflow"]["name"] == "Calm shot");
+
+  // Reset: the second clip goes back to the library version in one edit. Its own edits go, and so do its values for inputs the
+  // library version does not have; the library's new name is in.
+  const std::string second_id = second["clip"];
+  ok(e, "project.patch",
+     patch_of(project, json::array({{{"op", "add"}, {"path", second_id + "/media_ref/workflow/exposed/inputs/extra"}, {"value", {{"type", "text"}}}},
+                                    {{"op", "add"}, {"path", second_id + "/media_ref/inputs/extra"}, {"value", "kept?"}}})));
+  const std::string before = canonical(e, project);
+  ok(e, "gen.reset_clip", {{"project", project}, {"clip", second_id}});
+  const json again = clip_media(second);
+  CHECK(again["workflow"]["name"] == "Renamed");
+  CHECK(again["workflow"]["source"] == library_id);
+  CHECK_FALSE(again["workflow"]["exposed"]["inputs"].contains("extra"));
+  CHECK_FALSE(again["inputs"].contains("extra"));
+  CHECK(again["inputs"]["prompt"] == "It rains");
+  CHECK(again["workflow"]["nodes"][node_of(again["workflow"], "attome.generate_video")]["settings"] == json{{"steps", 3}});
+  CHECK(ok(e, "project.validate", {{"project", project}})["ok"] == true);
+  ok(e, "project.undo", {{"project", project}}); // one edit: undone at once
+  CHECK(canonical(e, project) == before);
+  // A built-in source resets to the built-in Shot; a source that is gone says so.
+  ok(e, "gen.reset_clip", {{"project", project}, {"clip", first["clip"]}});
+  CHECK(clip_media(first)["workflow"]["source"] == std::string("shot:") + atm::api::kMockModel);
+  CHECK(clip_media(first)["workflow"]["nodes"].size() == 3);
+  CHECK_FALSE(clip_media(first)["inputs"].contains("mood"));
+  const std::string third_id = third["clip"];
+  const std::string chained_id = chained["clip"];
+  // (the chained clip holds a Clip Reference to nothing the library would remove; take the library entry away)
+  ok(e, "project.patch", patch_of(project, json::array({{{"op", "remove"}, {"path", library_id}}})));
+  CHECK(err(e, "gen.reset_clip", {{"project", project}, {"clip", third_id}}).rule == "G_SOURCE");
+  (void)chained_id;
+
+  // What is refused: no such library workflow, a model together with a workflow, a clip that is not generative.
+  CHECK(err(e, "gen.create_clip", {{"project", project}, {"prompt", "x"}, {"workflow", "cwf_nobody"}}).rule == "G_WORKFLOW");
+  CHECK(err(e, "gen.create_clip", {{"project", project}, {"prompt", "x"}, {"workflow", "cwf_nobody"}, {"model", atm::api::kMockModel}}).rule != "G_WORKFLOW");
+  CHECK(err(e, "gen.save_to_library", {{"project", project}, {"clip", root}}).rule == "G_WORKFLOW");
+  CHECK(err(e, "gen.reset_clip", {{"project", project}, {"clip", root}}).rule == "G_WORKFLOW");
 }

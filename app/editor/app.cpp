@@ -875,6 +875,8 @@ App::DropPlan App::plan_drop(const std::string &payload, int row, int64_t frame)
     p.frames = three_seconds;
   } else if (p.kind == "gen") {
     p.label = "Shot";
+    if (p.id.rfind("cwf_", 0) == 0 && doc_.contains("workflows") && doc_["workflows"].is_object() && doc_["workflows"].contains(p.id))
+      p.label = doc_["workflows"][p.id].value("name", std::string("Shot")); // a card of the library
     p.frames = std::max<int64_t>(1, std::llround(double(std::round(gen_seconds_ * 2.0f) / 2.0f) * fps()));
   } else if (p.kind == "media") {
     const json &info = media_info(p.id);
@@ -2454,8 +2456,8 @@ void draw_link(ImDrawList *dl, ImVec2 a, ImVec2 b, ImU32 colour, float width) {
 // Makes a generative clip with `model`: at `at` frames on `track` when given (a card dropped on the timeline), else at the
 // end of the picture track. Its prompt is written afterwards, in the Inspector.
 void App::add_generative_clip(const std::string &model, const std::string &track, int64_t at) {
-  json params = {{"project", project_path_}, {"prompt", std::string()}, {"model", model},
-                 {"seconds", std::round(gen_seconds_ * 2.0f) / 2.0f}};
+  json params = {{"project", project_path_}, {"prompt", std::string()}, {"seconds", std::round(gen_seconds_ * 2.0f) / 2.0f}};
+  params[model.rfind("cwf_", 0) == 0 ? "workflow" : "model"] = model; // a card of the library, or a model's own
   if (!track.empty())
     params["track"] = track;
   if (at >= 0)
@@ -2541,6 +2543,33 @@ void App::draw_generate_panel() {
           dl->AddCircleFilled(ImVec2(c.x + 12.0f, c.y - 7.0f), 4.5f, hex(look::gen));
           dl->AddTriangleFilled(ImVec2(c.x - 21.0f, c.y + 14.0f), ImVec2(c.x - 7.0f, c.y - 3.0f), ImVec2(c.x + 5.0f, c.y + 14.0f), hex(look::gen));
         }
+      };
+      if (gallery_tile(grid, t))
+        pending_ = [this, id] { add_generative_clip(id); };
+    }
+    ImGui::Dummy(ImVec2(0, 4.0f));
+  }
+  // The project's own Clip Workflows: the ones saved from a clip's workflow. A card makes a clip with its own copy.
+  const json &library = object_in(doc_, "workflows");
+  if (!library.empty() && (gen_tab_ == 0 || gen_tab_ == 1)) {
+    section_label("YOUR WORKFLOWS");
+    ImGui::Spacing();
+    TileGrid grid = tile_grid(std::max<int>(3, int(library.size()))); // the size of the model cards
+    for (auto w = library.begin(); w != library.end(); ++w) {
+      const std::string id = w.key(), name = w->value("name", id);
+      Tile t;
+      t.id = "lib_" + id;
+      t.mark = "workflow_card:" + name;
+      t.label = name;
+      t.base = 0x2a2218;
+      t.tip = name + "\nA Clip Workflow saved in this project.\nDrag it onto the timeline, or click to add it at the end.";
+      t.payload = "gen:" + id;
+      t.art = [](ImDrawList *dl, ImVec2 p, ImVec2 q) {
+        const ImVec2 c((p.x + q.x) * 0.5f, p.y + (q.y - p.y) * 0.42f);
+        dl->AddRect(ImVec2(c.x - 26.0f, c.y - 18.0f), ImVec2(c.x + 26.0f, c.y + 18.0f), hex(look::accent2), 6.0f, 0, 2.2f);
+        dl->AddCircleFilled(ImVec2(c.x - 12.0f, c.y), 4.0f, hex(look::accent2)); // nodes joined by a line
+        dl->AddCircleFilled(ImVec2(c.x + 12.0f, c.y), 4.0f, hex(look::accent2));
+        dl->AddLine(ImVec2(c.x - 12.0f, c.y), ImVec2(c.x + 12.0f, c.y), hex(look::accent2), 2.0f);
       };
       if (gallery_tile(grid, t))
         pending_ = [this, id] { add_generative_clip(id); };
@@ -2696,6 +2725,45 @@ void App::draw_variables_card() {
       add_variable_open_ = false;
   }
   end_card();
+}
+
+// "Save to library" and "Reset to the library version" for a generative clip's own workflow.
+void App::workflow_library_buttons(const std::string &clip_id, const std::string &source) {
+  if (soft_button("workflow_save", "Save to library", ImVec2(0.0f, 26.0f)))
+    pending_ = [this, clip_id] {
+      json saved;
+      const json *clip = clip_json(clip_id);
+      json params = {{"project", project_path_}, {"clip", clip_id}};
+      if (clip) // the library's name: the workflow's, made unique among the library's
+        if (const std::string name = object_in(object_in(*clip, "media_ref"), "workflow").value("name", std::string("Workflow")); !name.empty()) {
+          std::string unique = name;
+          const json &library = object_in(doc_, "workflows");
+          for (int n = 2; std::any_of(library.begin(), library.end(), [&](const json &w) { return w.value("name", std::string()) == unique; }); ++n)
+            unique = name + " " + std::to_string(n);
+          params["name"] = unique;
+        }
+      if (rpc("gen.save_to_library", params, saved)) {
+        say("Saved to the library as \"" + saved.value("name", std::string("Workflow")) + "\". It is a card in the Generate panel.");
+        refresh();
+      }
+    };
+  ui_mark("button:workflow_save");
+  if (ImGui::IsItemHovered())
+    ImGui::SetTooltip("Make this workflow a card in the Generate panel, to make more clips from.");
+  ImGui::SameLine();
+  const bool known = source.rfind("shot:", 0) == 0 || (source.rfind("cwf_", 0) == 0 && object_in(doc_, "workflows").contains(source));
+  if (soft_button("workflow_reset", "Reset to library", ImVec2(0.0f, 26.0f), known))
+    pending_ = [this, clip_id] {
+      json done;
+      if (rpc("gen.reset_clip", {{"project", project_path_}, {"clip", clip_id}}, done)) {
+        say("Workflow reset to the library version");
+        refresh();
+      }
+    };
+  ui_mark("button:workflow_reset");
+  if (ImGui::IsItemHovered())
+    ImGui::SetTooltip(known ? "Put this clip's workflow back to the one it was made from. Edit > Undo brings your changes back."
+                            : "The workflow this clip was made from is not in the library any more.");
 }
 
 // The Workflow card of a generative clip: the Exposed Inputs of its own workflow, one row each in the workflow's order, each
@@ -3011,6 +3079,11 @@ void App::draw_workflow_card(const ClipUi &c) {
     if (e.name != "prompt")
       draw_row(e);
 
+  if (!wf.empty()) {
+    ImGui::Dummy(ImVec2(0.0f, 2.0f));
+    workflow_library_buttons(id, wf.value("source", std::string()));
+    ImGui::Dummy(ImVec2(0.0f, 2.0f));
+  }
   // Add input: a name and a Data Type; the Exposed Input is made on the clip's own workflow, unlinked, and shows on the
   // Clip Inputs node at once.
   if (!wf.empty()) {
@@ -6473,6 +6546,8 @@ void App::draw_workflow_side(const json &library) {
         ImGui::TextColored(hexv(look::fg2), "The workflow of the clip %s%s.", clip ? clip->name.c_str() : wf_id_.c_str(),
                            source.empty() ? "" : (", copied from " + source).c_str());
         ImGui::TextColored(hexv(look::fg3), "It is this clip's own: changing it changes no other clip.");
+        ImGui::Dummy(ImVec2(0.0f, 2.0f));
+        workflow_library_buttons(wf_id_, source);
       } else {
         ImGui::TextColored(hexv(look::fg3), "A workflow of the project's library.");
       }

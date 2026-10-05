@@ -1784,12 +1784,30 @@ struct Engine::Impl {
   Result<json> gen_create_clip(const json &params) {
     ATM_TRY(Project *pr, project(params));
     ATM_TRY(const std::string *prompt, string_param(params, "prompt"));
-    ATM_TRY(const std::string *model, string_param(params, "model"));
-    const gen::ModelDecl *decl = gen::find_model(*model);
-    if (!decl || !decl->does("generate_video"))
-      return fail(ErrorCode::NotFound, "G_MODEL", "\"" + *model + "\" is not a model that generates video here.", {},
-                  "List the models with gen.models.");
     const json &root = pr->doc.root();
+    // Made from a built-in Clip Workflow (a model: its Shot), or from one of the project's library (a "cwf_…" ID).
+    const std::string library_id = params.value("workflow", std::string());
+    json instance;
+    const gen::ModelDecl *decl = nullptr;
+    if (!library_id.empty()) {
+      if (params.contains("model"))
+        return bad_param("model", "is not used together with \"workflow\": the workflow has its own models");
+      const json &library = library_of(*pr);
+      const auto wf = library.find(library_id);
+      if (wf == library.end() || !wf->is_object())
+        return fail(ErrorCode::NotFound, "G_WORKFLOW", "The project's library has no workflow \"" + library_id + "\".", {},
+                    "List the library with project.get on the project's ID: its \"workflows\".");
+      instance = gen::fresh_copy(*wf, library_id);
+      decl = gen::main_model(*wf);
+    } else {
+      ATM_TRY(const std::string *model, string_param(params, "model"));
+      decl = gen::find_model(*model);
+      if (!decl || !decl->does("generate_video"))
+        return fail(ErrorCode::NotFound, "G_MODEL", "\"" + *model + "\" is not a model that generates video here.", {},
+                    "List the models with gen.models.");
+      instance = gen::instantiate("shot:" + *model);
+    }
+    const json &face = instance.value("exposed", json::object()).value("inputs", json::object());
     const std::string project_ref = to_utf8(pr->dir);
     std::string seq = params.value("sequence", std::string());
     if (seq.empty() && root.contains("sequence_order") && !root["sequence_order"].empty())
@@ -1804,12 +1822,14 @@ struct Engine::Impl {
     const json canvas = sequence.value("canvas", json::object());
     const double cw = canvas.value("width", 1920), ch = canvas.value("height", 1080);
     const auto scaled = gen::scaled_size(int64_t(cw), int64_t(ch), gen::kGenerationPixels);
-    const auto [made_w, made_h] = gen::fit_size(*decl, scaled.first, scaled.second);
+    const auto [made_w, made_h] = decl ? gen::fit_size(*decl, scaled.first, scaled.second) : scaled;
     const int width = int(made_w), height = int(made_h);
-    double seconds = params.value("seconds", 5.0);
-    seconds = std::max(seconds, decl->seconds_min);
-    if (decl->seconds_max > 0.0)
-      seconds = std::min(seconds, decl->seconds_max);
+    double seconds = std::max(params.value("seconds", 5.0), 0.1);
+    if (decl) {
+      seconds = std::max(seconds, decl->seconds_min);
+      if (decl->seconds_max > 0.0)
+        seconds = std::min(seconds, decl->seconds_max);
+    }
     static std::atomic<uint32_t> counter{uint32_t(std::chrono::steady_clock::now().time_since_epoch().count())};
     const int64_t seed = params.value("seed", int64_t((counter.fetch_add(2654435761u) >> 8) % 1000000));
 
@@ -1853,7 +1873,11 @@ struct Engine::Impl {
           before = c.key();
         }
       }
-    json inputs = {{"prompt", *prompt}, {"seed", seed}};
+    json inputs = json::object(); // what the workflow exposes: not every workflow has a prompt or a seed
+    if (face.contains("prompt"))
+      inputs["prompt"] = *prompt;
+    if (face.contains("seed"))
+      inputs["seed"] = seed;
     std::string start_reference;
     if (const std::string from = params.value("start_from", std::string()); !from.empty()) {
       const std::string source = from == "previous" ? before : from;
@@ -1863,17 +1887,16 @@ struct Engine::Impl {
                     from == "previous" ? "There is no generative clip before this one on the track to start from."
                                        : "\"" + from + "\" is not a generative clip.",
                     {}, "Add the first clip without start_from, or name a generative clip.");
-      if (!decl->takes("start_image"))
-        return fail(ErrorCode::InvalidArgument, "G_SETTING", "The model " + *model + " cannot start from a picture.", {},
+      if (decl && !decl->takes("start_image"))
+        return fail(ErrorCode::InvalidArgument, "G_SETTING", "The model " + decl->id + " cannot start from a picture.", {},
                     "Pick a model that accepts a start picture.");
       start_reference = from == "previous" ? "previous" : from;
     }
 
-    // The clip's own workflow: a copy of the built-in Shot of the model, with its own nodes. Starting on the last frame of
-    // another clip is two more nodes in it, a Clip Reference and a Get Frame.
-    json instance = gen::instantiate("shot:" + *model);
-    if (!start_reference.empty())
-      gen::start_from(instance, start_reference);
+    // Starting on the last frame of another clip is two more nodes in the clip's own workflow, a Clip Reference and a Get Frame node.
+    if (!start_reference.empty() && !gen::start_from(instance, start_reference))
+      return fail(ErrorCode::InvalidArgument, "G_SETTING", "This workflow has no start picture to start on a clip's last frame.", {},
+                  "Use a workflow with a node that takes a start_image, exposed as \"start_image\".");
     std::string name = params.value("name", std::string());
     if (name.empty()) { // "Shot N": the next number no generative clip of the project has. A prompt makes a poor name: it
       int next = 1;     // often starts with the style, and any cut of it reads as broken.
@@ -1926,6 +1949,84 @@ struct Engine::Impl {
     return json{{"clip", ids.value("$new:clip", std::string())},
                 {"track", ids.value("$new:track", track)}, {"width", width}, {"height", height}, {"seconds", seconds},
                 {"seed", seed}, {"revision", applied["revision"]}};
+  }
+
+  // Publishes a clip's own workflow to the project's library: a new Clip Workflow, a copy with IDs of its own, that the Generate
+  // panel shows as a card. The clip keeps its own; the values the clip gives its inputs are not part of it.
+  Result<json> gen_save_to_library(const json &params) {
+    ATM_TRY(Project *pr, project(params));
+    ATM_TRY(const std::string *clip, string_param(params, "clip"));
+    const json &workflow = instance_of(*pr, *clip);
+    if (workflow.empty() || !workflow.contains("nodes"))
+      return fail(ErrorCode::UnknownId, "G_WORKFLOW", "\"" + *clip + "\" is not a generative clip with a workflow of its own.", {},
+                  "Pass the ID of a clip made by gen.create_clip.");
+    json copy = gen::fresh_copy(workflow, std::string());
+    copy["name"] = params.value("name", workflow.value("name", std::string("Workflow")));
+    ATM_TRY(json applied, project_patch({{"project", to_utf8(pr->dir)},
+                                         {"patch", {{"ops", json::array({{{"op", "add"}, {"path", pr->doc.root().value("id", std::string()) + "/workflows/$new:w"}, {"value", std::move(copy)}}})},
+                                                    {"label", "Save to library"}}}}));
+    return json{{"workflow", applied["id_map"].value("$new:w", std::string())}, {"name", params.value("name", workflow.value("name", std::string("Workflow")))},
+                {"revision", applied["revision"]}};
+  }
+
+  // Puts a clip's workflow back to the Clip Workflow it was copied from (its "source": a built-in Shot, or a library workflow as
+  // it is now). The clip's values for inputs the original does not have are dropped with the rest of its edits; all of it is
+  // one edit, and can be undone.
+  Result<json> gen_reset_clip(const json &params) {
+    ATM_TRY(Project *pr, project(params));
+    ATM_TRY(const std::string *clip, string_param(params, "clip"));
+    const doc::NodeRef *ref = pr->doc.find(*clip);
+    const json media = ref ? ref->node->value("media_ref", json::object()) : json::object();
+    if (media.value("type", std::string()) != "workflow")
+      return fail(ErrorCode::UnknownId, "G_WORKFLOW", "\"" + *clip + "\" is not a generative clip.", {}, "Pass the ID of a generative clip.");
+    const std::string source = media.value("workflow", json::object()).value("source", std::string());
+    json fresh;
+    if (source.rfind("cwf_", 0) == 0) {
+      const json &library = library_of(*pr);
+      if (const auto wf = library.find(source); wf != library.end() && wf->is_object())
+        fresh = gen::fresh_copy(*wf, source);
+    } else {
+      fresh = gen::instantiate(source);
+    }
+    if (fresh.is_null() || fresh.empty())
+      return fail(ErrorCode::NotFound, "G_SOURCE", "The Clip Workflow of clip " + *clip + " (\"" + source + "\") is not in the Template Library any more.", {},
+                  "Save its workflow to the library again, or keep the clip's own.");
+    json ops = json::array();
+    const json &face = fresh.value("exposed", json::object()).value("inputs", json::object());
+    const json held = media.value("inputs", json::object());
+    for (auto it = held.begin(); it != held.end(); ++it) // values the original has no input for
+      if (!face.contains(it.key()))
+        ops.push_back({{"op", "remove"}, {"path", *clip + "/media_ref/inputs/" + it.key()}});
+    // The workflow holds collections, which are not taken away whole: what is in them goes one by one, then the copy is put in.
+    const std::string at = *clip + "/media_ref/workflow";
+    const json old = media.value("workflow", json::object());
+    const json old_links = old.value("links", json::object()), old_nodes = old.value("nodes", json::object());
+    const json old_exposed = old.value("exposed", json::object());
+    for (auto it = old_links.begin(); it != old_links.end(); ++it)
+      ops.push_back({{"op", "remove"}, {"path", it.key()}});
+    for (auto it = old_nodes.begin(); it != old_nodes.end(); ++it)
+      ops.push_back({{"op", "remove"}, {"path", it.key()}});
+    for (const char *side : {"inputs", "outputs"}) {
+      const json entries = old_exposed.value(side, json::object());
+      for (auto it = entries.begin(); it != entries.end(); ++it)
+        ops.push_back({{"op", "remove"}, {"path", at + "/exposed/" + side + "/" + it.key()}});
+    }
+    if (old_exposed.contains("primary"))
+      ops.push_back({{"op", "remove"}, {"path", at + "/exposed/primary"}});
+    ops.push_back({{"op", old.contains("name") ? "replace" : "add"}, {"path", at + "/name"}, {"value", fresh.value("name", std::string("Workflow"))}});
+    ops.push_back({{"op", old.contains("source") ? "replace" : "add"}, {"path", at + "/source"}, {"value", fresh.value("source", std::string())}});
+    for (const char *collection : {"nodes", "links"})
+      for (auto it = fresh[collection].begin(); it != fresh[collection].end(); ++it)
+        ops.push_back({{"op", "add"}, {"path", at + "/" + collection + "/" + it.key()}, {"value", *it}});
+    const json made = fresh.value("exposed", json::object());
+    for (const char *side : {"inputs", "outputs"}) {
+      const json entries = made.value(side, json::object());
+      for (auto it = entries.begin(); it != entries.end(); ++it)
+        ops.push_back({{"op", "add"}, {"path", at + "/exposed/" + side + "/" + it.key()}, {"value", *it}});
+    }
+    if (made.contains("primary"))
+      ops.push_back({{"op", "add"}, {"path", at + "/exposed/primary"}, {"value", made["primary"]}});
+    return project_patch({{"project", to_utf8(pr->dir)}, {"patch", {{"ops", std::move(ops)}, {"label", "Reset workflow"}}}});
   }
 
   Result<json> gen_select_take(const json &params) {
@@ -2391,15 +2492,28 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
      "its files are installed and whether an engine here runs each kind.",
      "", &Impl::gen_nodes},
     {"gen.create_clip", "gen", true,
-     "Add a generative clip: a prompt and a model. It goes at the end of the picture track (or at: a time), gets its own copy "
+     "Add a generative clip: a prompt and a model (or a workflow of the project's library). It goes at the end of the picture track (or at: a time), gets its own copy "
      "of the built-in Shot workflow for that model (its Instance: change it and no other clip changes), and is not generated yet: run gen.run. start_from: \"previous\" (or a clip ID) makes "
      "it start on the last frame of that clip, with a Clip Reference and a Get Frame node. The size is the canvas's shape at about 0.9 megapixels on the model's grid (a Project node), the length is the clip's Duration (a Clip node).",
      R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},
-       "prompt":{"type":"string"},"model":{"type":"string","description":"An id from gen.models"},"seconds":{"type":"number"},
+       "prompt":{"type":"string"},"model":{"type":"string","description":"An id from gen.models"},
+       "workflow":{"type":"string","description":"Instead of a model: the ID of a Clip Workflow of the project's library, a key of its workflows"},"seconds":{"type":"number"},
        "seed":{"type":"integer"},"name":{"type":"string"},
        "start_from":{"type":"string","description":"\"previous\" or a generative clip's ID"},"at":{"type":"string"},
-       "track":{"type":"string"},"sequence":{"type":"string"}},"required":["project","prompt","model"]})",
+       "track":{"type":"string"},"sequence":{"type":"string"}},"required":["project","prompt"]})",
      &Impl::gen_create_clip},
+    {"gen.save_to_library", "gen", true,
+     "Publish a generative clip's own workflow to the project's library as a new Clip Workflow (a card in the Generate panel). "
+     "The clip keeps its own; its input values are not part of the copy. name: the library's name for it (default: the workflow's).",
+     R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},
+       "clip":{"type":"string"},"name":{"type":"string"}},"required":["project","clip"]})",
+     &Impl::gen_save_to_library},
+    {"gen.reset_clip", "gen", true,
+     "Put a generative clip's workflow back to the Clip Workflow it was copied from (its source): the built-in Shot, or the library "
+     "workflow as it is now. One undoable edit; the clip's values for inputs the original does not have are dropped.",
+     R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},
+       "clip":{"type":"string"}},"required":["project","clip"]})",
+     &Impl::gen_reset_clip},
     {"gen.select_take", "gen", true,
      "Choose which Take of a generative clip plays. The clip's inputs go back to what made that Take; clips that start from it become dirty.",
      R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},

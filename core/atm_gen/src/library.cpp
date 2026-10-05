@@ -1,6 +1,7 @@
 #include "atm/gen/library.hpp"
 
 #include <algorithm>
+#include <map>
 
 #include "atm/base/id.hpp"
 
@@ -72,7 +73,7 @@ bool start_from(json &workflow, std::string_view reference) {
   json &nodes = workflow["nodes"];
   std::string gen;
   for (auto it = nodes.begin(); it != nodes.end(); ++it)
-    if (it->value("kind", std::string()) == "attome.generate_video")
+    if (const std::string kind = it->value("kind", std::string()); kind == "attome.generate_video" || kind == "attome.sample")
       gen = it.key();
   json &inputs = workflow["exposed"]["inputs"];
   if (gen.empty() || !inputs.contains("start_image"))
@@ -86,6 +87,63 @@ bool start_from(json &workflow, std::string_view reference) {
   links[placeholders ? "$new:l_frame" : new_id("lnk")] = {{"from", json::array({frame, "image"})}, {"to", json::array({gen, "start_image"})}};
   inputs["start_image"].erase("to");
   return true;
+}
+
+json fresh_copy(const json &workflow, std::string_view source) {
+  std::map<std::string, std::string> node_ids, link_ids;
+  json out = {{"name", workflow.value("name", std::string("Workflow"))}, {"nodes", json::object()}, {"links", json::object()}};
+  if (!source.empty())
+    out["source"] = std::string(source);
+  int n = 0;
+  if (workflow.contains("nodes") && workflow["nodes"].is_object())
+    for (auto it = workflow["nodes"].begin(); it != workflow["nodes"].end(); ++it) {
+      node_ids[it.key()] = "$new:n" + std::to_string(++n);
+      out["nodes"][node_ids[it.key()]] = *it;
+    }
+  const auto end_of = [&](const json &pair) -> json {
+    if (!pair.is_array() || pair.size() != 2 || !pair[0].is_string())
+      return pair;
+    const auto id = node_ids.find(pair[0].get<std::string>());
+    return id == node_ids.end() ? pair : json::array({id->second, pair[1]});
+  };
+  int l = 0;
+  if (workflow.contains("links") && workflow["links"].is_object())
+    for (auto it = workflow["links"].begin(); it != workflow["links"].end(); ++it) {
+      json link = *it;
+      if (link.is_object()) {
+        if (link.contains("from"))
+          link["from"] = end_of(link["from"]);
+        if (link.contains("to"))
+          link["to"] = end_of(link["to"]);
+      }
+      out["links"]["$new:l" + std::to_string(++l)] = std::move(link);
+    }
+  if (workflow.contains("exposed") && workflow["exposed"].is_object()) {
+    json exposed = workflow["exposed"];
+    if (exposed.contains("inputs") && exposed["inputs"].is_object())
+      for (auto it = exposed["inputs"].begin(); it != exposed["inputs"].end(); ++it)
+        if (it->is_object() && it->contains("to") && (*it)["to"].is_array())
+          for (json &pair : (*it)["to"])
+            pair = end_of(pair);
+    if (exposed.contains("outputs") && exposed["outputs"].is_object())
+      for (auto it = exposed["outputs"].begin(); it != exposed["outputs"].end(); ++it)
+        if (it->is_object() && it->contains("from"))
+          (*it)["from"] = end_of((*it)["from"]);
+    out["exposed"] = std::move(exposed);
+  }
+  return out;
+}
+
+const ModelDecl *main_model(const json &workflow) {
+  const ModelDecl *found = nullptr;
+  if (workflow.is_object() && workflow.contains("nodes") && workflow["nodes"].is_object())
+    for (auto it = workflow["nodes"].begin(); it != workflow["nodes"].end(); ++it) {
+      const std::string kind = it->value("kind", std::string()), model = it->value("model", std::string());
+      if (const ModelDecl *m = model.empty() ? nullptr : find_model(model))
+        if (m->does("generate_video") || m->does("sample"))
+          found = found ? found : m;
+    }
+  return found;
 }
 
 json instantiate(std::string_view source_id) {
