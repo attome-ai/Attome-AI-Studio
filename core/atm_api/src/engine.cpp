@@ -1428,6 +1428,8 @@ struct Engine::Impl {
           in.facts.known = true;
           in.facts.start = by_time[i].start;
           in.facts.duration = duration ? duration->to_seconds_lossy() : 0.0;
+          if (ref->contains("length_from")) // the workflow decides the length: the Clip node gives what the clip asks for, which a run does not change
+            in.facts.duration = ref->value("asked_length", in.facts.duration);
           in.facts.width = canvas.value("width", 1920);
           in.facts.height = canvas.value("height", 1080);
           in.facts.frame_rate = rate ? rate->to_seconds_lossy() : 30.0;
@@ -1684,6 +1686,72 @@ struct Engine::Impl {
   }
 
   // Puts the Takes that job threads finished on their clips, each as one undoable edit that also selects it.
+  // The edits that make a clip as long as its workflow said, when the clip's length comes from the workflow ("length_from" names a number
+  // Output): the Take's file for it is read, the clip's duration becomes that many frames, and the clips of the track that it now
+  // overlaps slide right (a clip that gets shorter moves nothing, as when it is trimmed). Nothing when the clip sets its own length.
+  void length_ops(const Project &pr, const std::string &clip_id, const json &take, json &ops) const {
+    const doc::NodeRef *ref = pr.doc.find(clip_id);
+    if (!ref)
+      return;
+    const json media = ref->node->value("media_ref", json::object());
+    const std::string from = media.value("length_from", std::string());
+    if (from.empty())
+      return;
+    const std::string file = take.value("outputs", json::object()).value(from, json::object()).value("path", std::string());
+    if (file.empty())
+      return;
+    const fs::path path = to_path(file).is_absolute() ? to_path(file) : pr.dir / to_path(file);
+    const auto text = storage::read_file(path);
+    if (!text)
+      return;
+    const double seconds = std::atof(text->c_str());
+    const doc::NodeRef *track = pr.doc.find(ref->parent);
+    const auto seq_ref = track ? pr.doc.find(track->parent) : nullptr;
+    const auto rate = Rational::parse(seq_ref ? seq_ref->node->value("rate", std::string("30")) : std::string("30"));
+    if (seconds <= 0.0 || !rate)
+      return;
+    const int64_t frames = std::max<int64_t>(1, std::llround(seconds * rate->to_seconds_lossy()));
+    const auto length = Rational::make(frames * rate->den(), rate->num());
+    const json timing = ref->node->value("timing", json::object());
+    const auto start = Rational::parse(timing.value("record_in", std::string("0")));
+    const auto old_length = Rational::parse(timing.value("duration", std::string("0")));
+    if (!length || !start || !old_length || compare(*length, *old_length) == 0)
+      return;
+    ops.push_back({{"op", "replace"}, {"path", clip_id + "/timing/duration"}, {"value", length->to_string()}});
+    if (compare(*length, *old_length) < 0 || !track)
+      return;
+    // The clips after it, in order, each moved right just enough not to overlap what comes before it.
+    struct After {
+      std::string id;
+      Rational at, len;
+    };
+    std::vector<After> after;
+    const json clips = track->node->value("clips", json::object());
+    for (auto it = clips.begin(); it != clips.end(); ++it) {
+      if (it.key() == clip_id)
+        continue;
+      const json t = it->value("timing", json::object());
+      const auto at = Rational::parse(t.value("record_in", std::string("0")));
+      const auto len = Rational::parse(t.value("duration", std::string("0")));
+      if (at && len && compare(*at, *start) >= 0)
+        after.push_back({it.key(), *at, *len});
+    }
+    std::sort(after.begin(), after.end(), [](const After &a, const After &b) { return compare(a.at, b.at) < 0; });
+    const auto first_end = add(*start, *length);
+    if (!first_end)
+      return;
+    Rational cursor = *first_end;
+    for (const After &a : after) {
+      if (compare(a.at, cursor) >= 0)
+        break;
+      ops.push_back({{"op", "replace"}, {"path", a.id + "/timing/record_in"}, {"value", cursor.to_string()}});
+      const auto next = add(cursor, a.len);
+      if (!next)
+        break;
+      cursor = *next;
+    }
+  }
+
   void apply_finished() {
     std::vector<Finished> items;
     {
@@ -1706,6 +1774,7 @@ struct Engine::Impl {
       if (!same.empty() && media.value("selected", json()) == json(same))
         continue;
       json ops = json::array();
+      length_ops(**pr, f.clip, f.take, ops); // a clip whose workflow decides its length gets it with the Take
       if (same.empty())
         ops.push_back({{"op", "add"}, {"path", f.clip + "/media_ref/takes/$new:take"}, {"value", std::move(f.take)}});
       ops.push_back({{"op", had ? "replace" : "add"}, {"path", f.clip + "/media_ref/selected"}, {"value", same.empty() ? std::string("$new:take") : same}});
@@ -2229,6 +2298,7 @@ struct Engine::Impl {
     json ops = json::array({{{"op", media.contains("selected") ? "replace" : "add"}, {"path", *clip + "/media_ref/selected"}, {"value", *take}}});
     if (const json then = takes[*take].value("inputs", json::object()); then != media.value("inputs", json::object()))
       ops.push_back({{"op", media.contains("inputs") ? "replace" : "add"}, {"path", *clip + "/media_ref/inputs"}, {"value", then}});
+    length_ops(*pr, *clip, takes[*take], ops); // and the clip is as long as that Take was
     return project_patch({{"project", to_utf8(pr->dir)}, {"patch", {{"ops", std::move(ops)}, {"label", "Select take"}}}});
   }
 

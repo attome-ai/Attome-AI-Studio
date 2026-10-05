@@ -795,3 +795,64 @@ TEST_CASE("generate: what a node made is told per node, only while it is what th
   const json after = ok(*f.engine, "gen.node_results", {{"project", f.project}, {"clip", f.a}});
   CHECK(after["nodes"].size() == 1);
 }
+
+TEST_CASE("generate: a clip whose workflow decides its length gets it from the run; the clips after it slide; the Take's length comes with the Take", "[gen][generate][length]") {
+  Film f; // First is 1 s at 0, Second is 1 s at 1 s; the mock makes the length its sampler is given
+  const auto node_of = [&](const std::string &clip, const char *kind) {
+    const json nodes = f.get(clip)["media_ref"]["workflow"]["nodes"];
+    for (auto it = nodes.begin(); it != nodes.end(); ++it)
+      if (it->value("kind", std::string()) == kind)
+        return it.key();
+    return std::string();
+  };
+  const std::string dec = node_of(f.a, "attome.decode"), smp = node_of(f.a, "attome.sample");
+  // First reads its length from the video it makes: a Get Duration node, an Output "length", length_from. What it asks for is typed in the
+  // sampler (0.5 s); the clip's own length (1 s) is not what the workflow is given.
+  const json made = f.patch(json::array(
+      {{{"op", "remove"}, {"path", smp + "/inputs/seconds"}},
+       {{"op", "add"}, {"path", f.a + "/media_ref/workflow/nodes/$new:clk"}, {"value", {{"kind", "attome.clip"}}}},
+       {{"op", "add"}, {"path", f.a + "/media_ref/workflow/links/$new:ls"}, {"value", {{"from", {"$new:clk", "duration"}}, {"to", {smp, "seconds"}}}}},
+       {{"op", "add"}, {"path", f.a + "/media_ref/workflow/nodes/$new:dur"}, {"value", {{"kind", "attome.get_duration"}}}},
+       {{"op", "add"}, {"path", f.a + "/media_ref/workflow/links/$new:l"}, {"value", {{"from", {dec, "video"}}, {"to", {"$new:dur", "media"}}}}},
+       {{"op", "add"}, {"path", f.a + "/media_ref/workflow/exposed/outputs/length"}, {"value", {{"from", {"$new:dur", "seconds"}}}}},
+       {{"op", "add"}, {"path", f.a + "/media_ref/length_from"}, {"value", "length"}},
+       {{"op", "add"}, {"path", f.a + "/media_ref/asked_length"}, {"value", 0.5}}}));
+  CHECK(ok(*f.engine, "project.validate", {{"project", f.project}})["ok"] == true);
+  const auto length_of = [&](const std::string &clip) { return f.get(clip)["timing"]["duration"].get<std::string>(); };
+  const auto start_of = [&](const std::string &clip) { return f.get(clip)["timing"]["record_in"].get<std::string>(); };
+  CHECK(length_of(f.a) == "1");
+  REQUIRE(f.wait(f.run({{"clips", json::array({f.a})}}))["state"] == "done");
+  // The sampler was asked for 0.5 s (Clip node: asked_length); the video came out 12 frames long; the clip is that long. Shorter: Second stays.
+  CHECK(length_of(f.a) == "1/2");
+  CHECK(start_of(f.b) == "1");
+  CHECK(f.status_of(f.a)["state"] == "clean"); // the run changed the clip's length, and that is not a reason to make it again
+  const std::string take_1 = f.get(f.a)["media_ref"]["selected"];
+
+  // Asked for 2 s: the new Take is 2 s long, the clip grows to it, and Second, which it now overlaps, slides right.
+  f.patch(json::array({{{"op", "replace"}, {"path", f.a + "/media_ref/asked_length"}, {"value", 2.0}}}));
+  CHECK(f.status_of(f.a)["state"] == "dirty");
+  REQUIRE(f.wait(f.run({{"clips", json::array({f.a})}}))["state"] == "done");
+  CHECK(length_of(f.a) == "2");
+  CHECK(start_of(f.b) == "2");
+  CHECK(f.status_of(f.a)["state"] == "clean");
+  const std::string take_2 = f.get(f.a)["media_ref"]["selected"];
+  CHECK(take_2 != take_1);
+
+  // Choosing the first Take again: the clip is as long as that Take was. Everything is one edit and undoes in one step.
+  ok(*f.engine, "gen.select_take", {{"project", f.project}, {"clip", f.a}, {"take", take_1}});
+  CHECK(length_of(f.a) == "1/2");
+  CHECK(f.get(f.a)["media_ref"]["inputs"].contains("seed"));
+  ok(*f.engine, "project.undo", {{"project", f.project}});
+  CHECK(length_of(f.a) == "2");
+  CHECK(f.get(f.a)["media_ref"]["selected"] == take_2);
+
+  // What is refused: a name that is not a number Output; a length asked for that is not a number or the model cannot make.
+  CHECK(err(*f.engine, "project.patch", {{"project", f.project}, {"patch", {{"ops", json::array({{{"op", "replace"}, {"path", f.a + "/media_ref/length_from"}, {"value", "video"}}})}}}}).rule == "G_PORT");
+  CHECK(err(*f.engine, "project.patch", {{"project", f.project}, {"patch", {{"ops", json::array({{{"op", "replace"}, {"path", f.a + "/media_ref/asked_length"}, {"value", "long"}}})}}}}).rule == "G_TYPE");
+  CHECK(err(*f.engine, "project.patch", {{"project", f.project}, {"patch", {{"ops", json::array({{{"op", "replace"}, {"path", f.a + "/media_ref/asked_length"}, {"value", 400.0}}})}}}}).rule == "G_RANGE");
+  // A clip that sets its own length is not touched by a run.
+  REQUIRE(f.wait(f.run({{"clips", json::array({f.b})}}))["state"] == "done");
+  CHECK(length_of(f.b) == "1");
+  (void)made;
+  (void)smp;
+}

@@ -36,6 +36,8 @@ try {
     'wait 400'
     "shot $work\takes_before_combo.jpg"
     'click @combo:gen_start'             # it starts from the last frame of the first clip
+    'wait 300'
+    "shot $work\takes_after_combo.jpg"
     'click @option:gen_start_previous'
     'wait 400'
     'click @button:gen_run'

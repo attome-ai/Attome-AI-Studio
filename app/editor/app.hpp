@@ -158,6 +158,7 @@ private:
   void poll_models();
   void poll_gen_parts(); // gen.nodes, every few seconds: the kinds and the models with what they declare
   const json *clip_json(const std::string &clip_id) const; // the clip's object in doc_                       // models.list and the download jobs, twice a second while something shows them
+  void draw_length_by(const ClipUi &clip, const json &recipe, const json &media); // who decides the clip's length
   void workflow_library_buttons(const std::string &clip_id, const std::string &source); // Save to library, Reset to the library version
   void draw_workflow_card(const ClipUi &clip);   // the Exposed Inputs of a generative clip's own workflow, one row each
   void draw_variables_card();                    // the project's Variables, on the Project card

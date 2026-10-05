@@ -9,4 +9,7 @@ namespace atm::api {
 // frame too). False when the file cannot be read as a video.
 bool write_frame(const std::string &video, const std::string &jpeg, double at_seconds);
 
+// The length of a video or a sound in seconds, written as text to `path`. False when the file cannot be read.
+bool write_duration(const std::string &media, const std::string &path);
+
 } // namespace atm::api

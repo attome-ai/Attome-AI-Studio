@@ -145,7 +145,7 @@ std::vector<GenOutcome> run_generation(const GenRun &run, const GenProgress &pro
         continue;
       }
       const std::string kind = step.what.value("kind", std::string()), model = step.what.value("model", std::string());
-      const bool builtin = kind == "get_frame"; // runs here, with no model
+      const bool builtin = kind == "get_frame" || kind == "get_duration"; // runs here, with no model
       gen::Provider *provider = builtin ? nullptr : provider_for(run.providers, model, kind);
       if (!provider && !builtin) {
         out.error = engine_error("G_NO_ENGINE", "No engine on this computer runs \"" + kind + "\" for the model " + model + ".",
@@ -206,7 +206,11 @@ std::vector<GenOutcome> run_generation(const GenRun &run, const GenProgress &pro
       if (progress.on_node)
         progress.on_node(running_node, 0, 0);
       Result<gen::StepResult> result = gen::StepResult{};
-      if (builtin) { // Get Frame: the first or the last picture of the video, or the one at a time
+      if (builtin && kind == "get_duration") { // Get Duration: the length of the video or the sound, as text
+        const std::string media_file = request.inputs.value("media", std::string());
+        if (!write_duration(media_file, request.outputs["seconds"]))
+          result = tl::unexpected(engine_error("E_INTERNAL", "The length of " + media_file + " could not be read.", "The clip it comes from may have no Take yet."));
+      } else if (builtin) { // Get Frame: the first or the last picture of the video, or the one at a time
         const std::string video = request.inputs.value("video", std::string());
         const double at = request.inputs.contains("at") && request.inputs["at"].is_number()
                               ? request.inputs["at"].get<double>()

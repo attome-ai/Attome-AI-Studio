@@ -2968,6 +2968,62 @@ void App::draw_presets_card() {
   end_card();
 }
 
+// "Length by": who decides how long a generative clip is, me (the slider sets the clip's length) or the workflow (a number Output of it).
+void App::draw_length_by(const ClipUi &c, const json &recipe, const json &media) {
+  const std::string id = c.id;
+  const std::string length_from = media.value("length_from", std::string());
+  const bool by_workflow = !length_from.empty();
+    {
+      std::vector<std::string> outs; // the workflow's number Outputs
+      for (const gen::Port &o : gen::workflow_ports(object_in(doc_, "workflows"), recipe).outputs)
+        if (o.type == gen::PortType::number || o.type == gen::PortType::integer)
+          outs.push_back(o.name);
+      const std::string primary_name = gen::primary_output(recipe);
+      ImGui::TextColored(hexv(look::fg2), "Length by");
+      ImGui::SameLine(88.0f);
+      ImGui::PushStyleColor(ImGuiCol_FrameBg, hexv(look::raised));
+      ImGui::SetNextItemWidth(-1.0f);
+      if (ImGui::BeginCombo("##length_by", by_workflow ? ("The workflow: " + length_from).c_str() : "Me")) {
+        if (ImGui::Selectable("Me", !by_workflow) && by_workflow)
+          pending_ = [this, id] {
+            patch(json::array({{{"op", "remove"}, {"path", id + "/media_ref/length_from"}}, {{"op", "remove"}, {"path", id + "/media_ref/asked_length"}}}), "Length by me");
+          };
+        ui_mark("option:length_me");
+        for (const std::string &name : outs)
+          if (ImGui::Selectable(("The workflow: " + name).c_str(), length_from == name) && length_from != name)
+            pending_ = [this, id, name, by_workflow, now = double(c.frames) / fps()] {
+              json ops = json::array({{{"op", by_workflow ? "replace" : "add"}, {"path", id + "/media_ref/length_from"}, {"value", name}}});
+              if (!by_workflow)
+                ops.push_back({{"op", "add"}, {"path", id + "/media_ref/asked_length"}, {"value", std::round(now * 100.0) / 100.0}});
+              patch(ops, "Length by the workflow");
+            };
+        if (outs.empty() && !primary_name.empty() && !by_workflow) { // no number Output yet: make one from the video the workflow makes
+          if (ImGui::Selectable("The video the workflow makes")) {
+            const gen::ExposedOutput *main = nullptr;
+            const auto exposed = gen::exposed_outputs(recipe);
+            for (const gen::ExposedOutput &o : exposed)
+              if (o.name == primary_name)
+                main = &o;
+            if (main)
+              pending_ = [this, id, from_node = main->node, from_port = main->port, now = double(c.frames) / fps()] {
+                const std::string wbase = id + "/media_ref/workflow";
+                patch(json::array({{{"op", "add"}, {"path", wbase + "/nodes/$new:dur"}, {"value", {{"kind", "attome.get_duration"}}}},
+                                   {{"op", "add"}, {"path", wbase + "/links/$new:l"}, {"value", {{"from", {from_node, from_port}}, {"to", {"$new:dur", "media"}}}}},
+                                   {{"op", "add"}, {"path", wbase + "/exposed/outputs/length"}, {"value", {{"from", {"$new:dur", "seconds"}}}}},
+                                   {{"op", "add"}, {"path", id + "/media_ref/length_from"}, {"value", "length"}},
+                                   {{"op", "add"}, {"path", id + "/media_ref/asked_length"}, {"value", std::round(now * 100.0) / 100.0}}}),
+                      "Length by the workflow");
+              };
+          }
+          ui_mark("option:length_from_video");
+        }
+        ImGui::EndCombo();
+      }
+      ui_mark("combo:length_by");
+      ImGui::PopStyleColor();
+    }
+}
+
 // "Save to library" and "Reset to the library version" for a generative clip's own workflow.
 void App::workflow_library_buttons(const std::string &clip_id, const std::string &source) {
   if (soft_button("workflow_save", "Save to library", ImVec2(0.0f, 26.0f)))
@@ -3187,7 +3243,7 @@ void App::draw_workflow_card(const ClipUi &c) {
         ui_mark("combo:input_variable_" + e.name);
       }
     } else if (e.name == "prompt" && multi) { // the prompt: a box of its own, as before
-      ImGui::InputTextMultiline("##prompt", prompt_buf_, sizeof prompt_buf_, ImVec2(-1.0f, 92.0f));
+      ImGui::InputTextMultiline("##prompt", prompt_buf_, sizeof prompt_buf_, ImVec2(-1.0f, 48.0f));
       ui_mark("field:prompt");
       if (ImGui::IsItemActive() && c.prompt != prompt_buf_)
         live_commit_ = [this, id, value = std::string(prompt_buf_), has = have.contains("prompt")] {
@@ -3272,13 +3328,19 @@ void App::draw_workflow_card(const ClipUi &c) {
               lo = std::max(0.1f, range["min"].get<float>());
               hi = range["max"].get<float>() > lo ? range["max"].get<float>() : 15.0f;
             }
-        const float current = float(double(c.frames) / fps());
+        // Who decides how long the clip is: the user (the slider sets the clip's length), or the workflow (a number Output of it, such as
+        // the length of the video it makes, sets the clip's length after each run; the slider is then what the clip asks for).
+        const std::string length_from = media.value("length_from", std::string());
+        const bool by_workflow = !length_from.empty();
+        const double asked_now = media.value("asked_length", double(c.frames) / fps());
+        const float current = by_workflow ? float(asked_now) : float(double(c.frames) / fps());
         const std::string key = c.id + "@" + std::to_string(revision_);
         if (gen_len_for_ != key && !ImGui::IsAnyItemActive()) {
           gen_len_for_ = key;
           gen_len_ = current;
         }
-        ImGui::TextColored(hexv(look::fg2), "Length");
+        draw_length_by(c, recipe, media);
+        ImGui::TextColored(hexv(look::fg2), by_workflow ? "Asks for" : "Length");
         ImGui::SameLine(88.0f);
         slim_slider("gen_length", &gen_len_, lo, std::max(hi, lo + 0.5f), ImGui::GetContentRegionAvail().x - 56.0f, "");
         const bool done = ImGui::IsItemDeactivatedAfterEdit();
@@ -3287,7 +3349,12 @@ void App::draw_workflow_card(const ClipUi &c) {
         ImGui::TextColored(hexv(look::fg2), "%4.1fs", gen_len_);
         ImGui::PopFont();
         const float asked = std::clamp(std::round(gen_len_ * 2.0f) / 2.0f, lo, hi); // in half seconds
-        if (done && std::fabs(asked - current) > 0.001f) {
+        if (done && by_workflow && std::fabs(asked - current) > 0.001f) { // what the clip asks for: the clip is as long as the run says, so nothing slides here
+          pending_ = [this, id, asked] {
+            if (!patch(json::array({{{"op", "replace"}, {"path", id + "/media_ref/asked_length"}, {"value", double(asked)}}}), "Change the length asked for"))
+              gen_len_for_.clear();
+          };
+        } else if (done && std::fabs(asked - current) > 0.001f) {
           // The clip is as long as what it makes; the clips after it slide right when it grows into them.
           const int64_t frames = std::max<int64_t>(1, std::llround(double(asked) * fps()));
           json ops = json::array({{{"op", "replace"}, {"path", id + "/timing/duration"}, {"value", frames_text(frames)}}});

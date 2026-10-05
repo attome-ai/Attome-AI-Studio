@@ -12,6 +12,7 @@ std::string output_file(std::string_view port) {
                     : type == PortType::image ? ".jpg"
                     : type == PortType::audio ? ".wav"
                     : type == PortType::mask  ? ".png"
+                    : type == PortType::number || type == PortType::integer || type == PortType::text || type == PortType::boolean ? ".txt"
                                               : ".bin";
   return std::string(port) + ext;
 }

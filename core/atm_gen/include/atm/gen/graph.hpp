@@ -27,6 +27,8 @@
 //   faces of "exposed" on the canvas.
 //   attome.get_frame       a node that runs here, with no model: video (and optionally "at", seconds) -> image;
 //                          settings {"frame": "first" | "last"} when "at" is not given
+//   attome.get_duration    a node that runs here, with no model: media (a video or a sound) -> seconds, its length. Exposed as an
+//                          Output and named by the clip's "length_from", it is how a workflow decides how long its clip is.
 //   exposed inputs, the Instance's Exposed Inputs, the values the clip sets:
 //           {"<name>": {"type": "<data type>", "label"?, "required"?: bool, "default"?, "range"?: {"min", "max"} or {"options": […]},
 //                       "order"?: n, "to"?: [["nod_…", "<input port>"], …]}}

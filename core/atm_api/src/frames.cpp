@@ -1,6 +1,9 @@
 #include "frames.hpp"
 
 #include <algorithm>
+#include <cstdio>
+#include <filesystem>
+#include <fstream>
 #include <cstdint>
 #include <vector>
 
@@ -27,6 +30,17 @@ bool write_frame(const std::string &video, const std::string &jpeg, double at_se
     std::copy_n(view->uv + size_t(y) * size_t(view->uv_pitch), w, nv12.data() + size_t(w) * size_t(h) + size_t(y) * size_t(w));
   media::nv12_to_bgrx(nv12.data(), w, h, bgrx.data());
   return bool(media::write_jpeg(jpeg, bgrx.data(), w, h));
+}
+
+bool write_duration(const std::string &media, const std::string &path) {
+  const auto info = media::probe(media);
+  if (!info || info->duration_hns <= 0)
+    return false;
+  char text[48];
+  std::snprintf(text, sizeof text, "%.6f", double(info->duration_hns) / double(media::kHnsPerSecond));
+  std::ofstream out(std::filesystem::path(std::u8string(path.begin(), path.end())), std::ios::binary);
+  out << text;
+  return bool(out);
 }
 
 } // namespace atm::api

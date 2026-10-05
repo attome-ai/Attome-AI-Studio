@@ -33,6 +33,8 @@ constexpr PortDef kDecodeInputs[] = {{"latent", T::latent, true}};
 
 constexpr PortDef kFrameInputs[] = {{"video", T::video, true}, {"at", T::number}};
 constexpr PortDef kFrameOutputs[] = {{"image", T::image}};
+constexpr PortDef kDurationInputs[] = {{"media", T::video, true}};
+constexpr PortDef kDurationOutputs[] = {{"seconds", T::number}};
 // The Input nodes. A Variable node's one output takes the type the node says; the table gives the default.
 constexpr PortDef kProjectOutputs[] = {{"width", T::integer}, {"height", T::integer}, {"frame_rate", T::number}};
 constexpr PortDef kVariableOutputs[] = {{"value", T::text}};
@@ -45,6 +47,7 @@ constexpr KindDef kKinds[] = {
     {"sample", "Sample", kSampleInputs, kSampleOutputs, true},
     {"decode", "Decode", kDecodeInputs, kShotOutputs, true},
     {"get_frame", "Get frame", kFrameInputs, kFrameOutputs, false},
+    {"get_duration", "Get duration", kDurationInputs, kDurationOutputs, false},
     {"project", "Project", {}, kProjectOutputs, false, true},
     {"variable", "Variable", {}, kVariableOutputs, false, true},
     {"clip", "Clip", {}, kClipOutputs, false, true},
@@ -715,6 +718,17 @@ void check_clip(const json &library, const json &variables, const std::string &c
     return;
   }
   check_workflow(library, instance, clip_id, clip_id + "/media_ref/workflow", out);
+  // The length of the clip decided by its workflow: "length_from" names a number Output of it, and "asked_length" is what the clip asks
+  // for in the meantime (what a Clip node gives), so a run that changes the clip's length does not make the clip out of date.
+  if (const auto from = ref.find("length_from"); from != ref.end()) {
+    const Ports mine = workflow_ports(library, instance);
+    const Port *source = from->is_string() ? mine.output(from->get<std::string>()) : nullptr;
+    if (!source || (source->type != T::number && source->type != T::integer))
+      add("G_PORT", "length_from", "\"length_from\" of clip " + clip_id + " must name a number Output of its workflow.",
+          "Outputs: " + names(mine.outputs) + ". Add a Get Duration node and give the clip its seconds as an Output.");
+    if (const auto asked = ref.find("asked_length"); asked != ref.end() && (!asked->is_number() || asked->get<double>() <= 0.0))
+      add("G_TYPE", "asked_length", "\"asked_length\" of clip " + clip_id + " must be a number of seconds above zero.", "Set it to the length the clip asks for.");
+  }
   const std::vector<ExposedInput> face = exposed_inputs(library, instance);
   const json &inputs = object_at(ref, "inputs");
   const json &wf_nodes = object_at(instance, "nodes");
@@ -805,17 +819,21 @@ void check_clip(const json &library, const json &variables, const std::string &c
                "A clip may not depend on its own result. Name a clip that does not.");
     }
   }
+  const auto asked_length = ref.find("asked_length");
+  const bool run_time_length = ref.contains("length_from");
   if (const auto duration = Rational::parse(object_at(clip, "timing").value("duration", std::string("0")))) {
-    const double seconds = duration->to_seconds_lossy();
+    const double seconds = run_time_length ? (asked_length != ref.end() && asked_length->is_number() ? asked_length->get<double>() : 0.0) : duration->to_seconds_lossy();
     const json &links = object_at(instance, "links");
+    if (!run_time_length || seconds > 0.0) {
     std::string from_node, from_port, to_node, to_port;
     for (auto it = links.begin(); it != links.end(); ++it)
       if (it->is_object() && read_end(*it, "from", from_node, from_port) && read_end(*it, "to", to_node, to_port) && wf_nodes.contains(from_node) &&
           wf_nodes.contains(to_node) && short_name(string_at(wf_nodes[from_node], "kind")) == "clip" && from_port == "duration")
         if (const ModelDecl *model = model_of(wf_nodes[to_node]))
           if (const std::string wrong = input_problem(*model, to_port, seconds); !wrong.empty())
-            add_at("G_RANGE", clip_id + "/timing/duration", "The Duration of clip " + clip_id + " " + wrong + ".",
-                   "Make the clip a length the model " + model->id + " can make.");
+            add_at("G_RANGE", clip_id + (run_time_length ? "/media_ref/asked_length" : "/timing/duration"), "The length clip " + clip_id + " asks for " + wrong + ".",
+                   "Ask for a length the model " + model->id + " can make.");
+    }
   }
   for (const ExposedInput &input : face)
     if (input.required && input.def.is_null() && !inputs.contains(input.name))
