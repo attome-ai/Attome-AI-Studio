@@ -16,18 +16,18 @@ try {
   $env:ATTOME_ENDPOINT = "\\.\pipe\attome-uitest-setup-$PID"
   try { & "$bin\attome.exe" new $proj --rate 24 --canvas 640x352 | Out-Null } finally { Remove-Item Env:\ATTOME_ENDPOINT -ErrorAction SilentlyContinue }
 
-  # The tiles sit in the left panel and the first lane about 480 points below them; the offsets are from the tile.
+  # The tiles sit in the left panel and the first lane about 550 points below them; the offsets are from the tile.
   $run = Invoke-EditorScript -Project $proj -Script @(
     'wait 300'
     "shot $work\empty_start.jpg"            # the dimmed V1 and A1 lanes and the hint
     'click @rail:Text'
-    'drag @style:Title 300 480 hold'
+    'drag @style:Title 300 550 hold'
     'wait 200'
     "shot $work\empty_title_held.jpg"       # the ghost on the lane that will become a track
     'release'
     'wait 600'
     'click @rail:Generate'
-    'drag @model:attome-mock 700 480'       # further right on the same lane, now a real track
+    'drag @model:attome-mock 700 550'       # further right on the same lane, now a real track
     'wait 800'
     "shot $work\empty_after.jpg"
   )

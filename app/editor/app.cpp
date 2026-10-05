@@ -1,6 +1,7 @@
 ﻿#include "app.hpp"
 
 #include <algorithm>
+#include <span>
 #include <chrono>
 #include <cmath>
 #include <numeric>
@@ -1467,12 +1468,49 @@ struct TileGrid {
   int cols = 3, n = 0;
 };
 
-TileGrid tile_grid(float wanted = 80.0f) {
+// `count` is how many tiles will be drawn. A tile is never smaller than kMinTile or larger than kMaxTile: a wide panel
+// shows more tiles in a row, and a row that the tiles do not fill keeps them at their largest.
+TileGrid tile_grid(int count) {
+  constexpr float kMinTile = 80.0f, kMaxTile = 132.0f;
   TileGrid g;
   const float w = ImGui::GetContentRegionAvail().x;
-  g.cols = std::max(2, int((w + g.gap) / (wanted + g.gap)));
-  g.size = (w - g.gap * float(g.cols - 1)) / float(g.cols);
+  const int fits = std::max(1, int((w + g.gap) / (kMinTile + g.gap)));
+  g.cols = std::max(1, std::min(fits, std::max(1, count)));
+  g.size = std::min(kMaxTile, (w - g.gap * float(g.cols - 1)) / float(g.cols));
   return g;
+}
+
+// The row of tabs at the top of a panel: what to show of it. They stand where the panel's name would be; the rail says
+// which panel is open. Each tab is marked "<mark>:<label>" for UI tests.
+void panel_tabs(const char *mark, std::span<const std::string> labels, int &selected) {
+  selected = std::clamp(selected, 0, std::max(0, int(labels.size()) - 1));
+  for (int i = 0; i < int(labels.size()); ++i) {
+    const bool active = selected == i;
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    const float tw = text_size(labels[size_t(i)].c_str()).x + 20.0f;
+    ImGui::PushID(i);
+    ImGui::InvisibleButton(mark, ImVec2(tw, 28.0f));
+    ImGui::PopID();
+    ui_mark(std::string(mark) + ":" + labels[size_t(i)]);
+    if (ImGui::IsItemClicked())
+      selected = i;
+    if (active)
+      ImGui::GetWindowDrawList()->AddRectFilled(p, ImVec2(p.x + tw, p.y + 28.0f), hex(look::raised), 8.0f);
+    ImGui::GetWindowDrawList()->AddText(ImVec2(p.x + 10.0f, p.y + 5.0f),
+                                        active ? hex(look::fg) : ImGui::IsItemHovered() ? hex(look::fg2) : hex(look::fg3),
+                                        labels[size_t(i)].c_str());
+    ImGui::SameLine(0.0f, 2.0f);
+  }
+}
+
+// The hint under a panel's cards: how they are used.
+void panel_hint(const char *text) {
+  ImGui::Dummy(ImVec2(0, 6.0f));
+  ImGui::PushTextWrapPos(0.0f);
+  ImGui::PushFont(g_fonts.ui, 12.0f);
+  ImGui::TextColored(hexv(look::fg3), "%s", text);
+  ImGui::PopFont();
+  ImGui::PopTextWrapPos();
 }
 
 struct Tile {
@@ -1910,73 +1948,101 @@ void App::draw_media() {
     ImGui::End();
     return;
   }
-  const float width = ImGui::GetContentRegionAvail().x;
-  ImGui::PushFont(g_fonts.bold, 15.0f);
-  ImGui::TextUnformatted("Media");
-  ImGui::PopFont();
-  ImGui::SameLine(width - 40.0f);
-  ImGui::TextColored(hexv(look::fg3), "%zu items", paths.size());
-  ImGui::Spacing();
+  // What each file is, for the filters: sound, a still picture, or video.
+  const auto kind_of = [&](const std::string &path) {
+    if (audio_only_.count(path))
+      return 2;
+    std::string ext = path.substr(std::min(path.size(), path.find_last_of('.') + 1));
+    std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char ch) { return char(std::tolower(ch)); });
+    for (const char *still : {"png", "jpg", "jpeg", "bmp", "gif", "tga", "webp"})
+      if (ext == still)
+        return 3;
+    return 1;
+  };
 
-  // Tabs: only the project's own media exists so far.
-  for (const char *tab : {"Project", "Generated", "Stock"}) {
-    const bool active = std::string(tab) == "Project";
-    const ImVec2 p = ImGui::GetCursorScreenPos();
-    const float tw = text_size(tab).x + 24.0f;
-    ImGui::InvisibleButton(tab, ImVec2(tw, 28.0f));
-    if (active)
-      ImGui::GetWindowDrawList()->AddRectFilled(p, ImVec2(p.x + tw, p.y + 28.0f), hex(look::raised), 8.0f);
-    ImGui::GetWindowDrawList()->AddText(ImVec2(p.x + 12.0f, p.y + 5.0f), active ? hex(look::fg) : hex(look::fg3), tab);
-    if (!active && ImGui::IsItemHovered())
-      ImGui::SetTooltip("Not built yet");
-    ImGui::SameLine(0.0f, 4.0f);
+  if (paths.empty()) {
+    // An empty project: the whole panel is the one thing to do. No heading (the rail says which panel this is), no
+    // search, no count: there is nothing to search or count yet.
+    const ImVec2 p = ImGui::GetCursorScreenPos(), size = ImGui::GetContentRegionAvail();
+    ImGui::InvisibleButton("##import_all", ImVec2(size.x, std::max(160.0f, size.y)));
+    ui_mark("button:import_media");
+    const bool hovered = ImGui::IsItemHovered();
+    if (ImGui::IsItemClicked())
+      ask_import();
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    const ImVec2 q(p.x + size.x, p.y + std::max(160.0f, size.y));
+    dl->AddRectFilled(p, q, hex(hovered ? look::panel2 : look::panel), 14.0f);
+    dl->AddRect(p, q, hex(hovered ? look::accent : look::line2), 14.0f, 0, 1.2f);
+    const ImVec2 c((p.x + q.x) * 0.5f, p.y + std::min((q.y - p.y) * 0.4f, 150.0f));
+    dl->AddRectFilled(ImVec2(c.x - 26.0f, c.y - 26.0f), ImVec2(c.x + 26.0f, c.y + 26.0f), hex(look::accent, 36), 14.0f);
+    const std::string plus = glyph(icon::add);
+    ImGui::PushFont(g_fonts.ui, 24.0f);
+    const ImVec2 ps = text_size(plus.c_str());
+    dl->AddText(ImVec2(c.x - ps.x * 0.5f, c.y - ps.y * 0.5f), hex(look::accent), plus.c_str());
+    ImGui::PopFont();
+    const auto centred = [&](const char *text, float y, uint32_t ink, ImFont *font, float font_size) {
+      ImGui::PushFont(font, font_size);
+      dl->AddText(ImVec2(c.x - text_size(text).x * 0.5f, y), hex(ink), text);
+      ImGui::PopFont();
+    };
+    centred("Import media", c.y + 40.0f, look::fg, g_fonts.bold, 15.0f);
+    centred("Drop files here, or click to browse", c.y + 64.0f, look::fg3, g_fonts.ui, 13.0f);
+    centred("Video, audio and pictures", c.y + 84.0f, look::fg3, g_fonts.ui, 12.0f);
+    ImGui::End();
+    return;
   }
-  ImGui::NewLine();
 
+  // With media: the filters are the top row, with how many files the chosen one shows and the import button.
+  int shown = 0;
+  for (const std::string &path : paths)
+    shown += media_kind_ == 0 || kind_of(path) == media_kind_ ? 1 : 0;
+  {
+    static const std::string kinds[] = {"All", "Video", "Audio", "Images"};
+    const float right = ImGui::GetWindowPos().x + ImGui::GetContentRegionMax().x;
+    panel_tabs("filter", kinds, media_kind_);
+    const std::string count = std::to_string(shown);
+    ImGui::SameLine(right - ImGui::GetWindowPos().x - 34.0f - text_size(count.c_str()).x - 8.0f);
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextColored(hexv(look::fg3), "%s", count.c_str());
+    ImGui::SameLine(right - ImGui::GetWindowPos().x - 30.0f);
+    if (icon_button("import_media", icon::add, true, false, 28.0f, "Import media"))
+      ask_import();
+  }
   ImGui::SetNextItemWidth(-1.0f);
   ImGui::PushStyleColor(ImGuiCol_FrameBg, hexv(look::raised));
-  ImGui::InputTextWithHint("##filter", "Search clips", media_filter_, sizeof media_filter_);
+  ImGui::InputTextWithHint("##filter", "Search", media_filter_, sizeof media_filter_);
   ImGui::PopStyleColor();
   ImGui::Spacing();
 
-  // The import card.
-  {
-    const ImVec2 p = ImGui::GetCursorScreenPos();
-    ImGui::InvisibleButton("##import", ImVec2(-1.0f, 62.0f));
-    ImDrawList *dl = ImGui::GetWindowDrawList();
-    const bool hovered = ImGui::IsItemHovered();
-    const ImVec2 q(p.x + ImGui::GetItemRectSize().x, p.y + 62.0f);
-    dl->AddRectFilled(p, q, hex(hovered ? look::panel2 : look::panel), 12.0f);
-    dl->AddRect(p, q, hex(hovered ? look::accent : look::line2), 12.0f, 0, 1.2f);
-    dl->AddRectFilled(ImVec2(p.x + 12.0f, p.y + 15.0f), ImVec2(p.x + 44.0f, p.y + 47.0f), hex(look::accent, 36), 9.0f);
-    const std::string plus = glyph(icon::add);
-    dl->AddText(ImVec2(p.x + 22.0f, p.y + 22.0f), hex(look::accent), plus.c_str());
-    ImGui::PushFont(g_fonts.bold, 14.0f);
-    dl->AddText(ImVec2(p.x + 56.0f, p.y + 12.0f), hex(look::fg), "Import media");
-    ImGui::PopFont();
-    dl->AddText(ImVec2(p.x + 56.0f, p.y + 32.0f), hex(look::fg3), "Drop files or browse");
-    if (ImGui::IsItemClicked())
-      ask_import();
-  }
-  ImGui::Spacing();
-  section_label("PROJECT MEDIA");
-  ImGui::Spacing();
-
   ImGui::BeginChild("##grid", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_NoBackground);
-  const float cell = (ImGui::GetContentRegionAvail().x - 10.0f) * 0.5f;
+  // As many columns as fit: a card is never narrower than kMinCard, and never wider than kMaxCard, so a wide panel
+  // shows more cards in a row rather than larger ones.
+  constexpr float kMinCard = 130.0f, kMaxCard = 200.0f, kGap = 10.0f;
+  const float avail = ImGui::GetContentRegionAvail().x;
+  // The cards that pass the filter and the search: with fewer cards than would fit in a row, the row is not divided
+  // into empty columns, so a lone card stays at its largest instead of shrinking each time another column would fit.
+  const auto matches = [&](const std::string &path) {
+    if (media_kind_ != 0 && kind_of(path) != media_kind_)
+      return false;
+    if (!media_filter_[0])
+      return true;
+    std::string name = file_name(path), wanted = media_filter_;
+    std::transform(name.begin(), name.end(), name.begin(), [](unsigned char ch) { return char(std::tolower(ch)); });
+    std::transform(wanted.begin(), wanted.end(), wanted.begin(), [](unsigned char ch) { return char(std::tolower(ch)); });
+    return name.find(wanted) != std::string::npos;
+  };
+  const int visible = int(std::count_if(paths.begin(), paths.end(), matches));
+  const int per_row = std::max(1, int((avail + kGap) / (kMinCard + kGap)));
+  const int columns = std::max(1, std::min(per_row, visible));
+  const float cell = std::min(kMaxCard, (avail - kGap * float(columns - 1)) / float(columns));
   const float thumb_h = cell * 9.0f / 16.0f;
   int column = 0;
   for (const std::string &path : paths) {
     const std::string name = file_name(path);
-    if (media_filter_[0]) { // case-insensitive substring search
-      std::string a = name, b = media_filter_;
-      std::transform(a.begin(), a.end(), a.begin(), ::tolower);
-      std::transform(b.begin(), b.end(), b.begin(), ::tolower);
-      if (a.find(b) == std::string::npos)
-        continue;
-    }
-    if (column == 1)
-      ImGui::SameLine(0.0f, 10.0f);
+    if (!matches(path))
+      continue;
+    if (column != 0)
+      ImGui::SameLine(0.0f, kGap);
     ImGui::BeginGroup();
     const ImVec2 p = ImGui::GetCursorScreenPos();
     ImGui::PushID(path.c_str());
@@ -2015,28 +2081,20 @@ void App::draw_media() {
       ImGui::SetTooltip("Drag it onto the timeline, or click to add it at the end");
     ImGui::PopID();
     ImGui::EndGroup();
-    column = (column + 1) % 2;
+    column = (column + 1) % columns;
   }
-  if (paths.empty()) {
+  if (shown == 0) { // files exist, none of this kind
     ImGui::Spacing();
-    ImGui::PushTextWrapPos(0.0f);
-    ImGui::TextColored(hexv(look::fg3), "Nothing yet. Drop video files anywhere in this window.");
-    ImGui::PopTextWrapPos();
+    ImGui::TextColored(hexv(look::fg3), "None of this kind in the project.");
   }
   ImGui::EndChild();
   ImGui::End();
 }
 
 void App::draw_text_panel() {
-  ImGui::PushFont(g_fonts.bold, 15.0f);
-  ImGui::TextUnformatted("Text");
-  ImGui::PopFont();
-  ImGui::Spacing();
-  ImGui::PushTextWrapPos(0.0f);
-  ImGui::TextColored(hexv(look::fg3), "Drag a style onto the timeline, or click it to add it at the playhead. Edit the words, size and colour in the Inspector; Arabic and other right-to-left text work.");
-  ImGui::PopTextWrapPos();
-  ImGui::Spacing();
-  section_label("TITLES");
+  static const std::string tabs[] = {"All", "Titles", "Captions"};
+  panel_tabs("tab", tabs, text_tab_);
+  ImGui::NewLine();
   ImGui::Spacing();
   struct Style {
     const char *name, *sample, *hint;
@@ -2046,8 +2104,11 @@ void App::draw_text_panel() {
   static const Style styles[] = {{"Title", "Your title", "Large, centred", 30.0f, true},
                                  {"Lower third", "Name Surname", "Near the bottom", 20.0f, true},
                                  {"Caption", "Caption text", "Small, bottom", 16.0f, false}};
-  TileGrid grid = tile_grid();
+  const auto in_tab = [&](int i) { return text_tab_ == 0 || (text_tab_ == 1) == (i == 0); }; // the first style is the title
+  TileGrid grid = tile_grid(text_tab_ == 0 ? 3 : text_tab_ == 1 ? 1 : 2);
   for (int i = 0; i < 3; ++i) {
+    if (!in_tab(i))
+      continue;
     const Style st = styles[i];
     Tile t;
     t.id = std::string("style_") + st.name;
@@ -2071,7 +2132,8 @@ void App::draw_text_panel() {
     if (gallery_tile(grid, t))
       add_title(i);
   }
-  ImGui::Dummy(ImVec2(0, 4.0f));
+  panel_hint("Drag a style onto the timeline, or click it to add it at the playhead. Edit the words, size and colour in the "
+             "Inspector; Arabic and other right-to-left text work.");
 }
 
 namespace {
@@ -2208,23 +2270,26 @@ void App::jump_effect_key(const ClipUi &c, const EffectUi &fx, bool forward) {
 }
 
 void App::draw_effects_panel() {
-  ImGui::PushFont(g_fonts.bold, 15.0f);
-  ImGui::TextUnformatted("Effects");
-  ImGui::PopFont();
+  static const std::string tabs[] = {"All", "Colour", "Detail", "Key"};
+  panel_tabs("tab", tabs, fx_tab_);
+  ImGui::NewLine();
   ImGui::Spacing();
-  ImGui::PushTextWrapPos(0.0f);
-  ImGui::TextColored(hexv(look::fg3), "Drag an effect onto a clip to change that clip alone, or onto empty track space for an adjustment layer: it changes every track below it while it plays.");
-  ImGui::PopTextWrapPos();
-  ImGui::Spacing();
-  section_label("EFFECTS");
-  ImGui::Spacing();
+  // The tab an effect is under: colour (grade, LUT, vignette), detail (blur, sharpen, grain) or key (chroma, luma).
+  const auto tab_of = [](const std::string &name) {
+    return name == "grade" || name == "lut" || name == "vignette" ? 1 : name == "key" || name == "luma" ? 3 : 2;
+  };
+  int in_tab = 0;
+  for (const eval::EffectDef &def : eval::effect_defs())
+    in_tab += fx_tab_ == 0 || tab_of(def.short_name()) == fx_tab_ ? 1 : 0;
   static const std::pair<const char *, const char *> kBlurb[] = {
       {"blur", "Softens everything below"}, {"grade", "Brightness, contrast and colour"}, {"vignette", "Darkens the corners"},
       {"sharpen", "Crisper edges"}, {"grain", "Film grain, new every frame"},
       {"lut", "A look from a .cube file"}};
-  TileGrid grid = tile_grid();
+  TileGrid grid = tile_grid(in_tab);
   for (const eval::EffectDef &def : eval::effect_defs()) {
     const std::string name = def.short_name();
+    if (fx_tab_ != 0 && tab_of(name) != fx_tab_)
+      continue;
     Tile t;
     t.id = "fx_" + name;
     t.mark = "effect:" + name;
@@ -2283,7 +2348,8 @@ void App::draw_effects_panel() {
       }
     }
   }
-  ImGui::Dummy(ImVec2(0, 4.0f));
+  panel_hint("Drag an effect onto a clip to change that clip alone, or onto empty track space for an adjustment layer: it "
+             "changes every track below it while it plays.");
 }
 
 // Makes a generative clip with `model`: at `at` frames on `track` when given (a card dropped on the timeline), else at the
@@ -2316,27 +2382,34 @@ void App::draw_generate_panel() {
     if (rpc("gen.models", json::object(), listed))
       gen_models_ = listed.value("models", json::array());
   }
-  ImGui::PushFont(g_fonts.bold, 15.0f);
-  ImGui::TextUnformatted("Generate");
-  ImGui::PopFont();
-  ImGui::Spacing();
-  ImGui::PushTextWrapPos(0.0f);
-  ImGui::TextColored(hexv(look::fg3), "Drag a clip type onto the timeline, then write its prompt in the Inspector. A clip you can "
-                                      "generate, redo and chain.");
-  ImGui::PopTextWrapPos();
-  ImGui::Spacing();
-  const auto type_title = [](const std::string &t) {
-    return t == "video" ? std::string("VIDEO") : t == "image" ? std::string("IMAGE") : t == "audio" ? std::string("AUDIO") : t;
-  };
   std::vector<std::string> types;
   for (const json &m : gen_models_)
     if (const std::string t = m.value("clip_type", "video"); std::find(types.begin(), types.end(), t) == types.end())
       types.push_back(t);
-  for (const std::string &type : types) {
-    section_label(type_title(type).c_str());
-    ImGui::Spacing();
+  const auto tab_title = [](const std::string &t) {
+    return t == "video" ? std::string("Video") : t == "image" ? std::string("Image") : t == "audio" ? std::string("Audio") : t;
+  };
+  std::vector<std::string> tabs = {"All"};
+  for (const std::string &t : types)
+    tabs.push_back(tab_title(t));
+  panel_tabs("tab", tabs, gen_tab_);
+  ImGui::NewLine();
+  ImGui::Spacing();
+  for (size_t ti = 0; ti < types.size(); ++ti) {
+    const std::string &type = types[ti];
+    if (gen_tab_ != 0 && size_t(gen_tab_) != ti + 1)
+      continue;
+    if (gen_tab_ == 0 && types.size() > 1) { // under "All", each kind of clip gets its label
+      std::string upper = tab_title(type);
+      std::transform(upper.begin(), upper.end(), upper.begin(), [](unsigned char ch) { return char(std::toupper(ch)); });
+      section_label(upper.c_str());
+      ImGui::Spacing();
+    }
+    int of_type = 0;
+    for (const json &m : gen_models_)
+      of_type += m.value("clip_type", "video") == type ? 1 : 0;
     std::string family = "\x01";
-    TileGrid grid = tile_grid();
+    TileGrid grid = tile_grid(of_type);
     for (const json &m : gen_models_) {
       if (m.value("clip_type", "video") != type)
         continue;
@@ -2391,6 +2464,7 @@ void App::draw_generate_panel() {
   ImGui::PopFont();
   ImGui::Checkbox("Start from the clip before", &gen_chain_);
   ui_mark("check:gen_chain");
+  panel_hint("Drag a clip type onto the timeline, then write its prompt in the Inspector. A clip you can generate, redo and chain.");
 }
 
 // The clips whose workflow cannot run on this computer, and why. Asked again when the project changes and while a
@@ -2649,10 +2723,6 @@ void App::draw_models_panel() {
       std::snprintf(text, sizeof text, "%.0f MB", double(bytes) / 1e6);
     return std::string(text);
   };
-  ImGui::PushFont(g_fonts.bold, 15.0f);
-  ImGui::TextUnformatted("Models");
-  ImGui::PopFont();
-  ImGui::Spacing();
   ImGui::PushTextWrapPos(0.0f);
   ImGui::TextColored(hexv(look::fg3), "Models run on this computer. A download can be stopped and continued later, and "
                                       "every file is checked before it is used.");
@@ -3148,7 +3218,7 @@ void App::draw_viewer() {
                         IM_COL32_WHITE, 6.0f);
   else {
     dl->AddRectFilled(p0, p1, hex(0x000000), 6.0f);
-    const char *hint = "Drop video files here, or click Import media";
+    const char *hint = "Nothing to play yet";
     dl->AddText(ImVec2(p0.x + (size.x - text_size(hint).x) * 0.5f, p0.y + size.y * 0.5f - 8.0f), hex(look::fg3), hint);
   }
   if (!preview_warning_.empty())

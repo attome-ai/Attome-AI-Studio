@@ -312,6 +312,8 @@ private:
   std::set<std::string> opened_cards_; // "<clip id>:fade" and "<clip id>:transition": cards the user added before anything is set
   std::set<std::string> audio_only_; // media files without a picture
   char media_filter_[128] = {};
+  int media_kind_ = 0; // the Media panel's filter: 0 all, 1 video, 2 audio, 3 pictures
+  int text_tab_ = 0, fx_tab_ = 0, gen_tab_ = 0; // the tab chosen in the Text, Effects and Generate panels; 0 is All
   int inspector_tab_ = 0;
   int rail_tab_ = 0; // 0 Media, 2 Text, 3 Effects, 4 Generate, 6 Models
   char text_buf_[1024] = {};
