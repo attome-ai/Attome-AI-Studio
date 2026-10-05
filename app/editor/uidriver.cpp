@@ -299,7 +299,23 @@ void UiDriver::before_frame() {
         d.frames.push_back([](ImGuiIO &) {});
         d.frames.push_back([](ImGuiIO &) {});
       } else if (op == "click" || op == "slide") {
+        const bool shift = std::find(c.words.begin() + 1, c.words.end(), "shift") != c.words.end(),
+                   ctrl = std::find(c.words.begin() + 1, c.words.end(), "ctrl") != c.words.end();
+        if (shift || ctrl) // "click <target> shift": with the key held
+          d.frames.push_back([=](ImGuiIO &in) {
+            if (shift)
+              in.AddKeyEvent(ImGuiMod_Shift, true);
+            if (ctrl)
+              in.AddKeyEvent(ImGuiMod_Ctrl, true);
+          });
         d.queue_click(*p);
+        if (shift || ctrl)
+          d.frames.push_back([=](ImGuiIO &in) {
+            if (shift)
+              in.AddKeyEvent(ImGuiMod_Shift, false);
+            if (ctrl)
+              in.AddKeyEvent(ImGuiMod_Ctrl, false);
+          });
       } else if (op == "drag") {
         // Offsets in points, or with % in a share of the target's width (dx) and height (dy).
         const auto offset = [](const std::string &v, float extent) {
@@ -325,8 +341,16 @@ void UiDriver::before_frame() {
           }
         }
         const ImVec2 from = *p;
+        const bool shift = std::find(c.words.begin() + 1, c.words.end(), "shift") != c.words.end(),
+                   ctrl = std::find(c.words.begin() + 1, c.words.end(), "ctrl") != c.words.end();
         if (finished) {
-        d.frames.push_back([&d, from](ImGuiIO &) { d.mouse = from; });
+        d.frames.push_back([&d, from, shift, ctrl](ImGuiIO &in) { // "drag ... shift": the key is held for the whole drag
+          d.mouse = from;
+          if (shift)
+            in.AddKeyEvent(ImGuiMod_Shift, true);
+          if (ctrl)
+            in.AddKeyEvent(ImGuiMod_Ctrl, true);
+        });
         d.frames.push_back([](ImGuiIO &in) { in.AddMouseButtonEvent(0, true); });
         constexpr int kSteps = 12;
         for (int i = 1; i <= kSteps; ++i)
@@ -337,6 +361,12 @@ void UiDriver::before_frame() {
         if (c.words.back() != "hold")
           d.frames.push_back([](ImGuiIO &in) { in.AddMouseButtonEvent(0, false); });
         d.frames.push_back([](ImGuiIO &) {});
+        d.frames.push_back([shift, ctrl](ImGuiIO &in) {
+          if (shift)
+            in.AddKeyEvent(ImGuiMod_Shift, false);
+          if (ctrl)
+            in.AddKeyEvent(ImGuiMod_Ctrl, false);
+        });
         d.frames.push_back([](ImGuiIO &) {});
         }
       }

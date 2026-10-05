@@ -142,6 +142,8 @@ void run_gen(const std::shared_ptr<Job> &job, GenRun run, std::shared_ptr<Finish
       c["why"] = out.why;
     if (out.state == "failed") {
       c["error"] = error_to_json(out.error);
+      if (!out.node.empty())
+        c["node"] = out.node; // the node of the clip's workflow the run stopped at
       if (!first)
         first = &out.error;
     }
@@ -1602,10 +1604,17 @@ struct Engine::Impl {
       for (const gen::ClipIn &c : gen_clips(*pr)) {
         if (std::find(options.clips.begin(), options.clips.end(), c.id) == options.clips.end())
           continue;
+        // Only a workflow that has a seed input can vary by it. The next seed is above the clip's own and above the seed of every
+        // Take it has made, so a new Take never repeats an earlier one.
+        if (!c.ref->value("workflow", json::object()).value("exposed", json::object()).value("inputs", json::object()).contains("seed"))
+          continue;
         const json inputs = c.ref->value("inputs", json::object());
-        const bool has = inputs.contains("seed") && inputs["seed"].is_number_integer();
-        ops.push_back({{"op", inputs.contains("seed") ? "replace" : "add"}, {"path", c.id + "/media_ref/inputs/seed"},
-                       {"value", has ? inputs["seed"].get<int64_t>() + 1 : int64_t(1)}});
+        int64_t next = inputs.contains("seed") && inputs["seed"].is_number_integer() ? inputs["seed"].get<int64_t>() : int64_t(0);
+        const json takes = c.ref->value("takes", json::object());
+        for (auto t = takes.begin(); t != takes.end(); ++t)
+          if (const json then = t->value("inputs", json::object()); then.contains("seed") && then["seed"].is_number_integer())
+            next = std::max(next, then["seed"].get<int64_t>());
+        ops.push_back({{"op", inputs.contains("seed") ? "replace" : "add"}, {"path", c.id + "/media_ref/inputs/seed"}, {"value", next + 1}});
       }
       if (!ops.empty())
         ATM_CHECK(project_patch({{"project", to_utf8(pr->dir)}, {"patch", {{"ops", std::move(ops)}, {"label", "New take"}}}}).map([](const json &) {}));

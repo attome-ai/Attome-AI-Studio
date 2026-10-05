@@ -120,6 +120,14 @@ std::vector<GenOutcome> run_generation(const GenRun &run, const GenProgress &pro
       continue;
     }
     bool ok = true;
+    // Which node of the clip's workflow a step is, for the message of a step that fails: nodes by key.
+    const std::map<std::string, std::string> keys = gen::node_keys(run.library, clip.instance, clip.inputs, context);
+    const auto node_of = [&](const std::string &key) {
+      for (const auto &[node, k] : keys)
+        if (k == key)
+          return node;
+      return std::string();
+    };
     for (const gen::Step &step : steps) {
       ATM_PROFILE_SCOPE("gen.step");
       if (cancelled()) {
@@ -142,6 +150,7 @@ std::vector<GenOutcome> run_generation(const GenRun &run, const GenProgress &pro
       if (!provider && !builtin) {
         out.error = engine_error("G_NO_ENGINE", "No engine on this computer runs \"" + kind + "\" for the model " + model + ".",
                                  "Attome's own engine for this model arrives in a later version.");
+        out.node = node_of(step.key);
         ok = false;
         finish("failed");
         break;
@@ -210,6 +219,7 @@ std::vector<GenOutcome> run_generation(const GenRun &run, const GenProgress &pro
           finish("cancelled");
         } else {
           out.error = result.error();
+          out.node = node_of(step.key);
           finish("failed");
         }
         break;

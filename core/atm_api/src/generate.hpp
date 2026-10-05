@@ -45,6 +45,7 @@ struct GenOutcome {
   std::string state; // "done", "failed", "skipped", "cancelled"
   std::string why;   // for skipped
   Error error;       // for failed
+  std::string node;  // for failed: the node of the clip's workflow it stopped at (its ID), when it is known
   nlohmann::json take; // for done
   int ran = 0, cached = 0; // steps
   double seconds = 0.0;

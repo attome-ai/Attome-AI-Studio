@@ -103,6 +103,8 @@ Result<void> decode(const gen::StepRequest &r, const json &latent) {
 } // namespace
 
 MockProvider::MockProvider() {
+  if (const char *fail = std::getenv("ATTOME_MOCK_FAIL")) // a kind of step that fails, for looking at what the editor shows then
+    fail_kind = fail;
   if (const char *delay = std::getenv("ATTOME_MOCK_DELAY_MS"))
     step_delay_ms = std::clamp(std::atoi(delay), 0, 10000);
   const json declaration = {

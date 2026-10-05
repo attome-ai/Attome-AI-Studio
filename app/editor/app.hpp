@@ -280,6 +280,30 @@ private:
   bool drag_landed_ = false;             // false while a press on a clip has not moved it
   // Workflows mode
   int mode_ = 0;                       // 0: the video editor; 1: the workflow editor
+  // The Workflow Canvas, beyond one node at a time: a search for a node to add, several nodes selected, a clipboard of nodes.
+  struct WfSearch {
+    bool open = false, focus = false;
+    ImVec2 screen, canvas;    // where it was opened: on the screen, and in canvas units (where the new node goes)
+    char text[64] = "";
+    bool linked = false;      // opened by a link let go on nothing: only nodes that can take (or give) its type are listed
+    bool from_output = false; // the held end was an output (the new node takes it) or an input (the new node gives to it)
+    std::string node, port;   // the held port
+    int type = 0;             // its Data Type (gen::PortType)
+  } wf_search_;
+  std::set<std::string> wf_sel_;                  // every selected node; wf_node_ is the one the side panel shows, when there is one
+  std::map<std::string, ImVec2> wf_pos_;          // where each node is, in canvas units, as of the last frame
+  json wf_clipboard_;                             // copied nodes and the links among them
+  int wf_pasted_ = 0;                             // pastes in a row of the same copy: each lands a step further
+  bool wf_box_ = false;                           // a box is being dragged on the background (Shift) to select with
+  ImVec2 wf_box_from_;
+  std::map<std::string, std::string> wf_fail_;    // node -> why the last run stopped there (shown on the node)
+  std::string wf_fail_clip_;                      // the clip whose run stopped, and a fingerprint of its workflow then: an edit of it clears the notes
+  size_t wf_fail_hash_ = 0;
+  json new_node_value(const std::string &kind_id) const;
+  json remove_nodes_ops(const json &workflow, const std::set<std::string> &ids) const;
+  void wf_copy();
+  void wf_paste(float offset);
+  void wf_add_from_search(const std::string &kind_id);
   std::string wf_row_;                    // the selected row of the Clip Inputs node ("in:name") or of the Output node ("out:name")
   std::string wf_id_, wf_node_, wf_link_; // the open workflow, and the node or the link that is selected in it
   std::string wf_clip_;                // the clip the workflow was opened from
@@ -306,6 +330,9 @@ private:
   int drag_mode_ = 0; // 1 move, 2 trim end, 3 trim start
   int64_t drag_frames_ = 0;
   int drag_track_ = 0;
+  // What the field being typed in would do if it were left now. The Inspector keeps it while a field is active, and makes the edit if
+  // another clip is selected before the field is left, so a click on another clip does not lose it (or put it on that clip).
+  std::function<void()> live_commit_;
   std::function<void()> pending_; // an edit to run after the panels are drawn
 
   // viewer

@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <filesystem>
+#include <set>
 #include <thread>
 
 #include "atm/api/engine.hpp"
@@ -458,4 +459,38 @@ TEST_CASE("gen.create_clip: the clip goes where it is asked for, or after the cl
   CHECK_FALSE(bad);
   std::error_code ec;
   fs::remove_all(dir, ec);
+}
+
+TEST_CASE("generate: a new Take never repeats the seed of an earlier Take; a failed run says which node it stopped at", "[gen][generate][seed]") {
+  Film f;
+  REQUIRE(f.wait(f.run({{"clips", json::array({f.a})}}))["state"] == "done"); // Take 1 of First: seed 7
+  const auto seed_of = [&](const std::string &clip) { return f.get(clip)["media_ref"]["inputs"]["seed"].get<int64_t>(); };
+  CHECK(seed_of(f.a) == 7);
+  std::set<int64_t> seen = {7};
+  // New takes go up, one at a time, from the seed the clip has.
+  for (int i = 0; i < 3; ++i) {
+    REQUIRE(f.wait(f.run({{"clips", json::array({f.a})}, {"new_take", true}}))["state"] == "done");
+    CHECK(seen.insert(seed_of(f.a)).second);
+  }
+  CHECK(seed_of(f.a) == 10);
+  // The user picks an earlier seed back by hand: the next Take is still above every seed used so far.
+  f.patch(json::array({{{"op", "replace"}, {"path", f.a + "/media_ref/inputs/seed"}, {"value", 8}}}));
+  REQUIRE(f.wait(f.run({{"clips", json::array({f.a})}, {"new_take", true}}))["state"] == "done");
+  CHECK(seed_of(f.a) == 11);
+  CHECK(f.get(f.a)["media_ref"]["takes"].size() == 5);
+  // A workflow with no seed input has nothing to vary: the clip's inputs stay as they are.
+  f.patch(json::array({{{"op", "remove"}, {"path", f.b + "/media_ref/workflow/exposed/inputs/seed"}}}));
+  REQUIRE(f.wait(f.run({{"clips", json::array({f.b})}, {"new_take", true}}))["state"] != "timeout");
+  CHECK_FALSE(f.get(f.b)["media_ref"]["inputs"].contains("seed"));
+
+  // A step that fails: the result names the node of the clip's workflow it stopped at, and the engine's message.
+  Film g;
+  g.mock->fail_kind = "sample";
+  const json failed = g.wait(g.run());
+  REQUIRE(failed["state"] == "failed");
+  const json clip = failed["result"]["clips"][0];
+  REQUIRE(clip["node"].is_string());
+  const json node = g.get(clip["node"]);
+  CHECK(node["kind"] == "attome.sample");
+  CHECK(clip["error"]["message"].is_string());
 }

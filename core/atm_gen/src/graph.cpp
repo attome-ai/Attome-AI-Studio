@@ -656,7 +656,8 @@ void check_workflow(const json &library, const json &workflow, const std::string
     const json &typed = object_at(nodes[id], "inputs");
     for (const Port &port : mine.inputs)
       if (port.required && !typed.contains(port.name) && !fed.contains({id, port.name}) && !open.contains({id, port.name}))
-        add("G_MISSING", id + "/inputs/" + port.name, "Node " + id + " needs its input \"" + port.name + "\".",
+        add("G_MISSING", id + "/inputs/" + port.name,
+            "The " + (find_kind(string_at(nodes[id], "kind")) ? std::string(find_kind(string_at(nodes[id], "kind"))->title) : std::string("workflow")) + " node needs its input \"" + port.name + "\".",
             "Give it a value, link an output to it, or let the clip set it.");
   }
 }
@@ -818,7 +819,7 @@ void check_clip(const json &library, const json &variables, const std::string &c
   }
   for (const ExposedInput &input : face)
     if (input.required && input.def.is_null() && !inputs.contains(input.name))
-      add("G_MISSING", "inputs/" + input.name, "Clip " + clip_id + " needs a value for \"" + input.name + "\".",
+      add("G_MISSING", "inputs/" + input.name, "The input \"" + (input.label.empty() ? input.name : input.label) + "\" needs a value.",
           "Set media_ref.inputs." + input.name + ".");
   if (const auto selected = ref.find("selected"); selected != ref.end() && !selected->is_null())
     if (!selected->is_string() || !object_at(ref, "takes").contains(selected->get_ref<const std::string &>()))
