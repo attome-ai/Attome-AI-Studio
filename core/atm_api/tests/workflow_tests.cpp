@@ -51,25 +51,37 @@ std::string canonical(Engine &e, const std::string &project) {
   return *atm::storage::read_file(fs::path(project) / "project.json");
 }
 
-// "Shot" as a clip's own workflow: three nodes, two links, three Exposed Inputs and two Outputs, the video the Primary
-// Output. `x` makes the placeholders of one clip's nodes different from another's in the same patch.
-json shot_instance(const std::string &x) {
+// "Shot" as a clip's own workflow: four nodes (a Get Frame node on the video), three Exposed Inputs and two Outputs, the video
+// the Primary Output. `x` makes the placeholders of one clip's nodes different from another's in the same patch. With
+// `previous` it starts on the last frame of the clip named (a Clip Reference node and a Get Frame node), and the start
+// picture is an Unlinked Exposed Input.
+json shot_instance(const std::string &x, const std::string &previous = "") {
   const auto n = [&](const char *name) { return "$new:" + std::string(name) + x; };
+  json nodes = {{n("enc"), {{"kind", "attome.encode_prompt"}, {"model", "mock"}}},
+                {n("smp"), {{"kind", "attome.sample"}, {"model", "mock"}, {"inputs", {{"seconds", 5}}}}},
+                {n("dec"), {{"kind", "attome.decode"}, {"model", "mock"}}},
+                {n("frm"), {{"kind", "attome.get_frame"}, {"settings", {{"frame", "last"}}}}}};
+  json links = {{n("l1"), {{"from", {n("enc"), "conditioning"}}, {"to", {n("smp"), "conditioning"}}}},
+                {n("l2"), {{"from", {n("smp"), "latent"}}, {"to", {n("dec"), "latent"}}}},
+                {n("lf"), {{"from", {n("dec"), "video"}}, {"to", {n("frm"), "video"}}}}};
+  json inputs = {{"prompt", {{"type", "text"}, {"label", "Prompt"}, {"order", 0}, {"to", to_({{n("enc"), "prompt"}})}}},
+                 {"start_image", {{"type", "image"}, {"order", 1}}},
+                 {"seed", {{"type", "integer"}, {"order", 2}, {"to", to_({{n("smp"), "seed"}})}}}};
+  if (previous.empty()) {
+    inputs["start_image"]["to"] = to_({{n("smp"), "start_image"}});
+  } else {
+    nodes[n("ref")] = {{"kind", "attome.clip_reference"}, {"settings", {{"clip", previous}}}};
+    nodes[n("prev")] = {{"kind", "attome.get_frame"}, {"settings", {{"frame", "last"}}}};
+    links[n("lr")] = {{"from", {n("ref"), "video"}}, {"to", {n("prev"), "video"}}};
+    links[n("ls")] = {{"from", {n("prev"), "image"}}, {"to", {n("smp"), "start_image"}}};
+  }
   return {{"name", "Shot"},
           {"source", "test"},
-          {"nodes",
-           {{n("enc"), {{"kind", "attome.encode_prompt"}, {"model", "mock"}}},
-            {n("smp"), {{"kind", "attome.sample"}, {"model", "mock"}, {"inputs", {{"seconds", 5}}}}},
-            {n("dec"), {{"kind", "attome.decode"}, {"model", "mock"}}}}},
-          {"links",
-           {{n("l1"), {{"from", {n("enc"), "conditioning"}}, {"to", {n("smp"), "conditioning"}}}},
-            {n("l2"), {{"from", {n("smp"), "latent"}}, {"to", {n("dec"), "latent"}}}}}},
+          {"nodes", std::move(nodes)},
+          {"links", std::move(links)},
           {"exposed",
-           {{"inputs",
-             {{"prompt", {{"type", "text"}, {"label", "Prompt"}, {"order", 0}, {"to", to_({{n("enc"), "prompt"}})}}},
-              {"start_image", {{"type", "image"}, {"order", 1}, {"to", to_({{n("smp"), "start_image"}})}}},
-              {"seed", {{"type", "integer"}, {"order", 2}, {"to", to_({{n("smp"), "seed"}})}}}}},
-            {"outputs", {{"video", {{"from", {n("dec"), "video"}}}}, {"last_frame", {{"from", {n("dec"), "last_frame"}}}}}},
+           {{"inputs", std::move(inputs)},
+            {"outputs", {{"video", {{"from", {n("dec"), "video"}}}}, {"last_frame", {{"from", {n("frm"), "image"}}}}}},
             {"primary", "video"}}}};
 }
 
@@ -89,7 +101,8 @@ TEST_CASE("workflow: a clip holds its own Clip Workflow, which is checked and un
   const std::string seq = created["sequence"];
   const std::string empty = canonical(e, project);
 
-  // A track and two clips, each with its own Instance, the second starting on the last frame of the first: one patch.
+  // A track and two clips, each with its own Instance, the second starting on the last frame of the first (a Clip Reference
+  // node naming the first clip, then a Get Frame node): one patch.
   const json added = ok(
       e, "project.patch",
       patch_of(project,
@@ -97,12 +110,11 @@ TEST_CASE("workflow: a clip holds its own Clip Workflow, which is checked and un
                             {{"op", "add"}, {"path", "$new:v1/clips/$new:a"},
                              {"value", shot_clip("0s", shot_instance("a"), {{"prompt", "A robot walks"}, {"seed", 7}})}},
                             {{"op", "add"}, {"path", "$new:v1/clips/$new:b"},
-                             {"value", shot_clip("5s", shot_instance("b"),
-                                                 {{"prompt", "It starts to rain"},
-                                                  {"start_image", {{"from", "$new:a"}, {"output", "last_frame"}}}})}}})));
+                             {"value", shot_clip("5s", shot_instance("b", "$new:a"), {{"prompt", "It starts to rain"}})}}})));
   const json &ids = added["id_map"];
   const std::string a = ids["$new:a"], b = ids["$new:b"];
-  const std::string enc_a = ids["$new:enca"], smp_a = ids["$new:smpa"], dec_a = ids["$new:deca"], smp_b = ids["$new:smpb"];
+  const std::string enc_a = ids["$new:enca"], smp_a = ids["$new:smpa"], dec_a = ids["$new:deca"], smp_b = ids["$new:smpb"],
+                    frm_a = ids["$new:frma"], ref_b = ids["$new:refb"];
   CHECK(atm::id_prefix(smp_a) == "nod");
   CHECK(atm::id_prefix(std::string(ids["$new:l1a"])) == "lnk");
   CHECK(smp_a != smp_b); // each clip has nodes of its own
@@ -113,7 +125,9 @@ TEST_CASE("workflow: a clip holds its own Clip Workflow, which is checked and un
   CHECK(workflow_a["exposed"]["inputs"]["prompt"]["to"] == json::array({json::array({enc_a, "prompt"})}));
   CHECK(workflow_a["exposed"]["primary"] == "video");
   const json clip_b = ok(e, "project.get", {{"project", project}, {"id", b}})["object"];
-  CHECK(clip_b["media_ref"]["inputs"]["start_image"]["from"] == a);
+  CHECK(ok(e, "project.get", {{"project", project}, {"id", ref_b}})["object"]["settings"]["clip"] == a); // the placeholder became the clip's ID
+  CHECK(workflow_a["exposed"]["outputs"]["last_frame"]["from"] == json::array({frm_a, "image"}));
+  CHECK_FALSE(clip_b["media_ref"]["inputs"].contains("start_image")); // an Unlinked Exposed Input: nothing set
   CHECK(ok(e, "project.validate", {{"project", project}})["ok"] == true);
   const std::string before = canonical(e, project);
 
@@ -128,18 +142,22 @@ TEST_CASE("workflow: a clip holds its own Clip Workflow, which is checked and un
   CHECK(err(e, "project.patch",
             patch_of(project, json::array({{{"op", "replace"}, {"path", a + "/media_ref/workflow/exposed/inputs/start_image/to"}, {"value", json::array()}},
                                            {{"op", "add"}, {"path", a + "/media_ref/workflow/links/$new:l3"},
-                                            {"value", {{"from", {dec_a, "last_frame"}}, {"to", {smp_a, "start_image"}}}}}})))
+                                            {"value", {{"from", {frm_a, "image"}}, {"to", {smp_a, "start_image"}}}}}})))
             .rule == "G_CYCLE");
-  // A clip input the workflow does not list; a clip that links to itself through another.
+  // A clip input the workflow does not list; a clip that takes from itself through another (a Clip Reference node).
   CHECK(err(e, "project.patch", patch_of(project, json::array({{{"op", "add"}, {"path", a + "/media_ref/inputs/style"}, {"value", "anime"}}}))).rule == "G_PORT");
   CHECK(err(e, "project.patch",
-            patch_of(project, json::array({{{"op", "add"}, {"path", a + "/media_ref/inputs/start_image"},
-                                            {"value", {{"from", b}, {"output", "last_frame"}}}}})))
+            patch_of(project, json::array({{{"op", "add"}, {"path", a + "/media_ref/workflow/nodes/$new:r"},
+                                            {"value", {{"kind", "attome.clip_reference"}, {"settings", {{"clip", b}}}}}}})))
             .rule == "G_CLIP_CYCLE");
-  // Removing the first clip would leave the second linked to nothing, though it is not in the patch.
+  // A value for an input is a value: a link to another clip is what a Clip Reference node is for.
+  CHECK(err(e, "project.patch",
+            patch_of(project, json::array({{{"op", "add"}, {"path", b + "/media_ref/inputs/start_image"}, {"value", {{"from", a}, {"output", "last_frame"}}}}})))
+            .rule == "G_TYPE");
+  // Removing the first clip would leave the second naming a clip that is gone, though it is not in the patch.
   const atm::Error orphan = err(e, "project.patch", patch_of(project, json::array({{{"op", "remove"}, {"path", a}}})));
-  CHECK(orphan.rule == "G_CLIP_LINK");
-  CHECK(orphan.path.rfind(b, 0) == 0);
+  CHECK(orphan.rule == "G_REFERENCE");
+  CHECK(orphan.path.rfind(ref_b, 0) == 0);
   CHECK(canonical(e, project) == before);
 
   // Editing the Instance of one clip changes that clip only.
@@ -292,7 +310,9 @@ TEST_CASE("workflow: a model that is not installed does not stop the project; a 
 TEST_CASE("workflow: a clip made by gen.create_clip has its own copy of the built-in Shot, and the Template Library lists them", "[gen][engine][library]") {
   TempDir tmp;
   const std::string project = tmp.project();
-  Engine e;
+  atm::api::EngineConfig cfg;
+  cfg.providers = {std::make_shared<atm::api::MockProvider>()}; // brings its model, whichever test ran before
+  Engine e(cfg);
   const json created = ok(e, "project.create", {{"path", project}, {"rate", "24"}, {"canvas", "320x176"}});
   const auto make = [&](const char *prompt) { return ok(e, "gen.create_clip", {{"project", project}, {"prompt", prompt}, {"model", atm::api::kMockModel}, {"seconds", 2}}); };
   const json one = make("A robot walks"), two = make("It rains");
@@ -303,21 +323,58 @@ TEST_CASE("workflow: a clip made by gen.create_clip has its own copy of the buil
   CHECK(first["source"] == std::string("shot:") + atm::api::kMockModel);
   CHECK(first["name"] == "Shot");
   CHECK(first["exposed"]["primary"] == "video");
-  CHECK(first["nodes"].size() == 1);
-  CHECK(second["nodes"].size() == 1);
-  CHECK(first["nodes"].begin().key() != second["nodes"].begin().key());
+  // The generating node, and the two Input nodes that give it its size and its length: nothing about the timeline is held
+  // in the workflow, and there is no last_frame output or Length input to hard-code.
+  const auto node_of = [](const json &workflow, const char *kind) {
+    for (auto it = workflow["nodes"].begin(); it != workflow["nodes"].end(); ++it)
+      if (it->value("kind", std::string()) == kind)
+        return it.key();
+    return std::string();
+  };
+  CHECK(first["nodes"].size() == 3);
+  CHECK(second["nodes"].size() == 3);
+  const std::string gen_node = node_of(first, "attome.generate_video");
+  REQUIRE_FALSE(gen_node.empty());
+  CHECK(gen_node != node_of(second, "attome.generate_video")); // nodes of their own
   CHECK(first["exposed"]["inputs"]["prompt"]["required"] == true);
-  CHECK(first["exposed"]["inputs"]["seconds"]["range"]["max"] == 15); // the lengths the model makes
-  CHECK(first["exposed"]["inputs"]["seconds"]["label"] == "Length");
-  CHECK(first["exposed"]["inputs"]["prompt"]["to"][0][0] == first["nodes"].begin().key());
-  CHECK(first["exposed"]["outputs"].contains("last_frame"));
+  CHECK(first["exposed"]["inputs"]["prompt"]["to"][0][0] == gen_node);
+  for (const char *gone : {"seconds", "width", "height"})
+    CHECK_FALSE(first["exposed"]["inputs"].contains(gone));
+  CHECK_FALSE(first["exposed"]["outputs"].contains("last_frame"));
+  const json &links = first["links"];
+  const auto fed_by = [&](const char *port, const char *kind, const char *from_port) {
+    for (auto it = links.begin(); it != links.end(); ++it)
+      if ((*it)["to"] == json::array({gen_node, port}) && (*it)["from"] == json::array({node_of(first, kind), from_port}))
+        return true;
+    return false;
+  };
+  CHECK(fed_by("width", "attome.project", "width"));
+  CHECK(fed_by("height", "attome.project", "height"));
+  CHECK(fed_by("seconds", "attome.clip", "duration"));
   // Nothing was added to the project's library by making clips.
   CHECK_FALSE(ok(e, "project.get", {{"project", project}, {"id", created["project"]}})["object"].contains("workflows"));
 
   // Editing one clip's workflow leaves the other as it was.
-  const std::string node = first["nodes"].begin().key();
+  const std::string node = gen_node;
   ok(e, "project.patch", patch_of(project, json::array({{{"op", "replace"}, {"path", node + "/settings"}, {"value", {{"steps", 3}}}}})));
-  CHECK(instance(one)["nodes"].begin()->at("settings") == json{{"steps", 3}});
+  CHECK(instance(one)["nodes"][node]["settings"] == json{{"steps", 3}});
   CHECK(instance(two) == second);
-  CHECK(instance(one)["nodes"].begin()->at("settings") != second["nodes"].begin()->value("settings", json::object()));
+  CHECK(second["nodes"][node_of(second, "attome.generate_video")].value("settings", json::object()) != json{{"steps", 3}});
+
+  // The clip's size and length come from the project and from the clip: the canvas is 320 x 176, the clip is 2 s.
+  const json &made = one;
+  CHECK(made["width"].get<int>() * made["height"].get<int>() <= 901120 * 102 / 100); // about 0.9 megapixels, on the model's grid
+  CHECK(made["width"].get<int>() % 16 == 0);
+  CHECK(ok(e, "project.get", {{"project", project}, {"id", made["clip"]}})["object"]["timing"]["duration"] == "2");
+
+  // A clip made to start from the clip before has the two nodes that say so, and no value for a start picture.
+  const json third = ok(e, "gen.create_clip", {{"project", project}, {"prompt", "Then"}, {"model", atm::api::kMockModel}, {"seconds", 2}, {"start_from", "previous"}});
+  const json chained = instance(third);
+  CHECK(chained["nodes"].size() == 5);
+  const std::string ref = node_of(chained, "attome.clip_reference");
+  REQUIRE_FALSE(ref.empty());
+  CHECK(chained["nodes"][ref]["settings"]["clip"] == "previous");
+  CHECK(chained["exposed"]["inputs"]["start_image"].contains("to") == false); // kept, unlinked
+  CHECK_FALSE(ok(e, "project.get", {{"project", project}, {"id", third["clip"]}})["object"]["media_ref"]["inputs"].contains("start_image"));
+  CHECK(ok(e, "project.validate", {{"project", project}})["ok"] == true);
 }

@@ -1359,8 +1359,9 @@ struct Engine::Impl {
   }
 
   // What a model is on this machine, for cache keys: the engine that runs it and the hashes of its files.
-  gen::KeyContext key_context() const {
+  gen::KeyContext key_context(const Project &pr) const {
     gen::KeyContext context;
+    context.variables = pr.doc.root().value("variables", json::object()); // what Variable nodes read
     context.model_identity = [this](std::string_view model) {
       std::string identity;
       for (const auto &p : providers)
@@ -1375,7 +1376,8 @@ struct Engine::Impl {
 
   static fs::path gen_dir(const Project &pr) { return pr.dir / ".attome" / "gen"; }
 
-  // The generative clips of a project, in timeline order.
+  // The generative clips of a project, in timeline order, with what their Input nodes read: the canvas and rate of their
+  // Sequence, their Duration and start, and the clips before and after them on their track.
   static std::vector<gen::ClipIn> gen_clips(const Project &pr) {
     std::vector<gen::ClipIn> out;
     const json &root = pr.doc.root();
@@ -1386,19 +1388,42 @@ struct Engine::Impl {
       const auto tracks = s->find("tracks");
       if (tracks == s->end() || !tracks->is_object())
         continue;
+      const json canvas = s->value("canvas", json::object());
+      const auto rate = Rational::parse(s->value("rate", std::string("30")));
       for (auto t = tracks->begin(); t != tracks->end(); ++t) {
         const auto clips = t->find("clips");
         if (clips == t->end() || !clips->is_object())
           continue;
+        struct Placed {
+          std::string id;
+          double start;
+        };
+        std::vector<Placed> by_time; // every clip of the track, left to right: "previous" and "next" are among all of them
         for (auto c = clips->begin(); c != clips->end(); ++c) {
+          double start = 0.0;
+          if (const auto timing = c->find("timing"); timing != c->end() && timing->is_object())
+            if (const auto in = Rational::parse(timing->value("record_in", std::string("0"))))
+              start = in->to_seconds_lossy();
+          by_time.push_back({c.key(), start});
+        }
+        std::stable_sort(by_time.begin(), by_time.end(), [](const Placed &a, const Placed &b) { return a.start < b.start; });
+        for (size_t i = 0; i < by_time.size(); ++i) {
+          const auto c = clips->find(by_time[i].id);
           const auto ref = c->find("media_ref");
           if (ref == c->end() || !ref->is_object() || ref->value("type", std::string()) != "workflow")
             continue;
-          int64_t order = 0;
-          if (const auto timing = c->find("timing"); timing != c->end() && timing->is_object())
-            if (const auto in = Rational::parse(timing->value("record_in", std::string("0"))))
-              order = int64_t(in->to_seconds_lossy() * 1000.0);
-          out.push_back(gen::ClipIn{c.key(), c->value("name", c.key()), &*ref, order});
+          gen::ClipIn in{c.key(), c->value("name", c.key()), &*ref, int64_t(by_time[i].start * 1000.0)};
+          const json timing = c->value("timing", json::object());
+          const auto duration = Rational::parse(timing.value("duration", std::string("0")));
+          in.facts.known = true;
+          in.facts.start = by_time[i].start;
+          in.facts.duration = duration ? duration->to_seconds_lossy() : 0.0;
+          in.facts.width = canvas.value("width", 1920);
+          in.facts.height = canvas.value("height", 1080);
+          in.facts.frame_rate = rate ? rate->to_seconds_lossy() : 30.0;
+          in.previous = i > 0 ? by_time[i - 1].id : std::string();
+          in.next = i + 1 < by_time.size() ? by_time[i + 1].id : std::string();
+          out.push_back(std::move(in));
         }
       }
     }
@@ -1415,7 +1440,7 @@ struct Engine::Impl {
           return false;
       return !outputs->empty();
     };
-    return gen::plan(library_of(pr), gen_clips(pr), key_context(), options);
+    return gen::plan(library_of(pr), gen_clips(pr), key_context(pr), options);
   }
 
   static json plan_json(const gen::ClipPlan &p) {
@@ -1469,7 +1494,7 @@ struct Engine::Impl {
       return other ? other->node : nullptr;
     };
     std::vector<gen::Problem> found;
-    gen::check_clip(library_of(pr), clip_id, *ref->node, lookup, found);
+    gen::check_clip(library_of(pr), pr.doc.root().value("variables", json::object()), clip_id, *ref->node, lookup, found);
     for (gen::Problem &p : found)
       if (gen::is_readiness_rule(p.rule))
         problems.push_back({{"rule", p.rule}, {"path", p.path}, {"target", p.target}, {"message", p.message}, {"hint", p.hint}});
@@ -1488,7 +1513,7 @@ struct Engine::Impl {
     };
     json kinds = json::array();
     for (const gen::KindDef &k : gen::kind_defs())
-      kinds.push_back({{"id", k.id}, {"kind", gen::kind_name(k)}, {"title", k.title}, {"runs_model", k.runs_model},
+      kinds.push_back({{"id", k.id}, {"kind", gen::kind_name(k)}, {"title", k.title}, {"runs_model", k.runs_model}, {"input", k.is_input},
                        {"inputs", ports(k.inputs)}, {"outputs", ports(k.outputs)}});
     json models = json::array();
     for (const std::string &id : gen::model_ids()) {
@@ -1610,6 +1635,10 @@ struct Engine::Impl {
       clip.key = p.key;
       clip.inputs = p.inputs;
       clip.depends = p.depends;
+      clip.references = p.references;
+      for (const gen::ClipIn &in : gen_clips(*pr))
+        if (in.id == p.id)
+          clip.facts = in.facts;
       if (const doc::NodeRef *ref = pr->doc.find(p.id))
         clip.written = ref->node->value("media_ref", json::object()).value("inputs", json::object());
       run.clips.push_back(std::move(clip));
@@ -1618,7 +1647,7 @@ struct Engine::Impl {
     run.dir = gen_dir(*pr);
     run.project = pr->dir;
     run.providers = providers;
-    run.context = key_context();
+    run.context = key_context(*pr);
     const StepCount count = count_steps(run);
     json out = {{"plan", std::move(listed)}, {"clips", run.clips.size()}, {"steps", count.total}, {"steps_cached", count.cached}};
     if (dry_run || run.clips.empty()) {
@@ -1770,13 +1799,13 @@ struct Engine::Impl {
       return fail(ErrorCode::UnknownId, "P_UNKNOWN_ID", "The project has no sequence \"" + seq + "\".");
     const json &sequence = *seq_ref->node;
 
-    // The size: what was asked for, else the canvas's shape at about 0.9 megapixels, on the model's grid.
+    // The size the clip is made at: the canvas's shape at about 0.9 megapixels, on the model's grid (what the Shot's Project
+    // node and the run give the model). It is kept on the clip so the editor can scale the picture to cover the canvas.
     const json canvas = sequence.value("canvas", json::object());
     const double cw = canvas.value("width", 1920), ch = canvas.value("height", 1080);
-    const int grid = std::max(1, decl->size_multiple);
-    const double fit = std::sqrt(901120.0 / std::max(1.0, cw * ch));
-    const auto on_grid = [&](double v) { return std::max(grid, int(std::lround(v / grid)) * grid); };
-    const int width = params.value("width", on_grid(cw * fit)), height = params.value("height", on_grid(ch * fit));
+    const auto scaled = gen::scaled_size(int64_t(cw), int64_t(ch), gen::kGenerationPixels);
+    const auto [made_w, made_h] = gen::fit_size(*decl, scaled.first, scaled.second);
+    const int width = int(made_w), height = int(made_h);
     double seconds = params.value("seconds", 5.0);
     seconds = std::max(seconds, decl->seconds_min);
     if (decl->seconds_max > 0.0)
@@ -1824,7 +1853,8 @@ struct Engine::Impl {
           before = c.key();
         }
       }
-    json inputs = {{"prompt", *prompt}, {"seed", seed}, {"seconds", seconds}, {"width", width}, {"height", height}};
+    json inputs = {{"prompt", *prompt}, {"seed", seed}};
+    std::string start_reference;
     if (const std::string from = params.value("start_from", std::string()); !from.empty()) {
       const std::string source = from == "previous" ? before : from;
       const doc::NodeRef *ref = source.empty() ? nullptr : pr->doc.find(source);
@@ -1836,11 +1866,14 @@ struct Engine::Impl {
       if (!decl->takes("start_image"))
         return fail(ErrorCode::InvalidArgument, "G_SETTING", "The model " + *model + " cannot start from a picture.", {},
                     "Pick a model that accepts a start picture.");
-      inputs["start_image"] = {{"from", source}, {"output", "last_frame"}};
+      start_reference = from == "previous" ? "previous" : from;
     }
 
-    // The clip's own workflow: a copy of the built-in Shot of the model, with its own nodes.
+    // The clip's own workflow: a copy of the built-in Shot of the model, with its own nodes. Starting on the last frame of
+    // another clip is two more nodes in it, a Clip Reference and a Get Frame.
     json instance = gen::instantiate("shot:" + *model);
+    if (!start_reference.empty())
+      gen::start_from(instance, start_reference);
     std::string name = params.value("name", std::string());
     if (name.empty()) { // "Shot N": the next number no generative clip of the project has. A prompt makes a poor name: it
       int next = 1;     // often starts with the style, and any cut of it reads as broken.
@@ -2360,10 +2393,10 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
     {"gen.create_clip", "gen", true,
      "Add a generative clip: a prompt and a model. It goes at the end of the picture track (or at: a time), gets its own copy "
      "of the built-in Shot workflow for that model (its Instance: change it and no other clip changes), and is not generated yet: run gen.run. start_from: \"previous\" (or a clip ID) makes "
-     "it start on the last frame of that clip. Size defaults to the canvas's shape at about 0.9 megapixels on the model's grid.",
+     "it start on the last frame of that clip, with a Clip Reference and a Get Frame node. The size is the canvas's shape at about 0.9 megapixels on the model's grid (a Project node), the length is the clip's Duration (a Clip node).",
      R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},
        "prompt":{"type":"string"},"model":{"type":"string","description":"An id from gen.models"},"seconds":{"type":"number"},
-       "width":{"type":"integer"},"height":{"type":"integer"},"seed":{"type":"integer"},"name":{"type":"string"},
+       "seed":{"type":"integer"},"name":{"type":"string"},
        "start_from":{"type":"string","description":"\"previous\" or a generative clip's ID"},"at":{"type":"string"},
        "track":{"type":"string"},"sequence":{"type":"string"}},"required":["project","prompt","model"]})",
      &Impl::gen_create_clip},

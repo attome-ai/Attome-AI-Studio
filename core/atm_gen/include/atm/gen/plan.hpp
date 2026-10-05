@@ -2,8 +2,8 @@
 // The generation plan: for every generative clip, whether its selected Take is what the clip asks for now, and for a
 // request to generate, which clips run and in what order.
 //
-// A clip's state is worked out, never stored: its key now (from its inputs, its workflow, the models, and the clips it
-// is linked to) against the key its selected Take was made with.
+// A clip's state is worked out, never stored: its key now (from its inputs, its workflow, the models, and what its Input
+// nodes read: Variables, the canvas, its Duration, other clips) against the key its selected Take was made with.
 //
 //   A Take: {"key": "<take key>", "made": "<UTC time>", "inputs": {…as the clip had them…},
 //            "outputs": {"<exposed output>": {"key": "<node key>", "port": "<its port>", "path": "<file>"}}}
@@ -11,6 +11,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -22,6 +23,8 @@ struct ClipIn {
   std::string id, name;
   const json *ref = nullptr; // the clip's media_ref
   int64_t order = 0;         // clips with no link between them run in this order (timeline order)
+  ClipFacts facts;           // what the clip's Input nodes read of it and of the project
+  std::string previous, next; // the clips before and after it on its track ("previous" and "next" of a Clip Reference node)
 };
 
 enum class ClipState { clean, dirty, empty, locked };
@@ -33,8 +36,11 @@ struct ClipPlan {
   std::string reason;       // why it is dirty: "changed: prompt, seed", "the clip before it changed"
   bool out_of_step = false; // locked, and its Take is no longer what its inputs ask for
   std::string key;          // the Take key its inputs ask for now; empty when it cannot be worked out
-  json inputs;              // its inputs with every clip link replaced by what the linked clip makes
-  std::vector<std::string> depends; // the clips it takes from
+  json inputs;              // the values the clip gives its Exposed Inputs
+  std::vector<std::string> depends; // the clips its Clip Reference nodes take from
+  // What each Clip Reference node of the workflow gave: "<previous | next | clip ID>|<video | audio>" -> what the other
+  // clip's output is made by. A run needs it to key the clip the same way.
+  std::map<std::string, Made> references;
   bool run = false;
   std::string skip; // why it does not run although it was asked for
 };

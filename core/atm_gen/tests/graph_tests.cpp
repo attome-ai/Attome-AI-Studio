@@ -4,6 +4,7 @@
 #include <map>
 
 #include "atm/gen/graph.hpp"
+#include "atm/gen/models.hpp"
 
 using atm::gen::json;
 using atm::gen::PortType;
@@ -19,23 +20,37 @@ json to_(std::initializer_list<std::pair<std::string, std::string>> ends) {
   return out;
 }
 
-// "Shot": encode the prompt, sample, decode; prompt, start picture and seed in, the clip and its last frame out.
+// "Shot": encode the prompt, sample, decode; prompt, start picture and seed in, the clip and its last frame (a Get Frame
+// node on the clip) out.
 json shot() {
   return {{"name", "Shot"},
           {"nodes",
            {{"enc", {{"kind", "attome.encode_prompt"}, {"model", "mock"}}},
             {"smp", {{"kind", "attome.sample"}, {"model", "mock"}, {"inputs", {{"seconds", 5}, {"width", 1280}, {"height", 704}}}}},
-            {"dec", {{"kind", "decode"}, {"model", "mock"}}}}},
+            {"dec", {{"kind", "decode"}, {"model", "mock"}}},
+            {"frm", {{"kind", "attome.get_frame"}, {"settings", {{"frame", "last"}}}}}}},
           {"links",
            {{"l1", {{"from", {"enc", "conditioning"}}, {"to", {"smp", "conditioning"}}}},
-            {"l2", {{"from", {"smp", "latent"}}, {"to", {"dec", "latent"}}}}}},
+            {"l2", {{"from", {"smp", "latent"}}, {"to", {"dec", "latent"}}}},
+            {"l_frm", {{"from", {"dec", "video"}}, {"to", {"frm", "video"}}}}}},
           {"exposed",
            {{"inputs",
              {{"prompt", {{"type", "text"}, {"label", "Prompt"}, {"order", 0}, {"to", to_({{"enc", "prompt"}})}}},
               {"start_image", {{"type", "image"}, {"order", 1}, {"to", to_({{"smp", "start_image"}})}}},
               {"seed", {{"type", "integer"}, {"order", 2}, {"to", to_({{"smp", "seed"}})}}}}},
-            {"outputs", {{"video", {{"from", {"dec", "video"}}}}, {"last_frame", {{"from", {"dec", "last_frame"}}}}}},
+            {"outputs", {{"video", {{"from", {"dec", "video"}}}}, {"last_frame", {{"from", {"frm", "image"}}}}}},
             {"primary", "video"}}}};
+}
+
+// The Shot starting on the last frame of another clip: a Clip Reference and a Get Frame node feed its start picture.
+json starting_from(const std::string &clip) {
+  json w = shot();
+  w["nodes"]["ref"] = {{"kind", "attome.clip_reference"}, {"settings", {{"clip", clip}}}};
+  w["nodes"]["last"] = {{"kind", "attome.get_frame"}, {"settings", {{"frame", "last"}}}};
+  w["links"]["l_ref"] = {{"from", {"ref", "video"}}, {"to", {"last", "video"}}};
+  w["links"]["l_start"] = {{"from", {"last", "image"}}, {"to", {"smp", "start_image"}}};
+  w["exposed"]["inputs"]["start_image"].erase("to"); // unlinked: the node gets its picture from the other clip
+  return w;
 }
 
 // Checks a workflow as it is (a clip's Instance), among the project's library.
@@ -69,13 +84,13 @@ json clip_of(const json &instance, json inputs) {
   return {{"media_ref", {{"type", "workflow"}, {"workflow", instance}, {"inputs", std::move(inputs)}}}};
 }
 
-std::vector<Problem> check_clip(const json &library, const std::map<std::string, json> &clips, const std::string &id) {
+std::vector<Problem> check_clip(const json &library, const std::map<std::string, json> &clips, const std::string &id, const json &variables = json::object()) {
   std::vector<Problem> out;
   const atm::gen::ClipLookup lookup = [&](std::string_view c) -> const json * {
     const auto it = clips.find(std::string(c));
     return it == clips.end() ? nullptr : &it->second;
   };
-  atm::gen::check_clip(library, id, clips.at(id), lookup, out);
+  atm::gen::check_clip(library, variables, id, clips.at(id), lookup, out);
   return out;
 }
 
@@ -86,7 +101,7 @@ TEST_CASE("gen: the kind table, and the ports a workflow exposes", "[gen]") {
   CHECK(atm::gen::find_kind("sample") == atm::gen::find_kind("attome.sample"));
   CHECK_FALSE(atm::gen::find_kind("blur"));
   CHECK(atm::gen::is_workflow_kind("attome.workflow"));
-  CHECK(atm::gen::kind_ids() == "generate_video, encode_prompt, sample, decode, workflow");
+  CHECK(atm::gen::kind_ids() == "generate_video, encode_prompt, sample, decode, get_frame, project, variable, clip, clip_reference, workflow");
 
   CHECK(check(shot()).empty());
   const atm::gen::Ports face = atm::gen::workflow_ports(json::object(), shot());
@@ -165,7 +180,7 @@ TEST_CASE("gen: a workflow that breaks a rule is refused with the rule, the path
   { // an input that is both exposed and linked, and one that two Exposed Inputs feed
     json w = shot();
     w["exposed"]["inputs"]["frame"] = {{"type", "image"}, {"to", to_({{"smp", "end_image"}})}};
-    w["links"]["l3"] = {{"from", {"dec", "last_frame"}}, {"to", {"smp", "end_image"}}};
+    w["links"]["l3"] = {{"from", {"frm", "image"}}, {"to", {"smp", "end_image"}}};
     CHECK(rules(check(w)).find("G_FAN_IN") != std::string::npos);
     json v = shot();
     v["exposed"]["inputs"]["again"] = {{"type", "integer"}, {"to", to_({{"smp", "seed"}})}};
@@ -174,7 +189,7 @@ TEST_CASE("gen: a workflow that breaks a rule is refused with the rule, the path
   { // a loop: the last frame of the decoder feeds the sampler that feeds the decoder
     json w = shot();
     w["exposed"]["inputs"].erase("start_image");
-    w["links"]["l3"] = {{"from", {"dec", "last_frame"}}, {"to", {"smp", "start_image"}}};
+    w["links"]["l3"] = {{"from", {"frm", "image"}}, {"to", {"smp", "start_image"}}};
     const auto p = check(w);
     REQUIRE(p.size() == 1);
     CHECK(p[0].rule == "G_CYCLE");
@@ -297,8 +312,8 @@ TEST_CASE("gen: a workflow has many Outputs and one Primary Output", "[gen][expo
   const auto outputs = atm::gen::exposed_outputs(shot());
   REQUIRE(outputs.size() == 2);
   CHECK(outputs[0].name == "last_frame");
-  CHECK(outputs[0].node == "dec");
-  CHECK(outputs[0].port == "last_frame");
+  CHECK(outputs[0].node == "frm");
+  CHECK(outputs[0].port == "image");
 }
 
 TEST_CASE("gen: a workflow used as a node has the ports it exposes, and may not hold itself", "[gen]") {
@@ -347,7 +362,7 @@ TEST_CASE("gen: a generative clip: its own workflow, its inputs, its links to ot
   const json instance = shot();
   std::map<std::string, json> clips;
   clips["clp_a"] = clip_of(instance, {{"prompt", "A robot walks"}, {"seed", 7}});
-  clips["clp_b"] = clip_of(instance, {{"prompt", "It rains"}, {"start_image", {{"from", "clp_a"}, {"output", "last_frame"}}}});
+  clips["clp_b"] = clip_of(starting_from("clp_a"), {{"prompt", "It rains"}});
   clips["clp_file"] = {{"media_ref", {{"type", "file"}, {"path", "a.mp4"}}}};
   CHECK(check_clip(library, clips, "clp_a").empty());
   CHECK(check_clip(library, clips, "clp_b").empty());
@@ -374,23 +389,26 @@ TEST_CASE("gen: a generative clip: its own workflow, its inputs, its links to ot
   CHECK(inside[0].rule == "G_KIND");
   CHECK(inside[0].target == "clp_x");
 
-  // Links: to a clip that is not there or not generative, to an output it does not have, to one of the wrong type.
-  clips["clp_x"] = clip_of(instance, {{"prompt", "x"}, {"start_image", {{"from", "clp_gone"}, {"output", "last_frame"}}}});
-  CHECK(rules(check_clip(library, clips, "clp_x")) == "G_CLIP_LINK");
-  clips["clp_x"] = clip_of(instance, {{"prompt", "x"}, {"start_image", {{"from", "clp_file"}, {"output", "last_frame"}}}});
-  CHECK(rules(check_clip(library, clips, "clp_x")) == "G_CLIP_LINK");
-  clips["clp_x"] = clip_of(instance, {{"prompt", "x"}, {"start_image", {{"from", "clp_a"}, {"output", "picture"}}}});
-  CHECK(rules(check_clip(library, clips, "clp_x")) == "G_PORT");
-  clips["clp_x"] = clip_of(instance, {{"prompt", "x"}, {"start_image", {{"from", "clp_a"}, {"output", "video"}}}});
+  // Clip Reference nodes: a clip that is not there or not generative is refused; "previous" and "next" are the timeline's.
+  clips["clp_x"] = clip_of(starting_from("clp_gone"), {{"prompt", "x"}});
+  CHECK(rules(check_clip(library, clips, "clp_x")) == "G_REFERENCE");
+  clips["clp_x"] = clip_of(starting_from("clp_file"), {{"prompt", "x"}});
+  CHECK(rules(check_clip(library, clips, "clp_x")) == "G_REFERENCE");
+  clips["clp_x"] = clip_of(starting_from("previous"), {{"prompt", "x"}});
+  CHECK(check_clip(library, clips, "clp_x").empty());
+  clips["clp_x"] = clip_of(starting_from(""), {{"prompt", "x"}});
+  CHECK(rules(check_clip(library, clips, "clp_x")) == "G_MISSING"); // names no clip yet: not finished
+  // A value cannot be a link to another clip any more: that is what the Clip Reference node is for.
+  clips["clp_x"] = clip_of(instance, {{"prompt", "x"}, {"start_image", {{"from", "clp_a"}, {"output", "last_frame"}}}});
   CHECK(rules(check_clip(library, clips, "clp_x")) == "G_TYPE");
 
   // A clip may not depend on itself, directly or through others.
-  clips["clp_x"] = clip_of(instance, {{"prompt", "x"}, {"start_image", {{"from", "clp_x"}, {"output", "last_frame"}}}});
+  clips["clp_x"] = clip_of(starting_from("clp_x"), {{"prompt", "x"}});
   CHECK(rules(check_clip(library, clips, "clp_x")) == "G_CLIP_CYCLE");
-  clips["clp_a"]["media_ref"]["inputs"]["start_image"] = {{"from", "clp_b"}, {"output", "last_frame"}};
+  clips["clp_a"] = clip_of(starting_from("clp_b"), {{"prompt", "A robot walks"}});
   CHECK(rules(check_clip(library, clips, "clp_a")) == "G_CLIP_CYCLE");
   CHECK(rules(check_clip(library, clips, "clp_b")) == "G_CLIP_CYCLE");
-  clips["clp_a"]["media_ref"]["inputs"].erase("start_image");
+  clips["clp_a"] = clip_of(instance, {{"prompt", "A robot walks"}, {"seed", 7}});
 
   // The selected Take is one of the clip's Takes, or nothing.
   json &ref = clips["clp_a"]["media_ref"];
@@ -429,4 +447,95 @@ TEST_CASE("gen: what may feed what", "[gen]") {
   CHECK(atm::gen::port_type_from_name("image", type));
   CHECK(type == PortType::image);
   CHECK_FALSE(atm::gen::port_type_from_name("picture", type));
+}
+
+TEST_CASE("gen: the Input nodes: a Variable, the Clip's Duration, a frame of a video", "[gen][input]") {
+  const auto &kinds = atm::gen::kind_defs();
+  for (const char *id : {"project", "variable", "clip", "clip_reference"}) {
+    const atm::gen::KindDef *def = atm::gen::find_kind(id);
+    REQUIRE(def);
+    CHECK(def->is_input);
+    CHECK_FALSE(def->runs_model);
+    CHECK(def->inputs.empty());
+  }
+  CHECK_FALSE(atm::gen::find_kind("get_frame")->is_input); // it runs here, with no model
+  CHECK(kinds.size() == 9);
+
+  // The ports of the Input nodes: the Project node's size is whole numbers, the Variable node has the type it says.
+  const atm::gen::Ports project = atm::gen::node_ports(json::object(), {{"kind", "attome.project"}});
+  REQUIRE(project.output("width"));
+  CHECK(project.output("width")->type == PortType::integer);
+  CHECK(project.output("frame_rate")->type == PortType::number);
+  const atm::gen::Ports variable = atm::gen::node_ports(json::object(), {{"kind", "attome.variable"}, {"variable", "var_a"}, {"type", "image"}});
+  REQUIRE(variable.output("value"));
+  CHECK(variable.output("value")->type == PortType::image);
+  CHECK(atm::gen::node_ports(json::object(), {{"kind", "attome.clip"}}).output("duration")->type == PortType::number);
+  CHECK(atm::gen::node_ports(json::object(), {{"kind", "attome.clip_reference"}}).output("video")->type == PortType::video);
+
+  // A Variable node feeds the prompt; the Variable has to exist, and be of the node's type.
+  json w = shot();
+  w["exposed"]["inputs"].erase("prompt");
+  w["nodes"]["style"] = {{"kind", "attome.variable"}, {"variable", "var_style"}, {"type", "text"}};
+  w["links"]["l_style"] = {{"from", {"style", "value"}}, {"to", {"enc", "prompt"}}};
+  CHECK(check(w).empty());
+  std::map<std::string, json> clips;
+  clips["clp_a"] = clip_of(w, json::object());
+  const json variables = {{"var_style", {{"name", "style"}, {"type", "text"}, {"value", "anime"}}}};
+  CHECK(check_clip(json::object(), clips, "clp_a", variables).empty());
+  const auto gone = check_clip(json::object(), clips, "clp_a", json::object());
+  CHECK(rules(gone) == "G_VARIABLE");
+  CHECK(gone[0].path == "style/variable");
+  CHECK(rules(check_clip(json::object(), clips, "clp_a", {{"var_style", {{"name", "style"}, {"type", "number"}, {"value", 1}}}})) == "G_VARIABLE");
+  // A Variable node that names nothing, or has a type that is no Data Type.
+  json bare = w; // not finished: a readiness rule, not a refusal
+  bare["nodes"]["style"] = {{"kind", "attome.variable"}};
+  const auto unfinished = check(bare);
+  CHECK(rules(unfinished) == "G_MISSING");
+  CHECK(unfinished[0].path == "style/variable");
+  json nowhere = starting_from("");
+  CHECK(rules(check(nowhere)) == "G_MISSING");
+  json odd = w;
+  odd["nodes"]["style"]["type"] = "latent";
+  CHECK(rules(check(odd)).find("G_VARIABLE") != std::string::npos);
+  // Typed into a text input, a number is not text: a link of a wrong type is refused like any other.
+  json wrong = w;
+  wrong["nodes"]["style"]["type"] = "number";
+  CHECK(rules(check(wrong)) == "G_TYPE");
+
+  // The project's Variables are checked as written.
+  std::vector<Problem> found;
+  atm::gen::check_variables({{"var_a", {{"name", "a"}, {"type", "text"}, {"value", 3}}}, {"var_b", {{"name", "b"}}}, {"var_c", {{"type", "integer"}, {"value", 2}}}}, found);
+  CHECK(rules(found) == "G_VARIABLE G_VARIABLE");
+  CHECK(atm::gen::variable_decls({{"var_a", {{"name", "a"}, {"type", "text"}}}, {"var_b", {{"name", "b"}}}}).size() == 1);
+
+  // A Get Frame node takes "first" or "last" as its frame.
+  json frame = shot();
+  frame["nodes"]["frm"]["settings"]["frame"] = "middle";
+  CHECK(rules(check(frame)) == "G_SETTING");
+  frame["nodes"]["frm"]["settings"]["frame"] = "first";
+  CHECK(check(frame).empty());
+  frame["nodes"]["frm"]["inputs"] = {{"at", 2.5}}; // or a time
+  CHECK(check(frame).empty());
+  frame["links"].erase("l_frm");
+  CHECK(rules(check(frame)) == "G_MISSING"); // the video it takes a frame of has to come from somewhere
+}
+
+TEST_CASE("gen: the Clip node's Duration is held to what the model behind it can make", "[gen][input]") {
+  atm::gen::register_model(atm::gen::parse_model({{"id", "duration-test-model"}, {"kinds", {"encode_prompt", "sample", "decode"}}, {"seconds", {{"min", 1}, {"max", 10}}}}).value());
+  json w = shot();
+  w["nodes"]["smp"]["model"] = "duration-test-model";
+  w["nodes"]["clock"] = {{"kind", "attome.clip"}};
+  w["links"]["l_seconds"] = {{"from", {"clock", "duration"}}, {"to", {"smp", "seconds"}}};
+  w["nodes"]["smp"]["inputs"].erase("seconds");
+  CHECK(check(w).empty());
+  std::map<std::string, json> clips;
+  clips["clp_a"] = clip_of(w, {{"prompt", "x"}});
+  clips["clp_a"]["timing"] = {{"record_in", "0"}, {"duration", "5"}};
+  CHECK(check_clip(json::object(), clips, "clp_a").empty());
+  clips["clp_a"]["timing"]["duration"] = "32017/3200"; // 10.005 s: over what the model makes
+  const auto long_clip = check_clip(json::object(), clips, "clp_a");
+  CHECK(rules(long_clip) == "G_RANGE");
+  CHECK(long_clip[0].path == "clp_a/timing/duration");
+  clips["clp_a"]["timing"]["duration"] = "1/2";
+  CHECK(rules(check_clip(json::object(), clips, "clp_a")) == "G_RANGE");
 }

@@ -15,6 +15,18 @@
 //           or {"kind": "attome.workflow", "workflow": "cwf_…", "inputs"?: {…}}: a Clip Workflow of the project's library
 //           (project.workflows) used as a node
 //   link    {"from": ["nod_…", "<output port>"], "to": ["nod_…", "<input port>"]}
+//
+//   Input nodes bring a value in from outside the workflow; they run no step and have no cache key, the value they give
+//   is part of the key of the node it feeds. They are the only way a workflow reads the timeline or the project:
+//     attome.project         width, height (the Sequence's canvas), frame_rate
+//     attome.variable        {"variable": "var_…", "type": "<data type>"}: output "value", the project Variable's value
+//     attome.clip            duration, start (seconds): the clip the Instance is on
+//     attome.clip_reference  settings {"clip": "previous" | "next" | "clp_…"}: outputs video, audio, the other clip's
+//                            outputs of those names; the clip becomes one this clip depends on
+//   The Clip Inputs node (the Exposed Inputs) and the Output node (the Outputs) are not stored as nodes: they are the two
+//   faces of "exposed" on the canvas.
+//   attome.get_frame       a node that runs here, with no model: video (and optionally "at", seconds) -> image;
+//                          settings {"frame": "first" | "last"} when "at" is not given
 //   exposed inputs, the Instance's Exposed Inputs, the values the clip sets:
 //           {"<name>": {"type": "<data type>", "label"?, "required"?: bool, "default"?, "range"?: {"min", "max"} or {"options": […]},
 //                       "order"?: n, "to"?: [["nod_…", "<input port>"], …]}}
@@ -60,6 +72,7 @@ struct KindDef {
   const char *title; // for menus
   std::span<const PortDef> inputs, outputs;
   bool runs_model; // it takes "model" and "settings"
+  bool is_input = false; // an Input node: gives a value from outside, runs no step
 };
 
 std::span<const KindDef> kind_defs();
@@ -136,13 +149,25 @@ void check_workflow(const json &library, const std::string &library_id, std::vec
 // reported as not ready and are not run until the input has a value, a link or an exposure.
 bool is_readiness_rule(std::string_view rule);
 
+struct VariableDecl {
+  std::string id, name;
+  PortType type = PortType::text;
+  json value; // null when it has none yet
+};
+// The project's Variables ({"var_…": {"name", "type", "value"}}) as written; one that cannot be read is left out.
+std::vector<VariableDecl> variable_decls(const json &variables);
+// Rule G_VARIABLE for each Variable that is not written like that.
+void check_variables(const json &variables, std::vector<Problem> &out);
+
 using ClipLookup = std::function<const json *(std::string_view clip_id)>;
 
 // The rules of one clip whose media_ref is a workflow, and of its Instance (check_workflow); does nothing for any other
-// clip. Rules: G_WORKFLOW (the clip has no Instance of its own), G_PORT,
-// G_TYPE, G_MISSING, G_SETTING and G_RANGE (a value the model behind the input does not take), G_CLIP_LINK (a link to a clip that does not exist or is not generative), G_CLIP_CYCLE (the clip
-// links to itself, directly or through other clips), G_TAKE (the selected Take is not one of its Takes).
-void check_clip(const json &library, const std::string &clip_id, const json &clip, const ClipLookup &lookup,
+// clip. `variables` are the project's Variables, for the Variable nodes. Rules: G_WORKFLOW (the clip has no Instance of its
+// own), G_PORT, G_TYPE, G_MISSING, G_SETTING and G_RANGE (a value the model behind the input does not take, or a clip
+// Duration the model cannot make), G_VARIABLE (a Variable node names no Variable, or has another type than it),
+// G_REFERENCE (a Clip Reference node names no clip, or one that is not generative), G_CLIP_CYCLE (the clip takes from
+// itself through Clip Reference nodes), G_TAKE (the selected Take is not one of its Takes).
+void check_clip(const json &library, const json &variables, const std::string &clip_id, const json &clip, const ClipLookup &lookup,
                 std::vector<Problem> &out);
 
 } // namespace atm::gen

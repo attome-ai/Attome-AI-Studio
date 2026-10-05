@@ -44,39 +44,45 @@ struct Film {
   fs::path dir = fs::temp_directory_path() / atm::new_id("attome-gen");
   std::shared_ptr<MockProvider> mock = std::make_shared<MockProvider>();
   std::unique_ptr<Engine> engine;
-  std::string project, a, b;
+  std::string project, root, a, b; // root: the ID of the project itself
 
   // The Shot as one clip's own workflow; `x` keeps the placeholders of two clips apart in one patch.
-  static json shot_workflow(const std::string &x, const char *model, bool blocks, const json &size) {
+  // `previous`: it starts on the last frame of the clip before it (a Clip Reference node and a Get Frame node).
+  static json shot_workflow(const std::string &x, const char *model, bool blocks, const json &size, bool previous = false) {
     const auto n = [&](const char *name) { return "$new:" + std::string(name) + x; };
     json inputs = {{"prompt", {{"type", "text"}, {"required", true}, {"order", 0}}},
                    {"start_image", {{"type", "image"}, {"order", 1}}},
                    {"seed", {{"type", "integer"}, {"order", 2}}}};
+    const std::string gen = blocks ? n("smp") : n("gen");
+    json nodes = json::object(), links = json::object();
+    inputs["prompt"]["to"] = to_({{blocks ? n("enc") : gen, "prompt"}});
+    inputs["seed"]["to"] = to_({{gen, "seed"}});
     if (blocks) {
-      inputs["prompt"]["to"] = to_({{n("enc"), "prompt"}});
-      inputs["start_image"]["to"] = to_({{n("smp"), "start_image"}});
-      inputs["seed"]["to"] = to_({{n("smp"), "seed"}});
-      return {{"name", "Shot"},
-              {"nodes",
-               {{n("enc"), {{"kind", "attome.encode_prompt"}, {"model", model}}},
-                {n("smp"), {{"kind", "attome.sample"}, {"model", model}, {"settings", {{"steps", 4}}}, {"inputs", size}}},
-                {n("dec"), {{"kind", "attome.decode"}, {"model", model}}}}},
-              {"links",
-               {{n("l1"), {{"from", {n("enc"), "conditioning"}}, {"to", {n("smp"), "conditioning"}}}},
-                {n("l2"), {{"from", {n("smp"), "latent"}}, {"to", {n("dec"), "latent"}}}}}},
-              {"exposed",
-               {{"inputs", inputs},
-                {"outputs", {{"video", {{"from", {n("dec"), "video"}}}}, {"last_frame", {{"from", {n("dec"), "last_frame"}}}}}},
-                {"primary", "video"}}}};
+      nodes[n("enc")] = {{"kind", "attome.encode_prompt"}, {"model", model}};
+      nodes[n("smp")] = {{"kind", "attome.sample"}, {"model", model}, {"settings", {{"steps", 4}}}, {"inputs", size}};
+      nodes[n("dec")] = {{"kind", "attome.decode"}, {"model", model}};
+      links[n("l1")] = {{"from", {n("enc"), "conditioning"}}, {"to", {n("smp"), "conditioning"}}};
+      links[n("l2")] = {{"from", {n("smp"), "latent"}}, {"to", {n("dec"), "latent"}}};
+    } else {
+      nodes[gen] = {{"kind", "attome.generate_video"}, {"model", model}, {"settings", {{"steps", 4}}}, {"inputs", size}};
     }
-    inputs["prompt"]["to"] = to_({{n("smp"), "prompt"}});
-    inputs["start_image"]["to"] = to_({{n("smp"), "start_image"}});
-    inputs["seed"]["to"] = to_({{n("smp"), "seed"}});
+    const std::string video = blocks ? n("dec") : gen;
+    nodes[n("frm")] = {{"kind", "attome.get_frame"}, {"settings", {{"frame", "last"}}}};
+    links[n("l_frm")] = {{"from", {video, "video"}}, {"to", {n("frm"), "video"}}};
+    if (previous) { // the start picture is the last frame of the clip before; the Exposed Input is left unlinked
+      nodes[n("ref")] = {{"kind", "attome.clip_reference"}, {"settings", {{"clip", "previous"}}}};
+      nodes[n("prev")] = {{"kind", "attome.get_frame"}, {"settings", {{"frame", "last"}}}};
+      links[n("l_ref")] = {{"from", {n("ref"), "video"}}, {"to", {n("prev"), "video"}}};
+      links[n("l_start")] = {{"from", {n("prev"), "image"}}, {"to", {gen, "start_image"}}};
+    } else {
+      inputs["start_image"]["to"] = to_({{gen, "start_image"}});
+    }
     return {{"name", "Shot"},
-            {"nodes", {{n("smp"), {{"kind", "attome.generate_video"}, {"model", model}, {"settings", {{"steps", 4}}}, {"inputs", size}}}}},
+            {"nodes", std::move(nodes)},
+            {"links", std::move(links)},
             {"exposed",
              {{"inputs", inputs},
-              {"outputs", {{"video", {{"from", {n("smp"), "video"}}}}, {"last_frame", {{"from", {n("smp"), "last_frame"}}}}}},
+              {"outputs", {{"video", {{"from", {video, "video"}}}}, {"last_frame", {{"from", {n("frm"), "image"}}}}}},
               {"primary", "video"}}}};
   }
 
@@ -90,10 +96,11 @@ struct Film {
     engine = std::make_unique<Engine>(cfg);
     const json created = ok(*engine, "project.create", {{"path", project}, {"rate", "24"}, {"canvas", "320x176"}});
     const std::string seq = created["sequence"];
-    const auto clip = [&](const char *name, const char *in, const char *x, json inputs) {
+    root = created["project"];
+    const auto clip = [&](const char *name, const char *in, const char *x, json inputs, bool previous = false) {
       return json{{"name", name},
                   {"timing", {{"record_in", in}, {"duration", "1s"}, {"source_in", "0s"}}},
-                  {"media_ref", {{"type", "workflow"}, {"workflow", shot_workflow(x, model, blocks, size)}, {"inputs", std::move(inputs)}}}};
+                  {"media_ref", {{"type", "workflow"}, {"workflow", shot_workflow(x, model, blocks, size, previous)}, {"inputs", std::move(inputs)}}}};
     };
     const json added = ok(
         *engine, "project.patch",
@@ -103,7 +110,7 @@ struct Film {
             json::array({{{"op", "add"}, {"path", seq + "/tracks/$new:v1"}, {"value", {{"kind", "video"}, {"name", "V1"}}}},
                          {{"op", "add"}, {"path", "$new:v1/clips/$new:a"}, {"value", clip("First", "0s", "a", {{"prompt", "A robot walks"}, {"seed", 7}})}},
                          {{"op", "add"}, {"path", "$new:v1/clips/$new:b"},
-                          {"value", clip("Second", "1s", "b", {{"prompt", "It rains"}, {"start_image", {{"from", "$new:a"}, {"output", "last_frame"}}}})}}})}}}});
+                          {"value", clip("Second", "1s", "b", {{"prompt", "It rains"}}, true)}}})}}}});
     a = added["id_map"]["$new:a"];
     b = added["id_map"]["$new:b"];
   }
@@ -157,11 +164,12 @@ TEST_CASE("generate: dirty clips run in dependency order, a second run does no w
   CHECK(f.status_of(f.b)["depends_on"] == json::array({f.a}));
   CHECK(f.status_of(f.a)["ready"] == true);
 
-  // The plan, without running: both clips, six steps, nothing cached.
+  // The plan, without running: both clips, eight steps (the last frame of the first, which the second starts on, is one of
+  // them), nothing cached.
   const json dry = f.run({{"dry_run", true}});
   CHECK(dry["job_id"].is_null());
   CHECK(dry["clips"] == 2);
-  CHECK(dry["steps"] == 6);
+  CHECK(dry["steps"] == 8);
   CHECK(dry["steps_cached"] == 0);
   REQUIRE(dry["plan"].size() == 2);
   CHECK(dry["plan"][0]["clip"] == f.a); // the clip the other starts from comes first
@@ -171,10 +179,10 @@ TEST_CASE("generate: dirty clips run in dependency order, a second run does no w
   const json done = f.wait(f.run());
   REQUIRE(done["state"] == "done");
   CHECK(done["unit"] == "steps");
-  CHECK(done["units_done"] == 6);
+  CHECK(done["units_done"] == 8);
   REQUIRE(done["result"]["clips"].size() == 2);
   CHECK(done["result"]["clips"][0]["state"] == "done");
-  CHECK(done["result"]["clips"][1]["steps_run"] == 3);
+  CHECK(done["result"]["clips"][1]["steps_run"] == 4); // not the first clip's frame again
   CHECK(f.mock->encodes == 2);
   CHECK(f.mock->samples == 2);
   CHECK(f.mock->decodes == 2);
@@ -206,7 +214,7 @@ TEST_CASE("generate: dirty clips run in dependency order, a second run does no w
   CHECK(nothing["clips"] == 0);
   CHECK(nothing["job_id"].is_null());
   const json all = f.run({{"scope", "all"}});
-  CHECK(all["steps_cached"] == 6);
+  CHECK(all["steps_cached"] == 8);
   CHECK(f.wait(all)["state"] == "done");
   CHECK(f.mock->samples == 2);
   CHECK(f.get(f.a)["media_ref"]["takes"].size() == 1);
@@ -215,9 +223,9 @@ TEST_CASE("generate: dirty clips run in dependency order, a second run does no w
   f.patch(json::array({{{"op", "replace"}, {"path", f.a + "/media_ref/inputs/seed"}, {"value", 8}}}));
   CHECK(f.states() == "First=dirty Second=dirty");
   CHECK(f.status_of(f.a)["reason"] == "changed: seed");
-  CHECK(f.status_of(f.b)["reason"].get<std::string>().find("starts from") != std::string::npos);
+  CHECK(f.status_of(f.b)["reason"].get<std::string>().find("takes from") != std::string::npos);
   const json again = f.run();
-  CHECK(again["steps"] == 6);
+  CHECK(again["steps"] == 8);
   CHECK(again["steps_cached"] == 2);
   CHECK(f.wait(again)["state"] == "done");
   CHECK(f.mock->encodes == 2);
@@ -264,6 +272,71 @@ TEST_CASE("generate: dirty clips run in dependency order, a second run does no w
   CHECK(f.status_of(f.a)["reason"] == "the files of its Take are gone");
   CHECK(f.wait(f.run())["state"] == "done");
   CHECK(f.states() == "First=clean Second=clean");
+}
+
+TEST_CASE("generate: what a clip's Input nodes read decides when it is out of date, and no clip else", "[gen][generate][input]") {
+  Film f;
+  REQUIRE(f.wait(f.run())["state"] == "done");
+  REQUIRE(f.states() == "First=clean Second=clean");
+  const auto node_of = [&](const std::string &clip, const char *kind) {
+    const json nodes = f.get(clip)["media_ref"]["workflow"]["nodes"];
+    for (auto it = nodes.begin(); it != nodes.end(); ++it)
+      if (it->value("kind", std::string()) == kind)
+        return it.key();
+    return std::string();
+  };
+
+  // A Variable node gives the second clip its prompt. Making the change is one edit; the clip is dirty, the first is not.
+  const std::string enc_b = node_of(f.b, "attome.encode_prompt");
+  const json made = f.patch(json::array(
+      {{{"op", "replace"}, {"path", f.b + "/media_ref/workflow/exposed/inputs/prompt/to"}, {"value", json::array()}},
+       {{"op", "add"}, {"path", f.root + "/variables/$new:style"}, {"value", {{"name", "style"}, {"type", "text"}, {"value", "anime"}}}},
+       {{"op", "add"}, {"path", f.b + "/media_ref/workflow/nodes/$new:sty"}, {"value", {{"kind", "attome.variable"}, {"variable", "$new:style"}, {"type", "text"}}}},
+       {{"op", "add"}, {"path", f.b + "/media_ref/workflow/links/$new:lp"}, {"value", {{"from", {"$new:sty", "value"}}, {"to", {enc_b, "prompt"}}}}}}));
+  const std::string style = made["id_map"]["$new:style"];
+  CHECK(ok(*f.engine, "project.validate", {{"project", f.project}})["ok"] == true);
+  CHECK(f.states() == "First=clean Second=dirty");
+  CHECK(f.wait(f.run())["state"] == "done");
+  CHECK(f.states() == "First=clean Second=clean");
+
+  // One change of the Variable, and exactly the clip that reads it is out of date; only its work is done again.
+  const int encodes = f.mock->encodes, samples = f.mock->samples;
+  f.patch(json::array({{{"op", "replace"}, {"path", style + "/value"}, {"value", "film"}}}));
+  CHECK(f.states() == "First=clean Second=dirty");
+  CHECK(f.status_of(f.b)["reason"].get<std::string>().find("Variable") != std::string::npos);
+  const json restyled = f.run();
+  CHECK(restyled["clips"] == 1);
+  CHECK(f.wait(restyled)["state"] == "done");
+  CHECK(f.mock->encodes == encodes + 1);
+  CHECK(f.mock->samples == samples + 1);
+  CHECK(f.states() == "First=clean Second=clean");
+  // The same value written again moves nothing; a Variable that is gone is reported, not run.
+  f.patch(json::array({{{"op", "replace"}, {"path", style + "/value"}, {"value", "film"}}}));
+  CHECK(f.states() == "First=clean Second=clean");
+  CHECK(err(*f.engine, "project.patch", {{"project", f.project}, {"patch", {{"ops", json::array({{{"op", "remove"}, {"path", style}}})}}}}).rule == "G_VARIABLE");
+  CHECK(err(*f.engine, "project.patch", {{"project", f.project}, {"patch", {{"ops", json::array({{{"op", "replace"}, {"path", style + "/value"}, {"value", 3}}})}}}}).rule == "G_VARIABLE");
+
+  // The first clip's length comes from a Clip node. Its Duration is read: a shorter clip is out of date, and so is the
+  // clip that starts on its last frame, which is not read from anywhere but the other clip.
+  const std::string smp_a = node_of(f.a, "attome.sample");
+  f.patch(json::array({{{"op", "remove"}, {"path", smp_a + "/inputs/seconds"}},
+                       {{"op", "add"}, {"path", f.a + "/media_ref/workflow/nodes/$new:ck"}, {"value", {{"kind", "attome.clip"}}}},
+                       {{"op", "add"}, {"path", f.a + "/media_ref/workflow/links/$new:ls"}, {"value", {{"from", {"$new:ck", "duration"}}, {"to", {smp_a, "seconds"}}}}}}));
+  CHECK(f.states() == "First=dirty Second=dirty");
+  CHECK(f.wait(f.run())["state"] == "done");
+  CHECK(f.states() == "First=clean Second=clean");
+  f.patch(json::array({{{"op", "replace"}, {"path", f.a + "/timing/duration"}, {"value", "1/2"}}}));
+  CHECK(f.states() == "First=dirty Second=dirty");
+  CHECK(f.status_of(f.a)["reason"].get<std::string>().find("length") != std::string::npos);
+  CHECK(f.wait(f.run())["state"] == "done");
+  CHECK(f.states() == "First=clean Second=clean");
+  // Where the clip sits is read by nobody here: moving it leaves it clean.
+  f.patch(json::array({{{"op", "replace"}, {"path", f.a + "/timing/record_in"}, {"value", "1/4"}}}));
+  CHECK(f.states() == "First=clean Second=clean");
+
+  // A clip that names a time the model cannot make is not wrong to hold but cannot run: the model takes 0.1 to 15 s.
+  const json status = f.status_of(f.a);
+  CHECK(status["ready"] == true);
 }
 
 TEST_CASE("generate: a project that is moved keeps its Takes", "[gen][generate]") {
@@ -343,7 +416,7 @@ TEST_CASE("generate: refused before anything runs when a model or its engine is 
     whole.mock->closed = true;
     const json done = whole.wait(whole.run());
     CHECK(done["state"] == "done");
-    CHECK(done["units_done"] == 2); // one step per clip
+    CHECK(done["units_done"] == 4); // the generating step and the last frame, per clip
     CHECK(whole.mock->generates == 2);
     CHECK(whole.states() == "First=clean Second=clean");
   }

@@ -5,6 +5,7 @@
 #include <set>
 #include <utility>
 
+#include "atm/base/rational.hpp"
 #include "atm/gen/models.hpp"
 
 namespace atm::gen {
@@ -19,7 +20,7 @@ constexpr PortDef kShotInputs[] = {
     {"prompt", T::text, true},  {"start_image", T::image},  {"end_image", T::image}, {"references", T::image, false, true},
     {"seed", T::integer},       {"seconds", T::number},     {"width", T::integer},   {"height", T::integer},
 };
-constexpr PortDef kShotOutputs[] = {{"video", T::video}, {"audio", T::audio}, {"last_frame", T::image}};
+constexpr PortDef kShotOutputs[] = {{"video", T::video}, {"audio", T::audio}};
 constexpr PortDef kEncodeInputs[] = {{"prompt", T::text, true}};
 constexpr PortDef kEncodeOutputs[] = {{"conditioning", T::conditioning}};
 constexpr PortDef kSampleInputs[] = {
@@ -30,11 +31,24 @@ constexpr PortDef kSampleInputs[] = {
 constexpr PortDef kSampleOutputs[] = {{"latent", T::latent}};
 constexpr PortDef kDecodeInputs[] = {{"latent", T::latent, true}};
 
+constexpr PortDef kFrameInputs[] = {{"video", T::video, true}, {"at", T::number}};
+constexpr PortDef kFrameOutputs[] = {{"image", T::image}};
+// The Input nodes. A Variable node's one output takes the type the node says; the table gives the default.
+constexpr PortDef kProjectOutputs[] = {{"width", T::integer}, {"height", T::integer}, {"frame_rate", T::number}};
+constexpr PortDef kVariableOutputs[] = {{"value", T::text}};
+constexpr PortDef kClipOutputs[] = {{"duration", T::number}, {"start", T::number}};
+constexpr PortDef kReferenceOutputs[] = {{"video", T::video}, {"audio", T::audio}};
+
 constexpr KindDef kKinds[] = {
     {"generate_video", "Generate video", kShotInputs, kShotOutputs, true},
     {"encode_prompt", "Encode prompt", kEncodeInputs, kEncodeOutputs, true},
     {"sample", "Sample", kSampleInputs, kSampleOutputs, true},
     {"decode", "Decode", kDecodeInputs, kShotOutputs, true},
+    {"get_frame", "Get frame", kFrameInputs, kFrameOutputs, false},
+    {"project", "Project", {}, kProjectOutputs, false, true},
+    {"variable", "Variable", {}, kVariableOutputs, false, true},
+    {"clip", "Clip", {}, kClipOutputs, false, true},
+    {"clip_reference", "Clip reference", {}, kReferenceOutputs, false, true},
 };
 
 constexpr std::string_view kNamespace = "attome.";
@@ -107,6 +121,11 @@ Ports node_ports_at(const json &library, const json &node, int depth) {
     out.inputs.push_back(from_def(d));
   for (const PortDef &d : def->outputs)
     out.outputs.push_back(from_def(d));
+  if (std::string_view(def->id) == "variable" && !out.outputs.empty()) { // its one output has the type of its Variable
+    PortType type = T::text;
+    if (port_type_from_name(string_at(node, "type"), type) && type != T::conditioning && type != T::latent)
+      out.outputs[0].type = type;
+  }
   return out;
 }
 
@@ -221,11 +240,15 @@ const ModelDecl *model_of(const json &node) {
   return def && def->runs_model ? find_model(string_at(node, "model")) : nullptr;
 }
 
-bool is_clip_link(const json &v) { return v.is_object() && v.contains("from"); }
-
 bool is_workflow_clip(const json &clip) { return string_at(object_at(clip, "media_ref"), "type") == "workflow"; }
 
-// Does the clip `from` take anything, directly or through other clips, from `target`?
+bool is_reference(const json &node) { return short_name(string_at(node, "kind")) == "clip_reference"; }
+
+// The clip a Clip Reference node names: "previous", "next" or a clip ID; empty when it names none.
+std::string reference_of(const json &node) { return string_at(object_at(node, "settings"), "clip"); }
+
+// Does the clip `from` take anything, through Clip Reference nodes that name a clip, from `target`? (previous and next
+// depend on where the clip is on the timeline: the planner finds a loop through those.)
 bool takes_from(const ClipLookup &lookup, const std::string &from, const std::string &target, std::set<std::string> &seen) {
   if (from == target)
     return true;
@@ -234,10 +257,13 @@ bool takes_from(const ClipLookup &lookup, const std::string &from, const std::st
   const json *clip = lookup(from);
   if (!clip)
     return false;
-  const json &inputs = object_at(object_at(*clip, "media_ref"), "inputs");
-  for (auto it = inputs.begin(); it != inputs.end(); ++it)
-    if (is_clip_link(*it) && takes_from(lookup, string_at(*it, "from"), target, seen))
-      return true;
+  const json &nodes = object_at(object_at(object_at(*clip, "media_ref"), "workflow"), "nodes");
+  for (auto it = nodes.begin(); it != nodes.end(); ++it)
+    if (is_reference(*it)) {
+      const std::string named = reference_of(*it);
+      if (!named.empty() && named != "previous" && named != "next" && takes_from(lookup, named, target, seen))
+        return true;
+    }
   return false;
 }
 
@@ -371,6 +397,22 @@ void check_workflow(const json &library, const json &workflow, const std::string
             "Input \"" + v.key() + "\" of node " + id + " is " + port_type_name(port->type) + " and must be " + what + ".",
             "Set a value of that type, or remove it and link the input instead.");
     }
+    // The nodes that bring a value in, and the one that takes a frame of a video, are held to what they say about themselves.
+    const KindDef *def = find_kind(kind);
+    const json &node_settings = object_at(*it, "settings");
+    if (def && short_name(kind) == "variable") {
+      PortType ignored = T::text;
+      if (const std::string type = string_at(*it, "type"); !type.empty() && (!port_type_from_name(type, ignored) || ignored == T::conditioning || ignored == T::latent))
+        add("G_VARIABLE", id + "/type", "Variable node " + id + " has the type \"" + type + "\".",
+            "Use the Data Type of its Variable: text, number, integer, boolean, image, video, audio or mask.");
+    } else if (def && short_name(kind) == "get_frame") {
+      if (const auto frame = node_settings.find("frame"); frame != node_settings.end() && (!frame->is_string() || (*frame != "first" && *frame != "last")))
+        add("G_SETTING", id + "/settings/frame", "Get Frame node " + id + " takes \"first\" or \"last\" as its frame.",
+            "Or give the input \"at\" a time in seconds.");
+    }
+    if (def && def->is_input)
+      continue; // gives a value, runs no model
+
     // What the node's model declares: the kind, the settings and their ranges, the optional inputs, lengths and sizes.
     const ModelDecl *model = model_of(*it);
     if (!model)
@@ -599,6 +641,16 @@ void check_workflow(const json &library, const json &workflow, const std::string
         "Set exposed.primary to the name of an output.");
   }
 
+  // An Input node that names nothing yet is not finished: a Variable node with no Variable, a Clip Reference node with no clip.
+  for (auto it = nodes.begin(); it != nodes.end(); ++it) {
+    const std::string kind(short_name(string_at(*it, "kind")));
+    if (kind == "variable" && string_at(*it, "variable").empty())
+      add("G_MISSING", it.key() + "/variable", "Variable node " + it.key() + " names no Variable.", "Set \"variable\" to the ID of a Variable of the project.");
+    else if (kind == "clip_reference" && reference_of(*it).empty())
+      add("G_MISSING", it.key() + "/settings/clip", "Clip Reference node " + it.key() + " names no clip.",
+          "Set settings.clip to \"previous\", \"next\" or the ID of a clip.");
+  }
+
   // Every required input gets its value from somewhere.
   for (const auto &[id, mine] : ports) {
     const json &typed = object_at(nodes[id], "inputs");
@@ -611,13 +663,49 @@ void check_workflow(const json &library, const json &workflow, const std::string
 
 bool is_readiness_rule(std::string_view rule) { return rule == "G_MISSING" || rule == "G_PRIMARY"; }
 
-void check_clip(const json &library, const std::string &clip_id, const json &clip, const ClipLookup &lookup,
+std::vector<VariableDecl> variable_decls(const json &variables) {
+  std::vector<VariableDecl> out;
+  const json &all = variables.is_object() ? variables : empty_object();
+  for (auto it = all.begin(); it != all.end(); ++it) {
+    VariableDecl v;
+    v.id = it.key();
+    if (!it->is_object() || !port_type_from_name(string_at(*it, "type"), v.type) || v.type == T::conditioning || v.type == T::latent)
+      continue;
+    v.name = string_at(*it, "name");
+    if (const auto value = it->find("value"); value != it->end())
+      v.value = *value;
+    out.push_back(std::move(v));
+  }
+  return out;
+}
+
+void check_variables(const json &variables, std::vector<Problem> &out) {
+  const json &all = variables.is_object() ? variables : empty_object();
+  for (auto it = all.begin(); it != all.end(); ++it) {
+    PortType type = T::text;
+    if (!it->is_object() || !port_type_from_name(string_at(*it, "type"), type) || type == T::conditioning || type == T::latent) {
+      out.push_back(Problem{"G_VARIABLE", it.key() + "/type", it.key(), "The Variable " + it.key() + " needs a type.",
+                            "Use text, number, integer, boolean, image, video, audio or mask."});
+      continue;
+    }
+    if (const auto value = it->find("value"); value != it->end())
+      if (const char *what = expected(*value, Port{it.key(), type, false, false}))
+        out.push_back(Problem{"G_VARIABLE", it.key() + "/value", it.key(),
+                              "The value of the Variable " + it.key() + " is " + port_type_name(type) + " and must be " + what + ".",
+                              "Set a value of that type."});
+  }
+}
+
+void check_clip(const json &library, const json &variables, const std::string &clip_id, const json &clip, const ClipLookup &lookup,
                 std::vector<Problem> &out) {
   if (!is_workflow_clip(clip))
     return;
   const json &ref = object_at(clip, "media_ref");
+  const auto add_at = [&](const char *rule, std::string path, std::string message, std::string hint) {
+    out.push_back(Problem{rule, std::move(path), clip_id, std::move(message), std::move(hint)});
+  };
   const auto add = [&](const char *rule, std::string path, std::string message, std::string hint) {
-    out.push_back(Problem{rule, clip_id + "/media_ref" + (path.empty() ? "" : "/" + path), clip_id, std::move(message), std::move(hint)});
+    add_at(rule, clip_id + "/media_ref" + (path.empty() ? "" : "/" + path), std::move(message), std::move(hint));
   };
   const json &instance = object_at(ref, "workflow");
   if (instance.empty()) {
@@ -667,51 +755,66 @@ void check_clip(const json &library, const std::string &clip_id, const json &cli
     }
     if (refused)
       continue;
-    if (!is_clip_link(*it)) {
-      if (const char *what = expected(*it, port))
-        add("G_TYPE", "inputs/" + it.key(),
-            "Input \"" + it.key() + "\" of clip " + clip_id + " is " + port_type_name(port.type) + " and must be " + what + ".",
-            "Set a value of that type, or link it to another clip: {\"from\": \"clp_…\", \"output\": \"<name>\"}.");
-      else if (input->range.is_object() && it->is_number()) { // the range the workflow says for the value
-        const json &r = input->range;
-        const double x = it->get<double>();
-        if (r.contains("min") && r.contains("max") && r["min"].is_number() && r["max"].is_number() && (x < r["min"].get<double>() || x > r["max"].get<double>()))
-          add("G_RANGE", "inputs/" + it.key(), "Input \"" + it.key() + "\" of clip " + clip_id + " is " + std::to_string(x) + "; the workflow takes " +
-              std::to_string(r["min"].get<double>()) + " to " + std::to_string(r["max"].get<double>()) + ".", "Set a value inside the range.");
-      } else if (input->range.is_object() && input->range.contains("options") && input->range["options"].is_array()) {
-        const auto &options = input->range["options"];
-        if (std::find(options.begin(), options.end(), *it) == options.end())
-          add("G_RANGE", "inputs/" + it.key(), "Input \"" + it.key() + "\" of clip " + clip_id + " is not one of: " + options.dump() + ".",
-              "Pick one of the options.");
-      }
-      continue;
-    }
-    // A link to another generative clip: one of its outputs feeds this input.
-    const std::string from = string_at(*it, "from"), output = string_at(*it, "output");
-    const json *other = from == clip_id ? &clip : lookup(from);
-    if (!other || !is_workflow_clip(*other)) {
-      add("G_CLIP_LINK", "inputs/" + it.key() + "/from",
-          "Input \"" + it.key() + "\" of clip " + clip_id + " is linked to \"" + from + "\", which is not a generative clip.",
-          "Link to a clip whose media_ref is a workflow.");
-      continue;
-    }
-    std::set<std::string> seen;
-    if (from == clip_id || takes_from(lookup, from, clip_id, seen)) {
-      add("G_CLIP_CYCLE", "inputs/" + it.key() + "/from",
-          "Clip " + clip_id + " takes its input \"" + it.key() + "\" from " + from + ", which depends on " + clip_id + ".",
-          "A clip may not depend on its own result. Link to a clip that comes before it.");
-      continue;
-    }
-    const Ports theirs = workflow_ports(library, object_at(object_at(*other, "media_ref"), "workflow"));
-    const Port *source = theirs.output(output);
-    if (!source)
-      add("G_PORT", "inputs/" + it.key() + "/output", "Clip " + from + " has no output \"" + output + "\".",
-          "Its outputs are: " + names(theirs.outputs) + ".");
-    else if (!can_link(*source, port))
+    if (const char *what = expected(*it, port))
       add("G_TYPE", "inputs/" + it.key(),
-          "The " + std::string(port_type_name(source->type)) + " output \"" + output + "\" of clip " + from + " cannot feed the " +
-              port_type_name(port.type) + " input \"" + it.key() + "\".",
-          "Link an output of the same type.");
+          "Input \"" + it.key() + "\" of clip " + clip_id + " is " + port_type_name(port.type) + " and must be " + what + ".",
+          "Set a value of that type. To take something from another clip, use a Clip Reference node in its workflow.");
+    else if (input->range.is_object() && it->is_number()) { // the range the workflow says for the value
+      const json &r = input->range;
+      const double x = it->get<double>();
+      if (r.contains("min") && r.contains("max") && r["min"].is_number() && r["max"].is_number() && (x < r["min"].get<double>() || x > r["max"].get<double>()))
+        add("G_RANGE", "inputs/" + it.key(), "Input \"" + it.key() + "\" of clip " + clip_id + " is " + std::to_string(x) + "; the workflow takes " +
+            std::to_string(r["min"].get<double>()) + " to " + std::to_string(r["max"].get<double>()) + ".", "Set a value inside the range.");
+    } else if (input->range.is_object() && input->range.contains("options") && input->range["options"].is_array()) {
+      const auto &options = input->range["options"];
+      if (std::find(options.begin(), options.end(), *it) == options.end())
+        add("G_RANGE", "inputs/" + it.key(), "Input \"" + it.key() + "\" of clip " + clip_id + " is not one of: " + options.dump() + ".",
+            "Pick one of the options.");
+    }
+  }
+
+  // The Input nodes: a Variable node reads a Variable of the project, a Clip Reference node a clip, and the Duration the
+  // Clip node gives must be one the model behind it can make.
+  const std::vector<VariableDecl> declared = variable_decls(variables);
+  for (auto it = wf_nodes.begin(); it != wf_nodes.end(); ++it) {
+    const std::string kind(short_name(string_at(*it, "kind")));
+    if (kind == "variable") {
+      const std::string var = string_at(*it, "variable");
+      const auto found = std::find_if(declared.begin(), declared.end(), [&](const VariableDecl &v) { return v.id == var; });
+      if (!var.empty() && found == declared.end())
+        add_at("G_VARIABLE", it.key() + "/variable", "Variable node " + it.key() + " reads \"" + var + "\", which is not a Variable of the project.",
+               "Add the Variable to the project's \"variables\", or pick another one.");
+      else if (found != declared.end() && port_type_name(found->type) != string_at(*it, "type"))
+        add_at("G_VARIABLE", it.key() + "/type",
+               "Variable node " + it.key() + " is " + string_at(*it, "type") + " and the Variable " + var + " is " + port_type_name(found->type) + ".",
+               "Give the node the type of its Variable.");
+    } else if (kind == "clip_reference") {
+      const std::string named = reference_of(*it);
+      if (named.empty() || named == "previous" || named == "next")
+        continue;
+      const json *other = named == clip_id ? &clip : lookup(named);
+      if (!other || !is_workflow_clip(*other)) {
+        add_at("G_REFERENCE", it.key() + "/settings/clip", "Clip Reference node " + it.key() + " names \"" + named + "\", which is not a generative clip.",
+               "Name a clip whose media_ref is a workflow, or use \"previous\" or \"next\".");
+        continue;
+      }
+      std::set<std::string> seen;
+      if (named == clip_id || takes_from(lookup, named, clip_id, seen))
+        add_at("G_CLIP_CYCLE", it.key() + "/settings/clip", "Clip " + clip_id + " takes from " + named + ", which depends on " + clip_id + ".",
+               "A clip may not depend on its own result. Name a clip that does not.");
+    }
+  }
+  if (const auto duration = Rational::parse(object_at(clip, "timing").value("duration", std::string("0")))) {
+    const double seconds = duration->to_seconds_lossy();
+    const json &links = object_at(instance, "links");
+    std::string from_node, from_port, to_node, to_port;
+    for (auto it = links.begin(); it != links.end(); ++it)
+      if (it->is_object() && read_end(*it, "from", from_node, from_port) && read_end(*it, "to", to_node, to_port) && wf_nodes.contains(from_node) &&
+          wf_nodes.contains(to_node) && short_name(string_at(wf_nodes[from_node], "kind")) == "clip" && from_port == "duration")
+        if (const ModelDecl *model = model_of(wf_nodes[to_node]))
+          if (const std::string wrong = input_problem(*model, to_port, seconds); !wrong.empty())
+            add_at("G_RANGE", clip_id + "/timing/duration", "The Duration of clip " + clip_id + " " + wrong + ".",
+                   "Make the clip a length the model " + model->id + " can make.");
   }
   for (const ExposedInput &input : face)
     if (input.required && input.def.is_null() && !inputs.contains(input.name))

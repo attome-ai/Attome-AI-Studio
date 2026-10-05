@@ -4,7 +4,12 @@
 //
 // A node's key is the BLAKE3 hash ("b3:…", as for every content hash here) of canonical JSON holding: its kind, its model and what the model is on this machine (the
 // hashes of its files and the engine's fingerprint), its settings, the value of every input, and for a linked input the
-// key of the node that feeds it and the port. Left out on purpose: IDs, names and positions. Renaming a node, moving it
+// key of the node that feeds it and the port. Left out on purpose: IDs, names and positions.
+//
+// An Input node (Project, Variable, Clip, Clip Reference) has no key of its own: what it gives goes into the key of the
+// node it feeds, as a plain value, or, for a Clip Reference, as what the other clip's output is made by. So a changed
+// Variable, canvas size, Duration or referenced clip moves exactly the keys of the nodes that read it, and the clips
+// that hold them. Renaming a node, moving it
 // on the canvas, or building the same graph again in another project gives the same keys.
 
 #include <functional>
@@ -17,10 +22,32 @@
 
 namespace atm::gen {
 
+// What makes an output: the key of the node that makes it and the node's port. An Input node gives a value instead
+// (`inlined`; `value` is null when it has none, such as the clip before the first clip).
+struct Made {
+  std::string key, port;
+  json value;
+  bool inlined = false;
+};
+
+// What the Input nodes of one clip's workflow read. A context with none of it set gives the Input nodes no value.
+struct ClipFacts {
+  bool known = false;                  // the facts below are set
+  double duration = 0.0, start = 0.0;  // the clip's Duration and its start on the timeline, in seconds (Clip node)
+  int64_t width = 0, height = 0;       // the canvas of the Sequence the clip is on (Project node)
+  double frame_rate = 0.0;
+};
+
 struct KeyContext {
   // What a model is here: the hashes of its files and the fingerprint of the engine that runs it. Empty for a model
   // that is not installed; the key then holds the model's name only.
   std::function<std::string(std::string_view model)> model_identity;
+  json variables;  // the project's Variables, {"var_…": {"name", "type", "value"}} (Variable node)
+  ClipFacts clip;  // the clip the workflow is on (Project node, Clip node)
+  // What an output of another clip is made by, for a Clip Reference node: `reference` is "previous", "next" or a clip ID,
+  // `port` "video" or "audio". An inlined null Made when there is no such clip (the first clip has no previous); an
+  // empty Made when it cannot be worked out (a loop). Not set: Clip Reference nodes give nothing.
+  std::function<Made(std::string_view reference, std::string_view port)> reference;
 };
 
 // A value another clip made, as an input: {"key": "<cache key of the node that made it>", "port": "<its output>"}.
@@ -35,9 +62,6 @@ std::map<std::string, std::string> node_keys(const json &library, const json &wo
 
 // What one exposed output of the workflow is made by: the key of its node and the node's port. Empty key when the
 // output does not exist or cannot be worked out.
-struct Made {
-  std::string key, port;
-};
 Made output_key(const json &library, const json &workflow, const json &inputs, std::string_view output, const KeyContext &context);
 
 // One node to run: its key and what it is. `what` holds "kind" (short), "model", "settings" and "inputs"; an input is a

@@ -26,7 +26,7 @@ try {
  {"op":"add","path":"`$new:v1/clips/`$new:a","value":{"name":"First","timing":{"record_in":"0","duration":"2","source_in":"0"},
    "media_ref":{"type":"workflow","workflow":$(Get-ShotInstance 'a'),"inputs":{"prompt":"A robot walks","seed":3}}}},
  {"op":"add","path":"`$new:v1/clips/`$new:b","value":{"name":"Second","timing":{"record_in":"2","duration":"2","source_in":"0"},
-   "media_ref":{"type":"workflow","workflow":$(Get-ShotInstance 'b'),"inputs":{"prompt":"It starts to rain","start_image":{"from":"`$new:a","output":"last_frame"}}}}}
+   "media_ref":{"type":"workflow","workflow":$(Get-ShotInstance 'b' -StartFrom '$new:a'),"inputs":{"prompt":"It starts to rain"}}}}
 ]}
 "@ | Set-Content "$work\pt.json" -Encoding utf8
     & "$bin\attome.exe" patch $proj "$work\pt.json" | Out-Null

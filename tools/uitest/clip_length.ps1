@@ -19,12 +19,12 @@ try {
   function Layout($run) {
     @((Get-Tracks $run)[0].clip_list | ForEach-Object {
       $o = Get-Object $run $_.id
-      [pscustomobject]@{ Name = $_.name; At = [math]::Round((ConvertFrom-Rational $o.timing.record_in), 3); Len = [math]::Round((ConvertFrom-Rational $o.timing.duration), 3); Seconds = $o.media_ref.inputs.seconds }
+      [pscustomobject]@{ Name = $_.name; At = [math]::Round((ConvertFrom-Rational $o.timing.record_in), 3); Len = [math]::Round((ConvertFrom-Rational $o.timing.duration), 3); }
     } | Sort-Object At)
   }
-  function Show($l) { ($l | ForEach-Object { "$($_.Name)@$($_.At)+$($_.Len) (asks $($_.Seconds) s)" }) -join ', ' }
+  function Show($l) { ($l | ForEach-Object { "$($_.Name)@$($_.At)+$($_.Len)" }) -join ', ' }
 
-  # Two 5-second shots, touching. The mock model makes 0.1 to 15 s: the slider at 0.5 asks for 7.5 s.
+  # Two 5-second shots, touching. The mock model makes 0.1 to 15 s: the slider at 0.5 sets the Duration (what the Clip node gives) to 7.5 s.
   $run = Invoke-EditorScript -Project $proj -Script @(
     'click @rail:Generate'
     'click @model:attome-mock'
@@ -41,7 +41,7 @@ try {
   try {
     if (-not $failed) {
       $l = Layout $run; "longer: $(Show $l)"
-      if ($l[0].Seconds -ne 7.5 -or $l[0].Len -ne 7.5) { $failed = 'Shot 1 does not ask for and last 7.5 s' }
+      if ($l[0].Len -ne 7.5) { $failed = 'Shot 1 does not last 7.5 s' }
       elseif ($l[1].At -ne 7.5) { $failed = "Shot 2 is at $($l[1].At) s, not slid to 7.5 s" }
     }
     if (-not $failed) {

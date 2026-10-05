@@ -8,7 +8,9 @@
 #include "atm/base/id.hpp"
 #include "atm/base/profiler.hpp"
 #include "atm/base/time.hpp"
+#include "atm/gen/models.hpp"
 #include "atm/storage/file.hpp"
+#include "frames.hpp"
 
 namespace atm::api {
 namespace {
@@ -51,11 +53,24 @@ gen::Provider *provider_for(const std::vector<std::shared_ptr<gen::Provider>> &p
   return nullptr;
 }
 
+gen::KeyContext GenRun::context_of(const GenClip &clip) const {
+  gen::KeyContext c = context;
+  c.clip = clip.facts;
+  c.reference = [&clip](std::string_view reference, std::string_view port) -> gen::Made {
+    if (const auto it = clip.references.find(std::string(reference) + "|" + std::string(port)); it != clip.references.end())
+      return it->second;
+    gen::Made none; // no such clip, or nothing it makes under that name
+    none.inlined = true;
+    return none;
+  };
+  return c;
+}
+
 StepCount count_steps(const GenRun &run) {
   StepCount n;
   std::set<std::string> seen;
   for (const GenClip &clip : run.clips)
-    for (const gen::Step &s : gen::steps(run.library, clip.instance, clip.inputs, run.context))
+    for (const gen::Step &s : gen::steps(run.library, clip.instance, clip.inputs, run.context_of(clip)))
       if (seen.insert(s.key).second) {
         ++n.total;
         n.cached += in_cache(run.dir, s.key) ? 1 : 0;
@@ -67,6 +82,7 @@ std::vector<GenOutcome> run_generation(const GenRun &run, const GenProgress &pro
   ATM_PROFILE_SCOPE("gen.run");
   std::vector<GenOutcome> outcomes;
   std::map<std::string, std::string> ended; // clip -> how it ended
+  std::set<std::string> finished; // steps this run has finished: a step two clips share (the last frame the second starts on) counts once
   const auto cancelled = [&] { return progress.cancel && progress.cancel->load(); };
   int index = 0;
   for (const GenClip &clip : run.clips) {
@@ -96,7 +112,8 @@ std::vector<GenOutcome> run_generation(const GenRun &run, const GenProgress &pro
       finish("skipped");
       continue;
     }
-    const std::vector<gen::Step> steps = gen::steps(run.library, clip.instance, clip.inputs, run.context);
+    const gen::KeyContext context = run.context_of(clip);
+    const std::vector<gen::Step> steps = gen::steps(run.library, clip.instance, clip.inputs, context);
     if (steps.empty()) {
       out.error = engine_error("G_PLAN", "The steps of " + clip.name + " cannot be worked out.", "Check the clip's workflow with project.validate.");
       finish("failed");
@@ -110,15 +127,19 @@ std::vector<GenOutcome> run_generation(const GenRun &run, const GenProgress &pro
         finish("cancelled");
         break;
       }
+      if (finished.contains(step.key))
+        continue;
       if (in_cache(run.dir, step.key)) {
+        finished.insert(step.key);
         ++out.cached;
         if (progress.done)
           progress.done->fetch_add(1);
         continue;
       }
       const std::string kind = step.what.value("kind", std::string()), model = step.what.value("model", std::string());
-      gen::Provider *provider = provider_for(run.providers, model, kind);
-      if (!provider) {
+      const bool builtin = kind == "get_frame"; // runs here, with no model
+      gen::Provider *provider = builtin ? nullptr : provider_for(run.providers, model, kind);
+      if (!provider && !builtin) {
         out.error = engine_error("G_NO_ENGINE", "No engine on this computer runs \"" + kind + "\" for the model " + model + ".",
                                  "Attome's own engine for this model arrives in a later version.");
         ok = false;
@@ -154,6 +175,13 @@ std::vector<GenOutcome> run_generation(const GenRun &run, const GenProgress &pro
           request.inputs[it.key()] = *it;
         }
       }
+      // A size is brought onto the model's grid and under its pixel limit, in the shape that was asked for.
+      if (const gen::ModelDecl *decl = gen::find_model(model); decl && request.inputs.value("width", json()).is_number_integer() &&
+                                                                request.inputs.value("height", json()).is_number_integer()) {
+        const auto [w, h] = gen::fit_size(*decl, request.inputs["width"].get<int64_t>(), request.inputs["height"].get<int64_t>());
+        request.inputs["width"] = w;
+        request.inputs["height"] = h;
+      }
       if (const gen::KindDef *def = gen::find_kind(kind))
         for (const gen::PortDef &port : def->outputs)
           request.outputs[port.name] = to_utf8(part / gen::output_file(port.name));
@@ -163,7 +191,18 @@ std::vector<GenOutcome> run_generation(const GenRun &run, const GenProgress &pro
       };
       if (progress.on_detail)
         progress.on_detail(label + ": " + kind);
-      const auto result = provider->run(request);
+      Result<gen::StepResult> result = gen::StepResult{};
+      if (builtin) { // Get Frame: the first or the last picture of the video, or the one at a time
+        const std::string video = request.inputs.value("video", std::string());
+        const double at = request.inputs.contains("at") && request.inputs["at"].is_number()
+                              ? request.inputs["at"].get<double>()
+                              : request.settings.value("frame", std::string("last")) == "first" ? 0.0 : -1.0;
+        if (!write_frame(video, request.outputs["image"], at))
+          result = tl::unexpected(engine_error("E_INTERNAL", "A frame of " + video + " could not be read.",
+                                               "The clip it comes from may have no video in its Take."));
+      } else {
+        result = provider->run(request);
+      }
       if (!result) {
         fs::remove_all(part, ec);
         ok = false;
@@ -179,7 +218,7 @@ std::vector<GenOutcome> run_generation(const GenRun &run, const GenProgress &pro
       for (const auto &[port, path] : request.outputs)
         if (storage::exists(part / gen::output_file(port)))
           files[port] = gen::output_file(port);
-      json record = {{"key", step.key}, {"kind", kind}, {"model", model}, {"engine", provider->name()}, {"outputs", std::move(files)},
+      json record = {{"key", step.key}, {"kind", kind}, {"model", model}, {"engine", provider ? provider->name() : std::string("attome")}, {"outputs", std::move(files)},
                      {"made", utc_now_iso8601()}, {"seconds", result->seconds}};
       auto written = storage::atomic_write(part / "result.json", record.dump(1) + "\n");
       fs::remove_all(final_dir, ec);
@@ -193,6 +232,7 @@ std::vector<GenOutcome> run_generation(const GenRun &run, const GenProgress &pro
         finish("failed");
         break;
       }
+      finished.insert(step.key);
       ++out.ran;
       if (progress.done)
         progress.done->fetch_add(1);
@@ -202,7 +242,7 @@ std::vector<GenOutcome> run_generation(const GenRun &run, const GenProgress &pro
     // The Take: what each exposed output of the clip's workflow is, and where its file lies.
     json outputs = json::object();
     for (const gen::Port &port : gen::workflow_ports(run.library, clip.instance).outputs) {
-      const gen::Made made = gen::output_key(run.library, clip.instance, clip.inputs, port.name, run.context);
+      const gen::Made made = gen::output_key(run.library, clip.instance, clip.inputs, port.name, context);
       const fs::path file = step_dir(run.dir, made.key) / gen::output_file(made.port);
       if (!made.key.empty() && storage::exists(file))
         outputs[port.name] = {{"key", made.key}, {"port", made.port},

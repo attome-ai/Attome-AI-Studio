@@ -587,13 +587,17 @@ void check_track(const doc::Document &doc, const std::string &track_id, json &pr
 
 // Clip Workflows and the clips that use them (atm_gen). `tracks` limits the clips looked at; null = every clip. The
 // workflows are always checked whole: there are few, and a change to one can break a clip anywhere.
-void check_generative(const doc::Document &doc, const std::set<std::string> *tracks, bool workflows_too, json &problems) {
+void check_generative(const doc::Document &doc, const std::set<std::string> *tracks, bool workflows_too, bool variables_too, json &problems) {
   ATM_PROFILE_SCOPE("patch.validate.workflows");
   const json &root = doc.root();
   static const json none = json::object();
   const auto wit = root.find("workflows");
   const json &workflows = wit != root.end() && wit->is_object() ? *wit : none;
+  const auto vit = root.find("variables");
+  const json &variables = vit != root.end() && vit->is_object() ? *vit : none;
   std::vector<gen::Problem> found;
+  if (variables_too) // the project's Variables, read by Variable nodes
+    gen::check_variables(variables, found);
   if (workflows_too) // the project's library of Clip Workflows (a clip's own Instance is checked with the clip)
     for (auto it = workflows.begin(); it != workflows.end(); ++it)
       gen::check_workflow(workflows, it.key(), found);
@@ -606,7 +610,7 @@ void check_generative(const doc::Document &doc, const std::set<std::string> *tra
     if (clips == track.end() || !clips->is_object())
       return;
     for (auto c = clips->begin(); c != clips->end(); ++c)
-      gen::check_clip(workflows, c.key(), *c, lookup, found);
+      gen::check_clip(workflows, variables, c.key(), *c, lookup, found);
   };
   if (tracks) {
     for (const std::string &id : *tracks)
@@ -704,11 +708,13 @@ public:
     // A clip taken away can break a generative clip on any track (one that takes from it): look at them all. A change to
     // the project's library of Clip Workflows can break any clip that uses one as a node. A change to a clip's own
     // Instance is checked with that clip (note_instance), on its track.
-    bool library = false, everywhere = false;
+    bool library = false, everywhere = false, variables = false;
     const auto touches = [&](const std::string &id, bool gone) {
       const string_view prefix = id_prefix(id);
       if (prefix == "cwf") {
         library = true;
+      } else if (prefix == "var") { // a Variable added, changed or removed: any clip with a Variable node may be affected
+        variables = everywhere = true;
       } else if (prefix == "nod" || prefix == "lnk") {
         const NodeRef *ref = gone ? nullptr : doc_.find(id);
         library = library || !ref || id_prefix(ref->parent) != "clp"; // a node of the library, or one that is gone
@@ -724,7 +730,7 @@ public:
     }
     everywhere = everywhere || (library && doc_.root().contains("workflows"));
     if (everywhere || !tracks.empty())
-      check_generative(doc_, everywhere ? nullptr : &tracks, library, problems);
+      check_generative(doc_, everywhere ? nullptr : &tracks, library, variables, problems);
     if (!problems.empty())
       return rejected(std::move(problems));
     return {};
@@ -1432,7 +1438,7 @@ json validate_document(const doc::Document &doc) {
       check_track(doc, t.key(), problems);
     }
   }
-  check_generative(doc, nullptr, true, problems);
+  check_generative(doc, nullptr, true, true, problems);
   return problems;
 }
 

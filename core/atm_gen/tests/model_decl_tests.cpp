@@ -46,7 +46,7 @@ json shot(const char *model) {
               {"start_image", {{"type", "image"}, {"to", to_({{"smp", "start_image"}})}}},
               {"references", {{"type", "image"}, {"to", to_({{"smp", "references"}})}}},
               {"seconds", {{"type", "number"}, {"to", to_({{"smp", "seconds"}})}}}}},
-            {"outputs", {{"video", {{"from", {"dec", "video"}}}}, {"last_frame", {{"from", {"dec", "last_frame"}}}}}},
+            {"outputs", {{"video", {{"from", {"dec", "video"}}}}}},
             {"primary", "video"}}}};
 }
 
@@ -151,7 +151,9 @@ TEST_CASE("model declaration: a node that disagrees with its model is refused wh
     w["nodes"]["smp"]["inputs"]["references"] = json::array({"a.png"});
     CHECK(rules(check(w)) == "G_SETTING");
     w["nodes"]["smp"]["inputs"].erase("references");
-    w["links"]["l3"] = {{"from", {"dec", "last_frame"}}, {"to", {"smp", "end_image"}}};
+    w["nodes"]["frm"] = {{"kind", "attome.get_frame"}};
+    w["links"]["l_frm"] = {{"from", {"dec", "video"}}, {"to", {"frm", "video"}}};
+    w["links"]["l3"] = {{"from", {"frm", "image"}}, {"to", {"smp", "end_image"}}};
     const auto p = check(w);
     CHECK(rules(p) == "G_CYCLE G_SETTING");
   }
@@ -162,7 +164,7 @@ TEST_CASE("model declaration: a clip's values are held to the model behind the i
   const auto check_clip = [&](json inputs) {
     const json clip = {{"media_ref", {{"type", "workflow"}, {"workflow", shot("decl-c")}, {"inputs", std::move(inputs)}}}};
     std::vector<Problem> out;
-    atm::gen::check_clip(json::object(), "clp_a", clip, [](std::string_view) -> const json * { return nullptr; }, out);
+    atm::gen::check_clip(json::object(), json::object(), "clp_a", clip, [](std::string_view) -> const json * { return nullptr; }, out);
     return out;
   };
   CHECK(check_clip({{"prompt", "x"}, {"seconds", 5}, {"start_image", "a.png"}}).empty());

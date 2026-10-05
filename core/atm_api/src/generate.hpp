@@ -9,6 +9,7 @@
 #include <atomic>
 #include <filesystem>
 #include <functional>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -22,8 +23,10 @@ struct GenClip {
   std::string id, name, key;
   nlohmann::json instance; // the clip's own workflow
   nlohmann::json written;  // the clip's inputs as the document has them (kept in the Take)
-  nlohmann::json inputs;   // with clip links replaced by what the linked clip makes
+  nlohmann::json inputs;   // the values the clip gives its Exposed Inputs
   std::vector<std::string> depends;
+  gen::ClipFacts facts;    // what its Input nodes read: the canvas, its Duration
+  std::map<std::string, gen::Made> references; // what its Clip Reference nodes gave (gen::ClipPlan::references)
 };
 
 struct GenRun {
@@ -32,7 +35,9 @@ struct GenRun {
   std::filesystem::path dir;  // the cache folder
   std::filesystem::path project; // the project folder: a Take records its files relative to it
   std::vector<std::shared_ptr<gen::Provider>> providers;
-  gen::KeyContext context;
+  gen::KeyContext context; // what is shared by the clips: the model identities and the project's Variables
+  // The context of one clip: the shared one with the clip's own facts, and its references as the plan recorded them.
+  gen::KeyContext context_of(const GenClip &clip) const;
 };
 
 struct GenOutcome {

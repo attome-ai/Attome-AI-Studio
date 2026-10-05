@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "atm/base/hash.hpp"
+#include "atm/gen/models.hpp"
 
 namespace atm::gen {
 namespace {
@@ -69,11 +70,49 @@ public:
     }
   }
 
-  // What makes an output of a node: the node's key and the port; for a workflow node, what makes that output inside.
+  // What an Input node gives at a port, as a value.
+  Made input_value(const std::string &kind, const json &node, const std::string &port) const {
+    Made out;
+    out.inlined = true;
+    const ClipFacts &f = context_.clip;
+    if (kind == "project") {
+      if (!f.known)
+        return out;
+      // settings.pixels: a size to generate at, the canvas's shape at about that many pixels
+      const auto [w, h] = scaled_size(f.width, f.height, object_at(node, "settings").value("pixels", int64_t(0)));
+      if (port == "width")
+        out.value = w;
+      else if (port == "height")
+        out.value = h;
+      else if (port == "frame_rate")
+        out.value = f.frame_rate;
+    } else if (kind == "clip") {
+      if (!f.known)
+        return out;
+      if (port == "duration")
+        out.value = f.duration;
+      else if (port == "start")
+        out.value = f.start;
+    } else if (kind == "variable") {
+      const json &variable = object_at(context_.variables, string_at(node, "variable").c_str());
+      if (const auto value = variable.find("value"); value != variable.end())
+        out.value = *value;
+    } else if (kind == "clip_reference") {
+      if (!context_.reference)
+        return out;
+      return context_.reference(object_at(node, "settings").value("clip", std::string()), port);
+    }
+    return out;
+  }
+
+  // What makes an output of a node: the node's key and the port; for a workflow node, what makes that output inside; for
+  // an Input node, the value it gives.
   Made made(const std::string &node_id, const std::string &port) {
     const auto it = nodes_->find(node_id);
     if (it == nodes_->end())
       return {};
+    if (const KindDef *def = find_kind(string_at(*it, "kind")); def && def->is_input)
+      return input_value(def->id, *it, port);
     if (is_workflow_kind(string_at(*it, "kind"))) {
       if (depth_ >= kMaxDepth)
         return {};
@@ -137,12 +176,19 @@ private:
       std::vector<json> sources;
       for (const End &from : links->second) {
         const Made m = made(from.first, from.second);
+        if (m.inlined) { // an Input node: its value, if it has one
+          if (!m.value.is_null())
+            sources.push_back(m.value.is_number() && port.type == PortType::number ? json(m.value.get<double>()) : m.value);
+          continue;
+        }
         if (m.key.empty()) {
           ok = false;
           return nullptr;
         }
         sources.push_back(made_by(m.key, m.port));
       }
+      if (sources.empty())
+        return nullptr;
       if (!port.list)
         return sources.front();
       std::sort(sources.begin(), sources.end(), [](const json &a, const json &b) { return a.dump() < b.dump(); });
@@ -186,7 +232,7 @@ private:
       return {}; // a loop
     std::string key;
     const json &node = (*nodes_)[node_id];
-    if (const KindDef *def = find_kind(string_at(node, "kind"))) {
+    if (const KindDef *def = find_kind(string_at(node, "kind")); def && !def->is_input) {
       const std::string model = string_at(node, "model");
       json what = {{"v", kKeyVersion}, {"kind", def->id}, {"model", model}, {"settings", object_at(node, "settings")}};
       if (context_.model_identity && !model.empty())

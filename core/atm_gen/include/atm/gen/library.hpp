@@ -14,6 +14,8 @@
 
 namespace atm::gen {
 
+constexpr int64_t kGenerationPixels = 901120; // what a clip is generated at: about 0.9 megapixels, in the canvas's shape
+
 // The IDs of the built-in Clip Workflows of this build, sorted: "shot:<model>" for every registered model that generates
 // video.
 std::vector<std::string> builtin_workflow_ids();
@@ -23,8 +25,15 @@ std::vector<std::string> builtin_workflow_ids();
 // is a copy of. Null when there is no such Clip Workflow.
 json instantiate(std::string_view source_id);
 
-// The Shot of a model: one "generate video" node with the model, its settings at their defaults, and the Exposed
-// Inputs and Outputs the model supports.
+// The Shot of a model: one "generate video" node with the model, its settings at their defaults, fed its size by a Project
+// node and its length by a Clip node, and the Exposed Inputs and Outputs the model supports: the prompt, the pictures it
+// takes, the seed; the video and the audio.
 json shot_workflow(const ModelDecl &model);
+
+// Makes a workflow start on the last frame of another clip: adds a Clip Reference node (`reference`: "previous", "next" or
+// a clip ID) and a Get Frame node for its last frame, links them to the "start_image" of the generate video node, and
+// leaves the "start_image" Exposed Input unlinked (its value is kept). Node IDs are "$new:" placeholders when the
+// workflow's own are, else fresh ones. False when the workflow has no generate video node with a start_image input.
+bool start_from(json &workflow, std::string_view reference);
 
 } // namespace atm::gen

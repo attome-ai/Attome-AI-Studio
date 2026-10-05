@@ -22,8 +22,6 @@ std::string string_at(const json &owner, const char *key) {
   return it != owner.end() && it->is_string() ? it->get<std::string>() : std::string();
 }
 
-bool is_clip_link(const json &v) { return v.is_object() && v.contains("from"); }
-
 const json *selected_take(const json &ref) {
   const std::string id = string_at(ref, "selected");
   const json &takes = object_at(ref, "takes");
@@ -38,6 +36,49 @@ struct Planner {
   std::map<std::string, const ClipIn *> by_id;
   std::map<std::string, ClipPlan> plans;
   std::set<std::string> walking;
+  std::map<std::string, KeyContext> contexts;                  // per clip: the context its Input nodes read
+  std::map<std::string, std::vector<std::string>> taken_from;  // per clip: the clips its Clip Reference nodes took from
+  std::map<std::string, std::map<std::string, Made>> given;    // per clip: what its Clip Reference nodes gave
+
+  // Does the clip make an output of this name?
+  bool makes(const std::string &clip, const std::string &output) {
+    for (const ExposedOutput &o : exposed_outputs(object_at(*by_id[clip]->ref, "workflow")))
+      if (o.name == output)
+        return true;
+    return false;
+  }
+
+  // The context of one clip: what the project gives, what the clip is, and the other clips its references name.
+  const KeyContext &context_of(const std::string &id) {
+    const auto [it, fresh] = contexts.try_emplace(id, context);
+    if (!fresh)
+      return it->second;
+    KeyContext &c = it->second;
+    c.clip = by_id[id]->facts;
+    c.reference = [this, id](std::string_view reference, std::string_view port) -> Made {
+      const ClipIn &me = *by_id[id];
+      std::string target(reference);
+      if (target == "previous")
+        target = me.previous;
+      else if (target == "next")
+        target = me.next;
+      Made none;
+      none.inlined = true; // there is no such clip: the node gives no value
+      if (target.empty() || !by_id.contains(target))
+        return none;
+      std::vector<std::string> &taken = taken_from[id];
+      if (std::find(taken.begin(), taken.end(), target) == taken.end())
+        taken.push_back(target);
+      if (!resolve(target)) // a loop of clips
+        return {};
+      const Made made = makes(target, std::string(port)) ? made_by_clip(target, std::string(port)) : none;
+      if (!made.inlined && made.key.empty())
+        return {};
+      given[id][std::string(reference) + "|" + std::string(port)] = made;
+      return made;
+    };
+    return c;
+  }
 
   // What an output of a clip is made by. A locked clip gives what its pinned Take recorded; any other clip gives what
   // its inputs ask for now, whether or not that has been generated yet.
@@ -51,7 +92,7 @@ struct Planner {
       const json &out = take ? object_at(object_at(*take, "outputs"), output.c_str()) : object_at(json(), "");
       return Made{string_at(out, "key"), string_at(out, "port")};
     }
-    return output_key(library, object_at(*in.ref, "workflow"), p->inputs, output, context);
+    return output_key(library, object_at(*in.ref, "workflow"), p->inputs, output, context_of(clip));
   }
 
   const ClipPlan *resolve(const std::string &id) {
@@ -65,23 +106,11 @@ struct Planner {
     p.id = in.id;
     p.name = in.name;
     p.source = string_at(object_at(*in.ref, "workflow"), "source");
-    p.inputs = json::object();
-    bool whole = true;
     const json &written = object_at(*in.ref, "inputs");
-    for (auto it = written.begin(); it != written.end(); ++it) {
-      if (!is_clip_link(*it)) {
-        p.inputs[it.key()] = *it;
-        continue;
-      }
-      const std::string from = string_at(*it, "from");
-      if (std::find(p.depends.begin(), p.depends.end(), from) == p.depends.end())
-        p.depends.push_back(from);
-      const Made m = made_by_clip(from, string_at(*it, "output"));
-      whole = whole && !m.key.empty();
-      p.inputs[it.key()] = made_by(m.key, m.port);
-    }
-    if (whole)
-      p.key = take_key(library, object_at(*in.ref, "workflow"), p.inputs, context);
+    p.inputs = written;
+    p.key = take_key(library, object_at(*in.ref, "workflow"), p.inputs, context_of(id)); // reads the other clips it references
+    p.depends = taken_from[id];
+    p.references = given[id];
 
     const json *take = selected_take(*in.ref);
     const bool there = take && (!options.present || options.present(*take));
@@ -106,8 +135,8 @@ struct Planner {
           if (!written.contains(it.key()))
             changed += (changed.empty() ? "" : ", ") + it.key();
         p.reason = !changed.empty()       ? "changed: " + changed
-                   : !p.depends.empty()   ? "a clip it starts from, or its workflow, changed"
-                                          : "its workflow or model changed";
+                   : !p.depends.empty()   ? "a clip it takes from, its length, a Variable or its workflow changed"
+                                          : "its length, a Variable, the canvas or its workflow changed";
       }
     }
     walking.erase(id);

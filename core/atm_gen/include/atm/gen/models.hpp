@@ -64,6 +64,13 @@ std::string setting_problem(const SettingDecl &setting, const json &value);
 // What is wrong with a value given to a node's input for this model, or empty. Covers seconds, width and height.
 std::string input_problem(const ModelDecl &model, std::string_view input, const json &value);
 
+// The size to generate at: the shape of a canvas at about `pixels` pixels (the Project node's "pixels" setting), both sides
+// even. A `pixels` of 0 or less leaves the canvas as it is.
+std::pair<int64_t, int64_t> scaled_size(int64_t width, int64_t height, int64_t pixels);
+// The size the model makes for a size asked for: onto its grid (nearest multiple) and, when that is more pixels than it
+// makes, brought down by whole grid steps, keeping the shape as near as the grid allows.
+std::pair<int64_t, int64_t> fit_size(const ModelDecl &model, int64_t width, int64_t height);
+
 // What keeps a valid workflow from running on this machine. Rules: G_MODEL_UNSET (a node that runs a model names
 // none), G_MODEL_UNKNOWN (this build has no declaration for it), G_MODEL_MISSING (its files are not installed).
 // `installed` is asked only about models that need files.

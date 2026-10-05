@@ -230,6 +230,26 @@ std::string input_problem(const ModelDecl &m, std::string_view input, const json
   return "";
 }
 
+std::pair<int64_t, int64_t> scaled_size(int64_t width, int64_t height, int64_t pixels) {
+  if (pixels <= 0 || width <= 0 || height <= 0)
+    return {width, height};
+  const double fit = std::sqrt(double(pixels) / (double(width) * double(height)));
+  const auto even = [](double v) { return std::max<int64_t>(2, int64_t(std::llround(v / 2.0)) * 2); };
+  return {even(double(width) * fit), even(double(height) * fit)};
+}
+
+std::pair<int64_t, int64_t> fit_size(const ModelDecl &model, int64_t width, int64_t height) {
+  const int64_t grid = std::max(1, model.size_multiple);
+  const auto on_grid = [&](double v) { return std::max<int64_t>(grid, int64_t(std::llround(v / double(grid))) * grid); };
+  int64_t w = on_grid(double(width)), h = on_grid(double(height));
+  if (model.max_pixels > 0 && w * h > model.max_pixels) {
+    const double fit = std::sqrt(double(model.max_pixels) / (double(width) * double(height)));
+    w = std::max<int64_t>(grid, int64_t(std::floor(double(width) * fit / double(grid))) * grid);
+    h = std::max<int64_t>(grid, int64_t(std::floor(double(height) * fit / double(grid))) * grid);
+  }
+  return {w, h};
+}
+
 namespace {
 void models_in(const json &library, const json &workflow, const std::string &owner, const std::function<bool(std::string_view)> &installed,
                std::vector<Problem> &out, std::vector<std::string> &seen);

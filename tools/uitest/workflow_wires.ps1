@@ -63,7 +63,7 @@ try {
       $w = Get-Workflow $run; "1. seed dropped on nothing: $(Describe $w)"
       if (-not ($w.exposed.inputs.PSObject.Properties.Name -contains 'seed')) { $failed = '1. the Exposed Input "seed" is gone: cutting a feed must leave it, unlinked' }
       elseif (@($w.exposed.inputs.seed.to).Count -ne 0) { $failed = '1. the seed still feeds the sampler' }
-      elseif (@($w.links.PSObject.Properties).Count -ne 2) { $failed = '1. a link changed' }
+      elseif (@($w.links.PSObject.Properties).Count -ne 3) { $failed = '1. a link changed' }
       else {
         $clip = (Get-Tracks $run)[0].clip_list[0].id
         if (-not ((Get-Object $run $clip).media_ref.inputs.PSObject.Properties.Name -contains 'seed')) { $failed = '1. the clip lost its value for the unlinked seed' }
@@ -85,7 +85,7 @@ try {
       $failed = $more.Errors
       if (-not $failed) {
         $w = Get-Workflow $run; "2. cut, linked again, seed wired from the clip's side: $(Describe $w)"
-        if (@($w.links.PSObject.Properties).Count -ne 2) { $failed = '2. the decoder is not linked again' }
+        if (@($w.links.PSObject.Properties).Count -ne 3) { $failed = '2. the decoder is not linked again' }
         elseif (@($w.exposed.inputs.seed.to).Count -ne 1) { $failed = '2. the seed does not feed the sampler again' }
       }
     }

@@ -83,21 +83,33 @@ function Get-VideoInstance([string]$X = '', [string]$Model = 'attome-mock', [str
   $node = """kind"":""attome.generate_video"",""model"":""$Model"""
   if ($Settings) { $node += ",""settings"":$Settings" }
   if ($Inputs) { $node += ",""inputs"":$Inputs" }
-  "{""name"":""Shot"",""source"":""test"",""nodes"":{""`$new:gen$X"":{$node}},""exposed"":{""inputs"":{$($in -join ',')},""outputs"":{""video"":{""from"":[""`$new:gen$X"",""video""]},""audio"":{""from"":[""`$new:gen$X"",""audio""]},""last_frame"":{""from"":[""`$new:gen$X"",""last_frame""]}},""primary"":""video""}}"
+  "{""name"":""Shot"",""source"":""test"",""nodes"":{""`$new:gen$X"":{$node}},""exposed"":{""inputs"":{$($in -join ',')},""outputs"":{""video"":{""from"":[""`$new:gen$X"",""video""]},""audio"":{""from"":[""`$new:gen$X"",""audio""]}},""primary"":""video""}}"
 }
 
 # The same as three blocks (encode the prompt, sample, decode), with a start picture and a seed to set.
+# -StartFrom names the clip it starts on the last frame of ("previous" or a clip ID, "$new:a" in a patch): a Clip Reference node and
+# a Get Frame node feed the start picture, and the Exposed Input of it is left unlinked.
 function Get-ShotInstance([string]$X = '', [string]$Model = 'attome-mock', [int]$Seconds = 2, [int]$Width = 640, [int]$Height = 352,
-                          [string[]]$Exposed = @('prompt', 'start_image', 'seed')) {
+                          [string[]]$Exposed = @('prompt', 'start_image', 'seed'), [string]$StartFrom = '') {
   $where = @{ prompt = 'enc'; start_image = 'smp'; seed = 'smp' }
   $types = @{ prompt = 'text'; seed = 'integer'; start_image = 'image' }
-  $in = $Exposed | ForEach-Object { """$_"":{""type"":""$($types[$_])"",""order"":$([array]::IndexOf($Exposed, $_)),""to"":[[""`$new:$($where[$_])$X"",""$_""]]}" }
+  $in = $Exposed | ForEach-Object {
+    $to = if ($_ -eq 'start_image' -and $StartFrom) { '' } else { ",""to"":[[""`$new:$($where[$_])$X"",""$_""]]" }
+    """$_"":{""type"":""$($types[$_])"",""order"":$([array]::IndexOf($Exposed, $_))$to}"
+  }
+  $from_nodes = ''; $from_links = ''
+  if ($StartFrom) {
+    $from_nodes = ",""`$new:ref$X"":{""kind"":""attome.clip_reference"",""settings"":{""clip"":""$StartFrom""}},""`$new:prev$X"":{""kind"":""attome.get_frame"",""settings"":{""frame"":""last""}}"
+    $from_links = ",""`$new:l4$X"":{""from"":[""`$new:ref$X"",""video""],""to"":[""`$new:prev$X"",""video""]},""`$new:l5$X"":{""from"":[""`$new:prev$X"",""image""],""to"":[""`$new:smp$X"",""start_image""]}"
+  }
   "{""name"":""Shot"",""source"":""test"",""nodes"":{" +
     """`$new:enc$X"":{""kind"":""attome.encode_prompt"",""model"":""$Model""}," +
     """`$new:smp$X"":{""kind"":""attome.sample"",""model"":""$Model"",""settings"":{""steps"":4},""inputs"":{""seconds"":$Seconds,""width"":$Width,""height"":$Height}}," +
-    """`$new:dec$X"":{""kind"":""attome.decode"",""model"":""$Model""}}," +
-    """links"":{""`$new:l1$X"":{""from"":[""`$new:enc$X"",""conditioning""],""to"":[""`$new:smp$X"",""conditioning""]},""`$new:l2$X"":{""from"":[""`$new:smp$X"",""latent""],""to"":[""`$new:dec$X"",""latent""]}}," +
-    """exposed"":{""inputs"":{$($in -join ',')},""outputs"":{""video"":{""from"":[""`$new:dec$X"",""video""]},""last_frame"":{""from"":[""`$new:dec$X"",""last_frame""]}},""primary"":""video""}}"
+    """`$new:dec$X"":{""kind"":""attome.decode"",""model"":""$Model""}," +
+    """`$new:frm$X"":{""kind"":""attome.get_frame"",""settings"":{""frame"":""last""}}$from_nodes}," +
+    """links"":{""`$new:l1$X"":{""from"":[""`$new:enc$X"",""conditioning""],""to"":[""`$new:smp$X"",""conditioning""]},""`$new:l2$X"":{""from"":[""`$new:smp$X"",""latent""],""to"":[""`$new:dec$X"",""latent""]}," +
+    """`$new:l3$X"":{""from"":[""`$new:dec$X"",""video""],""to"":[""`$new:frm$X"",""video""]}$from_links}," +
+    """exposed"":{""inputs"":{$($in -join ',')},""outputs"":{""video"":{""from"":[""`$new:dec$X"",""video""]},""last_frame"":{""from"":[""`$new:frm$X"",""image""]}},""primary"":""video""}}"
 }
 
 function Stop-Daemon($Run) {

@@ -124,26 +124,6 @@ json h3_graph(const gen::StepRequest &r, const std::string &start_image, const s
   return g;
 }
 
-// The last picture of a video as a JPEG. False when the file cannot be read as a video.
-bool write_last_frame(const std::string &video, const std::string &jpeg) {
-  const auto info = media::probe(video);
-  auto reader = media::VideoReader::open(video, 0, 0);
-  if (!info || !reader || info->rate_num <= 0)
-    return false;
-  const int64_t frame = info->rate_den * media::kHnsPerSecond / info->rate_num;
-  const auto view = (*reader)->frame_at(std::max<int64_t>(0, info->duration_hns - frame / 2));
-  if (!view)
-    return false;
-  const int w = view->width, h = view->height;
-  std::vector<uint8_t> nv12(media::nv12_size(w, h)), bgrx(size_t(w) * size_t(h) * 4);
-  for (int y = 0; y < h; ++y)
-    std::copy_n(view->y + size_t(y) * size_t(view->y_pitch), w, nv12.data() + size_t(y) * size_t(w));
-  for (int y = 0; y < h / 2; ++y)
-    std::copy_n(view->uv + size_t(y) * size_t(view->uv_pitch), w, nv12.data() + size_t(w) * size_t(h) + size_t(y) * size_t(w));
-  media::nv12_to_bgrx(nv12.data(), w, h, bgrx.data());
-  return bool(media::write_jpeg(jpeg, bgrx.data(), w, h));
-}
-
 } // namespace
 
 ComfyProvider::ComfyProvider(std::string address, std::shared_ptr<net::Transport> transport)
@@ -325,8 +305,6 @@ Result<gen::StepResult> ComfyProvider::run(const gen::StepRequest &r) {
     if (status != 200 || !out)
       return engine_error("E_INTERNAL", "The video could not be fetched from ComfyUI (status " + std::to_string(status) + ").");
   }
-  if (const auto frame = r.outputs.find("last_frame"); frame != r.outputs.end())
-    (void)write_last_frame(video->second, frame->second); // without it, a clip that starts from this one cannot run
   gen::StepResult result;
   result.seconds["running"] = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
   return result;

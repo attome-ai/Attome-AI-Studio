@@ -2,6 +2,8 @@
 
 #include <algorithm>
 
+#include "atm/base/id.hpp"
+
 namespace atm::gen {
 namespace {
 
@@ -39,23 +41,51 @@ json shot_workflow(const ModelDecl &model) {
       inputs[name] = exposed_input("image", label.c_str(), order++, gen, name);
     }
   inputs["seed"] = exposed_input("integer", "Seed", order++, gen, "seed");
-  json seconds = exposed_input("number", "Length", order++, gen, "seconds");
-  seconds["range"] = {{"min", model.seconds_min > 0.0 ? model.seconds_min : 1.0}, {"max", model.seconds_max > 0.0 ? model.seconds_max : 15.0}};
-  inputs["seconds"] = std::move(seconds);
-  inputs["width"] = exposed_input("integer", "Width", order++, gen, "width");
-  inputs["height"] = exposed_input("integer", "Height", order++, gen, "height");
 
   json node = {{"kind", "attome.generate_video"}, {"model", model.id}};
   if (!settings.empty())
     node["settings"] = std::move(settings);
+  // The size comes from the project (about 0.9 megapixels in the canvas's shape, as a model makes best), the length from
+  // the clip: nothing about the timeline is held in the workflow.
+  const auto link = [](const char *from, const char *from_port, const char *to, const char *to_port) {
+    return json{{"from", json::array({from, from_port})}, {"to", json::array({to, to_port})}};
+  };
+  json nodes = {{gen, std::move(node)},
+                {"$new:wf_project", {{"kind", "attome.project"}, {"settings", {{"pixels", kGenerationPixels}}}, {"ui", {{"x", -260}, {"y", 260}}}}},
+                {"$new:wf_clip", {{"kind", "attome.clip"}, {"ui", {{"x", -260}, {"y", 420}}}}}};
+  json links = {{"$new:l_width", link("$new:wf_project", "width", gen, "width")},
+                {"$new:l_height", link("$new:wf_project", "height", gen, "height")},
+                {"$new:l_seconds", link("$new:wf_clip", "duration", gen, "seconds")}};
   return {{"name", "Shot"},
           {"source", std::string(kShotPrefix) + model.id},
-          {"nodes", {{gen, std::move(node)}}},
-          {"links", json::object()},
+          {"nodes", std::move(nodes)},
+          {"links", std::move(links)},
           {"exposed",
            {{"inputs", std::move(inputs)},
-            {"outputs", {{"video", {{"from", {gen, "video"}}}}, {"audio", {{"from", {gen, "audio"}}}}, {"last_frame", {{"from", {gen, "last_frame"}}}}}},
+            {"outputs", {{"video", {{"from", {gen, "video"}}}}, {"audio", {{"from", {gen, "audio"}}}}}},
             {"primary", "video"}}}};
+}
+
+bool start_from(json &workflow, std::string_view reference) {
+  if (!workflow.is_object() || !workflow.contains("nodes") || !workflow["nodes"].is_object() || !workflow.contains("exposed"))
+    return false;
+  json &nodes = workflow["nodes"];
+  std::string gen;
+  for (auto it = nodes.begin(); it != nodes.end(); ++it)
+    if (it->value("kind", std::string()) == "attome.generate_video")
+      gen = it.key();
+  json &inputs = workflow["exposed"]["inputs"];
+  if (gen.empty() || !inputs.contains("start_image"))
+    return false;
+  const bool placeholders = gen.rfind("$new:", 0) == 0;
+  const std::string ref = placeholders ? "$new:reference" : new_id("nod"), frame = placeholders ? "$new:frame" : new_id("nod");
+  nodes[ref] = {{"kind", "attome.clip_reference"}, {"settings", {{"clip", std::string(reference)}}}, {"ui", {{"x", -520}, {"y", 20}}}};
+  nodes[frame] = {{"kind", "attome.get_frame"}, {"settings", {{"frame", "last"}}}, {"ui", {{"x", -260}, {"y", 20}}}};
+  json &links = workflow["links"];
+  links[placeholders ? "$new:l_ref" : new_id("lnk")] = {{"from", json::array({ref, "video"})}, {"to", json::array({frame, "video"})}};
+  links[placeholders ? "$new:l_frame" : new_id("lnk")] = {{"from", json::array({frame, "image"})}, {"to", json::array({gen, "start_image"})}};
+  inputs["start_image"].erase("to");
+  return true;
 }
 
 json instantiate(std::string_view source_id) {

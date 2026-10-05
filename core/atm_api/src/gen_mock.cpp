@@ -97,8 +97,6 @@ Result<void> decode(const gen::StepRequest &r, const json &latent) {
     ATM_CHECK((*encoder)->audio(audio.data(), audio.size() / 2));
   }
   ATM_CHECK((*encoder)->finish());
-  if (const std::string *last = out_path(r, "last_frame")) // `picture` still holds the last frame
-    ATM_CHECK(media::write_jpeg(*last, picture.data(), w, h));
   return {};
 }
 

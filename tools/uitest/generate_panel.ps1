@@ -62,10 +62,10 @@ try {
       elseif (@($clips[1].depends_on).Count -ne 1 -or $clips[1].depends_on[0] -ne $clips[0].clip) { $failed = 'the second clip does not start from the first' }
       else {
         $second = Get-Object $run $clips[1].clip
-        "second clip: '$($second.name)' at $($second.timing.record_in) for $($second.timing.duration), $($second.media_ref.inputs.width) x $($second.media_ref.inputs.height)"
+        "second clip: '$($second.name)' at $($second.timing.record_in) for $($second.timing.duration), $($second.media_ref.width) x $($second.media_ref.height)"
         if ($second.timing.record_in -ne '5' -or $second.timing.duration -ne '5') { $failed = 'the second clip is not at 5 s for 5 s' }
-        elseif ([math]::Abs($second.transform.scale[0] - 1.0099) -gt 0.0002) { $failed = "the clip is not scaled to cover the canvas (scale $($second.transform.scale[0]))" }
-        elseif ($second.media_ref.inputs.width -ne 1264 -or $second.media_ref.inputs.height -ne 704) { $failed = 'the size is not the canvas shape on the mock model''s grid of 16' }
+        elseif ([math]::Abs($second.transform.scale[0] - 1.0127) -gt 0.0002) { $failed = "the clip is not scaled to cover the canvas (scale $($second.transform.scale[0]))" }
+        elseif ($second.media_ref.width -ne 1264 -or $second.media_ref.height -ne 720) { $failed = 'the size is not the canvas shape on the mock model''s grid of 16' }
       }
     }
   } finally { Stop-Daemon $run }
