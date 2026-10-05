@@ -56,6 +56,8 @@ struct GenProgress {
   const std::atomic<bool> *cancel = nullptr;
   std::function<void(const std::string &)> on_detail;  // "Shot (2 of 5): sampling 3 of 8"
   std::function<void(const GenOutcome &)> on_clip;     // after each clip, in order
+  // The node of the clip's workflow that is running, and how far it is: step `at` of `of` (0 of 0 when it only began).
+  std::function<void(const std::string &node, int at, int of)> on_node;
 };
 
 std::filesystem::path step_dir(const std::filesystem::path &cache, const std::string &key);

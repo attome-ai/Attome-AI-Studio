@@ -31,6 +31,13 @@ json instantiate(std::string_view source_id);
 // it, or the original, changes the other not at all.
 json fresh_copy(const json &workflow, std::string_view source);
 
+// A ComfyUI workflow (the "API format": {"<id>": {"class_type", "inputs"}}) as a Clip Workflow, for the node kinds Attome has: CLIPTextEncode
+// (Encode prompt), KSampler, KSamplerAdvanced and SamplerCustomAdvanced (Sample), VAEDecode (Decode). The links among them, the text and
+// the seed come with them; the prompt and the seed become Exposed Inputs, the decoder's video the Primary Output. Every other node of the
+// file is named in `unmatched` ("SaveVideo (node 12)"), never dropped without a word. Null when the text is not a ComfyUI workflow.
+json from_comfy(const json &graph, std::vector<std::string> &unmatched, std::string_view name);
+bool is_comfy_graph(const json &graph);
+
 // The model a workflow's nodes run that generates video (or samples), when there is one: what the size and the lengths of a
 // clip made from it are held to. Null when no node names a model this build knows.
 const ModelDecl *main_model(const json &workflow);

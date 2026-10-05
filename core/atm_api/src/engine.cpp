@@ -92,6 +92,8 @@ struct Job {
   enum State { running, done, failed, cancelled };
   std::string id, kind, output, encoder;
   std::string detail; // what the job is doing now, in words (a download: which file); guarded by `mutex`
+  std::string node;   // a generation: the node of the clip's workflow that is running, and how far it is; guarded by `mutex`
+  int node_at = 0, node_of = 0;
   std::atomic<int> state{running};
   std::atomic<int64_t> units_done{0}, units_total{0};
   std::atomic<int64_t> fetched{0}; // a download: bytes that arrived in this run (units_done also counts what was on disk)
@@ -125,6 +127,12 @@ void run_gen(const std::shared_ptr<Job> &job, GenRun run, std::shared_ptr<Finish
   progress.on_detail = [&](const std::string &text) {
     std::lock_guard lock(job->mutex);
     job->detail = text;
+  };
+  progress.on_node = [&](const std::string &node, int at, int of) {
+    std::lock_guard lock(job->mutex);
+    job->node = node;
+    job->node_at = at;
+    job->node_of = of;
   };
   progress.on_clip = [&](const GenOutcome &out) {
     if (out.state != "done")
@@ -2024,9 +2032,15 @@ struct Engine::Impl {
       ops.push_back({{"op", "remove"}, {"path", at + "/exposed/primary"}});
     ops.push_back({{"op", old.contains("name") ? "replace" : "add"}, {"path", at + "/name"}, {"value", fresh.value("name", std::string("Workflow"))}});
     ops.push_back({{"op", old.contains("source") ? "replace" : "add"}, {"path", at + "/source"}, {"value", fresh.value("source", std::string())}});
-    for (const char *collection : {"nodes", "links"})
-      for (auto it = fresh[collection].begin(); it != fresh[collection].end(); ++it)
-        ops.push_back({{"op", "add"}, {"path", at + "/" + collection + "/" + it.key()}, {"value", *it}});
+    for (const char *deco : {"groups", "notes"}) { // frames and notes of the canvas are the workflow's too
+      const json olds = old.value(deco, json::object());
+      for (auto it = olds.begin(); it != olds.end(); ++it)
+        ops.push_back({{"op", "remove"}, {"path", it.key()}});
+    }
+    for (const char *collection : {"nodes", "links", "groups", "notes"})
+      if (fresh.contains(collection))
+        for (auto it = fresh[collection].begin(); it != fresh[collection].end(); ++it)
+          ops.push_back({{"op", "add"}, {"path", at + "/" + collection + "/" + it.key()}, {"value", *it}});
     const json made = fresh.value("exposed", json::object());
     for (const char *side : {"inputs", "outputs"}) {
       const json entries = made.value(side, json::object());
@@ -2097,6 +2111,108 @@ struct Engine::Impl {
       return json{{"applied", 0}, {"skipped", std::move(skipped)}};
     ATM_TRY(json applied, project_patch({{"project", to_utf8(pr->dir)}, {"patch", {{"ops", std::move(ops)}, {"label", "Apply preset"}}}}));
     return json{{"applied", values.size() - skipped.size()}, {"skipped", std::move(skipped)}, {"revision", applied["revision"]}};
+  }
+
+  // What each node of a clip's workflow made last: for every node that has a result in the cache, its key and the files of its outputs.
+  // The editor shows the picture of a node from it. The keys are those the clip's plan works out now, so a result is shown only while
+  // it is what the clip's inputs ask for.
+  Result<json> gen_node_results(const json &params) {
+    ATM_TRY(Project *pr, project(params));
+    ATM_TRY(const std::string *clip, string_param(params, "clip"));
+    const json &instance = instance_of(*pr, *clip);
+    if (instance.empty() || !instance.contains("nodes"))
+      return fail(ErrorCode::UnknownId, "G_WORKFLOW", "\"" + *clip + "\" is not a generative clip with a workflow of its own.", {},
+                  "Pass the ID of a generative clip.");
+    const std::vector<gen::ClipPlan> plans = gen_plan(*pr, {});
+    const std::vector<gen::ClipIn> all = gen_clips(*pr);
+    GenRun run;
+    run.library = library_of(*pr);
+    run.context = key_context(*pr);
+    GenClip g;
+    for (const gen::ClipPlan &plan : plans)
+      if (plan.id == *clip) {
+        g.id = plan.id;
+        g.inputs = plan.inputs;
+        g.references = plan.references;
+      }
+    for (const gen::ClipIn &in : all)
+      if (in.id == *clip)
+        g.facts = in.facts;
+    g.instance = instance;
+    const gen::KeyContext context = run.context_of(g);
+    json nodes = json::object();
+    for (const auto &[node, key] : gen::node_keys(run.library, instance, g.inputs, context)) {
+      const fs::path dir = step_dir(gen_dir(*pr), key);
+      const auto text = storage::read_file(dir / "result.json");
+      if (!text)
+        continue;
+      const json record = json::parse(*text, nullptr, false);
+      if (!record.is_object())
+        continue;
+      json files = json::object();
+      const json made_files = record.value("outputs", json::object());
+      for (auto it = made_files.begin(); it != made_files.end(); ++it)
+        if (it->is_string())
+          files[it.key()] = to_utf8(dir / to_path(it->get<std::string>()));
+      if (!files.empty())
+        nodes[node] = {{"key", key}, {"files", std::move(files)}};
+    }
+    return json{{"nodes", std::move(nodes)}};
+  }
+
+  // A Clip Workflow written to a file: the library's (workflow) or a clip's own (clip). The file says what it is and holds the workflow
+  // with the IDs it has; importing makes new ones.
+  Result<json> gen_export_workflow(const json &params) {
+    ATM_TRY(Project *pr, project(params));
+    ATM_TRY(const std::string *path, string_param(params, "path"));
+    json workflow;
+    if (params.contains("workflow")) {
+      const json &library = library_of(*pr);
+      const std::string id = params.value("workflow", std::string());
+      if (const auto wf = library.find(id); wf != library.end() && wf->is_object())
+        workflow = *wf;
+    } else if (params.contains("clip")) {
+      workflow = instance_of(*pr, params.value("clip", std::string()));
+    }
+    if (!workflow.is_object() || workflow.empty() || !workflow.contains("nodes"))
+      return fail(ErrorCode::UnknownId, "G_WORKFLOW", "There is no such workflow to export.", {}, "Pass workflow (a cwf_ ID of the library) or clip (a generative clip).");
+    workflow.erase("source");
+    json file = {{"attome", "clip_workflow"}, {"version", 1}, {"name", workflow.value("name", std::string("Workflow"))}, {"workflow", std::move(workflow)}};
+    ATM_CHECK(storage::atomic_write(to_path(*path), file.dump(1) + "\n"));
+    return json{{"path", *path}, {"nodes", file["workflow"]["nodes"].size()}};
+  }
+
+  // A Clip Workflow read from a file into the project's library: one of Attome's own export files, or a ComfyUI workflow (API format),
+  // of which what Attome has nodes for comes along and the rest is named in `unmatched`.
+  Result<json> gen_import_workflow(const json &params) {
+    ATM_TRY(Project *pr, project(params));
+    ATM_TRY(const std::string *path, string_param(params, "path"));
+    const auto text = storage::read_file(to_path(*path));
+    if (!text)
+      return fail(ErrorCode::NotFound, "G_IMPORT", "The file \"" + *path + "\" cannot be read.", {}, "Check the path.");
+    const json file = json::parse(*text, nullptr, false);
+    if (file.is_discarded())
+      return fail(ErrorCode::InvalidArgument, "G_IMPORT", "\"" + *path + "\" is not a workflow file: it is not JSON.", {}, "Export a workflow from Attome, or save one from ComfyUI as API format.");
+    json workflow;
+    std::vector<std::string> unmatched;
+    std::string name = params.value("name", fs::path(to_path(*path)).stem().string());
+    if (file.is_object() && file.value("attome", std::string()) == "clip_workflow" && file.contains("workflow")) {
+      workflow = gen::fresh_copy(file["workflow"], std::string());
+      if (!params.contains("name"))
+        name = file.value("name", name);
+    } else if (gen::is_comfy_graph(file)) {
+      workflow = gen::from_comfy(file, unmatched, name);
+      if (!workflow.is_null())
+        workflow = gen::fresh_copy(workflow, std::string());
+    }
+    if (workflow.is_null() || !workflow.is_object() || !workflow.contains("nodes"))
+      return fail(ErrorCode::InvalidArgument, "G_IMPORT", "\"" + *path + "\" is neither an Attome workflow file nor a ComfyUI workflow in API format.", {},
+                  "In ComfyUI use Save (API Format); Attome's own files come from gen.export_workflow.");
+    workflow["name"] = name;
+    ATM_TRY(json applied, project_patch({{"project", to_utf8(pr->dir)},
+                                         {"patch", {{"ops", json::array({{{"op", "add"}, {"path", pr->doc.root().value("id", std::string()) + "/workflows/$new:w"}, {"value", std::move(workflow)}}})},
+                                                    {"label", "Import workflow"}}}}));
+    return json{{"workflow", applied["id_map"].value("$new:w", std::string())}, {"name", name}, {"unmatched", std::move(unmatched)}, {"revision", applied["revision"]}};
   }
 
   Result<json> gen_select_take(const json &params) {
@@ -2363,6 +2479,8 @@ struct Engine::Impl {
       out["warning"] = job->warning;
     if (!job->detail.empty())
       out["detail"] = job->detail;
+    if (!job->node.empty())
+      out["node"] = {{"id", job->node}, {"at", job->node_at}, {"of", job->node_of}};
     if (!job->result.is_null())
       out["result"] = job->result;
     if (!job->encoder.empty())
@@ -2596,6 +2714,25 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
      R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},
        "clip":{"type":"string"},"preset":{"type":"string","description":"A pre_ ID"}},"required":["project","clip","preset"]})",
      &Impl::gen_apply_preset},
+    {"gen.node_results", "gen", false,
+     "What each node of a generative clip's workflow made last, for the nodes whose result is in the cache and is what the clip's inputs "
+     "ask for now: {node ID: {key, files: {output port: file}}}. An editor shows the picture of a node from it.",
+     R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},
+       "clip":{"type":"string"}},"required":["project","clip"]})",
+     &Impl::gen_node_results},
+    {"gen.export_workflow", "gen", false,
+     "Write a Clip Workflow to a file: a workflow of the project's library (workflow: cwf_ ID) or a clip's own (clip). The file is "
+     "Attome's own format; gen.import_workflow reads it back, in this project or another, and the workflow runs the same.",
+     R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},
+       "workflow":{"type":"string"},"clip":{"type":"string"},"path":{"type":"string"}},"required":["project","path"]})",
+     &Impl::gen_export_workflow},
+    {"gen.import_workflow", "gen", true,
+     "Read a Clip Workflow from a file into the project's library: Attome's own export, or a ComfyUI workflow saved as API format. From "
+     "ComfyUI, the nodes Attome has (CLIPTextEncode, KSampler, SamplerCustomAdvanced, VAEDecode) come with their links, text and seed; "
+     "every other node is named in `unmatched`. name: what to call it.",
+     R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},
+       "path":{"type":"string"},"name":{"type":"string"}},"required":["project","path"]})",
+     &Impl::gen_import_workflow},
     {"gen.select_take", "gen", true,
      "Choose which Take of a generative clip plays. The clip's inputs go back to what made that Take; clips that start from it become dirty.",
      R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},

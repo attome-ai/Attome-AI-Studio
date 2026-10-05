@@ -1120,6 +1120,33 @@ void App::ask_variable_file(const std::string &variable_id) {
       this, window_, filters, 2, user_folder(SDL_FOLDER_PICTURES).c_str(), false);
 }
 
+void App::ask_workflow_import() {
+  static const SDL_DialogFileFilter filters[] = {{"Workflow files (Attome, ComfyUI API)", "json"}, {"All files", "*"}};
+  SDL_ShowOpenFileDialog(
+      [](void *self, const char *const *files, int) {
+        App *app = static_cast<App *>(self);
+        std::lock_guard lock(app->dialog_mutex_);
+        if (files && *files)
+          app->dialog_wf_import_ = *files;
+      },
+      this, window_, filters, 2, user_folder(SDL_FOLDER_DOCUMENTS).c_str(), false);
+}
+
+void App::ask_workflow_export(const std::string &target) {
+  static const SDL_DialogFileFilter filters[] = {{"Attome workflow", "json"}};
+  wf_export_target_ = target;
+  const json *wf = workflow_json();
+  const std::string start = user_folder(SDL_FOLDER_DOCUMENTS) + (wf ? wf->value("name", std::string("Workflow")) : std::string("Workflow")) + ".json";
+  SDL_ShowSaveFileDialog(
+      [](void *self, const char *const *files, int) {
+        App *app = static_cast<App *>(self);
+        std::lock_guard lock(app->dialog_mutex_);
+        if (files && *files)
+          app->dialog_wf_export_ = *files;
+      },
+      this, window_, filters, 1, start.c_str());
+}
+
 void App::ask_lut(const std::string &target) {
   static const SDL_DialogFileFilter filters[] = {{"Colour look-up tables", "cube"}, {"All files", "*"}};
   lut_target_ = target;
@@ -1194,7 +1221,7 @@ std::string size_text(int64_t bytes) {
 
 void App::take_dialog_results() {
   std::vector<std::string> import;
-  std::string out, project, lut, models_folder, input;
+  std::string out, project, lut, models_folder, input, wf_import, wf_export;
   {
     std::lock_guard lock(dialog_mutex_);
     import.swap(dialog_import_);
@@ -1203,6 +1230,32 @@ void App::take_dialog_results() {
     lut.swap(dialog_lut_);
     models_folder.swap(dialog_models_folder_);
     input.swap(dialog_input_);
+    wf_import.swap(dialog_wf_import_);
+    wf_export.swap(dialog_wf_export_);
+  }
+  if (!wf_import.empty()) { // a workflow file into the library: Attome's own, or a ComfyUI one (what has no node here is named)
+    json done;
+    if (rpc("gen.import_workflow", {{"project", project_path_}, {"path", wf_import}}, done)) {
+      std::string note = "Imported \"" + done.value("name", std::string("workflow")) + "\" into the library.";
+      const json &unmatched = done.contains("unmatched") ? done["unmatched"] : json::array();
+      if (!unmatched.empty()) {
+        note += " Not brought over, Attome has no node for them: ";
+        for (size_t i = 0; i < unmatched.size(); ++i)
+          note += (i ? ", " : "") + unmatched[i].get<std::string>();
+        note += ".";
+      }
+      wf_import_note_ = note;
+      say("Imported a workflow");
+      refresh();
+      open_workflow(done.value("workflow", std::string()));
+    }
+  }
+  if (!wf_export.empty() && !wf_export_target_.empty()) {
+    json done;
+    json params = {{"project", project_path_}, {"path", wf_export}};
+    params[id_prefix(wf_export_target_) == "clp" ? "clip" : "workflow"] = wf_export_target_;
+    if (rpc("gen.export_workflow", params, done))
+      say("Workflow written to " + wf_export);
   }
   if (!input.empty() && input_clip_.empty() && !input_variable_.empty()) { // the file chosen for a Variable
     const std::string variable = std::exchange(input_variable_, {});
@@ -2460,6 +2513,8 @@ ImU32 port_colour(gen::PortType type, int alpha = 255) {
   }
   return IM_COL32(200, 200, 200, alpha);
 }
+
+constexpr float kPreviewH = 96.0f; // the picture of a node's last result under its ports
 
 float node_height(const gen::Ports &ports) {
   return kNodeTitleH + float(std::max<size_t>(1, std::max(ports.inputs.size(), ports.outputs.size()))) * kPortRowH + 10.0f;
@@ -5704,6 +5759,8 @@ void App::open_workflow(const std::string &target) {
   wf_link_.clear();
   wf_row_.clear();
   wf_sel_.clear();
+  wf_deco_.clear();
+  wf_results_clip_.clear();
   wf_search_.open = false;
   wf_moved_.clear();
   wf_drag_ = {};
@@ -5847,6 +5904,50 @@ void App::draw_workflow_list(const json &library) {
       }
     };
   }
+  // A workflow of the library as one node (a Subgraph): its Exposed Inputs are the node's inputs, its Outputs the node's. A workflow is
+  // not offered inside itself.
+  {
+    std::vector<std::pair<std::string, std::string>> usable;
+    for (auto w = library.begin(); w != library.end(); ++w)
+      if (w.key() != wf_id_)
+        usable.emplace_back(w.key(), w->value("name", w.key()));
+    if (!usable.empty() && workflow_json()) {
+      ImGui::Dummy(ImVec2(0.0f, 10.0f));
+      section_label("A WORKFLOW AS A NODE");
+      ImGui::Dummy(ImVec2(0.0f, 6.0f));
+      for (const auto &[wid, wname] : usable)
+        if (soft_button(("wf_sub_" + wname).c_str(), wname.c_str(), ImVec2(-1.0f, 30.0f)))
+          pending_ = [this, wid, wname] {
+            json ids;
+            if (patch(json::array({{{"op", "add"}, {"path", wf_base() + "/nodes/$new:n"}, {"value", {{"kind", "attome.workflow"}, {"workflow", wid}}}}}), ("Add " + wname).c_str(), &ids)) {
+              wf_node_ = ids.value("$new:n", "");
+              wf_sel_ = {wf_node_};
+            }
+          };
+    }
+  }
+  ImGui::Dummy(ImVec2(0.0f, 10.0f));
+  section_label("ON THE CANVAS");
+  ImGui::Dummy(ImVec2(0.0f, 6.0f));
+  if (soft_button("wf_add_group", "A frame around nodes", ImVec2(-1.0f, 30.0f), workflow_json() != nullptr))
+    pending_ = [this] { add_deco(true); };
+  if (soft_button("wf_add_note", "A note", ImVec2(-1.0f, 30.0f), workflow_json() != nullptr))
+    pending_ = [this] { add_deco(false); };
+  ImGui::Dummy(ImVec2(0.0f, 10.0f));
+  section_label("FILES");
+  ImGui::Dummy(ImVec2(0.0f, 6.0f));
+  if (soft_button("wf_import", "Import a workflow...", ImVec2(-1.0f, 30.0f)))
+    pending_ = [this] { ask_workflow_import(); };
+  ui_mark("button:wf_import");
+  if (ImGui::IsItemHovered())
+    ImGui::SetTooltip("An Attome workflow file, or a ComfyUI workflow saved as API format.");
+  if (soft_button("wf_export", "Export this workflow...", ImVec2(-1.0f, 30.0f), workflow_json() != nullptr))
+    pending_ = [this] { ask_workflow_export(wf_id_); };
+  if (!wf_import_note_.empty()) {
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::TextColored(hexv(look::fg2), "%s", wf_import_note_.c_str());
+    ImGui::PopTextWrapPos();
+  }
   ImGui::Dummy(ImVec2(0.0f, 10.0f));
   ImGui::PushTextWrapPos(0.0f);
   ImGui::TextColored(hexv(look::fg3), "Drag from a port to a port of the same colour to join them. Drag a joined port away and let go on nothing to break "
@@ -5875,6 +5976,49 @@ json App::new_node_value(const std::string &kind_id) const {
           value["settings"] = std::move(settings);
       }
   return value;
+}
+
+// A frame or a note. A frame goes around the nodes that are selected (its title bar above them); with none selected, and for a note, it
+// goes in the free space under the graph.
+void App::add_deco(bool group) {
+  const json *workflow = workflow_json();
+  if (!workflow)
+    return;
+  const json &nodes = object_in(*workflow, "nodes");
+  std::set<std::string> chosen = wf_sel_;
+  if (!wf_node_.empty())
+    chosen.insert(wf_node_);
+  float lo_x = 1e9f, lo_y = 1e9f, hi_x = -1e9f, hi_y = -1e9f, all_lo_x = 1e9f, all_hi_y = -1e9f;
+  for (auto n = nodes.begin(); n != nodes.end(); ++n) {
+    const auto at = wf_pos_.find(n.key());
+    if (at == wf_pos_.end())
+      continue;
+    const float h = node_height(gen::node_ports(object_in(doc_, "workflows"), *n)) + (wf_results_.contains(n.key()) ? kPreviewH : 0.0f);
+    all_lo_x = std::min(all_lo_x, at->second.x);
+    all_hi_y = std::max(all_hi_y, at->second.y + h);
+    if (chosen.contains(n.key())) {
+      lo_x = std::min(lo_x, at->second.x);
+      lo_y = std::min(lo_y, at->second.y);
+      hi_x = std::max(hi_x, at->second.x + kNodeW);
+      hi_y = std::max(hi_y, at->second.y + h);
+    }
+  }
+  json value;
+  if (group && lo_x < 1e8f)
+    value = {{"title", "Group"}, {"x", std::round(lo_x - 20.0f)}, {"y", std::round(lo_y - 44.0f)}, {"w", std::round(hi_x - lo_x + 40.0f)}, {"h", std::round(hi_y - lo_y + 64.0f)}, {"color", "#4a90d9"}};
+  else {
+    const float x = all_lo_x < 1e8f ? all_lo_x : 300.0f, y = all_hi_y > -1e8f ? all_hi_y + 50.0f : 60.0f;
+    value = group ? json{{"title", "Group"}, {"x", std::round(x)}, {"y", std::round(y)}, {"w", 360}, {"h", 220}, {"color", "#4a90d9"}}
+                  : json{{"text", "Note"}, {"x", std::round(x)}, {"y", std::round(y)}};
+  }
+  json ids;
+  if (patch(json::array({{{"op", "add"}, {"path", wf_base() + (group ? "/groups/$new:d" : "/notes/$new:d")}, {"value", value}}}), group ? "Add frame" : "Add note", &ids)) {
+    wf_deco_ = ids.value("$new:d", "");
+    wf_node_.clear();
+    wf_sel_.clear();
+    wf_row_.clear();
+    wf_link_.clear();
+  }
 }
 
 // The edits that take a node away: the node, the links at its ports, what the Exposed Inputs feed of it (they stay, and feed
@@ -6099,12 +6243,42 @@ void App::draw_workflow_canvas(const json &library) {
   const std::vector<gen::ExposedOutput> exposed_out = gen::exposed_outputs(workflow);
   const std::string primary = gen::primary_output(workflow);
 
+  // What each node of the open clip made last: asked again after an edit or a Take, and while a run is on.
+  if (!wf_clip_.empty() && wf_clip_ == wf_id_ && (wf_results_clip_ != wf_clip_ || wf_results_rev_ != revision_ || (!gen_job_.empty() && clock_ >= next_wf_results_))) {
+    next_wf_results_ = clock_ + 1.0;
+    wf_results_clip_ = wf_clip_;
+    wf_results_rev_ = revision_;
+    json got;
+    wf_results_ = rpc("gen.node_results", {{"project", project_path_}, {"clip", wf_clip_}}, got) ? got.value("nodes", json::object()) : json::object();
+  }
+  if (wf_clip_.empty() || wf_clip_ != wf_id_)
+    wf_results_ = json::object();
+  // The picture of a node: its image output, else a picture or a video among its files.
+  const auto preview_of = [&](const std::string &node) -> std::string {
+    const auto r = wf_results_.find(node);
+    if (r == wf_results_.end() || !r->is_object() || !r->contains("files") || !(*r)["files"].is_object())
+      return {};
+    const json &files = (*r)["files"];
+    std::string best;
+    for (auto f = files.begin(); f != files.end(); ++f) {
+      if (!f->is_string())
+        continue;
+      const std::string path = f->get<std::string>();
+      const std::string ext = fs::path(path).extension().string();
+      if (f.key() == "image" || ext == ".jpg" || ext == ".png")
+        return path;
+      if (ext == ".mp4" && best.empty())
+        best = path;
+    }
+    return best;
+  };
   struct Box {
     std::string id;
     const json *node = nullptr;
     gen::Ports ports;
     ImVec2 pos; // canvas units
     float height = 0.0f;
+    std::string preview; // a file whose picture the node shows under its ports
   };
   std::vector<Box> boxes;
   std::map<std::string, size_t> index;
@@ -6114,6 +6288,11 @@ void App::draw_workflow_canvas(const json &library) {
     b.node = &*it;
     b.ports = gen::node_ports(library, *it);
     b.height = node_height(b.ports);
+    b.preview = preview_of(b.id);
+    if (!b.preview.empty()) {
+      b.height += kPreviewH;
+      thumbs_.request(b.preview);
+    }
     index[b.id] = boxes.size();
     boxes.push_back(std::move(b));
   }
@@ -6150,18 +6329,18 @@ void App::draw_workflow_canvas(const json &library) {
   }
   std::erase_if(wf_sel_, [&](const std::string &id) { return !nodes.contains(id); });
   // What stops a node from running: what is missing (the engine says it for the open clip) and where the last run stopped.
-  std::map<std::string, std::string> notes;
+  std::map<std::string, std::string> fail_notes;
   if (!wf_clip_.empty() && wf_clip_ == wf_id_)
     if (const auto found = gen_problems_.find(wf_clip_); found != gen_problems_.end())
       for (const json &problem : found->second) {
         const std::string path = problem.value("path", std::string()), at = path.substr(0, path.find('/'));
-        if (nodes.contains(at) && !notes.contains(at))
-          notes[at] = problem.value("message", std::string());
+        if (nodes.contains(at) && !fail_notes.contains(at))
+          fail_notes[at] = problem.value("message", std::string());
       }
   if (!wf_fail_.empty() && wf_fail_clip_ == wf_id_ && wf_fail_hash_ == std::hash<std::string>{}(workflow.dump()))
     for (const auto &[node, why] : wf_fail_)
       if (nodes.contains(node))
-        notes[node] = why;
+        fail_notes[node] = why;
   // The two boxes at the ends: the Exposed Inputs (left of everything) and the Outputs (right of everything).
   float min_x = 300.0f, max_x = 300.0f, min_y = 40.0f;
   for (size_t i = 0; i < boxes.size(); ++i) {
@@ -6303,6 +6482,181 @@ void App::draw_workflow_canvas(const json &library) {
     wf_row_.clear();
   };
 
+  // Frames and notes: under everything. A frame is moved by its title bar, with the nodes inside it, and resized by its corner; a note
+  // is moved by its body. A click selects: the side panel edits the title or the text.
+  {
+    const auto live = [&](const std::string &id, const json &v, bool group) {
+      const auto it = wf_deco_live_.find(id);
+      if (it != wf_deco_live_.end())
+        return it->second;
+      return std::array<float, 4>{v.value("x", 0.0f), v.value("y", 0.0f), group ? v.value("w", 320.0f) : 190.0f, group ? v.value("h", 200.0f) : 0.0f};
+    };
+    const auto colour_of = [](const json &v, int alpha) {
+      unsigned rgb = 0x4a90d9;
+      const std::string c = v.value("color", std::string());
+      if (c.size() == 7 && c[0] == '#')
+        rgb = unsigned(std::strtoul(c.c_str() + 1, nullptr, 16));
+      return IM_COL32((rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255, alpha);
+    };
+    const json &groups = object_in(workflow, "groups"), &notes = object_in(workflow, "notes");
+    for (auto g = groups.begin(); g != groups.end(); ++g) {
+      const std::string gid = g.key();
+      const std::array<float, 4> r = live(gid, *g, true);
+      const ImVec2 p = screen(ImVec2(r[0], r[1])), q(p.x + r[2] * z, p.y + r[3] * z);
+      const bool sel = wf_deco_ == gid;
+      dl->AddRectFilled(p, q, colour_of(*g, 30), 10.0f * z);
+      dl->AddRect(p, q, colour_of(*g, sel ? 255 : 150), 10.0f * z, 0, sel ? 2.4f : 1.4f);
+      const std::string title = g->value("title", std::string("Group"));
+      ImGui::PushFont(g_fonts.bold, 13.0f * z);
+      dl->AddText(ImVec2(p.x + 12.0f * z, p.y + 7.0f * z), colour_of(*g, 255), title.c_str());
+      ImGui::PopFont();
+      // the title bar: a press selects, a drag moves the frame and what is inside it
+      ImGui::SetCursorScreenPos(p);
+      ImGui::SetNextItemAllowOverlap();
+      ImGui::InvisibleButton(("##grp_" + gid).c_str(), ImVec2(r[2] * z, 30.0f * z));
+      {
+        std::string joined = title;
+        std::replace(joined.begin(), joined.end(), ' ', '_');
+        ui_mark("group:" + joined);
+      }
+      if (ImGui::IsItemActivated()) {
+        wf_deco_ = gid;
+        wf_node_.clear();
+        wf_sel_.clear();
+        wf_row_.clear();
+        wf_link_.clear();
+        wf_deco_drag_ = {};
+        wf_deco_drag_.id = gid;
+        wf_deco_drag_.mode = 1;
+        wf_deco_drag_.from = r;
+        for (const Box &b : boxes) { // the nodes whose middle is inside
+          const ImVec2 mid(b.pos.x + kNodeW * 0.5f, b.pos.y + b.height * 0.5f);
+          if (mid.x >= r[0] && mid.x <= r[0] + r[2] && mid.y >= r[1] && mid.y <= r[1] + r[3]) {
+            wf_deco_drag_.nodes.push_back(b.id);
+            wf_deco_drag_.nodes_at[b.id] = b.pos;
+          }
+        }
+      }
+      if (ImGui::IsItemActive() && wf_deco_drag_.id == gid && wf_deco_drag_.mode == 1 && ImGui::IsMouseDragging(0, 3.0f)) {
+        const ImVec2 d = ImGui::GetMouseDragDelta(0);
+        wf_deco_live_[gid] = {wf_deco_drag_.from[0] + d.x / z, wf_deco_drag_.from[1] + d.y / z, r[2], r[3]};
+        for (const auto &[nid, at] : wf_deco_drag_.nodes_at)
+          wf_moved_[nid] = ImVec2(at.x + d.x / z, at.y + d.y / z);
+        wf_fit_ = false;
+      }
+      // the corner: a drag changes its size
+      const ImVec2 corner(q.x - 16.0f * z, q.y - 16.0f * z);
+      ImGui::SetCursorScreenPos(corner);
+      ImGui::SetNextItemAllowOverlap();
+      ImGui::InvisibleButton(("##grpsize_" + gid).c_str(), ImVec2(16.0f * z, 16.0f * z));
+      dl->AddTriangleFilled(ImVec2(q.x - 3.0f, q.y - 14.0f * z), ImVec2(q.x - 3.0f, q.y - 3.0f), ImVec2(q.x - 14.0f * z, q.y - 3.0f), colour_of(*g, 190));
+      if (ImGui::IsItemActivated()) {
+        wf_deco_ = gid;
+        wf_deco_drag_ = {};
+        wf_deco_drag_.id = gid;
+        wf_deco_drag_.mode = 2;
+        wf_deco_drag_.from = r;
+      }
+      if (ImGui::IsItemActive() && wf_deco_drag_.id == gid && wf_deco_drag_.mode == 2 && ImGui::IsMouseDragging(0, 2.0f)) {
+        const ImVec2 d = ImGui::GetMouseDragDelta(0);
+        wf_deco_live_[gid] = {r[0], r[1], std::max(80.0f, wf_deco_drag_.from[2] + d.x / z), std::max(60.0f, wf_deco_drag_.from[3] + d.y / z)};
+      }
+    }
+    for (auto n = notes.begin(); n != notes.end(); ++n) {
+      const std::string nid = n.key();
+      const std::array<float, 4> r = live(nid, *n, false);
+      const std::string text = n->value("text", std::string());
+      // wrapped to the width, so its height follows the text
+      std::vector<std::string> lines;
+      {
+        std::string line, word;
+        const float room = (r[2] - 20.0f) * z;
+        const auto flush = [&] {
+          if (!line.empty())
+            lines.push_back(line);
+          line.clear();
+        };
+        for (size_t i = 0; i <= text.size(); ++i) {
+          const char ch = i < text.size() ? text[i] : ' ';
+          if (ch == ' ' || ch == '\n') {
+            const std::string trial = line.empty() ? word : line + " " + word;
+            if (!line.empty() && text_size(trial.c_str()).x > room) {
+              flush();
+              line = word;
+            } else {
+              line = trial;
+            }
+            word.clear();
+            if (ch == '\n')
+              flush();
+          } else {
+            word += ch;
+          }
+        }
+        flush();
+        if (lines.empty())
+          lines.push_back("");
+      }
+      const float line_h = ImGui::GetFontSize() + 3.0f * z, height = float(lines.size()) * line_h + 18.0f * z;
+      const ImVec2 p = screen(ImVec2(r[0], r[1])), q(p.x + r[2] * z, p.y + height);
+      const bool sel = wf_deco_ == nid;
+      dl->AddRectFilled(p, q, IM_COL32(240, 205, 90, 235), 6.0f * z);
+      if (sel)
+        dl->AddRect(p, q, hex(look::accent), 6.0f * z, 0, 2.4f);
+      for (size_t i = 0; i < lines.size(); ++i)
+        dl->AddText(ImVec2(p.x + 10.0f * z, p.y + 9.0f * z + float(i) * line_h), IM_COL32(50, 40, 10, 255), lines[i].c_str());
+      ImGui::SetCursorScreenPos(p);
+      ImGui::SetNextItemAllowOverlap();
+      ImGui::InvisibleButton(("##note_" + nid).c_str(), ImVec2(r[2] * z, height));
+      ui_mark("note_card:" + text.substr(0, 24));
+      if (ImGui::IsItemActivated()) {
+        wf_deco_ = nid;
+        wf_node_.clear();
+        wf_sel_.clear();
+        wf_row_.clear();
+        wf_link_.clear();
+        wf_deco_drag_ = {};
+        wf_deco_drag_.id = nid;
+        wf_deco_drag_.mode = 1;
+        wf_deco_drag_.from = r;
+      }
+      if (ImGui::IsItemActive() && wf_deco_drag_.id == nid && ImGui::IsMouseDragging(0, 3.0f)) {
+        const ImVec2 d = ImGui::GetMouseDragDelta(0);
+        wf_deco_live_[nid] = {wf_deco_drag_.from[0] + d.x / z, wf_deco_drag_.from[1] + d.y / z, r[2], 0.0f};
+        wf_fit_ = false;
+      }
+    }
+    // A move or a resize that was let go: one edit for the frame or note and the nodes that went with it.
+    if (!ImGui::IsMouseDown(0) && !wf_deco_live_.empty() && !wf_deco_drag_.id.empty()) {
+      json ops = json::array();
+      const std::string id = wf_deco_drag_.id;
+      if (const auto it = wf_deco_live_.find(id); it != wf_deco_live_.end()) {
+        const std::array<float, 4> r = it->second;
+        const bool is_group = groups.contains(id);
+        const json &was = is_group ? groups[id] : notes.contains(id) ? notes[id] : object_in(json::object(), "");
+        const auto set = [&](const char *field, double value) {
+          ops.push_back({{"op", was.contains(field) ? "replace" : "add"}, {"path", id + "/" + field}, {"value", value}});
+        };
+        set("x", std::round(r[0]));
+        set("y", std::round(r[1]));
+        if (is_group) {
+          set("w", std::round(r[2]));
+          set("h", std::round(r[3]));
+        }
+        for (const auto &[nid, at] : wf_moved_)
+          if (nodes.contains(nid))
+            ops.push_back({{"op", nodes[nid].contains("ui") ? "replace" : "add"}, {"path", nid + "/ui"}, {"value", {{"x", std::round(at.x)}, {"y", std::round(at.y)}}}});
+      }
+      wf_deco_drag_ = {};
+      pending_ = [this, ops] {
+        if (!ops.empty())
+          patch(ops, ops.size() > 4 ? "Move frame" : "Move");
+        wf_deco_live_.clear();
+        wf_moved_.clear();
+      };
+    }
+  }
+
   // Links, under the boxes. The one under the pointer is found here for the click on the background.
   std::string link_hit;
   for (auto l = links.begin(); l != links.end(); ++l) {
@@ -6324,6 +6678,7 @@ void App::draw_workflow_canvas(const json &library) {
     if (!ImGui::GetIO().KeyShift) { // a click on nothing lets go of the selection; with Shift it starts a box
       wf_node_.clear();
       wf_sel_.clear();
+      wf_deco_.clear();
     }
     wf_row_.clear();
     wf_search_.open = false;
@@ -6470,6 +6825,7 @@ void App::draw_workflow_canvas(const json &library) {
     const gen::KindDef *def = gen::find_kind(kind);
     const std::string model = b.node->value("model", std::string());
     const bool selected = b.id == wf_node_ || wf_sel_.contains(b.id);
+    const bool kind_is_workflow = gen::is_workflow_kind(kind);
     // The body: select and move. A click selects it; Shift or Ctrl adds it to the selection, or takes it out; a node of several that
     // are selected moves them all.
     ImGui::SetCursorScreenPos(p);
@@ -6488,6 +6844,12 @@ void App::draw_workflow_canvas(const json &library) {
       wf_node_ = wf_sel_.size() == 1 ? *wf_sel_.begin() : std::string();
       wf_link_.clear();
       wf_row_.clear();
+      wf_deco_.clear();
+    }
+    if (kind_is_workflow && ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) { // a Subgraph: double click opens the workflow inside
+      const std::string inner = b.node->value("workflow", std::string());
+      if (library.contains(inner))
+        pending_ = [this, inner] { open_workflow(inner); };
     }
     if (ImGui::IsItemActive() && ImGui::IsMouseDragging(0, 3.0f)) {
       const ImVec2 d = ImGui::GetMouseDragDelta(0, 3.0f);
@@ -6633,12 +6995,42 @@ void App::draw_workflow_canvas(const json &library) {
         ImGui::PopFont();
       }
     }
-    const auto note = notes.find(b.id);
-    if (note != notes.end())
+    if (!b.preview.empty()) { // what the node made last: the picture under its ports
+      const ImVec2 a(p.x + 8.0f * z, q.y - (kPreviewH - 6.0f) * z), c(q.x - 8.0f * z, q.y - 8.0f * z);
+      dl->AddRectFilled(a, c, hex(look::bg), 6.0f * z);
+      if (const auto tex = thumb_tex_.find(b.preview); tex != thumb_tex_.end() && tex->second) {
+        float tw = c.x - a.x, th = c.y - a.y;
+        if (SDL_GetTextureSize(tex->second, &tw, &th) && tw > 0.0f && th > 0.0f) {
+          const float fit = std::min((c.x - a.x) / tw, (c.y - a.y) / th);
+          tw *= fit;
+          th *= fit;
+        }
+        const ImVec2 at((a.x + c.x - tw) * 0.5f, (a.y + c.y - th) * 0.5f);
+        dl->AddImageRounded(ImTextureID(reinterpret_cast<intptr_t>(tex->second)), at, ImVec2(at.x + tw, at.y + th), ImVec2(0, 0), ImVec2(1, 1), IM_COL32_WHITE, 5.0f * z);
+      }
+      ui_mark("preview:" + b.id);
+    }
+    if (gen_job_state_.is_object() && gen_job_state_.contains("node") && gen_job_state_["node"].is_object() && !gen_job_.empty() &&
+        gen_job_state_["node"].value("id", std::string()) == b.id) { // the node that is running: a bar along its foot
+      const int at = gen_job_state_["node"].value("at", 0), of = gen_job_state_["node"].value("of", 0);
+      const float fraction = of > 0 ? float(at) / float(of) : float(std::fmod(clock_ * 0.8, 1.0));
+      const ImVec2 a(p.x + 8.0f * z, q.y - 7.0f * z), c(q.x - 8.0f * z, q.y - 3.0f * z);
+      dl->AddRectFilled(a, c, hex(look::raised), 2.0f * z);
+      dl->AddRectFilled(a, ImVec2(a.x + (c.x - a.x) * std::clamp(fraction, 0.02f, 1.0f), c.y), hex(look::accent), 2.0f * z);
+      if (of > 0) {
+        char step[24];
+        std::snprintf(step, sizeof step, "%d of %d", at, of);
+        dl->AddText(ImVec2(q.x - pad - text_size(step).x, p.y + 7.0f * z), hex(look::accent), step);
+      }
+      ui_mark("running:" + b.id);
+      missing = false;
+    }
+    const auto note = fail_notes.find(b.id);
+    if (note != fail_notes.end())
       missing = true;
     dl->AddRect(p, q, selected ? hex(look::accent) : missing ? ImGui::ColorConvertFloat4ToU32(kError) : hex(hovered ? look::line2 : look::line), 10.0f * z, 0,
                 selected ? 2.0f : 1.3f);
-    if (note != notes.end()) { // why: a line of red under the node, and the whole of it when the pointer is on the node
+    if (note != fail_notes.end()) { // why: a line of red under the node, and the whole of it when the pointer is on the node
       std::string line = note->second;
       const float room = node_w - 2.0f * pad;
       while (line.size() > 4 && text_size(line.c_str()).x > room)
@@ -6967,6 +7359,68 @@ void App::draw_workflow_side(const json &library) {
       commit(buf.data());
   };
 
+  // A frame or a note of the canvas: its title or text, its colour, remove.
+  if (!wf_deco_.empty()) {
+    const json &groups = object_in(workflow, "groups"), &notes = object_in(workflow, "notes");
+    const bool is_group = groups.contains(wf_deco_), is_note = notes.contains(wf_deco_);
+    if (!is_group && !is_note) {
+      wf_deco_.clear();
+    } else {
+      const json &v = is_group ? groups[wf_deco_] : notes[wf_deco_];
+      const std::string did = wf_deco_;
+      if (begin_card("##wf_deco", is_group ? "Frame" : "Note")) {
+        if (is_group) {
+          ImGui::TextColored(hexv(look::fg2), "Title");
+          ImGui::SameLine(label_w);
+          text_field("grp:" + did, v.value("title", std::string()), -1.0f, [this, did, had = v.contains("title")](const std::string &typed) {
+            pending_ = [this, did, typed, had] { patch(json::array({{{"op", had ? "replace" : "add"}, {"path", did + "/title"}, {"value", typed}}}), "Rename frame"); };
+          });
+          ui_mark("field:wf_group_title");
+          ImGui::TextColored(hexv(look::fg2), "Colour");
+          static const char *colours[] = {"#4a90d9", "#3fa66b", "#d98a3a", "#c0504d", "#9a6ad0"};
+          for (const char *colour : colours) {
+            ImGui::SameLine(colour == colours[0] ? label_w : 0.0f);
+            unsigned rgb = unsigned(std::strtoul(colour + 1, nullptr, 16));
+            const ImVec2 cp = ImGui::GetCursorScreenPos();
+            if (ImGui::InvisibleButton((std::string("##col") + colour).c_str(), ImVec2(24.0f, 24.0f)))
+              pending_ = [this, did, colour = std::string(colour), had = v.contains("color")] {
+                patch(json::array({{{"op", had ? "replace" : "add"}, {"path", did + "/color"}, {"value", colour}}}), "Colour frame");
+              };
+            ui_mark(std::string("button:wf_group_colour_") + (colour + 1));
+            ImGui::GetWindowDrawList()->AddRectFilled(ImVec2(cp.x + 2.0f, cp.y + 2.0f), ImVec2(cp.x + 22.0f, cp.y + 22.0f), IM_COL32((rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255, 255), 5.0f);
+            if (v.value("color", std::string()) == colour)
+              ImGui::GetWindowDrawList()->AddRect(ImVec2(cp.x, cp.y), ImVec2(cp.x + 24.0f, cp.y + 24.0f), hex(look::fg), 6.0f, 0, 1.5f);
+          }
+          ImGui::PushTextWrapPos(0.0f);
+          ImGui::TextColored(hexv(look::fg3), "Drag its title bar to move it with the nodes inside, its corner to change its size. A frame changes no result.");
+          ImGui::PopTextWrapPos();
+        } else {
+          std::array<char, 512> &buf = wf_text_["note:" + did];
+          if (wf_editing_ != "note:" + did)
+            copy_to(buf.data(), buf.size(), v.value("text", std::string()));
+          ImGui::PushStyleColor(ImGuiCol_FrameBg, hexv(look::raised));
+          ImGui::InputTextMultiline("##note_text", buf.data(), buf.size(), ImVec2(-1.0f, 110.0f));
+          ImGui::PopStyleColor();
+          ui_mark("field:wf_note_text");
+          if (ImGui::IsItemActive())
+            wf_editing_ = "note:" + did;
+          else if (wf_editing_ == "note:" + did)
+            wf_editing_.clear();
+          if (ImGui::IsItemDeactivatedAfterEdit() && v.value("text", std::string()) != buf.data())
+            pending_ = [this, did, text = std::string(buf.data()), had = v.contains("text")] {
+              patch(json::array({{{"op", had ? "replace" : "add"}, {"path", did + "/text"}, {"value", text}}}), "Edit note");
+            };
+        }
+      }
+      end_card();
+      if (soft_button("wf_deco_remove", is_group ? "Remove this frame" : "Remove this note", ImVec2(-1.0f, 30.0f)))
+        pending_ = [this, did, is_group] {
+          if (patch(json::array({{{"op", "remove"}, {"path", did}}}), is_group ? "Remove frame" : "Remove note"))
+            wf_deco_.clear();
+        };
+      return;
+    }
+  }
   // A row of the Clip Inputs node or of the Output node: its name, its place, and what can be done with it.
   if (!wf_row_.empty()) {
     const bool is_in = wf_row_.rfind("in:", 0) == 0;
@@ -7323,6 +7777,9 @@ void App::draw_workflow_side(const json &library) {
     } else if (gen::is_workflow_kind(kind)) {
       const std::string inner = node.value("workflow", std::string());
       ImGui::TextColored(hexv(look::fg2), "Runs the workflow \"%s\".", library.contains(inner) ? library[inner].value("name", inner).c_str() : inner.c_str());
+      if (library.contains(inner) && soft_button("wf_open_inner", "Open it", ImVec2(96.0f, 28.0f)))
+        pending_ = [this, inner] { open_workflow(inner); };
+      ui_mark("button:wf_open_inner");
     } else if (short_kind == "variable") {
       // The Variable it reads: one of the project's, by name. Its output has the Variable's Data Type.
       const json &vars = object_in(doc_, "variables");

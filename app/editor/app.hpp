@@ -308,6 +308,17 @@ private:
   void wf_copy();
   void wf_paste(float offset);
   void wf_add_from_search(const std::string &kind_id);
+  std::string wf_deco_;                           // the selected group or note of the canvas
+  std::map<std::string, std::array<float, 4>> wf_deco_live_; // a group or note being moved or resized: x, y, w, h until it is saved
+  struct DecoDrag { std::string id; int mode = 0; std::vector<std::string> nodes; std::map<std::string, ImVec2> nodes_at; std::array<float, 4> from{}; } wf_deco_drag_;
+  json wf_results_;                               // gen.node_results of the open clip: what each node made last
+  uint64_t wf_results_rev_ = ~uint64_t(0);        // the revision they were asked at, and for which clip
+  std::string wf_results_clip_;
+  double next_wf_results_ = 0.0;
+  std::string dialog_wf_import_, dialog_wf_export_, wf_export_target_, wf_import_note_;
+  void ask_workflow_import();
+  void ask_workflow_export(const std::string &target);
+  void add_deco(bool group);                      // a frame or a note, at the middle of what is in view
   std::string wf_row_;                    // the selected row of the Clip Inputs node ("in:name") or of the Output node ("out:name")
   std::string wf_id_, wf_node_, wf_link_; // the open workflow, and the node or the link that is selected in it
   std::string wf_clip_;                // the clip the workflow was opened from

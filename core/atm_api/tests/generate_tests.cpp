@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <set>
 #include <thread>
 
@@ -631,4 +632,166 @@ TEST_CASE("generate: Presets keep a clip's input values for its Clip Workflow, a
   // A name is needed; the Preset has to be one.
   CHECK(err(*f.engine, "gen.save_preset", {{"project", f.project}, {"clip", f.a}, {"name", ""}}).rule != "");
   CHECK(err(*f.engine, "gen.apply_preset", {{"project", f.project}, {"clip", f.b}, {"preset", f.a}}).rule == "G_PRESET");
+}
+
+TEST_CASE("generate: a library workflow used as one node (a Subgraph) runs, and a workflow cannot be put inside itself", "[gen][generate][subgraph]") {
+  Film f;
+  // The first clip's workflow goes to the library; the second clip is rebuilt as one Subgraph node of it, fed its prompt.
+  const json saved = ok(*f.engine, "gen.save_to_library", {{"project", f.project}, {"clip", f.a}, {"name", "Inner"}});
+  const std::string inner = saved["workflow"];
+  json outer = {{"name", "Outer"},
+                {"nodes", {{"$new:sub", {{"kind", "attome.workflow"}, {"workflow", inner}}}}},
+                {"links", json::object()},
+                {"exposed",
+                 {{"inputs", {{"prompt", {{"type", "text"}, {"required", true}, {"order", 0}, {"to", to_({{"$new:sub", "prompt"}})}}},
+                              {"seed", {{"type", "integer"}, {"order", 1}, {"to", to_({{"$new:sub", "seed"}})}}}}},
+                  {"outputs", {{"video", {{"from", {"$new:sub", "video"}}}}}},
+                  {"primary", "video"}}}};
+  const json outer_made = f.patch(json::array({{{"op", "add"}, {"path", f.root + "/workflows/$new:outer"}, {"value", outer}}}));
+  const std::string outer_id = outer_made["id_map"]["$new:outer"];
+  CHECK(ok(*f.engine, "project.validate", {{"project", f.project}})["ok"] == true);
+  const json made = ok(*f.engine, "gen.create_clip", {{"project", f.project}, {"prompt", "A subgraph walks"}, {"workflow", outer_id}, {"seconds", 1}});
+  const json clip = f.get(made["clip"])["media_ref"];
+  CHECK(clip["workflow"]["nodes"].size() == 1); // one node: the Subgraph
+  CHECK(ok(*f.engine, "project.validate", {{"project", f.project}})["ok"] == true);
+  const json done = f.wait(f.run({{"clips", json::array({made["clip"]})}}));
+  REQUIRE(done["state"] == "done");
+  // Its steps ran inside: encode, sample, decode (the Get Frame is not an output of the outer workflow), and the clip has a Take with a video.
+  CHECK(done["result"]["clips"][0]["steps_run"] == 3);
+  const json take = f.get(made["clip"])["media_ref"]["takes"].begin()->at("outputs");
+  CHECK(take.contains("video"));
+
+  // The workflow cannot hold itself, directly or through another.
+  const std::string sub_node = [&] {
+    const json nodes = ok(*f.engine, "project.get", {{"project", f.project}, {"id", outer_id}})["object"]["nodes"];
+    return nodes.begin().key();
+  }();
+  (void)sub_node;
+  const atm::Error self = err(*f.engine, "project.patch",
+                              {{"project", f.project}, {"patch", {{"ops", json::array({{{"op", "add"}, {"path", outer_id + "/nodes/$new:me"}, {"value", {{"kind", "attome.workflow"}, {"workflow", outer_id}}}}})}}}});
+  CHECK(self.rule == "G_CYCLE");
+  const atm::Error loop = err(*f.engine, "project.patch",
+                              {{"project", f.project}, {"patch", {{"ops", json::array({{{"op", "add"}, {"path", inner + "/nodes/$new:up"}, {"value", {{"kind", "attome.workflow"}, {"workflow", outer_id}}}}})}}}});
+  CHECK(loop.rule == "G_CYCLE");
+}
+
+TEST_CASE("generate: groups and notes on the canvas are saved with the workflow and change no result", "[gen][generate][canvas]") {
+  Film f;
+  const std::string first_node = [&] {
+    const json nodes = f.get(f.a)["media_ref"]["workflow"]["nodes"];
+    return nodes.begin().key();
+  }();
+  (void)first_node;
+  const json keys_before = ok(*f.engine, "gen.run", {{"project", f.project}, {"dry_run", true}});
+  const json made = f.patch(json::array(
+      {{{"op", "add"}, {"path", f.a + "/media_ref/workflow/groups/$new:g"}, {"value", {{"title", "Look"}, {"x", 10}, {"y", 20}, {"w", 300}, {"h", 200}, {"color", "#3a6"}}}},
+       {{"op", "add"}, {"path", f.a + "/media_ref/workflow/notes/$new:n"}, {"value", {{"text", "Try a longer shot"}, {"x", 40}, {"y", 300}}}}}));
+  const std::string group = made["id_map"]["$new:g"], note = made["id_map"]["$new:n"];
+  CHECK(atm::id_prefix(group) == "grp");
+  CHECK(atm::id_prefix(note) == "nte");
+  CHECK(ok(*f.engine, "project.validate", {{"project", f.project}})["ok"] == true);
+  CHECK(f.get(group)["title"] == "Look");
+  // Nothing about the result moved: the clips are not out of date, and a clean clip stays clean.
+  REQUIRE(f.wait(f.run())["state"] == "done");
+  f.patch(json::array({{{"op", "replace"}, {"path", group + "/x"}, {"value", 99}}, {{"op", "replace"}, {"path", note + "/text"}, {"value", "Changed"}}}));
+  CHECK(f.states() == "First=clean Second=clean");
+  // They are part of the workflow: saved with it, copied into clips made from it, put back by a reset.
+  const json saved = ok(*f.engine, "gen.save_to_library", {{"project", f.project}, {"clip", f.a}, {"name", "With notes"}});
+  const json entry = ok(*f.engine, "project.get", {{"project", f.project}, {"id", saved["workflow"]}})["object"];
+  CHECK(entry["groups"].size() == 1);
+  CHECK(entry["notes"].size() == 1);
+  CHECK(entry["groups"].begin().key() != group); // IDs of their own
+  const json clip = ok(*f.engine, "gen.create_clip", {{"project", f.project}, {"prompt", "x"}, {"workflow", saved["workflow"]}, {"seconds", 1}});
+  const json copy = f.get(clip["clip"])["media_ref"]["workflow"];
+  CHECK(copy["groups"].size() == 1);
+  CHECK(copy["notes"].begin()->at("text") == "Changed");
+  CHECK(copy["groups"].begin().key() != entry["groups"].begin().key());
+  ok(*f.engine, "project.patch", {{"project", f.project}, {"patch", {{"ops", json::array({{{"op", "remove"}, {"path", note}}})}}}});
+  ok(*f.engine, "gen.reset_clip", {{"project", f.project}, {"clip", clip["clip"]}});
+  CHECK(f.get(clip["clip"])["media_ref"]["workflow"]["notes"].size() == 1);
+  CHECK(ok(*f.engine, "project.validate", {{"project", f.project}})["ok"] == true);
+  (void)keys_before;
+}
+
+TEST_CASE("generate: a workflow written to a file and read back runs the same; a ComfyUI file brings what matches and names the rest", "[gen][generate][import]") {
+  Film f;
+  const fs::path file = f.dir / "shot.attomeflow.json";
+  const json saved = ok(*f.engine, "gen.save_to_library", {{"project", f.project}, {"clip", f.a}, {"name", "Exported"}});
+  const json written = ok(*f.engine, "gen.export_workflow", {{"project", f.project}, {"workflow", saved["workflow"]}, {"path", file.string()}});
+  CHECK(written["nodes"] == 4);
+  // In another project, a clip made from the imported workflow has the same keys: its Take is reused, nothing is made again.
+  Film other;
+  const json imported = ok(*other.engine, "gen.import_workflow", {{"project", other.project}, {"path", file.string()}});
+  CHECK(imported["name"] == "Exported");
+  CHECK(imported["unmatched"].empty());
+  CHECK(ok(*other.engine, "project.validate", {{"project", other.project}})["ok"] == true);
+  const json first = f.get(f.a)["media_ref"];
+  const json made = ok(*other.engine, "gen.create_clip", {{"project", other.project}, {"prompt", first["inputs"]["prompt"]}, {"workflow", imported["workflow"]},
+                                                           {"seed", first["inputs"]["seed"]}, {"seconds", 1}});
+  const json mine = other.get(made["clip"])["media_ref"]["workflow"];
+  const json theirs = first["workflow"];
+  const atm::gen::KeyContext context;
+  const json noids = json::object();
+  // the workflows have different IDs and the same keys for the same inputs
+  const std::string a = atm::gen::take_key(noids, theirs, first["inputs"], context);
+  const std::string b = atm::gen::take_key(noids, mine, other.get(made["clip"])["media_ref"]["inputs"], context);
+  CHECK(!a.empty());
+  CHECK(a == b);
+  // Not a workflow file, and not there at all.
+  { std::ofstream bad(f.dir / "bad.json"); bad << "[1, 2"; }
+  CHECK(err(*other.engine, "gen.import_workflow", {{"project", other.project}, {"path", (f.dir / "bad.json").string()}}).rule == "G_IMPORT");
+  CHECK(err(*other.engine, "gen.import_workflow", {{"project", other.project}, {"path", (f.dir / "nope.json").string()}}).rule == "G_IMPORT");
+
+  // A ComfyUI workflow in API format: three nodes match, two do not.
+  const json comfy = {{"3", {{"class_type", "KSampler"}, {"inputs", {{"seed", 77}, {"steps", 20}, {"positive", {"6", 0}}, {"latent_image", {"5", 0}}}}}},
+                      {"5", {{"class_type", "EmptyLatentImage"}, {"inputs", {{"width", 512}, {"height", 512}}}}},
+                      {"6", {{"class_type", "CLIPTextEncode"}, {"inputs", {{"text", "a lighthouse at dusk"}, {"clip", {"4", 1}}}}}},
+                      {"8", {{"class_type", "VAEDecode"}, {"inputs", {{"samples", {"3", 0}}, {"vae", {"4", 2}}}}}},
+                      {"9", {{"class_type", "SaveImage"}, {"_meta", {{"title", "Save Image"}}}, {"inputs", {{"images", {"8", 0}}}}}}};
+  { std::ofstream out(f.dir / "comfy.json"); out << comfy.dump(); }
+  const json from = ok(*other.engine, "gen.import_workflow", {{"project", other.project}, {"path", (f.dir / "comfy.json").string()}, {"name", "Lighthouse"}});
+  CHECK(from["name"] == "Lighthouse");
+  REQUIRE(from["unmatched"].size() == 2);
+  const std::string named = from["unmatched"].dump();
+  CHECK(named.find("EmptyLatentImage") != std::string::npos);
+  CHECK(named.find("SaveImage") != std::string::npos);
+  const json lib = other.get(from["workflow"]);
+  CHECK(lib["nodes"].size() == 3);
+  CHECK(lib["links"].size() == 2); // text encode -> sampler, sampler -> decoder
+  CHECK(lib["exposed"]["inputs"]["prompt"]["default"] == "a lighthouse at dusk");
+  CHECK(lib["exposed"]["inputs"]["seed"]["default"] == 77);
+  CHECK(lib["exposed"]["primary"] == "video");
+  CHECK(ok(*other.engine, "project.validate", {{"project", other.project}})["ok"] == true);
+}
+
+TEST_CASE("generate: what a node made is told per node, only while it is what the clip asks for; a running node says how far it is", "[gen][generate][preview]") {
+  Film f;
+  f.mock->step_delay_ms = 40;
+  const json started = f.run({{"clips", json::array({f.a})}});
+  bool saw_node = false;
+  for (int i = 0; i < 400 && !saw_node; ++i) {
+    const json state = ok(*f.engine, "jobs.get", {{"job_id", started["job_id"]}});
+    if (state.contains("node")) {
+      saw_node = true;
+      CHECK(state["node"]["id"].is_string());
+      CHECK(f.get(state["node"]["id"].get<std::string>())["kind"].is_string()); // a node of the clip's workflow
+    }
+    if (state["state"] != "running")
+      break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  CHECK(saw_node);
+  REQUIRE(f.wait(started)["state"] == "done");
+  f.mock->step_delay_ms = 0;
+  const json results = ok(*f.engine, "gen.node_results", {{"project", f.project}, {"clip", f.a}});
+  CHECK(results["nodes"].size() == 4); // every node of the first clip has a result
+  bool any_picture = false;
+  for (const auto &[node, result] : results["nodes"].items())
+    for (const auto &[port, path] : result["files"].items())
+      any_picture = any_picture || (port == "image" && fs::exists(path.get<std::string>()));
+  CHECK(any_picture); // the Get Frame node's last frame
+  // A new seed: what the sampler and what follows made is not what the clip asks for now; the encoder's result is.
+  f.patch(json::array({{{"op", "replace"}, {"path", f.a + "/media_ref/inputs/seed"}, {"value", 99}}}));
+  const json after = ok(*f.engine, "gen.node_results", {{"project", f.project}, {"clip", f.a}});
+  CHECK(after["nodes"].size() == 1);
 }

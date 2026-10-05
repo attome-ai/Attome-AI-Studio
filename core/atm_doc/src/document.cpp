@@ -23,6 +23,7 @@ constexpr CollectionInfo kCollections[] = {
     {"assets", "ast", false},       {"consent_records", "con", false}, {"transitions", "trn", false},
     {"workflows", "cwf", false},    {"nodes", "nod", false},        {"links", "lnk", false}, // Clip Workflows (atm_gen)
     {"presets", "pre", false}, // saved input values of a Clip Workflow
+    {"groups", "grp", false}, {"notes", "nte", false}, // frames and text notes on a workflow's canvas
 };
 
 const CollectionInfo *collection_info(std::string_view name) {

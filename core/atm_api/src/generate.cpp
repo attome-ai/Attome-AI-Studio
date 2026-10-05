@@ -194,12 +194,17 @@ std::vector<GenOutcome> run_generation(const GenRun &run, const GenProgress &pro
       if (const gen::KindDef *def = gen::find_kind(kind))
         for (const gen::PortDef &port : def->outputs)
           request.outputs[port.name] = to_utf8(part / gen::output_file(port.name));
-      request.progress = [&](std::string_view phase, int at, int of) {
+      const std::string running_node = node_of(step.key);
+      request.progress = [&, running_node](std::string_view phase, int at, int of) {
         if (progress.on_detail)
           progress.on_detail(label + ": " + std::string(phase) + (of > 0 ? " " + std::to_string(at) + " of " + std::to_string(of) : ""));
+        if (progress.on_node)
+          progress.on_node(running_node, at, of);
       };
       if (progress.on_detail)
         progress.on_detail(label + ": " + kind);
+      if (progress.on_node)
+        progress.on_node(running_node, 0, 0);
       Result<gen::StepResult> result = gen::StepResult{};
       if (builtin) { // Get Frame: the first or the last picture of the video, or the one at a time
         const std::string video = request.inputs.value("video", std::string());
@@ -247,6 +252,8 @@ std::vector<GenOutcome> run_generation(const GenRun &run, const GenProgress &pro
       if (progress.done)
         progress.done->fetch_add(1);
     }
+    if (progress.on_node)
+      progress.on_node(std::string(), 0, 0);
     if (!ok)
       continue;
     // The Take: what each exposed output of the clip's workflow is, and where its file lies.

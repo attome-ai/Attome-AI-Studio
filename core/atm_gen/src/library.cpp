@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <map>
+#include <tuple>
 
 #include "atm/base/id.hpp"
 
@@ -118,6 +119,14 @@ json fresh_copy(const json &workflow, std::string_view source) {
       }
       out["links"]["$new:l" + std::to_string(++l)] = std::move(link);
     }
+  // Frames and notes of the canvas come along, with their own IDs.
+  for (const char *deco : {"groups", "notes"})
+    if (workflow.contains(deco) && workflow[deco].is_object()) {
+      out[deco] = json::object();
+      int d = 0;
+      for (auto it = workflow[deco].begin(); it != workflow[deco].end(); ++it)
+        out[deco]["$new:" + std::string(deco) + std::to_string(++d)] = *it;
+    }
   if (workflow.contains("exposed") && workflow["exposed"].is_object()) {
     json exposed = workflow["exposed"];
     if (exposed.contains("inputs") && exposed["inputs"].is_object())
@@ -131,6 +140,115 @@ json fresh_copy(const json &workflow, std::string_view source) {
           (*it)["from"] = end_of((*it)["from"]);
     out["exposed"] = std::move(exposed);
   }
+  return out;
+}
+
+bool is_comfy_graph(const json &graph) {
+  if (!graph.is_object() || graph.empty())
+    return false;
+  for (auto it = graph.begin(); it != graph.end(); ++it)
+    if (!it->is_object() || !it->contains("class_type") || !(*it)["class_type"].is_string())
+      return false;
+  return true;
+}
+
+json from_comfy(const json &graph, std::vector<std::string> &unmatched, std::string_view name) {
+  if (!is_comfy_graph(graph))
+    return nullptr;
+  const auto kind_of = [](const std::string &cls) -> const char * {
+    if (cls == "CLIPTextEncode")
+      return "attome.encode_prompt";
+    if (cls == "KSampler" || cls == "KSamplerAdvanced" || cls == "SamplerCustomAdvanced")
+      return "attome.sample";
+    if (cls == "VAEDecode" || cls == "VAEDecodeTiled")
+      return "attome.decode";
+    return nullptr;
+  };
+  json nodes = json::object(), links = json::object(), exposed_in = json::object(), exposed_out = json::object();
+  std::map<std::string, std::string> placed; // ComfyUI id -> "$new:…"
+  std::string first_encode, first_sample, first_decode;
+  int n = 0, l = 0;
+  for (auto it = graph.begin(); it != graph.end(); ++it) {
+    const std::string cls = (*it)["class_type"].get<std::string>();
+    const char *kind = kind_of(cls);
+    if (!kind) {
+      const std::string title = it->contains("_meta") && (*it)["_meta"].is_object() ? (*it)["_meta"].value("title", std::string()) : std::string();
+      unmatched.push_back(cls + (title.empty() || title == cls ? "" : " \"" + title + "\"") + " (node " + it.key() + ")");
+      continue;
+    }
+    const std::string id = "$new:c" + std::to_string(++n);
+    placed[it.key()] = id;
+    json node = {{"kind", kind}};
+    const json inputs = it->value("inputs", json::object());
+    json typed = json::object();
+    if (std::string_view(kind) == "attome.encode_prompt") {
+      if (first_encode.empty())
+        first_encode = id;
+      if (inputs.contains("text") && inputs["text"].is_string())
+        typed["prompt"] = inputs["text"];
+    } else if (std::string_view(kind) == "attome.sample") {
+      if (first_sample.empty())
+        first_sample = id;
+      for (const char *seed : {"seed", "noise_seed"})
+        if (inputs.contains(seed) && inputs[seed].is_number_integer())
+          typed["seed"] = inputs[seed];
+    } else if (first_decode.empty()) {
+      first_decode = id;
+    }
+    if (!typed.empty())
+      node["inputs"] = std::move(typed);
+    nodes[id] = std::move(node);
+  }
+  // Links between the nodes that came: ComfyUI writes one as [source id, output slot].
+  for (auto it = graph.begin(); it != graph.end(); ++it) {
+    const auto to = placed.find(it.key());
+    if (to == placed.end())
+      continue;
+    const json inputs = it->value("inputs", json::object());
+    const std::string kind = nodes[to->second].value("kind", std::string());
+    for (const auto &[input, port, from_kind, from_port] :
+         {std::tuple<const char *, const char *, const char *, const char *>{"positive", "conditioning", "attome.encode_prompt", "conditioning"},
+          {"conditioning", "conditioning", "attome.encode_prompt", "conditioning"},
+          {"samples", "latent", "attome.sample", "latent"}}) {
+      if (!inputs.contains(input) || !inputs[input].is_array() || inputs[input].size() != 2 || !inputs[input][0].is_string())
+        continue;
+      const auto from = placed.find(inputs[input][0].get<std::string>());
+      if (from == placed.end() || nodes[from->second].value("kind", std::string()) != from_kind)
+        continue;
+      if ((std::string_view(port) == "conditioning" && kind != "attome.sample") || (std::string_view(port) == "latent" && kind != "attome.decode"))
+        continue;
+      links["$new:l" + std::to_string(++l)] = {{"from", json::array({from->second, from_port})}, {"to", json::array({to->second, port})}};
+    }
+  }
+  int order = 0;
+  if (!first_encode.empty()) {
+    json prompt = {{"type", "text"}, {"label", "Prompt"}, {"order", order++}, {"required", true}, {"to", json::array({json::array({first_encode, "prompt"})})}};
+    if (nodes[first_encode].contains("inputs") && nodes[first_encode]["inputs"].contains("prompt")) {
+      prompt["default"] = nodes[first_encode]["inputs"]["prompt"];
+      nodes[first_encode]["inputs"].erase("prompt");
+      if (nodes[first_encode]["inputs"].empty())
+        nodes[first_encode].erase("inputs");
+    }
+    exposed_in["prompt"] = std::move(prompt);
+  }
+  if (!first_sample.empty()) {
+    json seed = {{"type", "integer"}, {"label", "Seed"}, {"order", order++}, {"to", json::array({json::array({first_sample, "seed"})})}};
+    if (nodes[first_sample].contains("inputs") && nodes[first_sample]["inputs"].contains("seed")) {
+      seed["default"] = nodes[first_sample]["inputs"]["seed"];
+      nodes[first_sample]["inputs"].erase("seed");
+      if (nodes[first_sample]["inputs"].empty())
+        nodes[first_sample].erase("inputs");
+    }
+    exposed_in["seed"] = std::move(seed);
+  }
+  json out = {{"name", std::string(name.empty() ? "ComfyUI workflow" : name)}, {"nodes", std::move(nodes)}, {"links", std::move(links)}};
+  json exposed = {{"inputs", std::move(exposed_in)}};
+  if (!first_decode.empty()) {
+    exposed_out["video"] = {{"from", json::array({first_decode, "video"})}};
+    exposed["primary"] = "video";
+  }
+  exposed["outputs"] = std::move(exposed_out);
+  out["exposed"] = std::move(exposed);
   return out;
 }
 
