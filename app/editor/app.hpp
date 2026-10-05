@@ -279,6 +279,7 @@ private:
   bool drag_landed_ = false;             // false while a press on a clip has not moved it
   // Workflows mode
   int mode_ = 0;                       // 0: the video editor; 1: the workflow editor
+  std::string wf_row_;                    // the selected row of the Clip Inputs node ("in:name") or of the Output node ("out:name")
   std::string wf_id_, wf_node_, wf_link_; // the open workflow, and the node or the link that is selected in it
   std::string wf_clip_;                // the clip the workflow was opened from
   ImVec2 wf_pan_ = ImVec2(60.0f, 50.0f), wf_view_ = ImVec2(800.0f, 600.0f); // where the graph is looked at; the canvas size

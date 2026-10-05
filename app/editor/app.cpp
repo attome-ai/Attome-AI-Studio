@@ -5339,6 +5339,7 @@ void App::open_workflow(const std::string &target) {
   wf_clip_ = id_prefix(target) == "clp" ? target : std::string();
   wf_node_.clear();
   wf_link_.clear();
+  wf_row_.clear();
   wf_moved_.clear();
   wf_drag_ = {};
   wf_fit_ = true; // the whole graph in view
@@ -5797,6 +5798,7 @@ void App::draw_workflow_canvas(const json &library) {
     wf_drag_.name = name;
     wf_node_.clear();
     wf_link_.clear();
+    wf_row_.clear();
   };
 
   // Links, under the boxes. The one under the pointer is found here for the click on the background.
@@ -5818,6 +5820,7 @@ void App::draw_workflow_canvas(const json &library) {
   if (bg_clicked) {
     wf_link_ = link_hit;
     wf_node_.clear();
+    wf_row_.clear();
   }
 
   // The Exposed Inputs box: one row each, in their order. A row that feeds nothing is dimmed: it keeps the clip's value.
@@ -5827,7 +5830,7 @@ void App::draw_workflow_canvas(const json &library) {
     dl->AddRectFilled(p, ImVec2(p.x + side_w, p.y + h), hex(look::panel), 10.0f * z);
     dl->AddRect(p, ImVec2(p.x + side_w, p.y + h), hex(look::line2), 10.0f * z, 0, 1.2f);
     ImGui::PushFont(g_fonts.bold, 12.0f * z);
-    dl->AddText(ImVec2(p.x + pad, p.y + 9.0f * z), hex(look::fg2), "THE CLIP SETS");
+    dl->AddText(ImVec2(p.x + pad, p.y + 9.0f * z), hex(look::fg2), "CLIP INPUTS");
     ImGui::PopFont();
     for (size_t row = 0; row <= exposed_in.size(); ++row) {
       const bool fresh = row == exposed_in.size();
@@ -5861,6 +5864,19 @@ void App::draw_workflow_canvas(const json &library) {
         dl->AddCircleFilled(dot, port_r, colour);
       }
       const ImVec2 ts = text_size(label.c_str());
+      if (!fresh) { // the row: a click on its name selects it, and the side panel renames, moves or removes it
+        const bool on = wf_row_ == "in:" + input->name;
+        ImGui::SetCursorScreenPos(ImVec2(in_at.x + 4.0f * z, dot.y - row_h * 0.5f));
+        ImGui::InvisibleButton(("##cinrow_" + input->name).c_str(), ImVec2(side_w - 4.0f * z - port_r * 3.0f, row_h));
+        ui_mark("row:in:" + input->name);
+        if (ImGui::IsItemClicked()) {
+          wf_row_ = "in:" + input->name;
+          wf_node_.clear();
+          wf_link_.clear();
+        }
+        if (on)
+          dl->AddRectFilled(ImVec2(in_at.x + 4.0f * z, dot.y - row_h * 0.5f), ImVec2(in_at.x + side_w - port_r * 3.0f, dot.y + row_h * 0.5f), hex(look::accent, 40), 5.0f * z);
+      }
       dl->AddText(ImVec2(dot.x - pad - ts.x, dot.y - ts.y * 0.5f), hex(fresh || unlinked ? look::fg3 : look::fg), label.c_str());
       if (dot_button(*e, ("##cin_" + (fresh ? std::string("+") : input->name)).c_str(), std::string("clipin:") + (fresh ? "+" : input->name)))
         start(true, e->where, {}, {}, e->name);
@@ -5882,7 +5898,7 @@ void App::draw_workflow_canvas(const json &library) {
     dl->AddRectFilled(p, ImVec2(p.x + side_w, p.y + h), hex(look::panel), 10.0f * z);
     dl->AddRect(p, ImVec2(p.x + side_w, p.y + h), hex(look::line2), 10.0f * z, 0, 1.2f);
     ImGui::PushFont(g_fonts.bold, 12.0f * z);
-    dl->AddText(ImVec2(p.x + pad, p.y + 9.0f * z), hex(look::fg2), "THE CLIP GETS");
+    dl->AddText(ImVec2(p.x + pad, p.y + 9.0f * z), hex(look::fg2), "OUTPUT");
     ImGui::PopFont();
     for (size_t row = 0; row <= exposed_out.size(); ++row) {
       const bool fresh = row == exposed_out.size();
@@ -5905,6 +5921,19 @@ void App::draw_workflow_canvas(const json &library) {
         dl->AddCircle(dot, port_r, colour, 0, 1.6f);
       } else {
         dl->AddCircleFilled(dot, port_r, colour);
+      }
+      if (!fresh) {
+        const bool on = wf_row_ == "out:" + exposed_out[row].name;
+        ImGui::SetCursorScreenPos(ImVec2(out_at.x + port_r * 3.0f, dot.y - row_h * 0.5f));
+        ImGui::InvisibleButton(("##coutrow_" + exposed_out[row].name).c_str(), ImVec2(side_w - port_r * 3.0f - 4.0f * z, row_h));
+        ui_mark("row:out:" + exposed_out[row].name);
+        if (ImGui::IsItemClicked()) {
+          wf_row_ = "out:" + exposed_out[row].name;
+          wf_node_.clear();
+          wf_link_.clear();
+        }
+        if (on)
+          dl->AddRectFilled(ImVec2(out_at.x + port_r * 3.0f, dot.y - row_h * 0.5f), ImVec2(out_at.x + side_w - 4.0f * z, dot.y + row_h * 0.5f), hex(look::accent, 40), 5.0f * z);
       }
       dl->AddText(ImVec2(dot.x + pad, dot.y - text_size(label.c_str()).y * 0.5f), hex(fresh ? look::fg3 : look::fg), label.c_str());
       if (!fresh && exposed_out[row].name == primary) { // the Primary Output: a small mark on the right
@@ -5944,6 +5973,7 @@ void App::draw_workflow_canvas(const json &library) {
     if (ImGui::IsItemActivated()) {
       wf_node_ = b.id;
       wf_link_.clear();
+      wf_row_.clear();
     }
     if (ImGui::IsItemActive() && ImGui::IsMouseDragging(0, 3.0f)) {
       const ImVec2 d = ImGui::GetMouseDragDelta(0, 3.0f);
@@ -6254,6 +6284,179 @@ void App::draw_workflow_side(const json &library) {
       commit(buf.data());
   };
 
+  // A row of the Clip Inputs node or of the Output node: its name, its place, and what can be done with it.
+  if (!wf_row_.empty()) {
+    const bool is_in = wf_row_.rfind("in:", 0) == 0;
+    const std::string name = wf_row_.substr(is_in ? 3 : 4);
+    const gen::ExposedInput *input = nullptr;
+    const gen::ExposedOutput *output = nullptr;
+    size_t at = 0;
+    for (size_t i = 0; i < exposed_in.size(); ++i)
+      if (is_in && exposed_in[i].name == name) {
+        input = &exposed_in[i];
+        at = i;
+      }
+    for (const gen::ExposedOutput &o : exposed_out)
+      if (!is_in && o.name == name)
+        output = &o;
+    if (!input && !output) {
+      wf_row_.clear();
+    } else {
+      static const json no_media = json::object();
+      const json *self_doc = of_clip ? clip_json(wf_id_) : nullptr;
+      const json &media = self_doc ? object_in(*self_doc, "media_ref") : no_media;
+      const json &have = object_in(media, "inputs");
+      if (begin_card("##wf_row", is_in ? "Input of the clip" : "Output of the clip")) {
+        const std::string label = is_in ? input->label : std::string();
+        ImGui::TextColored(hexv(look::fg2), "Name");
+        ImGui::SameLine(label_w);
+        text_field("row:" + wf_row_, label.empty() ? name : label, -1.0f, [this, is_in, name, label, &have, &exposed_in, &exposed_out, base, of_clip, input, output](const std::string &typed) {
+          // The name people read; the stored name is that, lower case with underscores.
+          std::string key;
+          for (char ch : typed)
+            key += std::isalnum(static_cast<unsigned char>(ch)) ? char(std::tolower(static_cast<unsigned char>(ch))) : '_';
+          while (!key.empty() && key.front() == '_')
+            key.erase(key.begin());
+          while (!key.empty() && key.back() == '_')
+            key.pop_back();
+          bool taken = false;
+          for (const gen::ExposedInput &e : exposed_in)
+            taken = taken || (is_in && e.name == key && e.name != name);
+          for (const gen::ExposedOutput &o : exposed_out)
+            taken = taken || (!is_in && o.name == key && o.name != name);
+          if (key.empty() || taken) {
+            say(key.empty() ? "A name is needed." : "There is one with that name.", true);
+            return;
+          }
+          const json *self = of_clip ? clip_json(wf_id_) : nullptr;
+          const json workflow_now = self ? object_in(object_in(*self, "media_ref"), "workflow") : *workflow_json();
+          json ops = json::array();
+          if (is_in) {
+            json value = object_in(object_in(object_in(workflow_now, "exposed"), "inputs"), name.c_str());
+            if (typed != key)
+              value["label"] = typed;
+            else
+              value.erase("label");
+            if (key == name) { // the same name: only its label changes
+              ops.push_back({{"op", value.contains("label") ? (input->label.empty() ? "add" : "replace") : "remove"}, {"path", base + "/exposed/inputs/" + name + "/label"}, {"value", value.value("label", std::string())}});
+              if (!value.contains("label") && input->label.empty())
+                ops.clear();
+            } else {
+              ops.push_back({{"op", "add"}, {"path", base + "/exposed/inputs/" + key}, {"value", value}});
+              ops.push_back({{"op", "remove"}, {"path", base + "/exposed/inputs/" + name}});
+              if (of_clip && have.contains(name)) { // the clip's value goes with it
+                ops.push_back({{"op", "add"}, {"path", wf_id_ + "/media_ref/inputs/" + key}, {"value", have[name]}});
+                ops.push_back({{"op", "remove"}, {"path", wf_id_ + "/media_ref/inputs/" + name}});
+              }
+            }
+          } else if (key != name) {
+            const json from = object_in(object_in(object_in(workflow_now, "exposed"), "outputs"), name.c_str());
+            ops.push_back({{"op", "add"}, {"path", base + "/exposed/outputs/" + key}, {"value", from}});
+            ops.push_back({{"op", "remove"}, {"path", base + "/exposed/outputs/" + name}});
+            if (gen::primary_output(workflow_now) == name)
+              ops.push_back({{"op", "replace"}, {"path", base + "/exposed/primary"}, {"value", key}});
+            if (of_clip && self) { // what the Takes made is kept under the new name
+              const json &takes = object_in(object_in(*self, "media_ref"), "takes");
+              for (auto t = takes.begin(); t != takes.end(); ++t)
+                if (object_in(*t, "outputs").contains(name)) {
+                  ops.push_back({{"op", "add"}, {"path", t.key() + "/outputs/" + key}, {"value", (*t)["outputs"][name]}});
+                  ops.push_back({{"op", "remove"}, {"path", t.key() + "/outputs/" + name}});
+                }
+            }
+          }
+          (void)output;
+          if (ops.empty())
+            return;
+          pending_ = [this, ops, key, is_in] {
+            if (patch(ops, "Rename")) {
+              wf_row_ = std::string(is_in ? "in:" : "out:") + key;
+              wf_text_.erase("row:" + wf_row_);
+            }
+          };
+        });
+        ui_mark("field:wf_row_name");
+        ImGui::PushTextWrapPos(0.0f);
+        if (input) {
+          ImGui::TextColored(hexv(look::fg3), "%s%s%s", gen::port_type_name(input->type), input->required ? ", needed" : "",
+                             input->to.empty() ? ", feeds nothing: its value is kept" : "");
+          if (of_clip && have.contains(name))
+            ImGui::TextColored(hexv(look::fg3), "The clip's value is kept when it is renamed.");
+        } else {
+          ImGui::TextColored(hexv(look::fg3), "%s%s", output->name == primary ? "The Primary Output: the clip plays it." : "The clip gets it.",
+                             "");
+        }
+        ImGui::PopTextWrapPos();
+        ImGui::Dummy(ImVec2(0.0f, 4.0f));
+        if (input) { // place: the order of the rows on the Clip Inputs node and on the Workflow card
+          if (soft_button("wf_row_up", "Move up", ImVec2(92.0f, 28.0f), at > 0))
+            pending_ = [this, base, rows = exposed_in, at] {
+              std::vector<std::string> order;
+              for (const gen::ExposedInput &e : rows)
+                order.push_back(e.name);
+              std::swap(order[at], order[at - 1]);
+              json ops = json::array();
+              for (size_t i = 0; i < order.size(); ++i) {
+                const gen::ExposedInput *e = nullptr;
+                for (const gen::ExposedInput &r : rows)
+                  if (r.name == order[i])
+                    e = &r;
+                const json &stored = object_in(object_in(object_in(*workflow_json(), "exposed"), "inputs"), order[i].c_str());
+                if (!stored.contains("order") || stored["order"] != int64_t(i))
+                  ops.push_back({{"op", stored.contains("order") ? "replace" : "add"}, {"path", base + "/exposed/inputs/" + order[i] + "/order"}, {"value", int64_t(i)}});
+                (void)e;
+              }
+              patch(ops, "Move input");
+            };
+          ui_mark("button:wf_row_up");
+          ImGui::SameLine();
+          if (soft_button("wf_row_down", "Move down", ImVec2(92.0f, 28.0f), at + 1 < exposed_in.size()))
+            pending_ = [this, base, rows = exposed_in, at] {
+              std::vector<std::string> order;
+              for (const gen::ExposedInput &e : rows)
+                order.push_back(e.name);
+              std::swap(order[at], order[at + 1]);
+              json ops = json::array();
+              for (size_t i = 0; i < order.size(); ++i) {
+                const json &stored = object_in(object_in(object_in(*workflow_json(), "exposed"), "inputs"), order[i].c_str());
+                if (!stored.contains("order") || stored["order"] != int64_t(i))
+                  ops.push_back({{"op", stored.contains("order") ? "replace" : "add"}, {"path", base + "/exposed/inputs/" + order[i] + "/order"}, {"value", int64_t(i)}});
+              }
+              patch(ops, "Move input");
+            };
+          ui_mark("button:wf_row_down");
+        } else if (output->name != primary) {
+          if (soft_button("wf_row_main", "Make main", ImVec2(110.0f, 28.0f), true, true))
+            pending_ = [this, base, name] {
+              patch(json::array({{{"op", gen::primary_output(*workflow_json()).empty() ? "add" : "replace"}, {"path", base + "/exposed/primary"}, {"value", name}}}), "Make main output");
+            };
+          ui_mark("button:wf_row_main");
+        }
+      }
+      end_card();
+      if (soft_button("wf_row_remove", is_in ? "Remove this input" : "Remove this output", ImVec2(-1.0f, 30.0f)))
+        pending_ = [this, base, name, is_in, of_clip, has_value = have.contains(name), exposed_out] {
+          json ops = json::array();
+          if (is_in) {
+            if (of_clip && has_value)
+              ops.push_back({{"op", "remove"}, {"path", wf_id_ + "/media_ref/inputs/" + name}});
+            ops.push_back({{"op", "remove"}, {"path", base + "/exposed/inputs/" + name}});
+          } else {
+            ops.push_back({{"op", "remove"}, {"path", base + "/exposed/outputs/" + name}});
+            std::vector<std::string> after;
+            for (const gen::ExposedOutput &o : exposed_out)
+              if (o.name != name)
+                after.push_back(o.name);
+            for (json &op : primary_ops(after, gen::primary_output(*workflow_json())))
+              ops.push_back(std::move(op));
+          }
+          if (patch(ops, is_in ? "Remove input" : "Remove output"))
+            wf_row_.clear();
+        };
+      ui_mark("button:wf_row_remove");
+      return;
+    }
+  }
+
   if (!nodes.contains(wf_node_)) { // the workflow itself
     wf_node_.clear();
     if (begin_card("##wf_card", "Workflow")) {
@@ -6276,7 +6479,7 @@ void App::draw_workflow_side(const json &library) {
       ImGui::PopTextWrapPos();
     }
     end_card();
-    if (begin_card("##wf_face", "What the clip sets and gets")) {
+    if (begin_card("##wf_face", "Clip inputs and output")) {
       ImGui::PushTextWrapPos(0.0f);
       std::string in, out, unlinked;
       for (const gen::ExposedInput &e : exposed_in) {
