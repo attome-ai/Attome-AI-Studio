@@ -275,7 +275,7 @@ void UiDriver::before_frame() {
       });
       d.frames.push_back([](ImGuiIO &) {});
       d.frames.push_back([](ImGuiIO &) {});
-    } else if (op == "expect" || op == "click" || op == "drag" || op == "slide") {
+    } else if (op == "expect" || op == "click" || op == "dblclick" || op == "drag" || op == "slide") {
       const float slide = op == "slide" ? float(std::atof(arg(2).c_str())) : -1.0f;
       ImVec2 size(0.0f, 0.0f);
       const auto p = d.resolve(arg(1), error, slide, &size);
@@ -289,6 +289,15 @@ void UiDriver::before_frame() {
           fail(c.line, arg(1) + " did not appear");
           return;
         }
+      } else if (op == "dblclick") { // two presses on consecutive frames: inside the double-click time
+        const ImVec2 at = *p;
+        d.frames.push_back([&d, at](ImGuiIO &) { d.mouse = at; });
+        for (int press = 0; press < 2; ++press) {
+          d.frames.push_back([](ImGuiIO &in) { in.AddMouseButtonEvent(0, true); });
+          d.frames.push_back([](ImGuiIO &in) { in.AddMouseButtonEvent(0, false); });
+        }
+        d.frames.push_back([](ImGuiIO &) {});
+        d.frames.push_back([](ImGuiIO &) {});
       } else if (op == "click" || op == "slide") {
         d.queue_click(*p);
       } else if (op == "drag") {

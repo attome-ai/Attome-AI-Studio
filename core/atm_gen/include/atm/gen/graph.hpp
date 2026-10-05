@@ -94,6 +94,11 @@ struct Problem {
 // link or exposure).
 void check_workflow(const json &workflows, const std::string &workflow_id, std::vector<Problem> &out);
 
+// Rules that say "not finished" rather than "wrong": G_MISSING. A workflow is built one step at a time (a node is added,
+// then linked), so these do not refuse an edit: the project stays valid, and the workflow and the clips that use it are
+// reported as not ready and are not run until the input has a value, a link or an exposure.
+bool is_readiness_rule(std::string_view rule);
+
 using ClipLookup = std::function<const json *(std::string_view clip_id)>;
 
 // The rules of one clip whose media_ref is a workflow; does nothing for any other clip. Rules: G_WORKFLOW, G_PORT,

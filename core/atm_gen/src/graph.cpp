@@ -483,6 +483,8 @@ void check_workflow(const json &workflows, const std::string &workflow_id, std::
   }
 }
 
+bool is_readiness_rule(std::string_view rule) { return rule == "G_MISSING"; }
+
 void check_clip(const json &workflows, const std::string &clip_id, const json &clip, const ClipLookup &lookup,
                 std::vector<Problem> &out) {
   if (!is_workflow_clip(clip))

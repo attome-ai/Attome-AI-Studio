@@ -108,8 +108,8 @@ TEST_CASE("workflow: a Clip Workflow and its clips live in the project, are chec
   CHECK(wrong.rule == "G_TYPE");
   CHECK(wrong.path == smp + "/inputs/seed");
   CHECK_FALSE(wrong.hint.empty());
-  // Taking the prompt's exposure away leaves a required input with nothing behind it.
-  CHECK(err(e, "project.patch", patch_of(project, json::array({{{"op", "remove"}, {"path", shot + "/exposed/inputs/prompt"}}}))).rule == "G_MISSING");
+  // Taking the prompt's exposure away while the clips still give a prompt: they would hold a value for nothing.
+  CHECK(err(e, "project.patch", patch_of(project, json::array({{{"op", "remove"}, {"path", shot + "/exposed/inputs/prompt"}}}))).rule == "G_PORT");
   // A link that closes a loop.
   CHECK(err(e, "project.patch",
             patch_of(project, json::array({{{"op", "remove"}, {"path", shot + "/exposed/inputs/start_image"}},
@@ -129,6 +129,37 @@ TEST_CASE("workflow: a Clip Workflow and its clips live in the project, are chec
   // Removing the workflow while clips use it.
   CHECK(err(e, "project.patch", patch_of(project, json::array({{{"op", "remove"}, {"path", shot}}}))).rule == "G_WORKFLOW");
   CHECK(canonical(e, project) == before);
+
+  // A workflow is built one step at a time: a node that is not linked yet is accepted (G_MISSING refuses no edit), the
+  // clips that use the workflow are reported as not ready, and nothing runs until the node has what it needs.
+  const json loose = ok(e, "project.patch", patch_of(project, json::array({{{"op", "add"}, {"path", shot + "/nodes/$new:n"}, {"value", {{"kind", "attome.decode"}}}}})));
+  const std::string extra = loose["id_map"]["$new:n"];
+  CHECK(ok(e, "project.validate", {{"project", project}})["ok"] == true);
+  for (const json &clip : ok(e, "gen.status", {{"project", project}})["clips"]) {
+    CHECK(clip["ready"] == false);
+    bool missing = false;
+    for (const json &problem : clip["problems"])
+      missing = missing || (problem["rule"] == "G_MISSING" && problem["path"] == extra + "/inputs/latent");
+    CHECK(missing);
+  }
+  CHECK(err(e, "gen.run", {{"project", project}}).rule == "G_NOT_READY");
+  ok(e, "project.undo", {{"project", project}}); // the node goes again
+  CHECK(canonical(e, project) == before);
+
+  // gen.nodes: what a workflow is built from, for an editor: the kinds with their ports, the models with their settings.
+  const json parts = ok(e, "gen.nodes", json::object());
+  bool has_sample = false;
+  for (const json &kind : parts["kinds"])
+    if (kind["kind"] == "attome.sample") {
+      has_sample = true;
+      CHECK(kind["runs_model"] == true);
+      CHECK(kind["inputs"][0]["name"] == "conditioning");
+      CHECK(kind["inputs"][0]["type"] == "conditioning");
+      CHECK(kind["inputs"][0]["required"] == true);
+      CHECK(kind["outputs"][0]["name"] == "latent");
+    }
+  CHECK(has_sample);
+  CHECK(parts["models"].is_array());
 
   // A valid edit of a node, then undo everything: the project is byte for byte what it was.
   ok(e, "project.patch", patch_of(project, json::array({{{"op", "add"}, {"path", smp + "/inputs/seed"}, {"value", 11}}})));

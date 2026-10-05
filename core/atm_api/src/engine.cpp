@@ -1449,7 +1449,78 @@ struct Engine::Impl {
     json problems = model_warnings(pr, workflow_id);
     std::set<std::string> seen;
     engine_warnings(pr, workflow_id, problems, seen);
+    // A required input of a node with nothing behind it: the workflow is still being built.
+    static const json none = json::object();
+    const auto wit = pr.doc.root().find("workflows");
+    std::vector<gen::Problem> found;
+    gen::check_workflow(wit != pr.doc.root().end() && wit->is_object() ? *wit : none, workflow_id, found);
+    for (gen::Problem &p : found)
+      if (gen::is_readiness_rule(p.rule))
+        problems.push_back({{"rule", p.rule}, {"path", p.path}, {"target", p.target}, {"message", p.message}, {"hint", p.hint}});
     return problems;
+  }
+
+  // What keeps one clip from running although its workflow can: an input of the workflow it gives no value for.
+  json clip_ready_problems(const Project &pr, const std::string &clip_id) const {
+    static const json none = json::object();
+    json problems = json::array();
+    const doc::NodeRef *ref = pr.doc.find(clip_id);
+    if (!ref)
+      return problems;
+    const auto wit = pr.doc.root().find("workflows");
+    const gen::ClipLookup lookup = [&](std::string_view id) -> const json * {
+      const doc::NodeRef *other = pr.doc.find(id);
+      return other ? other->node : nullptr;
+    };
+    std::vector<gen::Problem> found;
+    gen::check_clip(wit != pr.doc.root().end() && wit->is_object() ? *wit : none, clip_id, *ref->node, lookup, found);
+    for (gen::Problem &p : found)
+      if (gen::is_readiness_rule(p.rule))
+        problems.push_back({{"rule", p.rule}, {"path", p.path}, {"target", p.target}, {"message", p.message}, {"hint", p.hint}});
+    return problems;
+  }
+
+  // The node kinds a workflow is built from, with their ports, and every model with what it declares: the kinds it runs,
+  // its settings with their ranges and defaults, the optional inputs it takes. What a workflow editor needs to offer
+  // only what the validator will accept.
+  Result<json> gen_nodes(const json &) {
+    const auto ports = [](std::span<const gen::PortDef> defs) {
+      json out = json::array();
+      for (const gen::PortDef &d : defs)
+        out.push_back({{"name", d.name}, {"type", gen::port_type_name(d.type)}, {"required", d.required}, {"list", d.list}});
+      return out;
+    };
+    json kinds = json::array();
+    for (const gen::KindDef &k : gen::kind_defs())
+      kinds.push_back({{"id", k.id}, {"kind", gen::kind_name(k)}, {"title", k.title}, {"runs_model", k.runs_model},
+                       {"inputs", ports(k.inputs)}, {"outputs", ports(k.outputs)}});
+    json models = json::array();
+    for (const std::string &id : gen::model_ids()) {
+      const gen::ModelDecl *decl = gen::find_model(id);
+      if (!decl)
+        continue;
+      const models::CatalogEntry *entry = models::find_entry(models::builtin_catalog(), id);
+      json settings = json::array();
+      for (const gen::SettingDecl &s : decl->settings) {
+        static const char *const names[] = {"integer", "number", "boolean", "choice", "text"};
+        json one = {{"name", s.name}, {"type", names[int(s.type)]}, {"default", s.def}};
+        if (s.type == gen::SettingDecl::Type::integer || s.type == gen::SettingDecl::Type::number) {
+          one["min"] = s.lo;
+          one["max"] = s.hi;
+        }
+        if (s.type == gen::SettingDecl::Type::choice)
+          one["options"] = s.options;
+        settings.push_back(std::move(one));
+      }
+      const bool installed = !decl->needs_files || model_installed(id);
+      json engines = json::object(); // per kind: does something here run it
+      for (const std::string &kind : decl->kinds)
+        engines[kind] = provider_for(providers, id, kind) != nullptr;
+      models.push_back({{"id", id}, {"title", entry ? entry->title : id}, {"kinds", decl->kinds}, {"accepts", decl->accepts},
+                        {"settings", std::move(settings)}, {"installed", installed}, {"engines", std::move(engines)},
+                        {"seconds", {{"min", decl->seconds_min}, {"max", decl->seconds_max}}}});
+    }
+    return json{{"kinds", std::move(kinds)}, {"models", std::move(models)}};
   }
 
   Result<json> gen_status(const json &params) {
@@ -1463,8 +1534,11 @@ struct Engine::Impl {
         known = by_workflow.emplace(p.workflow, ready_problems(*pr, p.workflow)).first;
       json c = plan_json(p);
       c.erase("run");
-      c["ready"] = known->second.empty();
-      c["problems"] = known->second;
+      json problems = known->second;
+      for (json &own : clip_ready_problems(*pr, p.id))
+        problems.push_back(std::move(own));
+      c["ready"] = problems.empty();
+      c["problems"] = std::move(problems);
       for (const gen::ClipIn &in : all)
         if (in.id == p.id) {
           c["takes"] = in.ref->contains("takes") && (*in.ref)["takes"].is_object() ? (*in.ref)["takes"].size() : size_t(0);
@@ -1541,6 +1615,16 @@ struct Engine::Impl {
           e.errors = problems;
           return tl::unexpected(std::move(e));
         }
+      if (const json problems = clip_ready_problems(*pr, p.id); !problems.empty()) { // an input the clip gives no value for
+        Error e;
+        e.code = ErrorCode::InvalidArgument;
+        e.rule = "G_NOT_READY";
+        e.path = p.id;
+        e.message = p.name + " cannot be generated: " + problems[0].value("message", std::string());
+        e.hint = problems[0].value("hint", std::string());
+        e.errors = problems;
+        return tl::unexpected(std::move(e));
+      }
       GenClip clip;
       clip.id = p.id;
       clip.name = p.name;
@@ -2315,6 +2399,11 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
      "The models a generative clip can be made with: each with its title, whether its files are installed, whether an engine here "
      "runs it, the optional inputs it accepts and the clip lengths it makes.",
      "", &Impl::gen_models},
+    {"gen.nodes", "gen", false,
+     "What a Clip Workflow is built from: the node kinds with their input and output ports (name, type, required), and every "
+     "model with the kinds it runs, its settings (type, range, options, default), the optional inputs it accepts, whether "
+     "its files are installed and whether an engine here runs each kind.",
+     "", &Impl::gen_nodes},
     {"gen.create_clip", "gen", true,
      "Add a generative clip: a prompt and a model. It goes at the end of the picture track (or at: a time), uses the project's "
      "built-in Shot workflow for that model, and is not generated yet: run gen.run. start_from: \"previous\" (or a clip ID) makes "

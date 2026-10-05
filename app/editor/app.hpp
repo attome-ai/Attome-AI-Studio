@@ -2,6 +2,7 @@
 // Editor state and panels. The document shown here is a mirror: it is fetched again whenever the daemon's
 // revision moves, so edits made by an agent or the CLI appear by themselves.
 
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -140,6 +141,16 @@ private:
   void toggle_effect_key(const std::string &fx_id, size_t param);
   void jump_effect_key(const ClipUi &clip, const EffectUi &fx, bool forward);
   void draw_text_panel();
+  // Workflows mode: the node graph of a Clip Workflow (see the end of app.cpp).
+  void open_workflow(const std::string &workflow, const std::string &clip); // `clip`: the clip it was opened from, or ""
+  void draw_workflows();
+  void draw_workflow_list(const json &all);
+  void draw_workflow_canvas(const json &all);
+  void draw_workflow_side(const json &all);
+  void delete_in_workflow(); // the selected link, else the selected node
+  json remove_node_ops(const json &workflow, const std::string &node_id) const;
+  json unset_clip_input_ops(const std::string &name) const;
+  std::vector<const ClipUi *> clips_using(const std::string &workflow) const;
   void draw_models_panel();
   void draw_generate_panel();
   void poll_models();                       // models.list and the download jobs, twice a second while something shows them
@@ -259,6 +270,22 @@ private:
   std::map<std::string, int64_t> pushed_view_, pushed_next_; // clips drawn slid aside by a drag: now, and from the next frame
   TrackLanding drag_land_;               // where the clip being dragged lands
   bool drag_landed_ = false;             // false while a press on a clip has not moved it
+  // Workflows mode
+  int mode_ = 0;                       // 0: the video editor; 1: the workflow editor
+  std::string wf_id_, wf_node_, wf_link_; // the open workflow, and the node or the link that is selected in it
+  std::string wf_clip_;                // the clip the workflow was opened from
+  ImVec2 wf_pan_ = ImVec2(60.0f, 50.0f), wf_view_ = ImVec2(800.0f, 600.0f); // where the graph is looked at; the canvas size
+  float wf_zoom_ = 1.0f;               // how large the graph is drawn
+  bool wf_fit_ = true;                 // keep the whole graph in view, until the user pans or zooms
+  std::map<std::string, ImVec2> wf_moved_; // nodes being dragged: where they are until the move is saved
+  struct WfEnd {
+    std::string node, port;
+  } wf_from_;                          // the output a link is being dragged from
+  json wf_parts_;                      // gen.nodes: the kinds, and the models with what they declare
+  double next_wf_parts_poll_ = 0.0;
+  std::map<std::string, std::array<char, 512>> wf_text_; // text fields of the side panel
+  std::map<std::string, float> wf_value_;                // sliders of the side panel
+  std::string wf_editing_;                               // the field or slider that is being changed
   std::string drag_id_;
   int drag_mode_ = 0; // 1 move, 2 trim end, 3 trim start
   int64_t drag_frames_ = 0;

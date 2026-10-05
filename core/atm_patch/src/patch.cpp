@@ -621,6 +621,8 @@ void check_generative(const doc::Document &doc, const std::set<std::string> *tra
   for (gen::Problem &p : found) {
     if (problems.size() >= kMaxProblems)
       break;
+    if (gen::is_readiness_rule(p.rule))
+      continue; // not finished, not wrong: gen.status reports it and gen.run waits for it
     problems.push_back(problem(p.rule, std::move(p.path), p.target, std::move(p.message), std::move(p.hint)));
   }
 }
