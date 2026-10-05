@@ -1,5 +1,6 @@
 ﻿# UI test: a model card from the Generate panel dragged onto a clip of the timeline makes a generative clip after it
-# (never an overlap), and a clip of the timeline dragged onto another one lands after that one, not back where it was. Mock engine, virtual input only.
+# (the clip's right half) or before it (its left half); the clips in the way slide right, also around a clip that ends
+# between frames (10.005 s). Mock engine, virtual input only.
 #   .\tools\uitest\generate_drop.ps1
 
 $ErrorActionPreference = 'Stop'
@@ -13,7 +14,7 @@ Remove-Item $proj -Recurse -Force -ErrorAction SilentlyContinue
 
 $env:ATTOME_MOCK_ENGINE = '1'
 try {
-  $env:ATTOME_ENDPOINT = "\.\pipe\attome-uitest-setup-$PID"
+  $env:ATTOME_ENDPOINT = "\\.\pipe\attome-uitest-setup-$PID"
   try {
     & "$bin\attome.exe" new $proj --rate 24 --canvas 640x352 | Out-Null
     $info = (& "$bin\attome.exe" --json inspect $proj | ConvertFrom-Json).result.data
@@ -39,30 +40,36 @@ try {
     'click @rail:Generate'
     'wait 300'
     "shot $work\drop_before.jpg"
-    'drag @model:attome-mock @clip:First'   # released on top of the clip
+    'drag @model:attome-mock @clip:First@0.75,0.5'   # the right half of First: after it, and Second slides right
     'wait 800'
     "shot $work\drop_after.jpg"
-    'drag @clip:First @clip:Second'          # a clip of the timeline released on top of another one
+    'drag @model:attome-mock @clip:First@0.25,0.5'   # the left half: before it, and everything slides right
     'wait 800'
-    "shot $work\move_after.jpg"
+    "shot $work\drop_before_first.jpg"
   )
   $failed = $run.Errors
   try {
     if (-not $failed) {
-      $clips = @((Get-Tracks $run) | ForEach-Object { $_.clip_list })
-      "clips: $(($clips | ForEach-Object { $_.name }) -join ', ')"
-      if ($clips.Count -ne 3) { $failed = "expected 3 clips after the drop, found $($clips.Count)" }
+      $clips = @((Get-Tracks $run) | ForEach-Object { $_.clip_list } | ForEach-Object {
+        $o = Get-Object $run $_.id
+        $at = ConvertFrom-Rational $o.timing.record_in
+        [pscustomobject]@{ Name = $_.name; At = $at; End = $at + (ConvertFrom-Rational $o.timing.duration) }
+      } | Sort-Object At)
+      "clips: $(($clips | ForEach-Object { "$($_.Name)@$([math]::Round($_.At, 3))" }) -join ', ')"
+      if ($clips.Count -ne 4) { $failed = "expected 4 clips after the two drops, found $($clips.Count)" }
+      elseif (($clips.Name -join ',') -ne 'Shot 2,First,Shot 1,Second') { $failed = 'the clips are not in the order Shot 2, First, Shot 1, Second' }
       else {
-        $at = @{}; foreach ($c in $clips) { $at[$c.name] = ConvertFrom-Rational (Get-Object $run $c.id).timing.record_in }
-        $at.GetEnumerator() | ForEach-Object { "$($_.Key) at $($_.Value) s" }
-        if ($at['First'] -lt 15.0) { $failed = "First went back to $($at['First']) s instead of the free space after Second (15.005 s)" }
+        for ($i = 1; $i -lt $clips.Count; ++$i) {
+          if ($clips[$i].At -lt $clips[$i - 1].End - 1e-9) { $failed = "$($clips[$i - 1].Name) and $($clips[$i].Name) overlap" }
+          elseif ($clips[$i].At - $clips[$i - 1].End -gt 0.05) { $failed = "a gap opened between $($clips[$i - 1].Name) and $($clips[$i].Name)" }
+        }
       }
     }
   } finally { Stop-Daemon $run }
 } finally { Remove-Item Env:\ATTOME_MOCK_ENGINE -ErrorAction SilentlyContinue }
 
 if ($failed) { Write-Host "FAIL: $failed" -ForegroundColor Red; exit 1 }
-Write-Host "PASS: a card dropped on a clip made a second clip after it (captures in $work)" -ForegroundColor Green
+Write-Host "PASS: a model dropped after and before a clip, the clips in the way sliding right (captures in $work)" -ForegroundColor Green
 exit 0
 
 

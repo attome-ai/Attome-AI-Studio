@@ -52,6 +52,7 @@ function Show($run) {
 $failed = $null
 # 1. Titles unlocked from the card (a saved edit): the picture track makes room, the titles stay where they were.
 $run = Invoke-EditorScript -Project $proj -SelectFirstClip -Script @(
+  'click @button:add_card_transition'
   'expect @check:ripple_Titles'
   'click @check:ripple_Titles'
   'click @button:make_room'
@@ -76,6 +77,7 @@ try {
   }
   if (-not $failed) {
     $again = Invoke-EditorScript -Project $proj -SelectFirstClip -Endpoint $run.Endpoint -Script @(
+      'click @button:add_card_transition'
       'expect @button:make_room'
       'wait 400'
       "shot $work\make_room_ripple.jpg"
@@ -92,7 +94,7 @@ try {
   }
   # 3. Now it fits: the dissolve is added from the same card.
   if (-not $failed) {
-    $dis = Invoke-EditorScript -Project $proj -SelectFirstClip -Endpoint $run.Endpoint -Script @('click @button:add_dissolve')
+    $dis = Invoke-EditorScript -Project $proj -SelectFirstClip -Endpoint $run.Endpoint -Script @('click @button:add_card_transition', 'click @button:add_dissolve')
     $failed = $dis.Errors
     if (-not $failed) {
       $track = Get-Object $run (@(Get-Tracks $run) | Where-Object { $_.name -eq 'V1' }).id

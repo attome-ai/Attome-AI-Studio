@@ -28,8 +28,8 @@ try {
 } finally { Remove-Item Env:\ATTOME_ENDPOINT -ErrorAction SilentlyContinue }
 
 $run = Invoke-EditorScript -Project $proj -Script @(
-  'click @clip:a.mp4'
-  'click @button:add_luma'
+  'click @rail:Effects'
+  'drag @effect:luma @clip:a.mp4'
   'expect @slider:luma_level'
   'slide @slider:luma_level 1'          # 0 .. 1 on the slider: white
   'wait 800'

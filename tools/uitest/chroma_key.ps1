@@ -28,8 +28,8 @@ try {
 } finally { Remove-Item Env:\ATTOME_ENDPOINT -ErrorAction SilentlyContinue }
 
 $run = Invoke-EditorScript -Project $proj -Script @(
-  'click @clip:a.mp4'
-  'click @button:add_key'
+  'click @rail:Effects'
+  'drag @effect:key @clip:a.mp4'
   'expect @slider:key_hue'
   'slide @slider:key_hue 0.6667'        # 0 .. 360 on the slider: 240, blue
   'click @button:pick_key'              # then pick from the picture instead: the left of the sample is blue-violet

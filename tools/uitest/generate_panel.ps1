@@ -1,6 +1,6 @@
-# UI test: the Generate panel. A typed prompt becomes a generative clip on the timeline; a second one, with "Start from
-# the clip before" ticked and "Add and generate" pressed, is linked to the first and both are generated (the first is
-# needed and not made yet). Mock engine: no model, no GPU. Virtual input only (uitest.psm1). Exit code 0 = pass.
+# UI test: the Generate panel. A click on a model's card adds a generative clip whose prompt is typed in the Inspector; a
+# second one, with "Start from the clip before" ticked, is linked to the first, and Generate on it makes both (the first
+# is needed and not made yet). Mock engine: no model, no GPU. Virtual input only (uitest.psm1). Exit code 0 = pass.
 #   .\tools\uitest\generate_panel.ps1
 
 $ErrorActionPreference = 'Stop'
@@ -21,28 +21,23 @@ try {
   $run = Invoke-EditorScript -Project $proj -Script @(
     'click @rail:Generate'
     'wait 400'
-    'click @combo:gen_model'              # two models: the mock (ready) and the catalog's (not installed here)
-    'wait 300'
+    'expect @model:minimax-h3.fl2va.turbo8-int8' # two cards: the mock (ready) and the catalog's (not installed: a badge)
     "shot $work\panel_models.jpg"
-    'click @model:minimax-h3.fl2va.turbo8-int8'
-    'wait 300'
-    'expect @note:gen_model'              # the red note: not installed
-    "shot $work\panel_not_installed.jpg"
-    'click @combo:gen_model'
-    'wait 300'
-    'click @model:attome-mock'
-    'wait 300'
-    'click @field:gen_prompt'
+    'click @model:attome-mock'            # a click adds the clip at the end and selects it; its prompt is in the Inspector
+    'wait 500'
+    'click @field:prompt'
     'type A robot walks through the snow'
     'wait 100'
     "shot $work\panel_typed.jpg"
-    'click @button:gen_add'
+    'click @check:gen_chain'              # leaving the field saves the prompt
+    'wait 400'
+    'click @model:attome-mock'
     'wait 500'
-    'click @field:gen_prompt'
+    'click @field:prompt'
     'type It finds a lantern, and lifts it'
-    'click @check:gen_chain'
-    'wait 100'
-    'click @button:gen_add_run'
+    'click @rail:Generate'                # leaves the field
+    'wait 400'
+    'click @button:gen_run'               # the second clip: the first is made too, because the second starts from it
     'wait 300'
     'expect @button:gen_run'             # the new clip is selected; its card is back from "Stop" when the run has ended
     'wait 1500'

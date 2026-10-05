@@ -1813,31 +1813,31 @@ struct Engine::Impl {
     // The model's grid rarely gives the canvas's exact size (1264 x 704 for 1280 x 720): the clip is scaled to cover the
     // canvas, losing a sliver at two edges rather than showing a border.
     // Scale 1 is the picture fitted inside the canvas, so the factor is how much more it takes to cover it.
-    // A place asked for that is taken by another clip of the track moves right, to the end of that clip (clips' times are
-    // exact fractions of a second, so this is done here and not on the editor's rounded frames).
+    // Where: the place asked for ("at", any form parse_time reads: "12.5s", "300@24", a timecode), else the end of the
+    // track. A place that is taken by another clip of the track moves right, to the end of that clip: clips' times are
+    // exact fractions of a second, so this is settled here and not on an editor's rounded frames.
     std::string record_in = end.to_string();
-    if (params.contains("at") && params["at"].is_string())
-      if (const auto asked = Rational::parse(params["at"].get<std::string>()); asked && track_node && track_node->contains("clips")) {
-        Rational at = *asked;
-        const auto len = Rational::parse(length);
-        for (bool moved = len.has_value(); moved;) {
+    if (params.contains("at")) {
+      ATM_TRY(Rational at, parse_time(params["at"]));
+      const auto len = Rational::make(std::llround(seconds * 1000.0), 1000);
+      if (len && track_node && track_node->contains("clips"))
+        for (bool moved = true; moved;) {
           moved = false;
           for (const auto &c : (*track_node)["clips"]) {
             const json timing = c.value("timing", json::object());
             const auto in = Rational::parse(timing.value("record_in", std::string("0")));
             const auto dur = Rational::parse(timing.value("duration", std::string("0")));
-            const auto out = in && dur ? add(*in, *dur) : Result<Rational>(Rational::from_int(0));
-            const auto at_end = add(at, *len);
-            if (in && out && at_end && compare(at, *out) < 0 && compare(*in, *at_end) < 0) {
+            if (!in || !dur)
+              continue;
+            const auto out = add(*in, *dur), at_end = add(at, *len);
+            if (out && at_end && compare(at, *out) < 0 && compare(*in, *at_end) < 0) {
               at = *out;
               moved = true;
             }
           }
         }
-        record_in = at.to_string();
-      } else if (asked) {
-        record_in = asked->to_string();
-      }
+      record_in = at.to_string();
+    }
     const double across = cw / double(width), down = ch / double(height);
     const double fill = std::round(std::max(across, down) / std::min(across, down) * 10000.0) / 10000.0;
     ops.push_back({{"op", "add"},

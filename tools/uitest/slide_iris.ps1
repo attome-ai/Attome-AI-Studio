@@ -45,6 +45,7 @@ $failed = $null
 # 1. A slide from the bottom.
 $proj = New-Project 'Slide'
 $run = Invoke-EditorScript -Project $proj -SelectFirstClip -Script @(
+  'click @button:add_card_transition'
   'click @button:wipe_down'
   'click @button:add_slide'
   'wait 800'
@@ -63,6 +64,7 @@ try {
 if (-not $failed) {
   $proj = New-Project 'Iris'
   $run = Invoke-EditorScript -Project $proj -SelectFirstClip -Script @(
+    'click @button:add_card_transition'
     'click @button:add_iris'
     'wait 800'
     "shot $work\iris_added.jpg"
@@ -81,6 +83,7 @@ if (-not $failed) {
 if (-not $failed) {
   $proj = New-Project 'SlideIrisRemove'
   $run = Invoke-EditorScript -Project $proj -SelectFirstClip -Script @(
+    'click @button:add_card_transition'
     'click @button:add_slide'
     'expect @button:remove_slide'
     'click @button:remove_slide'

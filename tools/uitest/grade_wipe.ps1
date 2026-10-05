@@ -59,6 +59,7 @@ try {
   }
   if (-not $failed) { # a wipe from the bottom, added from the first clip's Transition card
     $again = Invoke-EditorScript -Project $proj -SelectFirstClip -Endpoint $run.Endpoint -Script @(
+      'click @button:add_card_transition'
       'click @button:wipe_down'
       'click @button:add_wipe'
       "shot $work\wipe_added.jpg"
@@ -81,6 +82,7 @@ try {
   }
   if (-not $failed) { # a push from the top, the same card
     $push = Invoke-EditorScript -Project $proj -SelectFirstClip -Endpoint $run.Endpoint -Script @(
+      'click @button:add_card_transition'
       'click @button:wipe_up'
       'click @button:add_push'
       "shot $work\push_added.jpg"
@@ -103,6 +105,7 @@ try {
   }
   if (-not $failed) { # a zoom with an amount from the slider, the same card
     $zoom = Invoke-EditorScript -Project $proj -SelectFirstClip -Endpoint $run.Endpoint -Script @(
+      'click @button:add_card_transition'
       'slide @slider:zoom_amount 0.5'      # 0.05 .. 2: about 1.03
       'click @button:add_zoom'
       "shot $work\zoom_added.jpg"
@@ -125,6 +128,7 @@ try {
   }
   if (-not $failed) {
     $zout = Invoke-EditorScript -Project $proj -SelectFirstClip -Endpoint $run.Endpoint -Script @(
+      'click @button:add_card_transition'
       'click @button:add_zoom_out'
       "shot $work\zoom_out_added.jpg"
     )

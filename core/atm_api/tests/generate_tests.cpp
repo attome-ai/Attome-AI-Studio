@@ -328,3 +328,41 @@ TEST_CASE("generate: refused before anything runs when a model or its engine is 
     CHECK(whole.states() == "First=clean Second=clean");
   }
 }
+
+TEST_CASE("gen.create_clip: the clip goes where it is asked for, or after the clips in the way", "[gen][create]") {
+  const fs::path dir = fs::temp_directory_path() / atm::new_id("attome-gen-at");
+  fs::create_directories(dir);
+  const std::string project = (dir / "At.attome").string();
+  atm::api::EngineConfig cfg;
+  cfg.models_dir = (dir / "models").string();
+  cfg.providers = {std::make_shared<MockProvider>()};
+  Engine engine(cfg);
+  ok(engine, "project.create", {{"path", project}, {"rate", "24"}, {"canvas", "320x176"}});
+  const auto add = [&](json extra) {
+    json params = {{"project", project}, {"prompt", ""}, {"model", atm::api::kMockModel}, {"seconds", 2}};
+    params.update(extra);
+    return ok(engine, "gen.create_clip", params);
+  };
+  const auto start_of = [&](const json &made) {
+    return ok(engine, "project.get", {{"project", project}, {"id", made["clip"]}})["object"]["timing"]["record_in"].get<std::string>();
+  };
+
+  const json first = add(json::object()); // no place: the end of the track, which is its start
+  CHECK(start_of(first) == "0");
+  const std::string track = first["track"];
+  CHECK(start_of(add(json::object())) == "2"); // and the next one after it
+
+  // A free place is kept, in every form a time can be written in: frames at a rate, seconds, a fraction.
+  CHECK(start_of(add({{"track", track}, {"at", "240@24"}})) == "10");
+  CHECK(start_of(add({{"track", track}, {"at", "12.5s"}})) == "25/2");
+  CHECK(start_of(add({{"track", track}, {"at", "20"}})) == "20");
+  // A place that is taken: past the clips in the way. 1 s is inside the first clip, and the second touches it.
+  CHECK(start_of(add({{"track", track}, {"at", "24@24"}})) == "4");
+  // Exactly touching is not in the way: 6 s is where the clip above ends.
+  CHECK(start_of(add({{"track", track}, {"at", "144@24"}})) == "6");
+  // A time that cannot be read is an error, not the end of the track.
+  auto bad = engine.call("gen.create_clip", {{"project", project}, {"prompt", ""}, {"model", atm::api::kMockModel}, {"track", track}, {"at", "soon"}});
+  CHECK_FALSE(bad);
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}

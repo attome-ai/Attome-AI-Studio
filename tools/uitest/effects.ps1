@@ -54,7 +54,8 @@ try {
   if (-not $failed) { # a blur on one clip: the title's own Blur card
     $again = Invoke-EditorScript -Project $proj -Endpoint $run.Endpoint -Script @(
       'click @clip:Title'
-      'click @button:add_blur'
+      'click @rail:Effects'
+      'drag @effect:blur @clip:Title'
       "shot $work\effects_clip_blur.jpg"
     )
     $failed = $again.Errors

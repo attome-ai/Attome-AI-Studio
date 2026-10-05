@@ -1,4 +1,4 @@
-#include "app.hpp"
+﻿#include "app.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -250,6 +250,9 @@ void App::refresh() {
           c.start = frames_of(timing, "record_in", rate_);
           c.frames = std::max<int64_t>(1, end_frame_of(timing, rate_) - c.start); // the renderer's rounding
           c.end_ceil = std::max(c.start + c.frames, end_frame_of(timing, rate_, Round::ceil));
+          c.start_floor = c.start;
+          if (const auto in = Rational::parse(timing.value("record_in", std::string("0"))))
+            c.start_floor = std::min(c.start, to_frames(*in, rate_, Round::floor).value_or(c.start));
           c.source_frames = frames_of(timing, "source_in", rate_);
           c.media_frames = frames_of(ref, "duration", rate_);
           if (cit->contains("transform")) {
@@ -462,7 +465,7 @@ void App::add_track() {
 }
 
 // Adds a text clip at the playhead on the "Titles" track (made when missing), on the first free spot.
-void App::add_title(int preset) {
+void App::add_title(int preset, const std::string &on_track, int64_t on_at) {
   struct Preset {
     const char *name, *text;
     float size, y;
@@ -472,21 +475,14 @@ void App::add_title(int preset) {
                                    {"Lower third", "Name Surname", 0.06f, 0.84f, true},
                                    {"Caption", "Caption text", 0.05f, 0.9f, false}};
   const Preset &p = presets[std::clamp(preset, 0, 2)];
-  const TrackUi *titles = nullptr;
+  const TrackUi *titles = nullptr; // the track it goes on: the one it was dropped on, else "Titles"
   for (const TrackUi &t : tracks_)
-    if (t.name == "Titles")
+    if (on_track.empty() ? t.name == "Titles" : t.id == on_track)
       titles = &t;
   const int64_t frames = std::max<int64_t>(1, std::llround(3.0 * fps()));
-  int64_t at = playhead_;
-  if (titles) { // clips on one track may not overlap: move past any title in the way
-    std::vector<const ClipUi *> sorted;
-    for (const ClipUi &c : titles->clips)
-      sorted.push_back(&c);
-    std::sort(sorted.begin(), sorted.end(), [](const ClipUi *a, const ClipUi *b) { return a->start < b->start; });
-    for (const ClipUi *c : sorted)
-      if (at < c->start + c->frames && at + frames > c->start)
-        at = c->start + c->frames;
-  }
+  int64_t at = on_at >= 0 ? on_at : playhead_;
+  if (titles) // clips on one track may not overlap: move past any in the way
+    at = free_start(*titles, at, frames, {});
   json ops = json::array();
   std::string track = titles ? titles->id : "$new:titles";
   if (!titles)
@@ -508,7 +504,7 @@ void App::add_title(int preset) {
 
 // Import goes through timeline.edit, so a video with sound becomes linked picture and sound clips, as for an agent.
 // The first video of an empty project sets the canvas.
-void App::import_files(const std::vector<std::string> &paths) {
+void App::import_files(const std::vector<std::string> &paths, const std::string &track, int64_t at) {
   if (project_path_.empty() || paths.empty())
     return;
   json ops = json::array();
@@ -539,8 +535,10 @@ void App::import_files(const std::vector<std::string> &paths) {
     json op = {{"op", "add_clip"}, {"id", "$new:c" + std::to_string(added)}, {"path", path}};
     // The selected track takes the clip when it is the right kind; otherwise timeline.edit picks one.
     for (const TrackUi &t : tracks_)
-      if (t.id == selected_track_ && (t.kind == "audio") == !has_video)
+      if (t.id == (track.empty() ? selected_track_ : track) && (t.kind == "audio") == !has_video)
         op["track"] = t.id;
+    if (at >= 0)
+      op["at"] = frames_text(at);
     ops.push_back(std::move(op));
     ++added;
   }
@@ -720,23 +718,268 @@ void App::history_step(bool undo) {
   }
 }
 
-void App::commit_drag(const TrackUi &track, const ClipUi &c, int mode, int64_t d, int target_track) {
+// ---- dragging onto the timeline ----------------------------------------------------------------------------------
+
+int64_t App::free_start(const TrackUi &track, int64_t start, int64_t length, const std::string &skip) const {
+  start = std::max<int64_t>(0, start);
+  for (bool moved = true; moved;) { // past each clip in the way, and the next one if that is in the way too
+    moved = false;
+    for (const ClipUi &o : track.clips)
+      if (o.id != skip && o.start_floor < start + length && start < o.end_ceil) {
+        start = o.end_ceil; // clips end between frames: the end rounded up is the first frame that is free
+        moved = true;
+      }
+  }
+  return start;
+}
+
+App::TrackLanding App::landing(const TrackUi &track, int64_t pointer, int64_t start, int64_t length, const std::string &skip) const {
+  std::vector<eval::Span> spans;
+  std::vector<const ClipUi *> clips;
+  for (const ClipUi &o : track.clips)
+    if (o.id != skip) {
+      spans.push_back({o.start_floor, o.end_ceil}); // clips start and end between frames: the frames they touch
+      clips.push_back(&o);
+    }
+  const eval::Landing l = eval::land(spans, pointer, start, length);
+  TrackLanding out;
+  out.start = l.start;
+  for (const auto &[index, to] : l.pushed)
+    out.pushed.emplace_back(clips[index]->id, to);
+  return out;
+}
+
+void App::show_pushes(const TrackLanding &l, std::map<std::string, int64_t> &view) const {
+  for (const auto &[id, to] : l.pushed) {
+    const ClipUi *k = find_clip(id);
+    if (!k)
+      continue;
+    view[id] = to;
+    for (const ClipUi *m : linked_of(*k)) // its sound slides with it
+      view.emplace(m->id, m->start + (to - k->start));
+  }
+}
+
+void App::push_ops(const TrackLanding &l, std::map<std::string, int64_t> moved, json &ops) const {
+  for (const auto &[id, to] : l.pushed) {
+    const ClipUi *k = find_clip(id);
+    if (!k || moved.count(id))
+      continue;
+    const int64_t delta = to - k->start;
+    moved[id] = delta;
+    ops.push_back({{"op", "replace"}, {"path", id + "/timing/record_in"}, {"value", frames_text(to)}});
+    for (const ClipUi *m : linked_of(*k)) // a picture and its sound stay together
+      if (moved.emplace(m->id, delta).second)
+        ops.push_back({{"op", "replace"}, {"path", m->id + "/timing/record_in"}, {"value", frames_text(m->start + delta)}});
+  }
+  // A dissolve sits on a cut: it goes when its two clips no longer move together.
+  std::set<std::string> gone;
+  for (const json &op : ops)
+    if (op.value("op", "") == "remove")
+      gone.insert(op.value("path", ""));
+  const auto delta_of = [&](const std::string &id) {
+    const auto it = moved.find(id);
+    return it == moved.end() ? int64_t(0) : it->second;
+  };
+  for (const TrackUi &t : tracks_)
+    for (const TransitionUi &tr : t.transitions)
+      if (delta_of(tr.from) != delta_of(tr.to) && gone.insert(tr.id).second)
+        ops.push_back({{"op", "remove"}, {"path", tr.id}});
+}
+
+int64_t App::snap_frame(int64_t start, int64_t length, const std::string &skip) {
+  start = std::max<int64_t>(0, start);
+  if (ImGui::GetIO().KeyAlt)
+    return start;
+  const ClipUi *moved = skip.empty() ? nullptr : find_clip(skip);
+  const int64_t reach = std::max<int64_t>(1, std::llround(8.0 / double(pps_) * fps())); // 8 pixels
+  int64_t best = reach + 1, out = start, line = -1;
+  const auto consider = [&](int64_t edge) {
+    if (const int64_t d = std::llabs(edge - start); d < best) { // the clip's start on the edge
+      best = d;
+      out = edge;
+      line = edge;
+    }
+    if (const int64_t d = std::llabs(edge - (start + length)); d < best && edge - length >= 0) { // or its end
+      best = d;
+      out = edge - length;
+      line = edge;
+    }
+  };
+  consider(0);
+  consider(playhead_);
+  for (const TrackUi &t : tracks_)
+    for (const ClipUi &c : t.clips) {
+      if (c.id == skip || (moved && !moved->link_group.empty() && c.link_group == moved->link_group))
+        continue; // its own linked sound still sits where the clip came from
+      consider(c.start);
+      consider(c.end_ceil);
+    }
+  if (line >= 0)
+    snap_at_ = line;
+  return out;
+}
+
+const json &App::media_info(const std::string &path) {
+  const auto it = media_info_.find(path);
+  if (it != media_info_.end())
+    return it->second;
+  json info = json::object();
+  RpcError error;
+  client_.call("media.probe", {{"path", path}}, info, error); // a file that cannot be read stays an empty object
+  return media_info_[path] = std::move(info);
+}
+
+App::DropPlan App::plan_drop(const std::string &payload, int row, int64_t frame) {
+  DropPlan p;
+  const size_t colon = payload.find(':');
+  p.kind = payload.substr(0, colon);
+  p.id = colon == std::string::npos ? std::string() : payload.substr(colon + 1);
+  const int rows = int(tracks_.size());
+  p.row = std::clamp(row, 0, rows);
+  const TrackUi *track = p.row < rows ? &tracks_[size_t(p.row)] : nullptr;
+  frame = std::max<int64_t>(0, frame);
+  const int64_t three_seconds = std::max<int64_t>(1, std::llround(3.0 * fps()));
+  if (p.kind == "fx") {
+    const eval::EffectDef *def = eval::find_effect(p.id);
+    if (!def)
+      return p;
+    p.label = def->title;
+    if (track && track->kind == "audio") {
+      p.why = "An effect changes a picture. Drop it on a picture clip.";
+      return p;
+    }
+    if (track) // on a clip: the effect goes on that clip alone
+      for (const ClipUi &c : track->clips)
+        if (frame >= c.start && frame < c.start + c.frames) {
+          p.clip = c.id;
+          p.start = c.start;
+          p.frames = c.frames;
+          p.valid = std::none_of(c.effects.begin(), c.effects.end(), [&](const EffectUi &e) { return e.kind == def->id; });
+          if (!p.valid)
+            p.why = std::string(def->title) + " is already on this clip.";
+          return p;
+        }
+    if (def->clip_only) {
+      p.why = std::string(def->title) + " works on one clip. Drop it on a clip.";
+      return p;
+    }
+    p.frames = three_seconds; // on empty track space: an adjustment layer there
+    p.label += " layer";
+  } else if (p.kind == "title") {
+    static const char *const names[] = {"Title", "Lower third", "Caption"};
+    p.label = names[std::clamp(std::atoi(p.id.c_str()), 0, 2)];
+    p.frames = three_seconds;
+  } else if (p.kind == "gen") {
+    p.label = "Shot";
+    p.frames = std::max<int64_t>(1, std::llround(double(std::round(gen_seconds_ * 2.0f) / 2.0f) * fps()));
+  } else if (p.kind == "media") {
+    const json &info = media_info(p.id);
+    p.label = file_name(p.id);
+    p.sound = !info.value("has_video", false);
+    if (p.sound && !info.value("has_audio", false)) {
+      p.why = "This file cannot be read.";
+      return p;
+    }
+    const auto length = Rational::parse(info.value("duration", std::string("0")));
+    p.frames = info.value("image", false) || !length ? std::llround(5.0 * fps()) : to_frames(*length, rate_, Round::ceil).value_or(0);
+    p.frames = std::max<int64_t>(1, p.frames);
+  } else {
+    return p;
+  }
+  if (track && (track->kind == "audio") != p.sound) {
+    p.why = p.sound ? "Sound goes on an audio track." : "A picture goes on a video track.";
+    return p;
+  }
+  p.start = snap_frame(frame, p.frames, {});
+  if (track && (p.kind == "title" || p.kind == "fx")) {
+    // A title or an adjustment layer belongs over the picture at that moment, not after it: when the place is taken it
+    // goes on the next track above that is free there, or on a new one.
+    while (p.row < rows && (tracks_[size_t(p.row)].kind == "audio" || free_start(tracks_[size_t(p.row)], p.start, p.frames, {}) != p.start))
+      ++p.row;
+  } else if (track) {
+    const int64_t asked = p.start;
+    const TrackLanding l = landing(*track, asked, asked, p.frames, {}); // a card is held by its start: the pointer is there
+    p.start = l.start;
+    p.pushed = l.pushed;
+    if (p.kind == "media" && !p.sound && media_info(p.id).value("has_audio", false)) {
+      // Its sound goes on an audio track at the same time. When sound that is not sliding along is in the way there, the
+      // clip goes to the first place that is free on both tracks instead, and nothing is pushed.
+      std::map<std::string, int64_t> sliding;
+      show_pushes(l, sliding);
+      for (const TrackUi &t : tracks_)
+        if (t.kind == "audio") {
+          const bool blocked = std::any_of(t.clips.begin(), t.clips.end(), [&](const ClipUi &o) {
+            const auto it = sliding.find(o.id);
+            const int64_t shift = it == sliding.end() ? 0 : it->second - o.start;
+            return o.start_floor + shift < p.start + p.frames && p.start < o.end_ceil + shift;
+          });
+          if (blocked) {
+            p.pushed.clear();
+            p.start = asked;
+            for (int64_t before = -1; before != p.start;) {
+              before = p.start;
+              p.start = free_start(t, free_start(*track, p.start, p.frames, {}), p.frames, {});
+            }
+          }
+          break;
+        }
+    }
+    if (p.start != asked)
+      snap_at_ = -1; // it lands beside a clip, not on the edge it caught
+  }
+  p.valid = true;
+  return p;
+}
+
+void App::commit_drop(const DropPlan &p) {
+  const eval::EffectDef *def = p.kind == "fx" ? eval::find_effect(p.id) : nullptr;
+  if (def && !p.clip.empty())
+    return add_clip_effect(p.clip, *def);
+  std::string track = size_t(p.row) < tracks_.size() ? tracks_[size_t(p.row)].id : std::string();
+  if (track.empty()) { // below the last track: a new one
+    size_t same = 0;
+    for (const TrackUi &t : tracks_)
+      same += (t.kind == "audio") == p.sound ? 1 : 0;
+    json ids;
+    if (!patch(json::array({{{"op", "add"},
+                             {"path", seq_id_ + "/tracks/$new:t"},
+                             {"value", {{"kind", p.sound ? "audio" : "video"}, {"name", (p.sound ? "A" : "V") + std::to_string(same + 1)}}}}}),
+               "Add track", &ids))
+      return;
+    track = ids.value("$new:t", "");
+  }
+  if (!p.pushed.empty()) { // the clips in the way slide right first
+    json ops = json::array();
+    TrackLanding l;
+    l.start = p.start;
+    l.pushed = p.pushed;
+    push_ops(l, {}, ops);
+    if (!ops.empty() && !patch(std::move(ops), "Make room"))
+      return;
+  }
+  if (p.kind == "gen") {
+    add_generative_clip(p.id, track, p.start);
+  } else if (p.kind == "title") {
+    add_title(std::atoi(p.id.c_str()), track, p.start);
+  } else if (p.kind == "media") {
+    import_files({p.id}, track, p.start);
+  } else if (def && def->file_param[0] != 0) { // the layer is made when the file is chosen
+    lut_drop_track_ = track;
+    lut_drop_at_ = p.start;
+    ask_lut("");
+  } else if (def) {
+    add_adjustment(*def, {}, track, p.start);
+  }
+}
+
+void App::commit_drag(const TrackUi &track, const ClipUi &c, int mode, int64_t d, int target_track, const TrackLanding &land) {
   json ops = json::array();
   const char *label = "Move clip";
   if (mode == 1) {
     const TrackUi &to = tracks_[size_t(std::clamp(target_track, 0, int(tracks_.size()) - 1))];
-    // Dropped on top of another clip of the track: it goes to the nearest free space on the right, after that clip,
-    // instead of the move being refused and the clip springing back.
-    int64_t start = std::max<int64_t>(0, c.start + d);
-    const int64_t length = std::max(c.frames, c.end_ceil - c.start); // the clip's own end rounded up too
-    for (bool moved = true; moved;) {
-      moved = false;
-      for (const ClipUi &o : to.clips)
-        if (o.id != c.id && o.start < start + length && start < o.end_ceil) {
-          start = o.end_ceil;
-          moved = true;
-        }
-    }
+    // Where the drag showed it landing; the clips it showed sliding right are moved with it, in the same edit.
+    const int64_t start = land.start;
     d = start - c.start; // linked clips follow by the same distance
     if (to.id != track.id)
       ops.push_back({{"op", "move"}, {"path", c.id}, {"to", to.id + "/clips"}});
@@ -758,7 +1001,7 @@ void App::commit_drag(const TrackUi &track, const ClipUi &c, int mode, int64_t d
       ops.push_back({{"op", "replace"}, {"path", c.id + "/timing/source_in"}, {"value", frames_text(c.source_frames + d)}});
     }
   }
-  if (ops.empty())
+  if (ops.empty() && (mode != 1 || land.pushed.empty()))
     return;
   if (mode != 1 && !c.opacity_keys.empty() && c.fades_only) { // fades stay at the clip's ends
     int64_t frames = c.frames;
@@ -791,6 +1034,12 @@ void App::commit_drag(const TrackUi &track, const ClipUi &c, int mode, int64_t d
       ops.push_back({{"op", "replace"}, {"path", m->id + "/timing/source_in"}, {"value", frames_text(m->source_frames + d)}});
     }
     drop_transitions(m->id, ops);
+  }
+  if (mode == 1) {
+    std::map<std::string, int64_t> moved = {{c.id, d}};
+    for (const ClipUi *m : linked_of(c))
+      moved[m->id] = d;
+    push_ops(land, std::move(moved), ops);
   }
   patch(std::move(ops), linked_of(c).empty() ? label : (std::string(label) + " (linked)").c_str());
 }
@@ -887,7 +1136,7 @@ void App::take_dialog_results() {
     const eval::EffectDef *def = eval::find_effect("lut");
     const std::string target = lut_target_;
     if (def && target.empty())
-      add_adjustment(*def, lut);
+      add_adjustment(*def, lut, std::exchange(lut_drop_track_, {}), std::exchange(lut_drop_at_, -1));
     else if (def && target.rfind("fx_", 0) == 0)
       patch(json::array({{{"op", "replace"}, {"path", target + "/params/" + def->file_param}, {"value", lut}}}), "Change LUT file");
     else if (def)
@@ -1123,6 +1372,101 @@ void section_label(const char *text) {
   ImGui::PushFont(g_fonts.bold, 11.0f);
   ImGui::TextColored(hexv(look::fg3), "%s", text);
   ImGui::PopFont();
+}
+
+// ---- gallery tiles: the cards of the Text, Effects and Generate panels ---------------------------------------------------
+// Square tiles in as many columns as the panel is wide: a preview that fills the tile, the name on a dark strip at the
+// bottom, a badge in the corner when something must be downloaded first, and the longer description as a tooltip.
+struct TileGrid {
+  float size = 92.0f, gap = 8.0f;
+  int cols = 3, n = 0;
+};
+
+TileGrid tile_grid(float wanted = 80.0f) {
+  TileGrid g;
+  const float w = ImGui::GetContentRegionAvail().x;
+  g.cols = std::max(2, int((w + g.gap) / (wanted + g.gap)));
+  g.size = (w - g.gap * float(g.cols - 1)) / float(g.cols);
+  return g;
+}
+
+struct Tile {
+  std::string id;      // ImGui ID of the tile
+  std::string mark;    // the UI test mark, "" for none
+  std::string label;   // on the tile
+  std::string tip;     // on hover: what it is
+  uint32_t base = look::panel2;
+  bool download = false;                                  // a badge: it has to be downloaded before it can be used
+  std::function<void(ImDrawList *, ImVec2, ImVec2)> art;  // draws the preview inside the tile's rectangle
+  std::string payload;                                    // "<kind>:<id>": what the tile carries when it is dragged
+};
+
+// Makes the item just drawn a card that can be dragged onto the timeline, carrying "<kind>:<id>" (see App::DropPlan).
+// True when it was clicked instead: pressed and let go without a drag.
+bool card_source(const std::string &payload, const char *label) {
+  static bool dragged = false;
+  if (ImGui::IsItemActivated())
+    dragged = false;
+  if (!payload.empty() && ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
+    dragged = true;
+    ImGui::SetDragDropPayload("ATM_CARD", payload.c_str(), payload.size() + 1);
+    ImGui::TextUnformatted(label);
+    ImGui::EndDragDropSource();
+  }
+  return ImGui::IsItemDeactivated() && ImGui::IsItemHovered() && !dragged;
+}
+
+// Draws one tile in the next free cell of the grid. True when it was clicked (a press that became a drag is not a click).
+bool gallery_tile(TileGrid &g, const Tile &t) {
+  if (g.n % g.cols != 0)
+    ImGui::SameLine(0.0f, g.gap);
+  ++g.n;
+  const ImVec2 p = ImGui::GetCursorScreenPos(), q(p.x + g.size, p.y + g.size);
+  ImGui::InvisibleButton(("##tile_" + t.id).c_str(), ImVec2(g.size, g.size));
+  if (!t.mark.empty())
+    ui_mark(t.mark);
+  const bool hovered = ImGui::IsItemHovered();
+  const bool clicked = card_source(t.payload, t.label.c_str());
+  ImDrawList *dl = ImGui::GetWindowDrawList();
+  constexpr float kRound = 10.0f;
+  dl->AddRectFilled(p, q, hex(t.base), kRound);
+  dl->PushClipRect(p, q, true);
+  if (t.art)
+    t.art(dl, p, q);
+  dl->PopClipRect();
+  // The name: on a dark strip over the bottom of the preview, cut with ".." when it does not fit.
+  ImGui::PushFont(g_fonts.bold, 12.0f);
+  std::string label = t.label;
+  const float room = g.size - 12.0f;
+  while (label.size() > 2 && ImGui::CalcTextSize(label.c_str()).x > room)
+    label = label.substr(0, label.size() - 1);
+  if (label != t.label)
+    label = label.substr(0, std::max<size_t>(1, label.size() - 1)) + "..";
+  const float strip = 24.0f;
+  dl->AddRectFilled(ImVec2(p.x, q.y - strip), q, IM_COL32(8, 10, 16, 190), kRound, ImDrawFlags_RoundCornersBottom);
+  dl->AddText(ImVec2(p.x + (g.size - ImGui::CalcTextSize(label.c_str()).x) * 0.5f, q.y - strip + 5.0f), hex(look::fg), label.c_str());
+  ImGui::PopFont();
+  if (t.download) { // a round badge with a down arrow, top right
+    const ImVec2 c(q.x - 14.0f, p.y + 14.0f);
+    dl->AddCircleFilled(c, 10.0f, IM_COL32(8, 10, 16, 200));
+    dl->AddLine(ImVec2(c.x, c.y - 5.0f), ImVec2(c.x, c.y + 4.0f), hex(look::fg), 1.6f);
+    dl->AddLine(ImVec2(c.x - 4.0f, c.y), ImVec2(c.x, c.y + 4.5f), hex(look::fg), 1.6f);
+    dl->AddLine(ImVec2(c.x + 4.0f, c.y), ImVec2(c.x, c.y + 4.5f), hex(look::fg), 1.6f);
+  }
+  if (hovered)
+    dl->AddRectFilled(p, q, IM_COL32(255, 255, 255, 14), kRound);
+  dl->AddRect(p, q, hex(hovered ? look::accent : look::line), kRound, 0, hovered ? 2.0f : 1.0f);
+  if (hovered && !ImGui::IsMouseDown(0) && !t.tip.empty()) {
+    ImGui::BeginTooltip();
+    ImGui::PushFont(g_fonts.bold, 13.0f);
+    ImGui::TextUnformatted(t.label.c_str());
+    ImGui::PopFont();
+    ImGui::PushTextWrapPos(280.0f);
+    ImGui::TextColored(hexv(look::fg2), "%s", t.tip.c_str());
+    ImGui::PopTextWrapPos();
+    ImGui::EndTooltip();
+  }
+  return clicked;
 }
 
 // The keyframe diamond of a parameter row. state: 0 not animated, 1 animated, 2 there is a key at the playhead.
@@ -1533,6 +1877,7 @@ void App::draw_media() {
     ImGui::InvisibleButton("##m", ImVec2(cell, thumb_h + 24.0f));
     ui_mark("media:" + name);
     const bool hovered = ImGui::IsItemHovered();
+    const bool media_clicked = card_source("media:" + path, name.c_str());
     ImDrawList *dl = ImGui::GetWindowDrawList();
     const auto tex = thumb_tex_.find(path);
     dl->AddRectFilled(p, ImVec2(p.x + cell, p.y + thumb_h), hex(look::bg), 8.0f);
@@ -1558,10 +1903,10 @@ void App::draw_media() {
     dl->PushClipRect(ImVec2(p.x, p.y + thumb_h), ImVec2(p.x + cell, p.y + thumb_h + 24.0f), true);
     dl->AddText(ImVec2(p.x + 2.0f, p.y + thumb_h + 4.0f), hex(look::fg2), name.c_str());
     dl->PopClipRect();
-    if (hovered)
-      ImGui::SetTooltip("Click to add to the timeline");
-    if (ImGui::IsItemClicked())
-      import_files({path});
+    if (media_clicked)
+      pending_ = [this, path] { import_files({path}); };
+    if (hovered && !ImGui::IsMouseDown(0))
+      ImGui::SetTooltip("Drag it onto the timeline, or click to add it at the end");
     ImGui::PopID();
     ImGui::EndGroup();
     column = (column + 1) % 2;
@@ -1582,7 +1927,7 @@ void App::draw_text_panel() {
   ImGui::PopFont();
   ImGui::Spacing();
   ImGui::PushTextWrapPos(0.0f);
-  ImGui::TextColored(hexv(look::fg3), "Click a style to add it at the playhead. Edit the words, size and colour in the Inspector; Arabic and other right-to-left text work.");
+  ImGui::TextColored(hexv(look::fg3), "Drag a style onto the timeline, or click it to add it at the playhead. Edit the words, size and colour in the Inspector; Arabic and other right-to-left text work.");
   ImGui::PopTextWrapPos();
   ImGui::Spacing();
   section_label("TITLES");
@@ -1595,28 +1940,32 @@ void App::draw_text_panel() {
   static const Style styles[] = {{"Title", "Your title", "Large, centred", 30.0f, true},
                                  {"Lower third", "Name Surname", "Near the bottom", 20.0f, true},
                                  {"Caption", "Caption text", "Small, bottom", 16.0f, false}};
+  TileGrid grid = tile_grid();
   for (int i = 0; i < 3; ++i) {
-    const ImVec2 p = ImGui::GetCursorScreenPos();
-    ImGui::PushID(i);
-    ImGui::InvisibleButton("##style", ImVec2(-1.0f, 78.0f));
-    ui_mark(std::string("style:") + styles[i].name);
-    const bool hovered = ImGui::IsItemHovered();
-    if (ImGui::IsItemClicked())
+    const Style st = styles[i];
+    Tile t;
+    t.id = std::string("style_") + st.name;
+    t.mark = std::string("style:") + st.name;
+    t.label = st.name;
+    t.tip = std::string(st.hint) + ". Drag it onto the timeline, or click to add it at the playhead.";
+    t.payload = "title:" + std::to_string(i);
+    t.base = 0x1b2536;
+    t.art = [st](ImDrawList *dl, ImVec2 p, ImVec2 q) {
+      // a stand-in picture for the words to sit on: sky over a darker ground
+      const float h = q.y - p.y;
+      dl->AddRectFilled(p, ImVec2(q.x, p.y + h * 0.4f), IM_COL32(64, 98, 150, 255), 10.0f, ImDrawFlags_RoundCornersTop);
+      dl->AddRectFilled(ImVec2(p.x, p.y + h * 0.4f), ImVec2(q.x, p.y + h * 0.7f), IM_COL32(40, 62, 100, 255));
+      dl->AddRectFilled(ImVec2(p.x, p.y + h * 0.7f), q, IM_COL32(22, 30, 48, 255), 10.0f, ImDrawFlags_RoundCornersBottom);
+      ImGui::PushFont(st.bold ? g_fonts.bold : g_fonts.ui, st.size * 0.8f * (q.x - p.x) / 133.0f); // 133 px: the tile of a two-column panel
+      const ImVec2 ss = ImGui::CalcTextSize(st.sample);
+      const bool low = std::string(st.name) != "Title"; // lower third and caption sit near the bottom
+      dl->AddText(ImVec2(p.x + (q.x - p.x - ss.x) * 0.5f, p.y + (low ? h * 0.46f : h * 0.30f)), IM_COL32(255, 255, 255, 255), st.sample);
+      ImGui::PopFont();
+    };
+    if (gallery_tile(grid, t))
       add_title(i);
-    ImGui::PopID();
-    const ImVec2 q(p.x + ImGui::GetItemRectSize().x, p.y + 78.0f);
-    ImDrawList *dl = ImGui::GetWindowDrawList();
-    dl->AddRectFilled(p, q, hex(hovered ? look::panel2 : look::bg), 12.0f);
-    dl->AddRect(p, q, hex(hovered ? look::accent : look::line), 12.0f, 0, 1.2f);
-    ImGui::PushFont(styles[i].bold ? g_fonts.bold : g_fonts.ui, styles[i].size);
-    const ImVec2 ss = text_size(styles[i].sample);
-    dl->AddText(ImVec2(p.x + (q.x - p.x - ss.x) * 0.5f, p.y + 12.0f), hex(look::fg), styles[i].sample);
-    ImGui::PopFont();
-    const float label_w = text_size(styles[i].name).x;
-    dl->AddText(ImVec2(p.x + 12.0f, q.y - 22.0f), hex(look::fg2), styles[i].name);
-    dl->AddText(ImVec2(p.x + 20.0f + label_w, q.y - 22.0f), hex(look::fg3), styles[i].hint);
-    ImGui::Dummy(ImVec2(0, 4.0f));
   }
+  ImGui::Dummy(ImVec2(0, 4.0f));
 }
 
 namespace {
@@ -1758,66 +2107,77 @@ void App::draw_effects_panel() {
   ImGui::PopFont();
   ImGui::Spacing();
   ImGui::PushTextWrapPos(0.0f);
-  ImGui::TextColored(hexv(look::fg3), "An effect goes on an adjustment layer: it changes every track below it while it "
-                                      "plays. Fade it in or out with its Fade card.");
+  ImGui::TextColored(hexv(look::fg3), "Drag an effect onto a clip to change that clip alone, or onto empty track space for an adjustment layer: it changes every track below it while it plays.");
   ImGui::PopTextWrapPos();
   ImGui::Spacing();
-  section_label("ADJUSTMENT LAYERS");
+  section_label("EFFECTS");
   ImGui::Spacing();
   static const std::pair<const char *, const char *> kBlurb[] = {
       {"blur", "Softens everything below"}, {"grade", "Brightness, contrast and colour"}, {"vignette", "Darkens the corners"},
       {"sharpen", "Crisper edges"}, {"grain", "Film grain, new every frame"},
       {"lut", "A look from a .cube file"}};
+  TileGrid grid = tile_grid();
   for (const eval::EffectDef &def : eval::effect_defs()) {
-    if (def.clip_only)
-      continue; // not for an adjustment layer: it is on the clip's own card
     const std::string name = def.short_name();
-    const ImVec2 p = ImGui::GetCursorScreenPos();
-    ImGui::InvisibleButton(("##fx_" + name).c_str(), ImVec2(-1.0f, 78.0f));
-    ui_mark("effect:" + name);
-    const bool hovered = ImGui::IsItemHovered();
-    if (ImGui::IsItemClicked()) {
-      if (def.file_param[0] != '\0')
-        ask_lut(""); // the layer is made when the file is chosen
-      else
-        add_adjustment(def);
-    }
-    const ImVec2 q(p.x + ImGui::GetItemRectSize().x, p.y + 78.0f);
-    const ImVec2 c((p.x + q.x) * 0.5f, p.y + 30.0f);
-    ImDrawList *dl = ImGui::GetWindowDrawList();
-    dl->AddRectFilled(p, q, hex(hovered ? look::panel2 : look::bg), 12.0f);
-    dl->AddRect(p, q, hex(hovered ? look::accent : look::line), 12.0f, 0, 1.2f);
-    if (name == "blur") { // soft rings
-      for (int i = 0; i < 5; ++i)
-        dl->AddCircle(c, 6.0f + float(i) * 4.0f, hex(look::adj, 200 - i * 40), 0, 2.0f);
-    } else if (name == "grade") { // three overlapping colour discs
-      dl->AddCircleFilled(ImVec2(c.x - 9.0f, c.y + 5.0f), 15.0f, IM_COL32(230, 70, 70, 130));
-      dl->AddCircleFilled(ImVec2(c.x + 9.0f, c.y + 5.0f), 15.0f, IM_COL32(70, 200, 110, 130));
-      dl->AddCircleFilled(ImVec2(c.x, c.y - 10.0f), 15.0f, IM_COL32(80, 130, 240, 130));
-    } else if (name == "sharpen") { // an edge that overshoots on both sides: the profile of a sharpened step
-      const ImVec2 edge[6] = {ImVec2(c.x - 34.0f, c.y + 10.0f), ImVec2(c.x - 9.0f, c.y + 10.0f), ImVec2(c.x - 7.0f, c.y + 16.0f),
-                              ImVec2(c.x - 5.0f, c.y - 16.0f), ImVec2(c.x - 3.0f, c.y - 10.0f), ImVec2(c.x + 34.0f, c.y - 10.0f)};
-      dl->AddPolyline(edge, 6, hex(look::adj), 0, 2.2f);
-    } else if (name == "lut") { // a strip of graded colour: the table's cube, flattened
-      for (int i = 0; i < 6; ++i)
-        dl->AddRectFilled(ImVec2(c.x - 36.0f + float(i) * 12.0f, c.y - 14.0f), ImVec2(c.x - 25.0f + float(i) * 12.0f, c.y + 14.0f),
-                          IM_COL32(60 + i * 30, 170 - i * 20, 220 - i * 32, 200), 3.0f);
-    } else if (name == "grain") { // scattered specks
-      for (int i = 0; i < 70; ++i)
-        dl->AddRectFilled(ImVec2(c.x - 34.0f + std::fmod(float(i) * 37.3f, 68.0f), c.y - 22.0f + std::fmod(float(i) * 53.7f, 44.0f)),
-                          ImVec2(c.x - 33.0f + std::fmod(float(i) * 37.3f, 68.0f), c.y - 21.0f + std::fmod(float(i) * 53.7f, 44.0f)),
-                          hex(look::adj, 90 + (i * 53) % 150));
-    } else { // vignette: a frame whose edges fade to dark
-      for (int i = 0; i < 5; ++i)
-        dl->AddRect(ImVec2(c.x - 30.0f + float(i) * 3.0f, c.y - 20.0f + float(i) * 2.0f),
-                    ImVec2(c.x + 30.0f - float(i) * 3.0f, c.y + 20.0f - float(i) * 2.0f), hex(look::adj, 60 + i * 40), 8.0f, 0, 2.0f);
-    }
-    dl->AddText(ImVec2(p.x + 12.0f, q.y - 22.0f), hex(look::fg2), def.title);
+    Tile t;
+    t.id = "fx_" + name;
+    t.mark = "effect:" + name;
+    t.label = def.title;
     for (const auto &[blurb_name, blurb] : kBlurb)
       if (name == blurb_name)
-        dl->AddText(ImVec2(p.x + 20.0f + text_size(def.title).x, q.y - 22.0f), hex(look::fg3), blurb);
-    ImGui::Dummy(ImVec2(0.0f, 4.0f));
+        t.tip = std::string(blurb) + (def.clip_only ? ". Drag it onto a clip." : ". Drag it onto a clip, or onto empty track space for an adjustment layer. Click adds one at the playhead.");
+    t.payload = std::string("fx:") + def.id;
+    t.base = 0x141824;
+    t.art = [name](ImDrawList *dl, ImVec2 p, ImVec2 q) {
+      const ImVec2 c((p.x + q.x) * 0.5f, p.y + (q.y - p.y) * 0.42f);
+      if (name == "blur") { // soft rings
+        for (int i = 0; i < 5; ++i)
+          dl->AddCircle(c, 5.0f + float(i) * 4.0f, hex(look::adj, 200 - i * 40), 0, 2.0f);
+      } else if (name == "grade") { // three overlapping colour discs
+        dl->AddCircleFilled(ImVec2(c.x - 9.0f, c.y + 5.0f), 15.0f, IM_COL32(230, 70, 70, 130));
+        dl->AddCircleFilled(ImVec2(c.x + 9.0f, c.y + 5.0f), 15.0f, IM_COL32(70, 200, 110, 130));
+        dl->AddCircleFilled(ImVec2(c.x, c.y - 10.0f), 15.0f, IM_COL32(80, 130, 240, 130));
+      } else if (name == "sharpen") { // an edge that overshoots on both sides: the profile of a sharpened step
+        const ImVec2 edge[6] = {ImVec2(c.x - 30.0f, c.y + 10.0f), ImVec2(c.x - 8.0f, c.y + 10.0f), ImVec2(c.x - 6.0f, c.y + 16.0f),
+                                ImVec2(c.x - 4.0f, c.y - 16.0f), ImVec2(c.x - 2.0f, c.y - 10.0f), ImVec2(c.x + 30.0f, c.y - 10.0f)};
+        dl->AddPolyline(edge, 6, hex(look::adj), 0, 2.2f);
+      } else if (name == "lut") { // a strip of graded colour: the table's cube, flattened
+        for (int i = 0; i < 6; ++i)
+          dl->AddRectFilled(ImVec2(c.x - 33.0f + float(i) * 11.0f, c.y - 14.0f), ImVec2(c.x - 23.0f + float(i) * 11.0f, c.y + 14.0f),
+                            IM_COL32(60 + i * 30, 170 - i * 20, 220 - i * 32, 200), 3.0f);
+      } else if (name == "grain") { // scattered specks
+        for (int i = 0; i < 70; ++i)
+          dl->AddRectFilled(ImVec2(c.x - 30.0f + std::fmod(float(i) * 37.3f, 60.0f), c.y - 22.0f + std::fmod(float(i) * 53.7f, 44.0f)),
+                            ImVec2(c.x - 29.0f + std::fmod(float(i) * 37.3f, 60.0f), c.y - 21.0f + std::fmod(float(i) * 53.7f, 44.0f)),
+                            hex(look::adj, 90 + (i * 53) % 150));
+      } else if (name == "key") { // a green screen with a person-shaped hole cut out of it
+        dl->AddRectFilled(ImVec2(c.x - 30.0f, c.y - 20.0f), ImVec2(c.x + 30.0f, c.y + 20.0f), IM_COL32(40, 180, 90, 200), 6.0f);
+        dl->AddCircleFilled(ImVec2(c.x, c.y - 6.0f), 7.0f, IM_COL32(20, 24, 36, 255));
+        dl->AddRectFilled(ImVec2(c.x - 11.0f, c.y + 3.0f), ImVec2(c.x + 11.0f, c.y + 20.0f), IM_COL32(20, 24, 36, 255), 5.0f, ImDrawFlags_RoundCornersTop);
+      } else if (name == "luma") { // brightness steps, the dark ones cut away
+        for (int i = 0; i < 6; ++i)
+          dl->AddRectFilled(ImVec2(c.x - 33.0f + float(i) * 11.0f, c.y - 18.0f), ImVec2(c.x - 23.0f + float(i) * 11.0f, c.y + 18.0f),
+                            i < 2 ? IM_COL32(255, 255, 255, 25) : IM_COL32(60 + i * 36, 60 + i * 36, 60 + i * 36, 255), 3.0f);
+      } else { // vignette: a frame whose edges fade to dark
+        for (int i = 0; i < 5; ++i)
+          dl->AddRect(ImVec2(c.x - 28.0f + float(i) * 3.0f, c.y - 20.0f + float(i) * 2.0f),
+                      ImVec2(c.x + 28.0f - float(i) * 3.0f, c.y + 20.0f - float(i) * 2.0f), hex(look::adj, 60 + i * 40), 8.0f, 0, 2.0f);
+      }
+    };
+    if (gallery_tile(grid, t)) {
+      if (def.clip_only) { // only a clip has one: the selected clip
+        if (selected_clip_.empty())
+          say("Drag " + std::string(def.title) + " onto a clip.", true);
+        else
+          add_clip_effect(selected_clip_, def);
+      } else if (def.file_param[0] != 0) {
+        ask_lut(""); // the layer is made when the file is chosen
+      } else {
+        add_adjustment(def);
+      }
+    }
   }
+  ImGui::Dummy(ImVec2(0, 4.0f));
 }
 
 // Makes a generative clip with `model`: at `at` frames on `track` when given (a card dropped on the timeline), else at the
@@ -1869,54 +2229,47 @@ void App::draw_generate_panel() {
   for (const std::string &type : types) {
     section_label(type_title(type).c_str());
     ImGui::Spacing();
-    std::string family = "";
+    std::string family = "\x01";
+    TileGrid grid = tile_grid();
     for (const json &m : gen_models_) {
       if (m.value("clip_type", "video") != type)
         continue;
       if (const std::string f = m.value("family", ""); f != family) {
         family = f;
-        if (!f.empty())
+        if (!f.empty()) {
+          ImGui::Dummy(ImVec2(0, 2.0f));
           section_label(f.c_str());
+          ImGui::Spacing();
+          grid.n = 0;
+        }
       }
       const std::string id = m.value("id", "");
-      const bool ready = m.value("ready", false);
-      const ImVec2 p = ImGui::GetCursorScreenPos();
-      ImGui::InvisibleButton(("##genmodel_" + id).c_str(), ImVec2(-1.0f, 96.0f));
-      ui_mark("model:" + id);
-      const bool hovered = ImGui::IsItemHovered();
-      static bool dragged = false; // a press that became a drag is not a click
-      if (ImGui::IsItemActivated())
-        dragged = false;
-      if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
-        dragged = true;
-        ImGui::SetDragDropPayload("ATM_GEN_MODEL", id.c_str(), id.size() + 1);
-        ImGui::TextUnformatted(m.value("title", id).c_str());
-        ImGui::EndDragDropSource();
-      }
-      if (ImGui::IsItemDeactivated() && hovered && !dragged)
+      const std::string title = m.value("title", id);
+      Tile t;
+      t.id = "gen_" + id;
+      t.mark = "model:" + id;
+      t.label = title.substr(0, title.find(':')); // "MiniMax H3: text and image to video..." -> "MiniMax H3"
+      t.base = 0x182321;
+      t.download = !m.value("installed", false);
+      t.tip = title + (!m.value("installed", false) ? "\nNot installed. Download it in the Models panel."
+                       : !m.value("engine", false)  ? "\nNothing runs it yet. Set ComfyUI in the Models panel."
+                                                    : "\nReady.") +
+              "\nDrag it onto the timeline, or click to add it at the end.";
+      t.payload = "gen:" + id;
+      t.art = [type](ImDrawList *dl, ImVec2 p, ImVec2 q) {
+        const ImVec2 c((p.x + q.x) * 0.5f, p.y + (q.y - p.y) * 0.42f);
+        dl->AddRect(ImVec2(c.x - 26.0f, c.y - 18.0f), ImVec2(c.x + 26.0f, c.y + 18.0f), hex(look::gen), 6.0f, 0, 2.2f);
+        if (type == "video") { // a frame with a play triangle
+          dl->AddTriangleFilled(ImVec2(c.x - 6.0f, c.y - 9.0f), ImVec2(c.x - 6.0f, c.y + 9.0f), ImVec2(c.x + 10.0f, c.y), hex(look::gen));
+        } else { // a picture: sun and hills
+          dl->AddCircleFilled(ImVec2(c.x + 12.0f, c.y - 7.0f), 4.5f, hex(look::gen));
+          dl->AddTriangleFilled(ImVec2(c.x - 21.0f, c.y + 14.0f), ImVec2(c.x - 7.0f, c.y - 3.0f), ImVec2(c.x + 5.0f, c.y + 14.0f), hex(look::gen));
+        }
+      };
+      if (gallery_tile(grid, t))
         pending_ = [this, id] { add_generative_clip(id); };
-      const ImVec2 q(p.x + ImGui::GetItemRectSize().x, p.y + 96.0f);
-      const ImVec2 c((p.x + q.x) * 0.5f, p.y + 34.0f);
-      ImDrawList *dl = ImGui::GetWindowDrawList();
-      dl->AddRectFilled(p, q, hex(hovered ? look::panel2 : look::bg), 12.0f);
-      dl->AddRect(p, q, hex(hovered ? look::accent : look::line), 12.0f, 0, 1.2f);
-      if (type == "video") { // a frame with a play triangle
-        dl->AddRect(ImVec2(c.x - 30.0f, c.y - 20.0f), ImVec2(c.x + 30.0f, c.y + 20.0f), hex(look::gen), 6.0f, 0, 2.2f);
-        dl->AddTriangleFilled(ImVec2(c.x - 7.0f, c.y - 10.0f), ImVec2(c.x - 7.0f, c.y + 10.0f), ImVec2(c.x + 11.0f, c.y), hex(look::gen));
-      } else { // a picture: frame, sun and hills
-        dl->AddRect(ImVec2(c.x - 30.0f, c.y - 20.0f), ImVec2(c.x + 30.0f, c.y + 20.0f), hex(look::gen), 6.0f, 0, 2.2f);
-        dl->AddCircleFilled(ImVec2(c.x + 14.0f, c.y - 8.0f), 5.0f, hex(look::gen));
-        dl->AddTriangleFilled(ImVec2(c.x - 24.0f, c.y + 16.0f), ImVec2(c.x - 8.0f, c.y - 4.0f), ImVec2(c.x + 6.0f, c.y + 16.0f), hex(look::gen));
-      }
-      dl->PushClipRect(ImVec2(p.x + 8.0f, p.y), ImVec2(q.x - 8.0f, q.y), true);
-      dl->AddText(ImVec2(p.x + 12.0f, q.y - 40.0f), hex(look::fg2), m.value("title", id).c_str());
-      const char *note = !m.value("installed", false) ? "Not installed. Download it in the Models panel."
-                         : !m.value("engine", false)  ? "Nothing runs it yet. Set ComfyUI in the Models panel."
-                                                      : "Ready";
-      dl->AddText(ImVec2(p.x + 12.0f, q.y - 22.0f), ready ? hex(look::fg3) : ImGui::ColorConvertFloat4ToU32(kError), note);
-      dl->PopClipRect();
-      ImGui::Dummy(ImVec2(0.0f, 4.0f));
     }
+    ImGui::Dummy(ImVec2(0, 4.0f));
   }
   ImGui::Spacing();
   section_label("NEW CLIP");
@@ -2337,25 +2690,37 @@ void App::draw_models_panel() {
 
 // Adds a 3-second effect at the playhead on the "Effects" track, made when missing just under the titles, so it changes
 // the video but not the text.
-void App::add_adjustment(const eval::EffectDef &def, const std::string &file) {
-  const TrackUi *effects = nullptr, *titles = nullptr;
+// Puts an effect on one clip (dragged from the Effects panel). A clip keeps one effect of each kind.
+void App::add_clip_effect(const std::string &clip_id, const eval::EffectDef &def) {
+  const ClipUi *c = find_clip(clip_id);
+  if (!c)
+    return;
+  if (std::any_of(c->effects.begin(), c->effects.end(), [&](const EffectUi &e) { return e.kind == def.id; })) {
+    say(std::string(def.title) + " is already on this clip.", true);
+    selected_clip_ = clip_id;
+    return;
+  }
+  selected_clip_ = clip_id;
+  if (def.file_param[0] != 0) {
+    ask_lut(clip_id); // the effect is added when the file is chosen
+    return;
+  }
+  patch(json::array({{{"op", "add"}, {"path", clip_id + "/effects/$new:fx"}, {"value", default_effect(def)}}}),
+        (std::string("Add ") + def.title).c_str());
+}
+
+void App::add_adjustment(const eval::EffectDef &def, const std::string &file, const std::string &on_track, int64_t on_at) {
+  const TrackUi *effects = nullptr, *titles = nullptr; // the track it goes on: the one it was dropped on, else "Effects"
   for (const TrackUi &t : tracks_) {
-    if (t.name == "Effects")
+    if (on_track.empty() ? t.name == "Effects" : t.id == on_track)
       effects = &t;
     if (t.name == "Titles" && !titles)
       titles = &t;
   }
   const int64_t frames = std::max<int64_t>(1, std::llround(3.0 * fps()));
-  int64_t at = playhead_;
-  if (effects) { // clips on one track may not overlap: move past any in the way
-    std::vector<const ClipUi *> sorted;
-    for (const ClipUi &c : effects->clips)
-      sorted.push_back(&c);
-    std::sort(sorted.begin(), sorted.end(), [](const ClipUi *a, const ClipUi *b) { return a->start < b->start; });
-    for (const ClipUi *c : sorted)
-      if (at < c->start + c->frames && at + frames > c->start)
-        at = c->start + c->frames;
-  }
+  int64_t at = on_at >= 0 ? on_at : playhead_;
+  if (effects) // clips on one track may not overlap: move past any in the way
+    at = free_start(*effects, at, frames, {});
   json ops = json::array();
   const std::string track = effects ? effects->id : "$new:effects";
   if (!effects) {
@@ -2384,40 +2749,15 @@ void App::add_adjustment(const eval::EffectDef &def, const std::string &file) {
 // The effect cards of a clip or adjustment layer. A clip shows a card for every effect (an empty one offers to add it).
 // An adjustment layer shows the effects it has, and one row of buttons for the others. The layer's amount (its opacity:
 // how much of the changed picture replaces the original) sits once, in the card of the first effect it has.
+// The effect cards of a clip: only the effects it has. They are added by dragging an effect from the Effects panel.
 void App::draw_effect_cards(const ClipUi &c) {
-  const auto has = [&](const eval::EffectDef &def) {
-    return std::any_of(c.effects.begin(), c.effects.end(), [&](const EffectUi &e) { return e.kind == def.id; });
-  };
   bool amount_shown = !c.is_adjustment;
   for (const eval::EffectDef &def : eval::effect_defs()) {
-    if (c.is_adjustment && !has(def))
+    if (std::none_of(c.effects.begin(), c.effects.end(), [&](const EffectUi &e) { return e.kind == def.id; }))
       continue;
-    draw_effect_card(c, def, !amount_shown && has(def));
-    amount_shown = amount_shown || has(def);
+    draw_effect_card(c, def, !amount_shown);
+    amount_shown = true;
   }
-  if (!c.is_adjustment || std::all_of(eval::effect_defs().begin(), eval::effect_defs().end(),
-                                      [&](const eval::EffectDef &def) { return has(def) || def.clip_only; }))
-    return;
-  if (!begin_card("##fx_add", c.effects.empty() ? "Effects" : "Add an effect")) {
-    end_card();
-    return;
-  }
-  const std::string id = c.id;
-  for (const eval::EffectDef &def : eval::effect_defs()) {
-    if (has(def) || def.clip_only)
-      continue;
-    if (soft_button((std::string("add_") + def.short_name()).c_str(), def.title, ImVec2(-1.0f, 28.0f))) {
-      if (def.file_param[0] != '\0') {
-        ask_lut(id);
-        continue;
-      }
-      pending_ = [this, id, &def] {
-        patch(json::array({{{"op", "add"}, {"path", id + "/effects/$new:fx"}, {"value", default_effect(def)}}}),
-              (std::string("Add ") + def.title).c_str());
-      };
-    }
-  }
-  end_card();
 }
 
 // Sets the hue of a chroma key from the Monitor's picture at (u, v), taken without the key (the keyed picture has the
@@ -2480,35 +2820,21 @@ void App::pick_key_colour(const std::string &fx_id, float u, float v) {
 // One effect of a clip: its parameters as sliders in the ranges of the effect table, added and removed with a button.
 void App::draw_effect_card(const ClipUi &c, const eval::EffectDef &def, bool show_amount) {
   const std::string name = def.short_name(); // blur, grade, vignette: the controls are named after it
-  if (!begin_card(("##fx_" + name).c_str(), def.title)) {
-    end_card();
-    return;
-  }
   const EffectUi *found = nullptr;
   for (const EffectUi &e : c.effects)
     if (e.kind == def.id) {
       found = &e;
       break;
     }
-  const std::string id = c.id;
-  std::string lower = def.title;
-  std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char ch) { return char(std::tolower(ch)); });
-  if (!found) {
-    ImGui::PushTextWrapPos(0.0f);
-    ImGui::TextColored(hexv(look::fg3), "%s", c.is_adjustment ? ("This adjustment layer has no " + lower + ".").c_str()
-                                                              : ("Add " + lower + " to this clip alone.").c_str());
-    ImGui::PopTextWrapPos();
-    if (soft_button(("add_" + name).c_str(), ("Add " + lower).c_str(), ImVec2(-1.0f, 28.0f))) {
-      if (def.file_param[0] != '\0')
-        ask_lut(id);
-      else
-        pending_ = [this, id, &def, label = "Add " + lower] {
-          patch(json::array({{{"op", "add"}, {"path", id + "/effects/$new:fx"}, {"value", default_effect(def)}}}), label.c_str());
-        };
-    }
+  if (!found) // an effect the clip does not have has no card
+    return;
+  if (!begin_card(("##fx_" + name).c_str(), def.title)) {
     end_card();
     return;
   }
+  const std::string id = c.id;
+  std::string lower = def.title;
+  std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char ch) { return char(std::tolower(ch)); });
   const std::string fx = found->id;
   if (std::string(def.id) == "chroma_key") { // the colour can be picked from the picture
     const bool picking = pick_key_fx_ == fx;
@@ -2837,6 +3163,9 @@ void App::jump_cut(bool forward) {
 
 void App::draw_timeline() {
   ATM_PROFILE_SCOPE("ui.timeline");
+  snap_at_ = -1; // set again by a drag that catches on an edge this frame
+  pushed_view_.swap(pushed_next_); // what the drag of the frame before said slides aside
+  pushed_next_.clear();
   ImGui::PushStyleColor(ImGuiCol_WindowBg, hexv(look::panel));
   ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
   ImGui::Begin("Timeline", nullptr, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
@@ -2949,17 +3278,6 @@ void App::draw_timeline() {
       selected_track_ = track.id;
       selected_clip_.clear();
     }
-    // A model card from the Generate panel: the whole row takes it, over the clips too (a target of its own, not the
-    // row's button, which a clip or the header would cover).
-    if (ImGui::BeginDragDropTargetCustom(ImRect(ImVec2(win.x, y), ImVec2(win.x + view_w, y + row_h)), ImGui::GetID(("##drop" + track.id).c_str()))) {
-      if (const ImGuiPayload *drop = ImGui::AcceptDragDropPayload("ATM_GEN_MODEL")) {
-        const std::string model = static_cast<const char *>(drop->Data);
-        const int64_t at = std::max<int64_t>(0, std::llround((mouse.x - origin.x - header_w) / pps_ * rate));
-        const std::string target = track.kind == "audio" ? std::string() : track.id; // sound tracks cannot hold a picture
-        pending_ = [this, model, target, at] { add_generative_clip(model, target, at); };
-      }
-      ImGui::EndDragDropTarget();
-    }
     const ClipUi *sel_clip = selected();
     const std::string sel_link = sel_clip ? sel_clip->link_group : std::string();
     for (const ClipUi &c : track.clips) {
@@ -2967,9 +3285,9 @@ void App::draw_timeline() {
       int64_t start = c.start, frames = c.frames;
       int row = ti;
       if (drag_id_ == c.id) {
-        if (drag_mode_ == 1) {
-          start = std::max<int64_t>(0, c.start + drag_frames_);
-          row = drag_track_;
+        if (drag_mode_ == 1) { // where it will land
+          row = std::clamp(drag_track_, 0, rows - 1);
+          start = drag_land_.start;
         } else if (drag_mode_ == 2) {
           frames = std::max<int64_t>(1, c.frames + drag_frames_);
           if (c.media_frames > 0)
@@ -2979,6 +3297,8 @@ void App::draw_timeline() {
           start = c.start + d;
           frames = c.frames - d;
         }
+      } else if (const auto slid = pushed_view_.find(c.id); slid != pushed_view_.end()) {
+        start = slid->second; // making room for what is being dragged
       }
       const float x0 = x_of(double(start)), x1 = std::max(x0 + 2.0f, x_of(double(start + frames)));
       const float cy = origin.y + ruler_h + float(row) * row_h + 4.0f, ch = row_h - 8.0f;
@@ -3068,24 +3388,48 @@ void App::draw_timeline() {
           drag_mode_ = mode;
           drag_frames_ = 0;
           drag_track_ = ti;
+          drag_land_ = {c.start, {}};
+          drag_landed_ = false;
           selected_clip_ = c.id;
           selected_track_ = track.id;
         }
         if (ImGui::IsItemActive() && drag_id_ == c.id) {
           drag_frames_ = std::llround(ImGui::GetMouseDragDelta(0, 0.0f).x / pps_ * rate);
-          if (mode == 1 && rows > 0)
-            drag_track_ = std::clamp(int((mouse.y - origin.y - ruler_h) / row_h), 0, rows - 1);
+          if (mode == 1 && rows > 0) {
+            drag_track_ = std::clamp(int(std::floor((mouse.y - origin.y - ruler_h) / row_h)), 0, rows - 1);
+            if ((tracks_[size_t(drag_track_)].kind == "audio") != (track.kind == "audio"))
+              drag_track_ = ti; // a picture stays on picture tracks, a sound on audio tracks
+            // Where it will land (see eval::land): on free space where it is; over another clip before or after it, by
+            // the half the pointer is on, the clips after it sliding right. A press without a move changes nothing.
+            drag_landed_ = drag_frames_ != 0 || drag_track_ != ti;
+            drag_land_ = {c.start, {}};
+            if (drag_landed_) {
+              const int64_t length = std::max(c.frames, c.end_ceil - c.start), raw = c.start + drag_frames_;
+              const int64_t snapped = snap_frame(raw, length, c.id); // its edges catch on the playhead and on other clips
+              const int64_t pointer = std::llround((mouse.x - origin.x - header_w) / pps_ * rate) + (snapped - std::max<int64_t>(0, raw));
+              drag_land_ = landing(tracks_[size_t(drag_track_)], pointer, snapped, length, c.id);
+              if (drag_land_.start != snapped)
+                snap_at_ = -1; // it lands beside a clip, not on the edge it caught
+              show_pushes(drag_land_, pushed_next_);
+              for (const ClipUi *m : linked_of(c)) // its own sound comes along
+                pushed_next_[m->id] = std::max<int64_t>(0, m->start + (drag_land_.start - c.start));
+            }
+          }
         }
         if (ImGui::IsItemDeactivated() && drag_id_ == c.id) {
           const int64_t d = drag_frames_;
           const int target = drag_track_;
           const std::string track_id = track.id, clip_id = c.id;
-          pending_ = [this, track_id, clip_id, mode, d, target] { // the mirror is rebuilt by the edit
+          const bool landed = drag_landed_;
+          const TrackLanding land = drag_land_;
+          pending_ = [this, track_id, clip_id, mode, d, target, landed, land] { // the mirror is rebuilt by the edit
+            if (mode == 1 && !landed)
+              return; // a click
             for (const TrackUi &t : tracks_)
               if (t.id == track_id)
                 for (const ClipUi &k : t.clips)
                   if (k.id == clip_id)
-                    return commit_drag(t, k, mode, d, target);
+                    return commit_drag(t, k, mode, d, target, land);
           };
           drag_id_.clear();
         }
@@ -3139,6 +3483,58 @@ void App::draw_timeline() {
       }
       dl->AddRect(ImVec2(bx0, by0), ImVec2(bx1, by1), IM_COL32(255, 255, 255, 120), 4.0f);
     }
+  }
+  // A card dragged over the tracks: the plan of what letting go would do, drawn as it will be, and carried out on release.
+  if (const ImGuiPayload *held = ImGui::GetDragDropPayload(); held && held->IsDataType("ATM_CARD") &&
+      ImGui::BeginDragDropTargetCustom(ImRect(ImVec2(win.x, win.y + ruler_h), ImVec2(win.x + view_w, win.y + view_h)), ImGui::GetID("##card_drop"))) {
+    const DropPlan plan = plan_drop(static_cast<const char *>(held->Data), int(std::floor((mouse.y - origin.y - ruler_h) / row_h)),
+                                    std::llround((mouse.x - origin.x - header_w) / pps_ * rate));
+    if (const ImGuiPayload *got = ImGui::AcceptDragDropPayload("ATM_CARD", ImGuiDragDropFlags_AcceptBeforeDelivery | ImGuiDragDropFlags_AcceptNoDrawDefaultRect)) {
+      const float y = origin.y + ruler_h + float(plan.row) * row_h;
+      if (plan.row >= rows) { // the band of the track that will be made
+        dl->AddRectFilled(ImVec2(win.x, y), ImVec2(win.x + view_w, y + row_h), hex(look::accent, 18));
+        dl->AddLine(ImVec2(win.x, y + row_h), ImVec2(win.x + view_w, y + row_h), hex(look::accent, 120));
+      }
+      if (plan.valid && !plan.pushed.empty()) {
+        TrackLanding l;
+        l.pushed = plan.pushed;
+        show_pushes(l, pushed_next_);
+      }
+      if (plan.valid) {
+        const float x0 = x_of(double(plan.start)), x1 = std::max(x0 + 6.0f, x_of(double(plan.start + plan.frames)));
+        const ImVec2 a(x0, y + 4.0f), b(x1 - 1.0f, y + row_h - 4.0f);
+        if (!plan.clip.empty()) { // an effect onto this clip: the clip lights up
+          dl->AddRectFilled(a, b, hex(look::adj, 90), 5.0f);
+          dl->AddRect(a, b, hex(look::accent), 5.0f, 0, 2.5f);
+        } else { // a new clip: its ghost, where and as long as it will be
+          const uint32_t base = plan.kind == "gen" ? look::gen : plan.kind == "title" ? look::txt : plan.kind == "fx" ? look::adj
+                                : plan.sound ? look::aud : look::vid;
+          dl->AddRectFilled(a, b, hex(base, 110), 5.0f);
+          dl->AddRect(a, b, hex(look::accent), 5.0f, 0, 2.0f);
+          dl->PushClipRect(ImVec2(std::max(x0, win.x + header_w), a.y), ImVec2(b.x - 4.0f, b.y), true);
+          dl->AddText(ImVec2(x0 + 9.0f, a.y + (b.y - a.y - ImGui::GetFontSize()) * 0.5f), IM_COL32(255, 255, 255, 235),
+                      (plan.label + "   " + timecode(plan.start)).c_str());
+          dl->PopClipRect();
+        }
+      } else if (!plan.why.empty()) { // not here: say why, next to the pointer
+        ImGui::SetMouseCursor(ImGuiMouseCursor_NotAllowed);
+        ImDrawList *top = ImGui::GetForegroundDrawList();
+        const ImVec2 size = text_size(plan.why.c_str()), at(mouse.x + 16.0f, mouse.y + 34.0f);
+        top->AddRectFilled(ImVec2(at.x - 8.0f, at.y - 5.0f), ImVec2(at.x + size.x + 8.0f, at.y + size.y + 5.0f), IM_COL32(8, 10, 16, 235), 6.0f);
+        top->AddText(at, ImGui::ColorConvertFloat4ToU32(kError), plan.why.c_str());
+      }
+      if (got->IsDelivery()) {
+        if (plan.valid)
+          pending_ = [this, plan] { commit_drop(plan); };
+        else if (!plan.why.empty())
+          say(plan.why, true);
+      }
+    }
+    ImGui::EndDragDropTarget();
+  }
+  if (snap_at_ >= 0) { // the edge a drag has caught on
+    const float sx = x_of(double(snap_at_));
+    dl->AddLine(ImVec2(sx, origin.y + ruler_h), ImVec2(sx, std::max(origin.y + content_h, win.y + view_h)), IM_COL32(255, 255, 255, 170), 1.0f);
   }
   dl->PopClipRect();
 
@@ -3475,7 +3871,9 @@ void App::draw_inspector() {
     ImGui::End();
     return;
   }
-  if ((insp_for_ != c->id || insp_rev_ != revision_) && !ImGui::IsAnyItemActive()) {
+  // Another clip: its values, at once (it may have been picked up by a drag). The same clip after an edit: when nothing
+  // is held, so a field that is being typed in is not written over.
+  if (insp_for_ != c->id || (insp_rev_ != revision_ && !ImGui::IsAnyItemActive())) {
     insp_for_ = c->id;
     insp_rev_ = revision_;
     copy_to(name_buf_, sizeof name_buf_, c->name);
@@ -3781,9 +4179,29 @@ void App::draw_inspector() {
     end_card();
     draw_effect_cards(*c); // effects on this clip alone
   }
-  if (picture || c->is_adjustment) // an adjustment layer's fades fade its effect
+  // Fades and transitions are shown when the clip has one, or when the user added the card below; nothing else about the
+  // clip is listed until it is there.
+  const bool fadeable = picture || c->is_adjustment; // an adjustment layer's fades fade its effect
+  const bool has_fade = c->fade_in > 0 || c->fade_out > 0 || !c->opacity_keys.empty();
+  const bool has_transition = std::any_of(track->transitions.begin(), track->transitions.end(), [&](const TransitionUi &t) { return t.from == c->id; });
+  const bool has_next = std::any_of(track->clips.begin(), track->clips.end(), [&](const ClipUi &k) { return k.id != c->id && k.start == c->start + c->frames; });
+  const bool fade_shown = fadeable && (has_fade || opened_cards_.count(c->id + ":fade"));
+  const bool transition_shown = has_transition || opened_cards_.count(c->id + ":transition");
+  if (fade_shown)
     draw_fade_card(*c);
-  draw_transition_card(*track, *c);
+  if (transition_shown)
+    draw_transition_card(*track, *c);
+  if ((fadeable && !fade_shown) || (has_next && !transition_shown)) {
+    section_label("ADD TO THIS CLIP");
+    ImGui::Spacing();
+    if (fadeable && !fade_shown && soft_button("add_card_fade", "Fade", ImVec2(0.0f, 28.0f)))
+      opened_cards_.insert(c->id + ":fade");
+    if (fadeable && !fade_shown && has_next && !transition_shown)
+      ImGui::SameLine(0.0f, 6.0f);
+    if (has_next && !transition_shown && soft_button("add_card_transition", "Transition", ImVec2(0.0f, 28.0f)))
+      opened_cards_.insert(c->id + ":transition");
+    ImGui::Dummy(ImVec2(0.0f, 4.0f));
+  }
 
   // Text, adjustment layers and pictures whose sound lives in a linked clip have no sound of their own here.
   const bool show_audio = !c->is_text && !c->is_adjustment && c->stream != "video";

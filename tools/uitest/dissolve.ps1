@@ -37,6 +37,7 @@ function Get-Transitions($run) {
 
 # The first clip is selected; its Inspector offers a dissolve into the next clip.
 $run = Invoke-EditorScript -Project $proj -SelectFirstClip -Script @(
+  'click @button:add_card_transition'
   'click @button:add_dissolve'
   "shot $work\dissolve_added.jpg"
 )

@@ -324,11 +324,17 @@ void UiDriver::before_frame() {
           d.frames.push_back([&d, from, dx, dy, i](ImGuiIO &) {
             d.mouse = ImVec2(from.x + dx * float(i) / kSteps, from.y + dy * float(i) / kSteps);
           });
-        d.frames.push_back([](ImGuiIO &in) { in.AddMouseButtonEvent(0, false); });
+        // "hold" as the last word keeps the button down, for a capture of what is shown during the drag; "release" ends it.
+        if (c.words.back() != "hold")
+          d.frames.push_back([](ImGuiIO &in) { in.AddMouseButtonEvent(0, false); });
         d.frames.push_back([](ImGuiIO &) {});
         d.frames.push_back([](ImGuiIO &) {});
         }
       }
+    } else if (op == "release") { // lets go of a drag that was held
+      d.frames.push_back([](ImGuiIO &in) { in.AddMouseButtonEvent(0, false); });
+      d.frames.push_back([](ImGuiIO &) {});
+      d.frames.push_back([](ImGuiIO &) {});
     } else {
       fail(c.line, "unknown command \"" + op + "\"");
       return;

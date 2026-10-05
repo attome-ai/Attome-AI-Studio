@@ -35,6 +35,7 @@ function Get-Clips($run) { ,@((Get-Tracks $run)[0].clip_list | ForEach-Object { 
 
 # The 4-second clip is selected; each fade slider spans 0..4 s, so a quarter is 1 s.
 $run = Invoke-EditorScript -Project $proj -SelectFirstClip -Script @(
+  'click @button:add_card_fade'
   'slide @slider:fadein 0.25'
   'slide @slider:fadeout 0.25'
   "shot $work\fade_after.jpg"

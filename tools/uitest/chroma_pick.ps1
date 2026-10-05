@@ -39,8 +39,8 @@ $run = Invoke-EditorScript -Project $proj -Import $png -Script @(
   'expect @clip:halves'
   'click @clip:halves'
   'wait 300'
-  'expect @button:add_key'
-  'click @button:add_key'
+  'click @rail:Effects'
+  'drag @effect:key @clip:halves'
   'click @button:pick_key'
   'click @monitor@0.25,0.5'             # the green half
   'wait 800'

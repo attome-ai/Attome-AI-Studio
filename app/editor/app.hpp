@@ -17,6 +17,7 @@
 #include "atm/base/rational.hpp"
 #include "atm/eval/effects.hpp"
 #include "atm/eval/keyframes.hpp"
+#include "atm/eval/landing.hpp"
 #include "audio.hpp"
 #include "client.hpp"
 #include "preview.hpp"
@@ -42,6 +43,7 @@ struct EffectUi { // one effect of a clip or adjustment layer: its ID, the eval:
 struct ClipUi {
   std::string id, name, path;
   int64_t start = 0, frames = 0; // in sequence frames
+  int64_t start_floor = 0;       // the exact start rounded down: the last frame at which another clip may end before it
   int64_t end_ceil = 0;          // the exact end rounded up: the first frame at which another clip may start without overlapping
   int64_t source_frames = 0;     // frames of the file before the clip's first frame
   int64_t media_frames = 0;      // length of the file; 0 when unknown
@@ -115,11 +117,14 @@ private:
   void say(std::string text, bool error = false);
 
   // actions
-  void import_files(const std::vector<std::string> &paths);
+  // `track` and `at` (frames) place a single file where a card was dropped; without them the engine picks the place.
+  void import_files(const std::vector<std::string> &paths, const std::string &track = {}, int64_t at = -1);
   void add_track();
-  void add_title(int preset);
+  void add_title(int preset, const std::string &track = {}, int64_t at = -1); // without a place: the Titles track, at the playhead
   void add_generative_clip(const std::string &model, const std::string &track = {}, int64_t at = -1);
-  void add_adjustment(const eval::EffectDef &def, const std::string &file = {});
+  // Without a place: the Effects track, at the playhead.
+  void add_adjustment(const eval::EffectDef &def, const std::string &file = {}, const std::string &track = {}, int64_t at = -1);
+  void add_clip_effect(const std::string &clip_id, const eval::EffectDef &def); // an effect on one clip alone
   void draw_effects_panel();
   void draw_effect_card(const ClipUi &clip, const eval::EffectDef &def, bool show_amount);
   void draw_effect_cards(const ClipUi &clip);
@@ -150,7 +155,42 @@ private:
   void ask_export();
   void ask_project();
   void take_dialog_results();
-  void commit_drag(const TrackUi &track, const ClipUi &clip, int mode, int64_t delta, int target_track);
+  // Where a clip lands on a track and which clips slide right to make room for it (eval::land), by clip ID.
+  struct TrackLanding {
+    int64_t start = 0;
+    std::vector<std::pair<std::string, int64_t>> pushed; // clip -> its new start, in frames
+  };
+  // `pointer` is the frame under the mouse, `start` where the clip would begin if nothing were in the way; `skip` is the
+  // clip being moved, whose own place is free.
+  TrackLanding landing(const TrackUi &track, int64_t pointer, int64_t start, int64_t length, const std::string &skip) const;
+  // The pushed clips and what is linked to them, as they will be: clip -> start, for drawing while the drag goes on.
+  void show_pushes(const TrackLanding &landing, std::map<std::string, int64_t> &view) const;
+  // The edits that slide the pushed clips right, with their linked clips, and take away the dissolves whose two clips
+  // no longer move together. `moved` holds what the caller moves itself: clip -> frames.
+  void push_ops(const TrackLanding &landing, std::map<std::string, int64_t> moved, json &ops) const;
+  void commit_drag(const TrackUi &track, const ClipUi &clip, int mode, int64_t delta, int target_track, const TrackLanding &land);
+  // Dragging onto the timeline. A card (a title style, an effect, a model, a media file) carries "<kind>:<id>"; while it
+  // is over the tracks a DropPlan says what letting go would do, and both the preview and the edit are made from it.
+  struct DropPlan {
+    bool valid = false;
+    std::string kind, id; // "title", "fx", "gen" or "media", and the preset, effect, model or file
+    int row = 0;          // the track's index; tracks_.size() is a new track below the last one
+    int64_t start = 0, frames = 0; // where the new clip lands
+    std::vector<std::pair<std::string, int64_t>> pushed; // the clips of the track that slide right to make room
+    std::string clip;     // an effect dropped on a clip: that clip
+    bool sound = false;   // a file without a picture: it goes on an audio track
+    std::string label;    // what the preview is called
+    std::string why;      // not valid: what to do instead
+  };
+  DropPlan plan_drop(const std::string &payload, int row, int64_t frame);
+  void commit_drop(const DropPlan &plan);
+  const json &media_info(const std::string &path); // media.probe, asked once per file
+  // The first frame at or after `start` where `length` frames fit on the track without touching a clip (`skip` excepted).
+  // For what is added at the playhead; a drag uses landing().
+  int64_t free_start(const TrackUi &track, int64_t start, int64_t length, const std::string &skip) const;
+  // `start` moved onto the playhead, the timeline's start or another clip's edge when one of the two ends of the clip is
+  // within a few pixels of it (Alt turns this off). Sets snap_at_ for the guide line.
+  int64_t snap_frame(int64_t start, int64_t length, const std::string &skip);
   void drop_transitions(const std::string &clip_id, json &ops) const; // ops that remove the clip's dissolves
   std::vector<const ClipUi *> linked_of(const ClipUi &clip) const;     // the other clips of its link group
   void draw_transition_card(const TrackUi &track, const ClipUi &clip);
@@ -209,6 +249,13 @@ private:
   char path_buf_[512] = {};
 
   // drag in the timeline
+  int64_t snap_at_ = -1;                 // the frame a drag is snapped to this frame, -1 for none
+  std::map<std::string, json> media_info_; // by file path
+  std::string lut_drop_track_;           // a LUT card dropped on a track: where its layer goes once the file is chosen
+  int64_t lut_drop_at_ = -1;
+  std::map<std::string, int64_t> pushed_view_, pushed_next_; // clips drawn slid aside by a drag: now, and from the next frame
+  TrackLanding drag_land_;               // where the clip being dragged lands
+  bool drag_landed_ = false;             // false while a press on a clip has not moved it
   std::string drag_id_;
   int drag_mode_ = 0; // 1 move, 2 trim end, 3 trim start
   int64_t drag_frames_ = 0;
@@ -232,6 +279,7 @@ private:
   Thumbs thumbs_;
   std::map<std::string, SDL_Texture *> thumb_tex_;
   std::vector<std::string> media_paths_;
+  std::set<std::string> opened_cards_; // "<clip id>:fade" and "<clip id>:transition": cards the user added before anything is set
   std::set<std::string> audio_only_; // media files without a picture
   char media_filter_[128] = {};
   int inspector_tab_ = 0;
