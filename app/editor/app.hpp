@@ -153,7 +153,9 @@ private:
   std::vector<const ClipUi *> clips_using(const std::string &workflow) const;
   void draw_models_panel();
   void draw_generate_panel();
-  void poll_models();                       // models.list and the download jobs, twice a second while something shows them
+  void poll_models();
+  void poll_gen_parts(); // gen.nodes, every few seconds: the kinds and the models with what they declare
+  const json *clip_json(const std::string &clip_id) const; // the clip's object in doc_                       // models.list and the download jobs, twice a second while something shows them
   void draw_generate_card(const ClipUi &clip); // a generative clip: why it cannot run here, and the download that fixes it
   void delete_selected();
   void split_at_playhead();
@@ -278,9 +280,15 @@ private:
   float wf_zoom_ = 1.0f;               // how large the graph is drawn
   bool wf_fit_ = true;                 // keep the whole graph in view, until the user pans or zooms
   std::map<std::string, ImVec2> wf_moved_; // nodes being dragged: where they are until the move is saved
-  struct WfEnd {
-    std::string node, port;
-  } wf_from_;                          // the output a link is being dragged from
+  // A connection being dragged on the graph: the dot that is held (a source gives a value, a sink takes one; `where` is
+  // 0 for a node's port, 1 for a named row of the clip's side, 2 for the clip side's "new" row) and what was picked up
+  // with it, which is gone unless it is let go back where it was.
+  struct WfDrag {
+    bool active = false, source = false;
+    int where = 0;
+    std::string node, port, name;
+    std::string cut_link, cut_in, cut_out;
+  } wf_drag_;
   json wf_parts_;                      // gen.nodes: the kinds, and the models with what they declare
   double next_wf_parts_poll_ = 0.0;
   std::map<std::string, std::array<char, 512>> wf_text_; // text fields of the side panel
@@ -359,9 +367,11 @@ private:
   char comfy_buf_[256] = {};
   // the Generate panel: what a new generative clip is made from
   json gen_models_ = json::array();
-  bool gen_models_loaded_ = false, gen_chain_ = false;
+  bool gen_models_loaded_ = false;
   double next_gen_models_poll_ = 0.0;
   float gen_seconds_ = 5.0f;
+  float gen_len_ = 5.0f;   // the Length slider of a generative clip's card
+  std::string gen_len_for_; // "<clip>@<revision>" it was read for
   json comfy_status_ = json::object();
   bool engines_loaded_ = false;
   void start_generation(json params);     // gen.run; the Takes arrive by themselves as the project changes

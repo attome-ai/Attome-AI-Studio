@@ -47,7 +47,7 @@ try {
     'click @combo:wf_model'
     'click @wfmodel:attome-mock'
     'wait 300'
-    'click @check:wf_clip_sets_prompt'       # the prompt comes from the clip
+    'drag @clipin:+ @port:encode_prompt.prompt' # the clip sets the prompt: from the clip's side to the input
     'wait 300'
     'click @node:sample'
     'click @combo:wf_model'
@@ -57,7 +57,7 @@ try {
     'click @combo:wf_model'
     'click @wfmodel:attome-mock'
     'wait 300'
-    'click @check:wf_clip_gets_video'        # the clip plays what the decoder makes
+    'drag @port:decode.video:out @clipout:+' # the clip plays what the decoder makes
     'wait 300'
     'drag @node:decode 40 120'               # a node moved: its place is kept
     'wait 400'

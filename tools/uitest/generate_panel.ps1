@@ -1,5 +1,5 @@
 # UI test: the Generate panel. A click on a model's card adds a generative clip whose prompt is typed in the Inspector; a
-# second one, with "Start from the clip before" ticked, is linked to the first, and Generate on it makes both (the first
+# second one, set to start from the clip before on its own card, is linked to the first, and Generate on it makes both (the first
 # is needed and not made yet). Mock engine: no model, no GPU. Virtual input only (uitest.psm1). Exit code 0 = pass.
 #   .\tools\uitest\generate_panel.ps1
 
@@ -29,7 +29,7 @@ try {
     'type A robot walks through the snow'
     'wait 100'
     "shot $work\panel_typed.jpg"
-    'click @check:gen_chain'              # leaving the field saves the prompt
+    'click @rail:Generate'                # leaving the field saves the prompt
     'wait 400'
     'click @model:attome-mock'
     'wait 500'
@@ -37,6 +37,10 @@ try {
     'type It finds a lantern, and lifts it'
     'click @rail:Generate'                # leaves the field
     'wait 400'
+    'click @combo:gen_start'              # the clip's own setting: it starts from the last frame of the clip before
+    'click @option:gen_start_previous'
+    'wait 400'
+    'expect @slider:gen_length'           # its length is on its card too
     'click @button:gen_run'               # the second clip: the first is made too, because the second starts from it
     'wait 300'
     'expect @button:gen_run'             # the new clip is selected; its card is back from "Stop" when the run has ended

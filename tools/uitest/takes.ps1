@@ -26,13 +26,16 @@ try {
     'wait 500'
     'click @field:prompt'
     'type A robot walks'
-    'click @check:gen_chain'             # leaving the field saves the prompt
+    'click @rail:Generate'               # leaving the field saves the prompt
     'wait 400'
     'click @model:attome-mock'
     'wait 500'
     'click @field:prompt'
     'type It starts to rain'
     'click @rail:Generate'               # leaves the field
+    'wait 400'
+    'click @combo:gen_start'             # it starts from the last frame of the first clip
+    'click @option:gen_start_previous'
     'wait 400'
     'click @button:gen_run'
     'wait 300'
