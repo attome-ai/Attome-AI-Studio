@@ -23,7 +23,10 @@ namespace {
 namespace fs = std::filesystem;
 using json = nlohmann::json;
 
-constexpr const char *kH3 = "minimax-h3.fl2va.turbo8-int8";
+// The catalog models this provider has a graph for: MiniMax H3 with its Turbo add-on, and FastH3, which is the same
+// graph with another checkpoint and no add-on.
+constexpr std::string_view kModels[] = {"minimax-h3.fl2va.turbo8-int8", "fasth3.8step-v2.int8"};
+bool known(std::string_view model) { return std::find(std::begin(kModels), std::end(kModels), model) != std::end(kModels); }
 
 fs::path to_path(const std::string &utf8) { return fs::path(std::u8string(utf8.begin(), utf8.end())); }
 
@@ -54,9 +57,9 @@ std::string url_encode(const std::string &s) {
 struct H3Files {
   std::string checkpoint, text_encoder, lora, video_vae, audio_vae;
 };
-H3Files h3_files() {
+H3Files h3_files(std::string_view model) {
   H3Files f;
-  if (const models::CatalogEntry *entry = models::find_entry(models::builtin_catalog(), kH3))
+  if (const models::CatalogEntry *entry = models::find_entry(models::builtin_catalog(), model))
     for (const models::CatalogFile &file : entry->files) {
       const std::string name = file.path.substr(file.path.find('/') + 1);
       if (file.path.rfind("diffusion_models/", 0) == 0)
@@ -80,15 +83,18 @@ int frames_for(double seconds) { // 24 frames per second, up to the model's 17k 
 
 // The graph of ComfyUI's own template video_minimax_h3_t2v, flattened, with the Turbo 8-step add-on.
 json h3_graph(const gen::StepRequest &r, const std::string &start_image, const std::string &end_image, const std::string &prefix) {
-  const H3Files f = h3_files();
+  const H3Files f = h3_files(r.model);
   const auto node = [](const char *type, json inputs) { return json{{"class_type", type}, {"inputs", std::move(inputs)}}; };
   json g = json::object();
   g["unet"] = node("UNETLoader", {{"unet_name", f.checkpoint}, {"weight_dtype", "default"}});
   g["clip"] = node("CLIPLoader", {{"clip_name", f.text_encoder}, {"type", "minimax"}, {"device", "default"}});
   g["vae"] = node("VAELoader", {{"vae_name", f.video_vae}});
   g["avae"] = node("VAELoader", {{"vae_name", f.audio_vae}});
-  g["lora"] = node("LoraLoaderModelOnly", {{"model", {"unet", 0}}, {"lora_name", f.lora}, {"strength_model", 1.0}});
-  json model = {"lora", 0};
+  json model = {"unet", 0};
+  if (!f.lora.empty()) { // the few-step add-on, for a model that has one
+    g["lora"] = node("LoraLoaderModelOnly", {{"model", model}, {"lora_name", f.lora}, {"strength_model", 1.0}});
+    model = {"lora", 0};
+  }
   if (r.settings.value("attention", std::string("int8")) == "int8") {
     g["attn"] = node("ModelAttentionBackend", {{"model", model}, {"attention", "comfy kitchen attention"}});
     model = {"attn", 0};
@@ -148,9 +154,9 @@ ComfyProvider::ComfyProvider(std::string address, std::shared_ptr<net::Transport
     address_ = "http://" + address_;
 }
 
-bool ComfyProvider::offers(std::string_view model, std::string_view kind) const { return model == kH3 && kind == "generate_video"; }
+bool ComfyProvider::offers(std::string_view model, std::string_view kind) const { return known(model) && kind == "generate_video"; }
 
-std::string ComfyProvider::fingerprint(std::string_view model) const { return model == kH3 ? "comfyui-graph-1" : std::string(); }
+std::string ComfyProvider::fingerprint(std::string_view model) const { return known(model) ? "comfyui-graph-1" : std::string(); }
 
 json ComfyProvider::status() {
   json out = {{"name", "comfyui"}, {"address", address_}, {"reachable", false}};

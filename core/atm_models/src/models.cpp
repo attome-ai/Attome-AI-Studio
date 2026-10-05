@@ -199,11 +199,20 @@ Result<void> fetch_file(net::Transport &transport, const CatalogFile &file, cons
   Error last = Error{ErrorCode::ProviderUnavailable, "M_INCOMPLETE", "The download of " + name + " kept stopping before the end.", {},
                      "Check the internet connection and start it again; it continues from where it stopped.", {}, {}};
   bool complete = false;
-  for (int attempt = 0; attempt < options.attempts && !complete; ++attempt) {
+  int failures = 0; // tries in a row that brought nothing
+  for (int64_t had = -1; failures < options.attempts && !complete; ++failures) {
     if (cancelled(progress))
       return cancelled_error(name);
-    if (attempt > 0)
-      std::this_thread::sleep_for(std::chrono::milliseconds(int64_t(options.retry_delay_ms) * attempt));
+    if (const int64_t now = std::max<int64_t>(0, size_of(part)); now > had && had >= 0)
+      failures = 0; // the last try brought bytes: not a failure in a row
+    if (failures > 0) { // waited in slices, so a cancel is not held up by a long wait
+      const int64_t wait = std::min<int64_t>(int64_t(options.retry_delay_ms) << std::min(failures - 1, 20), options.max_retry_delay_ms);
+      for (int64_t waited = 0; waited < wait && !cancelled(progress); waited += 100)
+        std::this_thread::sleep_for(std::chrono::milliseconds(std::min<int64_t>(100, wait - waited)));
+      if (cancelled(progress))
+        return cancelled_error(name);
+    }
+    had = std::max<int64_t>(0, size_of(part));
     int64_t offset = std::max<int64_t>(0, size_of(part));
     if (offset > file.size) { // larger than the file can be: not a part of it
       fs::remove(part, ec);

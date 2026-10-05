@@ -62,8 +62,13 @@ struct FileStatus {
 FileStatus file_status(const CatalogFile &file, const std::filesystem::path &models_dir);
 
 struct FetchOptions {
-  int attempts = 8;         // tries per file; each continues where the last one stopped
-  int retry_delay_ms = 750; // multiplied by the attempt number
+  // Failed tries in a row before a file is given up; each try continues where the last one stopped, and a try that
+  // brought bytes starts the count again, so a long download survives many short drops.
+  int attempts = 8;
+  // The wait before the second try in a row; it doubles with each failure, up to max_retry_delay_ms. With the
+  // defaults the tries are spread over about two and a half minutes: a server that is briefly down (502) is waited out.
+  int retry_delay_ms = 750;
+  int max_retry_delay_ms = 60000;
 };
 
 struct FetchProgress {

@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
+#include <chrono>
 #include <filesystem>
+#include <thread>
 #include <fstream>
 #include <string>
 #include <vector>
@@ -249,6 +251,38 @@ TEST_CASE("models: the server's refusals are reported with what to do; its own t
   REQUIRE_FALSE(never);
   CHECK(never.error().rule == "N_HTTP");
   CHECK(server.ranges.size() == 4);
+
+}
+
+TEST_CASE("models: a connection that keeps dropping but brings bytes each time is not given up", "[models]") {
+  Store store;
+  FakeServer server;
+  server.body = body_of(5000);
+  const models::CatalogFile file = file_for(server.body);
+  server.fail_first = 9; // nine drops, each after about 400 bytes: far more than the two failures in a row allowed
+  server.drop_after = 400;
+  std::atomic<int64_t> done{0};
+  REQUIRE(models::fetch_file(server, file, store.dir, {&done, nullptr, {}}, models::FetchOptions{2, 0}));
+  CHECK(server.ranges.size() == 10);
+  CHECK(store.read("vae/test.safetensors") == server.body);
+
+  // The wait between failures grows, so a server that is down for a while is waited out; a cancel still ends it soon.
+  Store other;
+  server.fail_first = 0;
+  server.status = 502;
+  server.ranges.clear();
+  std::atomic<bool> cancel{false};
+  std::thread stopper([&] {
+    std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    cancel.store(true);
+  });
+  const auto started = std::chrono::steady_clock::now();
+  auto stopped = models::fetch_file(server, file, other.dir, {&done, &cancel, {}}, models::FetchOptions{8, 100, 60000});
+  stopper.join();
+  REQUIRE_FALSE(stopped);
+  CHECK(stopped.error().rule == "M_CANCELLED");
+  CHECK(server.ranges.size() == 2); // tried at once, then after 100 ms; the 200 ms wait was cut short
+  CHECK(std::chrono::steady_clock::now() - started < std::chrono::milliseconds(600));
 }
 
 TEST_CASE("models: an entry's files are fetched in order and progress counts the whole entry", "[models]") {

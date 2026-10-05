@@ -130,6 +130,17 @@ TEST_CASE("comfyui: one generate_video step becomes one ComfyUI graph, and its v
   CHECK_FALSE(server->graph.contains("attn"));
   CHECK_FALSE(server->graph.contains("first"));
 
+  // FastH3 is the same graph with its own checkpoint and no add-on.
+  request.model = "fasth3.8step-v2.int8";
+  CHECK(comfy.offers(request.model, "generate_video"));
+  server->history_calls = 0;
+  REQUIRE(comfy.run(request));
+  CHECK(server->graph["unet"]["inputs"]["unet_name"] == "fastvideo_fasth3_8step_v2_pruned_int8_convrot.safetensors");
+  CHECK_FALSE(server->graph.contains("lora"));
+  CHECK(server->graph["sigmas"]["inputs"]["model"] == json::array({"unet", 0}));
+  CHECK(server->graph["vae"]["inputs"]["vae_name"] == "minimax_h3_video_vae_int8_convrot.safetensors");
+  request.model = h3;
+
   server->refuse_models = true; // ComfyUI cannot see the model files
   auto refused = comfy.run(request);
   REQUIRE_FALSE(refused);
