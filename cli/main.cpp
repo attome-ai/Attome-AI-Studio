@@ -570,6 +570,31 @@ int main(int argc, char **argv) {
     exit_status = finish(opt, call(opt, "tools.list", json::object()));
   });
 
+  // Any Tool by name, for the ones that have no command of their own: attome call gen.create_clip params.json
+  auto *cmd_call = app.add_subcommand("call", "Call any Tool: attome call gen.create_clip params.json (\"-\" reads the parameters from stdin)");
+  std::string call_tool, call_params = "-";
+  cmd_call->add_option("tool", call_tool, "A Tool name from attome tools")->required();
+  cmd_call->add_option("params", call_params, "JSON file with the parameters, or \"-\" for stdin (default)");
+  cmd_call->callback([&] {
+    std::string text;
+    if (call_params == "-") {
+      text.assign(std::istreambuf_iterator<char>(std::cin), std::istreambuf_iterator<char>());
+    } else {
+      auto read = atm::storage::read_file(std::filesystem::path(std::u8string(call_params.begin(), call_params.end())));
+      if (!read) {
+        exit_status = finish(opt, {{"ok", false}, {"error", atm::error_to_json(read.error())}});
+        return;
+      }
+      text = std::move(*read);
+    }
+    json params = text.find_first_not_of(" \t\r\n") == std::string::npos ? json::object() : json::parse(text, nullptr, false);
+    if (params.is_discarded() || !params.is_object()) {
+      exit_status = finish(opt, {{"ok", false}, {"error", {{"message", "The parameters are not a JSON object."}, {"hint", "Write them as {\"project\": \"Demo.attome\", ...}."}}}});
+      return;
+    }
+    exit_status = finish(opt, call(opt, call_tool.c_str(), params));
+  });
+
   auto *cmd_profile = app.add_subcommand("profile", "Zone timings of the running daemon, slowest first");
   cmd_profile->add_flag("--reset", reset, "Zero the statistics after reading them");
   cmd_profile->add_flag("--watch", watch, "Refresh every second until interrupted");
