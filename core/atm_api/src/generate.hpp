@@ -19,14 +19,15 @@
 namespace atm::api {
 
 struct GenClip {
-  std::string id, name, workflow, key;
+  std::string id, name, key;
+  nlohmann::json instance; // the clip's own workflow
   nlohmann::json written;  // the clip's inputs as the document has them (kept in the Take)
   nlohmann::json inputs;   // with clip links replaced by what the linked clip makes
   std::vector<std::string> depends;
 };
 
 struct GenRun {
-  nlohmann::json workflows;
+  nlohmann::json library;  // the project's library of Clip Workflows, for workflows used as nodes
   std::vector<GenClip> clips; // in run order
   std::filesystem::path dir;  // the cache folder
   std::filesystem::path project; // the project folder: a Take records its files relative to it

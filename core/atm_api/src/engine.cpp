@@ -20,6 +20,7 @@
 #include "atm/base/profiler.hpp"
 #include "atm/base/time.hpp"
 #include "atm/doc/document.hpp"
+#include "atm/gen/library.hpp"
 #include "atm/gen/models.hpp"
 #include "atm/gen/plan.hpp"
 #include "atm/models/models.hpp"
@@ -740,10 +741,9 @@ struct Engine::Impl {
     const bool ok = errors.empty();
     // Not errors: the project is valid, but a workflow cannot run here until its model is chosen or installed.
     json warnings = json::array();
-    if (const auto workflows = pr->doc.root().find("workflows"); workflows != pr->doc.root().end() && workflows->is_object())
-      for (auto it = workflows->begin(); it != workflows->end(); ++it)
-        for (json &w : ready_problems(*pr, it.key()))
-          warnings.push_back(std::move(w));
+    for (const gen::ClipIn &clip : gen_clips(*pr))
+      for (json &w : ready_problems(*pr, clip.id))
+        warnings.push_back(std::move(w));
     return json{{"ok", ok}, {"errors", std::move(errors)}, {"warnings", std::move(warnings)}, {"revision", pr->revision}};
   }
 
@@ -1311,15 +1311,30 @@ struct Engine::Impl {
     return true;
   }
 
-  // What keeps a workflow from running on this machine (a model not chosen, not known, or not installed), as JSON,
-  // with the model's ID and, for one that can be downloaded, its title and what is still missing.
-  json model_warnings(const Project &pr, const std::string &workflow_id) const {
+  static const json &library_of(const Project &pr) {
     static const json none = json::object();
-    const json &root = pr.doc.root();
-    const auto wit = root.find("workflows");
+    const auto it = pr.doc.root().find("workflows");
+    return it != pr.doc.root().end() && it->is_object() ? *it : none;
+  }
+
+  // A clip's Instance: its own copy of a Clip Workflow.
+  static const json &instance_of(const Project &pr, const std::string &clip_id) {
+    static const json none = json::object();
+    const doc::NodeRef *ref = pr.doc.find(clip_id);
+    if (!ref || !ref->node->is_object())
+      return none;
+    const auto media = ref->node->find("media_ref");
+    if (media == ref->node->end() || !media->is_object())
+      return none;
+    const auto instance = media->find("workflow");
+    return instance != media->end() && instance->is_object() ? *instance : none;
+  }
+
+  // What keeps a clip's workflow from running on this machine (a model not chosen, not known, or not installed), as
+  // JSON, with the model's ID and, for one that can be downloaded, its title and what is still missing.
+  json model_warnings(const Project &pr, const std::string &clip_id) const {
     std::vector<gen::Problem> found;
-    gen::check_models(wit != root.end() && wit->is_object() ? *wit : none, workflow_id,
-                      [&](std::string_view id) { return model_installed(id); }, found);
+    gen::check_models(library_of(pr), instance_of(pr, clip_id), clip_id, [&](std::string_view id) { return model_installed(id); }, found);
     json out = json::array();
     for (gen::Problem &p : found) {
       json w = {{"rule", p.rule}, {"path", p.path}, {"target", p.target}, {"message", p.message}, {"hint", p.hint}};
@@ -1391,9 +1406,6 @@ struct Engine::Impl {
   }
 
   std::vector<gen::ClipPlan> gen_plan(const Project &pr, gen::PlanOptions options) const {
-    static const json none = json::object();
-    const json &root = pr.doc.root();
-    const auto wit = root.find("workflows");
     options.present = [&pr](const json &take) { // every file the Take recorded is still there
       const auto outputs = take.find("outputs");
       if (outputs == take.end() || !outputs->is_object())
@@ -1403,11 +1415,11 @@ struct Engine::Impl {
           return false;
       return !outputs->empty();
     };
-    return gen::plan(wit != root.end() && wit->is_object() ? *wit : none, gen_clips(pr), key_context(), options);
+    return gen::plan(library_of(pr), gen_clips(pr), key_context(), options);
   }
 
   static json plan_json(const gen::ClipPlan &p) {
-    json c = {{"clip", p.id}, {"name", p.name}, {"workflow", p.workflow}, {"state", gen::clip_state_name(p.state)}, {"run", p.run},
+    json c = {{"clip", p.id}, {"name", p.name}, {"source", p.source}, {"state", gen::clip_state_name(p.state)}, {"run", p.run},
               {"depends_on", p.depends}};
     if (!p.reason.empty())
       c["reason"] = p.reason;
@@ -1419,19 +1431,17 @@ struct Engine::Impl {
   }
 
   // A model is chosen, known and installed, but nothing here runs it.
-  void engine_warnings(const Project &pr, const std::string &workflow_id, json &out, std::set<std::string> &seen) const {
-    const json &root = pr.doc.root();
-    const auto all = root.find("workflows");
-    if (all == root.end() || !all->is_object() || !seen.insert(workflow_id).second)
-      return;
-    const auto wf = all->find(workflow_id);
-    const auto nodes = wf == all->end() || !wf->is_object() ? json::const_iterator() : wf->find("nodes");
-    if (wf == all->end() || !wf->is_object() || nodes == wf->end() || !nodes->is_object())
+  void engine_warnings(const Project &pr, const json &workflow, const std::string &owner, json &out, std::set<std::string> &seen) const {
+    const auto nodes = workflow.is_object() ? workflow.find("nodes") : workflow.end();
+    if (!workflow.is_object() || nodes == workflow.end() || !nodes->is_object())
       return;
     for (auto it = nodes->begin(); it != nodes->end(); ++it) {
       const std::string kind = it->value("kind", std::string());
-      if (gen::is_workflow_kind(kind)) {
-        engine_warnings(pr, it->value("workflow", std::string()), out, seen);
+      if (gen::is_workflow_kind(kind)) { // a library workflow used as a node
+        const std::string inner = it->value("workflow", std::string());
+        if (seen.insert(inner).second)
+          if (const auto wf = library_of(pr).find(inner); wf != library_of(pr).end())
+            engine_warnings(pr, *wf, inner, out, seen);
         continue;
       }
       const gen::KindDef *def = gen::find_kind(kind);
@@ -1439,41 +1449,27 @@ struct Engine::Impl {
       const gen::ModelDecl *decl = def ? gen::find_model(model) : nullptr;
       if (!decl || (decl->needs_files && !model_installed(model)) || provider_for(providers, model, def->id))
         continue;
-      out.push_back({{"rule", "G_ENGINE_MISSING"}, {"path", it.key() + "/model"}, {"target", workflow_id}, {"model", model},
+      out.push_back({{"rule", "G_ENGINE_MISSING"}, {"path", it.key() + "/model"}, {"target", owner}, {"model", model},
                      {"message", "Nothing on this computer runs the model " + model + " yet."},
-                     {"hint", "Attome's own engine for this model arrives in a later version."}});
+                     {"hint", "Set the address of your ComfyUI in the Models panel, or wait for Attome's own engine for this model."}});
     }
   }
 
-  json ready_problems(const Project &pr, const std::string &workflow_id) const {
-    json problems = model_warnings(pr, workflow_id);
+  // What keeps a clip from running: its models (not chosen, not known, not installed, not run by anything here), and what
+  // its workflow still needs (an input with nothing behind it, no Primary Output, a value the clip did not give).
+  json ready_problems(const Project &pr, const std::string &clip_id) const {
+    json problems = model_warnings(pr, clip_id);
     std::set<std::string> seen;
-    engine_warnings(pr, workflow_id, problems, seen);
-    // A required input of a node with nothing behind it: the workflow is still being built.
-    static const json none = json::object();
-    const auto wit = pr.doc.root().find("workflows");
-    std::vector<gen::Problem> found;
-    gen::check_workflow(wit != pr.doc.root().end() && wit->is_object() ? *wit : none, workflow_id, found);
-    for (gen::Problem &p : found)
-      if (gen::is_readiness_rule(p.rule))
-        problems.push_back({{"rule", p.rule}, {"path", p.path}, {"target", p.target}, {"message", p.message}, {"hint", p.hint}});
-    return problems;
-  }
-
-  // What keeps one clip from running although its workflow can: an input of the workflow it gives no value for.
-  json clip_ready_problems(const Project &pr, const std::string &clip_id) const {
-    static const json none = json::object();
-    json problems = json::array();
+    engine_warnings(pr, instance_of(pr, clip_id), clip_id, problems, seen);
     const doc::NodeRef *ref = pr.doc.find(clip_id);
     if (!ref)
       return problems;
-    const auto wit = pr.doc.root().find("workflows");
     const gen::ClipLookup lookup = [&](std::string_view id) -> const json * {
       const doc::NodeRef *other = pr.doc.find(id);
       return other ? other->node : nullptr;
     };
     std::vector<gen::Problem> found;
-    gen::check_clip(wit != pr.doc.root().end() && wit->is_object() ? *wit : none, clip_id, *ref->node, lookup, found);
+    gen::check_clip(library_of(pr), clip_id, *ref->node, lookup, found);
     for (gen::Problem &p : found)
       if (gen::is_readiness_rule(p.rule))
         problems.push_back({{"rule", p.rule}, {"path", p.path}, {"target", p.target}, {"message", p.message}, {"hint", p.hint}});
@@ -1525,18 +1521,12 @@ struct Engine::Impl {
 
   Result<json> gen_status(const json &params) {
     ATM_TRY(Project *pr, project(params));
-    std::map<std::string, json> by_workflow; // each workflow is looked at once, however many clips use it
     json clips = json::array();
     const std::vector<gen::ClipIn> all = gen_clips(*pr);
     for (const gen::ClipPlan &p : gen_plan(*pr, {})) {
-      auto known = by_workflow.find(p.workflow);
-      if (known == by_workflow.end())
-        known = by_workflow.emplace(p.workflow, ready_problems(*pr, p.workflow)).first;
       json c = plan_json(p);
       c.erase("run");
-      json problems = known->second;
-      for (json &own : clip_ready_problems(*pr, p.id))
-        problems.push_back(std::move(own));
+      json problems = ready_problems(*pr, p.id);
       c["ready"] = problems.empty();
       c["problems"] = std::move(problems);
       for (const gen::ClipIn &in : all)
@@ -1599,23 +1589,11 @@ struct Engine::Impl {
     const std::vector<gen::ClipPlan> plans = gen_plan(*pr, options);
     GenRun run;
     json listed = json::array();
-    std::set<std::string> checked;
     for (const gen::ClipPlan &p : plans) {
       listed.push_back(plan_json(p));
       if (!p.run)
         continue;
-      if (checked.insert(p.workflow).second) // refused before anything runs: a model that is not here
-        if (const json problems = ready_problems(*pr, p.workflow); !problems.empty()) {
-          Error e;
-          e.code = ErrorCode::InvalidArgument;
-          e.rule = "G_NOT_READY";
-          e.path = p.id;
-          e.message = p.name + " cannot be generated: " + problems[0].value("message", std::string());
-          e.hint = problems[0].value("hint", std::string());
-          e.errors = problems;
-          return tl::unexpected(std::move(e));
-        }
-      if (const json problems = clip_ready_problems(*pr, p.id); !problems.empty()) { // an input the clip gives no value for
+      if (const json problems = ready_problems(*pr, p.id); !problems.empty()) { // refused before anything runs
         Error e;
         e.code = ErrorCode::InvalidArgument;
         e.rule = "G_NOT_READY";
@@ -1628,7 +1606,7 @@ struct Engine::Impl {
       GenClip clip;
       clip.id = p.id;
       clip.name = p.name;
-      clip.workflow = p.workflow;
+      clip.instance = instance_of(*pr, p.id);
       clip.key = p.key;
       clip.inputs = p.inputs;
       clip.depends = p.depends;
@@ -1636,7 +1614,7 @@ struct Engine::Impl {
         clip.written = ref->node->value("media_ref", json::object()).value("inputs", json::object());
       run.clips.push_back(std::move(clip));
     }
-    run.workflows = pr->doc.root().value("workflows", json::object());
+    run.library = pr->doc.root().value("workflows", json::object());
     run.dir = gen_dir(*pr);
     run.project = pr->dir;
     run.providers = providers;
@@ -1772,8 +1750,8 @@ struct Engine::Impl {
     return json{{"models", std::move(list)}};
   }
 
-  // Adds a generative clip: the built-in "Shot" workflow for the model (made once per project and model, then shared)
-  // and a clip that uses it, at the end of the picture track unless a place is given.
+  // Adds a generative clip made from the built-in Shot of the model: the clip gets its own copy of that Clip Workflow (its
+  // Instance), at the end of the picture track unless a place is given.
   Result<json> gen_create_clip(const json &params) {
     ATM_TRY(Project *pr, project(params));
     ATM_TRY(const std::string *prompt, string_param(params, "prompt"));
@@ -1861,33 +1839,8 @@ struct Engine::Impl {
       inputs["start_image"] = {{"from", source}, {"output", "last_frame"}};
     }
 
-    // The workflow: the project's Shot for this model, or a new one.
-    std::string workflow;
-    if (const auto all = root.find("workflows"); all != root.end() && all->is_object())
-      for (auto w = all->begin(); w != all->end(); ++w)
-        if (w->value("builtin", std::string()) == "shot:" + *model)
-          workflow = w.key();
-    if (workflow.empty()) {
-      workflow = "$new:shot";
-      json settings = json::object();
-      for (const gen::SettingDecl &s : decl->settings)
-        if (!s.def.is_null())
-          settings[s.name] = s.def;
-      json open = {{"prompt", {"$new:gen", "prompt"}}, {"seed", {"$new:gen", "seed"}}, {"seconds", {"$new:gen", "seconds"}},
-                   {"width", {"$new:gen", "width"}}, {"height", {"$new:gen", "height"}}};
-      for (const char *optional : {"start_image", "end_image", "references"})
-        if (decl->takes(optional))
-          open[optional] = {"$new:gen", optional};
-      ops.push_back({{"op", "add"},
-                     {"path", pr->doc.id() + "/workflows/$new:shot"},
-                     {"value",
-                      {{"name", "Shot"},
-                       {"builtin", "shot:" + *model},
-                       {"nodes", {{"$new:gen", {{"kind", "attome.generate_video"}, {"model", *model}, {"settings", std::move(settings)}}}}},
-                       {"exposed",
-                        {{"inputs", std::move(open)},
-                         {"outputs", {{"video", {"$new:gen", "video"}}, {"audio", {"$new:gen", "audio"}}, {"last_frame", {"$new:gen", "last_frame"}}}}}}}}});
-    }
+    // The clip's own workflow: a copy of the built-in Shot of the model, with its own nodes.
+    json instance = gen::instantiate("shot:" + *model);
     std::string name = params.value("name", std::string());
     if (name.empty()) { // "Shot N": the next number no generative clip of the project has. A prompt makes a poor name: it
       int next = 1;     // often starts with the style, and any cut of it reads as broken.
@@ -1933,11 +1886,11 @@ struct Engine::Impl {
                    {"value",
                     {{"name", name},
                      {"timing", {{"record_in", record_in}, {"duration", length}, {"source_in", "0"}}},
-                     {"media_ref", {{"type", "workflow"}, {"workflow", workflow}, {"inputs", std::move(inputs)}, {"width", width}, {"height", height}}},
+                     {"media_ref", {{"type", "workflow"}, {"workflow", std::move(instance)}, {"inputs", std::move(inputs)}, {"width", width}, {"height", height}}},
                      {"transform", {{"position", {0.5, 0.5}}, {"scale", {fill, fill}}, {"opacity", 1}}}}}});
     ATM_TRY(json applied, project_patch({{"project", project_ref}, {"patch", {{"ops", std::move(ops)}, {"label", "Add generative clip"}}}}));
     const json &ids = applied["id_map"];
-    return json{{"clip", ids.value("$new:clip", std::string())}, {"workflow", ids.value("$new:shot", workflow)},
+    return json{{"clip", ids.value("$new:clip", std::string())},
                 {"track", ids.value("$new:track", track)}, {"width", width}, {"height", height}, {"seconds", seconds},
                 {"seed", seed}, {"revision", applied["revision"]}};
   }
@@ -2405,8 +2358,8 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
      "its files are installed and whether an engine here runs each kind.",
      "", &Impl::gen_nodes},
     {"gen.create_clip", "gen", true,
-     "Add a generative clip: a prompt and a model. It goes at the end of the picture track (or at: a time), uses the project's "
-     "built-in Shot workflow for that model, and is not generated yet: run gen.run. start_from: \"previous\" (or a clip ID) makes "
+     "Add a generative clip: a prompt and a model. It goes at the end of the picture track (or at: a time), gets its own copy "
+     "of the built-in Shot workflow for that model (its Instance: change it and no other clip changes), and is not generated yet: run gen.run. start_from: \"previous\" (or a clip ID) makes "
      "it start on the last frame of that clip. Size defaults to the canvas's shape at about 0.9 megapixels on the model's grid.",
      R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},
        "prompt":{"type":"string"},"model":{"type":"string","description":"An id from gen.models"},"seconds":{"type":"number"},

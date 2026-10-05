@@ -67,7 +67,7 @@ std::string input_problem(const ModelDecl &model, std::string_view input, const 
 // What keeps a valid workflow from running on this machine. Rules: G_MODEL_UNSET (a node that runs a model names
 // none), G_MODEL_UNKNOWN (this build has no declaration for it), G_MODEL_MISSING (its files are not installed).
 // `installed` is asked only about models that need files.
-void check_models(const json &workflows, const std::string &workflow_id, const std::function<bool(std::string_view)> &installed,
+void check_models(const json &library, const json &workflow, const std::string &owner, const std::function<bool(std::string_view)> &installed,
                   std::vector<Problem> &out);
 
 } // namespace atm::gen

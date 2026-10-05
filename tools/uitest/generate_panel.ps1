@@ -58,7 +58,7 @@ try {
       if ($clips.Count -ne 2) { $failed = "expected two generative clips, found $($clips.Count)" }
       elseif ($clips[0].name -ne 'Shot 1' -or $clips[1].name -ne 'Shot 2') { $failed = 'the clips are not named Shot 1 and Shot 2' }
       elseif (@($clips | Where-Object { $_.state -ne 'clean' -or $_.takes -ne 1 }).Count) { $failed = 'both clips are not generated' }
-      elseif ($clips[0].workflow -ne $clips[1].workflow) { $failed = 'the two clips do not share one Shot workflow' }
+      elseif ($clips[0].source -ne $clips[1].source -or -not $clips[0].source) { $failed = 'the two clips were not copied from the same Clip Workflow' }
       elseif (@($clips[1].depends_on).Count -ne 1 -or $clips[1].depends_on[0] -ne $clips[0].clip) { $failed = 'the second clip does not start from the first' }
       else {
         $second = Get-Object $run $clips[1].clip

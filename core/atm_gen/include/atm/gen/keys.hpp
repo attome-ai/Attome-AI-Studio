@@ -27,19 +27,18 @@ struct KeyContext {
 // A clip linked to another clip is given this in place of the link.
 json made_by(std::string_view key, std::string_view port);
 
-// The key of every node of a workflow, by node ID, for these values of its exposed inputs. Media inputs should be
+// The key of every node of a workflow, by node ID, for these values of its Exposed Inputs. The workflow is given as it
+// is (a clip's Instance); `library` is the project's workflows, for workflows used as nodes. Media inputs should be
 // given by content ("b3:…"), not by path: a path's file can change under the same name. Nodes of an unknown
-// kind, and nodes behind a loop, get no key.
-std::map<std::string, std::string> node_keys(const json &workflows, std::string_view workflow_id, const json &inputs,
-                                             const KeyContext &context);
+// kind, and nodes behind a loop, get no key. An Exposed Input the clip gives no value for holds its default.
+std::map<std::string, std::string> node_keys(const json &library, const json &workflow, const json &inputs, const KeyContext &context);
 
 // What one exposed output of the workflow is made by: the key of its node and the node's port. Empty key when the
 // output does not exist or cannot be worked out.
 struct Made {
   std::string key, port;
 };
-Made output_key(const json &workflows, std::string_view workflow_id, const json &inputs, std::string_view output,
-                const KeyContext &context);
+Made output_key(const json &library, const json &workflow, const json &inputs, std::string_view output, const KeyContext &context);
 
 // One node to run: its key and what it is. `what` holds "kind" (short), "model", "settings" and "inputs"; an input is a
 // plain value, or {"key", "port"} for the output of another step, or a list of those.
@@ -49,9 +48,9 @@ struct Step {
 };
 // Every step the workflow's exposed outputs need, each once, in an order in which a step comes after the steps it
 // takes from. Workflows used as nodes are opened. Empty when an output cannot be worked out.
-std::vector<Step> steps(const json &workflows, std::string_view workflow_id, const json &inputs, const KeyContext &context);
+std::vector<Step> steps(const json &library, const json &workflow, const json &inputs, const KeyContext &context);
 
 // The key of a clip's Take: one hash over all the outputs its workflow exposes.
-std::string take_key(const json &workflows, std::string_view workflow_id, const json &inputs, const KeyContext &context);
+std::string take_key(const json &library, const json &workflow, const json &inputs, const KeyContext &context);
 
 } // namespace atm::gen

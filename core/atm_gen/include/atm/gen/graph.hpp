@@ -3,16 +3,25 @@
 // and the rules a workflow and a generative clip must keep. The validator (atm_patch), the executor (atm_api) and the
 // editor all read the table, so a new kind is added here and in the executor, not in three places.
 //
-// In the project:
-//   "workflows": {"cwf_…": {"name", "nodes": {"nod_…": node}, "links": {"lnk_…": link}, "exposed": {"inputs", "outputs"}}}
-//   node    {"kind": "attome.sample", "model"?: "<catalog id>", "settings"?: {…}, "inputs"?: {<port>: value}}
-//           or {"kind": "attome.workflow", "workflow": "cwf_…", "inputs"?: {…}}: a workflow used as a node
+// A generative clip holds its own copy of a Clip Workflow, its Instance. In the project:
+//   on a clip: "media_ref": {"type": "workflow",
+//                            "workflow": the Instance: {"name", "source", "nodes": {"nod_…": node}, "links": {"lnk_…": link},
+//                                                       "exposed": {"inputs": {…}, "outputs": {…}, "primary": "<output>"}},
+//                            "inputs": {"<exposed input>": value or clip link},
+//                            "takes": {"tak_…": {…}}, "take_order": […], "selected": "tak_…" or null}
+//   "source" says which Clip Workflow the clip was copied from ("shot:<model>" for the built-in ones). Editing the
+//   Instance changes this clip only.
+//   node    {"kind": "attome.sample", "model"?: "<catalog id>", "settings"?: {…}, "inputs"?: {<port>: value}, "ui"?: {x, y}}
+//           or {"kind": "attome.workflow", "workflow": "cwf_…", "inputs"?: {…}}: a Clip Workflow of the project's library
+//           (project.workflows) used as a node
 //   link    {"from": ["nod_…", "<output port>"], "to": ["nod_…", "<input port>"]}
-//   exposed {"inputs": {"<name>": ["nod_…", "<input port>"]}, "outputs": {"<name>": ["nod_…", "<output port>"]}}
-// On a clip:
-//   "media_ref": {"type": "workflow", "workflow": "cwf_…", "inputs": {"<exposed input>": value or clip link},
-//                 "takes": {"tak_…": {…}}, "take_order": […], "selected": "tak_…" or null}
-//   clip link {"from": "clp_…", "output": "<exposed output of that clip's workflow>"}
+//   exposed inputs, the Instance's Exposed Inputs, the values the clip sets:
+//           {"<name>": {"type": "<data type>", "label"?, "required"?: bool, "default"?, "range"?: {"min", "max"} or {"options": […]},
+//                       "order"?: n, "to"?: [["nod_…", "<input port>"], …]}}
+//           "to" is where the value goes; an input with no "to" is an Unlinked Exposed Input: it does nothing, and the
+//           clip's value for it is kept.
+//   exposed outputs: {"<name>": {"from": ["nod_…", "<output port>"]}}, and "primary": the name of the one that is the
+//           clip's picture or sound.
 //
 // A node is also held to what its model declares (atm/gen/models.hpp): the kinds it does, its settings and their
 // ranges, the optional inputs it takes, the lengths and sizes it makes. That is known from the catalog whether or not
@@ -37,6 +46,7 @@ enum class PortType {
   conditioning, latent,             // held by the engine; they arrive through a link only
 };
 const char *port_type_name(PortType type);
+bool port_type_from_name(std::string_view name, PortType &type); // false for a name that is not a Data Type
 
 struct PortDef {
   const char *name;
@@ -74,10 +84,32 @@ struct Ports {
   const Port *output(std::string_view name) const;
 };
 
+// One Exposed Input of a workflow, as written. `required` and `list` are what the clip must give: the input is required
+// when it says so, or when it leads to a node input that needs a value, has none of its own, and this input has no default.
+struct ExposedInput {
+  std::string name, label;
+  PortType type = PortType::text;
+  bool required = false, list = false;
+  json def;   // "default"; null when none
+  json range; // {"min", "max"} or {"options": […]}; null when none
+  int64_t order = 0;
+  std::vector<std::pair<std::string, std::string>> to; // node input ports it feeds; none: an Unlinked Exposed Input
+};
+struct ExposedOutput {
+  std::string name, node, port;
+};
+// The workflow's Exposed Inputs by "order", then name, and its Outputs by name. An entry that cannot be read is left out
+// (check_workflow says why). `library` is the project's workflows, for workflows used as nodes.
+std::vector<ExposedInput> exposed_inputs(const json &library, const json &workflow);
+std::vector<ExposedOutput> exposed_outputs(const json &workflow);
+std::string primary_output(const json &workflow); // "exposed.primary", or empty
+
 // The ports of one node; of a workflow node, what the workflow it names exposes. Nothing for an unknown kind.
-Ports node_ports(const json &workflows, const json &node);
-// The public face of a workflow: its exposed inputs and outputs, typed by the ports they lead to.
-Ports workflow_ports(const json &workflows, std::string_view workflow_id);
+Ports node_ports(const json &library, const json &node);
+// The public face of a workflow: its Exposed Inputs and Outputs. The workflow is given as it is (an Instance), or by the
+// ID of a workflow of the library.
+Ports workflow_ports(const json &library, const json &workflow);
+Ports library_workflow_ports(const json &library, std::string_view library_id);
 
 // May an output of type `from` feed an input of type `to`? The same type, an integer into a number, and one value into
 // a list of its type.
@@ -92,19 +124,25 @@ struct Problem {
 // (a port, node or link end that does not exist), G_TYPE (a value or a link of the wrong type), G_FAN_IN (two sources
 // for one input), G_CYCLE (the graph loops, or a workflow holds itself), G_MISSING (a required input with no value,
 // link or exposure).
-void check_workflow(const json &workflows, const std::string &workflow_id, std::vector<Problem> &out);
+// `workflow` is the workflow as it is; `owner` names it in problems (a clip ID for an Instance, a library ID), and `base`
+// is the path to it (the clip's "<id>/media_ref/workflow", or the library ID).
+void check_workflow(const json &library, const json &workflow, const std::string &owner, const std::string &base,
+                    std::vector<Problem> &out);
+void check_workflow(const json &library, const std::string &library_id, std::vector<Problem> &out);
 
-// Rules that say "not finished" rather than "wrong": G_MISSING. A workflow is built one step at a time (a node is added,
+// Rules that say "not finished" rather than "wrong": G_MISSING (a required input with nothing behind it) and G_PRIMARY
+// (no Primary Output chosen). A workflow is built one step at a time (a node is added,
 // then linked), so these do not refuse an edit: the project stays valid, and the workflow and the clips that use it are
 // reported as not ready and are not run until the input has a value, a link or an exposure.
 bool is_readiness_rule(std::string_view rule);
 
 using ClipLookup = std::function<const json *(std::string_view clip_id)>;
 
-// The rules of one clip whose media_ref is a workflow; does nothing for any other clip. Rules: G_WORKFLOW, G_PORT,
+// The rules of one clip whose media_ref is a workflow, and of its Instance (check_workflow); does nothing for any other
+// clip. Rules: G_WORKFLOW (the clip has no Instance of its own), G_PORT,
 // G_TYPE, G_MISSING, G_SETTING and G_RANGE (a value the model behind the input does not take), G_CLIP_LINK (a link to a clip that does not exist or is not generative), G_CLIP_CYCLE (the clip
 // links to itself, directly or through other clips), G_TAKE (the selected Take is not one of its Takes).
-void check_clip(const json &workflows, const std::string &clip_id, const json &clip, const ClipLookup &lookup,
+void check_clip(const json &library, const std::string &clip_id, const json &clip, const ClipLookup &lookup,
                 std::vector<Problem> &out);
 
 } // namespace atm::gen

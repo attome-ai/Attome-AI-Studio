@@ -74,6 +74,32 @@ function New-Sample([string]$Path, [string]$SampleArgs) {
   Copy-Item $cached $Path -Force
 }
 
+# A generative clip's own workflow, as JSON text to put in a patch (`"workflow": <this>`): the "Shot" of a model as one
+# "generate video" node. $X keeps the placeholders of two clips apart in one patch. -Exposed names the inputs the clip sets.
+function Get-VideoInstance([string]$X = '', [string]$Model = 'attome-mock', [string]$Settings = '', [string]$Inputs = '',
+                           [string[]]$Exposed = @('prompt', 'seed', 'seconds', 'width', 'height')) {
+  $types = @{ prompt = 'text'; seed = 'integer'; seconds = 'number'; width = 'integer'; height = 'integer'; start_image = 'image' }
+  $in = $Exposed | ForEach-Object { """$_"":{""type"":""$($types[$_])"",""order"":$([array]::IndexOf($Exposed, $_)),""to"":[[""`$new:gen$X"",""$_""]]$(if ($_ -eq 'prompt') { ',"required":true' })}" }
+  $node = """kind"":""attome.generate_video"",""model"":""$Model"""
+  if ($Settings) { $node += ",""settings"":$Settings" }
+  if ($Inputs) { $node += ",""inputs"":$Inputs" }
+  "{""name"":""Shot"",""source"":""test"",""nodes"":{""`$new:gen$X"":{$node}},""exposed"":{""inputs"":{$($in -join ',')},""outputs"":{""video"":{""from"":[""`$new:gen$X"",""video""]},""audio"":{""from"":[""`$new:gen$X"",""audio""]},""last_frame"":{""from"":[""`$new:gen$X"",""last_frame""]}},""primary"":""video""}}"
+}
+
+# The same as three blocks (encode the prompt, sample, decode), with a start picture and a seed to set.
+function Get-ShotInstance([string]$X = '', [string]$Model = 'attome-mock', [int]$Seconds = 2, [int]$Width = 640, [int]$Height = 352,
+                          [string[]]$Exposed = @('prompt', 'start_image', 'seed')) {
+  $where = @{ prompt = 'enc'; start_image = 'smp'; seed = 'smp' }
+  $types = @{ prompt = 'text'; seed = 'integer'; start_image = 'image' }
+  $in = $Exposed | ForEach-Object { """$_"":{""type"":""$($types[$_])"",""order"":$([array]::IndexOf($Exposed, $_)),""to"":[[""`$new:$($where[$_])$X"",""$_""]]}" }
+  "{""name"":""Shot"",""source"":""test"",""nodes"":{" +
+    """`$new:enc$X"":{""kind"":""attome.encode_prompt"",""model"":""$Model""}," +
+    """`$new:smp$X"":{""kind"":""attome.sample"",""model"":""$Model"",""settings"":{""steps"":4},""inputs"":{""seconds"":$Seconds,""width"":$Width,""height"":$Height}}," +
+    """`$new:dec$X"":{""kind"":""attome.decode"",""model"":""$Model""}}," +
+    """links"":{""`$new:l1$X"":{""from"":[""`$new:enc$X"",""conditioning""],""to"":[""`$new:smp$X"",""conditioning""]},""`$new:l2$X"":{""from"":[""`$new:smp$X"",""latent""],""to"":[""`$new:dec$X"",""latent""]}}," +
+    """exposed"":{""inputs"":{$($in -join ',')},""outputs"":{""video"":{""from"":[""`$new:dec$X"",""video""]},""last_frame"":{""from"":[""`$new:dec$X"",""last_frame""]}},""primary"":""video""}}"
+}
+
 function Stop-Daemon($Run) {
   $ErrorActionPreference = 'Continue' # "no daemon running" is fine
   Invoke-Attome $Run daemon stop 2>&1 | Out-Null
@@ -91,4 +117,4 @@ function ConvertFrom-Rational([string]$T) {
   if ($T -match '/') { $p = $T -split '/'; [double]$p[0] / [double]$p[1] } else { [double]$T }
 }
 
-Export-ModuleMember -Function New-Sample, Invoke-EditorScript, Invoke-Attome, Stop-Daemon, Get-Tracks, Get-Object, ConvertFrom-Rational
+Export-ModuleMember -Function Get-VideoInstance, Get-ShotInstance, New-Sample, Invoke-EditorScript, Invoke-Attome, Stop-Daemon, Get-Tracks, Get-Object, ConvertFrom-Rational

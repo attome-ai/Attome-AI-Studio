@@ -17,6 +17,14 @@ namespace fs = std::filesystem;
 
 namespace {
 
+// The ports an Exposed Input feeds: a list of [node, port] pairs. (In brace syntax {{"a", "b"}} is an object, not a list.)
+json to_(std::initializer_list<std::pair<std::string, std::string>> ends) {
+  json out = json::array();
+  for (const auto &e : ends)
+    out.push_back(json::array({e.first, e.second}));
+  return out;
+}
+
 json ok(Engine &e, const char *tool, json params) {
   auto r = e.call(tool, params);
   INFO(tool << ": " << (r ? "" : r.error().message));
@@ -30,13 +38,47 @@ atm::Error err(Engine &e, const char *tool, json params) {
   return r.error();
 }
 
-// A project with the "Shot" workflow (three blocks on the mock model) and two clips, the second starting on the last
-// frame of the first.
+// A project with two clips, each with its own copy of the "Shot" workflow (three blocks on the mock model), the second
+// starting on the last frame of the first.
 struct Film {
   fs::path dir = fs::temp_directory_path() / atm::new_id("attome-gen");
   std::shared_ptr<MockProvider> mock = std::make_shared<MockProvider>();
   std::unique_ptr<Engine> engine;
-  std::string project, shot, a, b, smp;
+  std::string project, a, b;
+
+  // The Shot as one clip's own workflow; `x` keeps the placeholders of two clips apart in one patch.
+  static json shot_workflow(const std::string &x, const char *model, bool blocks, const json &size) {
+    const auto n = [&](const char *name) { return "$new:" + std::string(name) + x; };
+    json inputs = {{"prompt", {{"type", "text"}, {"required", true}, {"order", 0}}},
+                   {"start_image", {{"type", "image"}, {"order", 1}}},
+                   {"seed", {{"type", "integer"}, {"order", 2}}}};
+    if (blocks) {
+      inputs["prompt"]["to"] = to_({{n("enc"), "prompt"}});
+      inputs["start_image"]["to"] = to_({{n("smp"), "start_image"}});
+      inputs["seed"]["to"] = to_({{n("smp"), "seed"}});
+      return {{"name", "Shot"},
+              {"nodes",
+               {{n("enc"), {{"kind", "attome.encode_prompt"}, {"model", model}}},
+                {n("smp"), {{"kind", "attome.sample"}, {"model", model}, {"settings", {{"steps", 4}}}, {"inputs", size}}},
+                {n("dec"), {{"kind", "attome.decode"}, {"model", model}}}}},
+              {"links",
+               {{n("l1"), {{"from", {n("enc"), "conditioning"}}, {"to", {n("smp"), "conditioning"}}}},
+                {n("l2"), {{"from", {n("smp"), "latent"}}, {"to", {n("dec"), "latent"}}}}}},
+              {"exposed",
+               {{"inputs", inputs},
+                {"outputs", {{"video", {{"from", {n("dec"), "video"}}}}, {"last_frame", {{"from", {n("dec"), "last_frame"}}}}}},
+                {"primary", "video"}}}};
+    }
+    inputs["prompt"]["to"] = to_({{n("smp"), "prompt"}});
+    inputs["start_image"]["to"] = to_({{n("smp"), "start_image"}});
+    inputs["seed"]["to"] = to_({{n("smp"), "seed"}});
+    return {{"name", "Shot"},
+            {"nodes", {{n("smp"), {{"kind", "attome.generate_video"}, {"model", model}, {"settings", {{"steps", 4}}}, {"inputs", size}}}}},
+            {"exposed",
+             {{"inputs", inputs},
+              {"outputs", {{"video", {{"from", {n("smp"), "video"}}}}, {"last_frame", {{"from", {n("smp"), "last_frame"}}}}}},
+              {"primary", "video"}}}};
+  }
 
   explicit Film(const char *model = atm::api::kMockModel, bool blocks = true,
                 json size = {{"seconds", 0.5}, {"width", 320}, {"height", 176}}) {
@@ -47,45 +89,23 @@ struct Film {
     cfg.providers = {mock};
     engine = std::make_unique<Engine>(cfg);
     const json created = ok(*engine, "project.create", {{"path", project}, {"rate", "24"}, {"canvas", "320x176"}});
-    const std::string prj = created["project"], seq = created["sequence"];
-    json workflow;
-    if (blocks)
-      workflow = {{"name", "Shot"},
-                  {"nodes",
-                   {{"$new:enc", {{"kind", "attome.encode_prompt"}, {"model", model}}},
-                    {"$new:smp", {{"kind", "attome.sample"}, {"model", model}, {"settings", {{"steps", 4}}}, {"inputs", size}}},
-                    {"$new:dec", {{"kind", "attome.decode"}, {"model", model}}}}},
-                  {"links",
-                   {{"$new:l1", {{"from", {"$new:enc", "conditioning"}}, {"to", {"$new:smp", "conditioning"}}}},
-                    {"$new:l2", {{"from", {"$new:smp", "latent"}}, {"to", {"$new:dec", "latent"}}}}}},
-                  {"exposed",
-                   {{"inputs", {{"prompt", {"$new:enc", "prompt"}}, {"start_image", {"$new:smp", "start_image"}}, {"seed", {"$new:smp", "seed"}}}},
-                    {"outputs", {{"video", {"$new:dec", "video"}}, {"last_frame", {"$new:dec", "last_frame"}}}}}}};
-    else
-      workflow = {{"name", "Shot"},
-                  {"nodes", {{"$new:smp", {{"kind", "attome.generate_video"}, {"model", model}, {"settings", {{"steps", 4}}}, {"inputs", size}}}}},
-                  {"exposed",
-                   {{"inputs", {{"prompt", {"$new:smp", "prompt"}}, {"start_image", {"$new:smp", "start_image"}}, {"seed", {"$new:smp", "seed"}}}},
-                    {"outputs", {{"video", {"$new:smp", "video"}}, {"last_frame", {"$new:smp", "last_frame"}}}}}}};
-    const auto clip = [](const char *name, const char *in, json inputs) {
+    const std::string seq = created["sequence"];
+    const auto clip = [&](const char *name, const char *in, const char *x, json inputs) {
       return json{{"name", name},
                   {"timing", {{"record_in", in}, {"duration", "1s"}, {"source_in", "0s"}}},
-                  {"media_ref", {{"type", "workflow"}, {"workflow", "$new:shot"}, {"inputs", std::move(inputs)}}}};
+                  {"media_ref", {{"type", "workflow"}, {"workflow", shot_workflow(x, model, blocks, size)}, {"inputs", std::move(inputs)}}}};
     };
     const json added = ok(
         *engine, "project.patch",
         {{"project", project},
          {"patch",
           {{"ops",
-            json::array({{{"op", "add"}, {"path", prj + "/workflows/$new:shot"}, {"value", workflow}},
-                         {{"op", "add"}, {"path", seq + "/tracks/$new:v1"}, {"value", {{"kind", "video"}, {"name", "V1"}}}},
-                         {{"op", "add"}, {"path", "$new:v1/clips/$new:a"}, {"value", clip("First", "0s", {{"prompt", "A robot walks"}, {"seed", 7}})}},
+            json::array({{{"op", "add"}, {"path", seq + "/tracks/$new:v1"}, {"value", {{"kind", "video"}, {"name", "V1"}}}},
+                         {{"op", "add"}, {"path", "$new:v1/clips/$new:a"}, {"value", clip("First", "0s", "a", {{"prompt", "A robot walks"}, {"seed", 7}})}},
                          {{"op", "add"}, {"path", "$new:v1/clips/$new:b"},
-                          {"value", clip("Second", "1s", {{"prompt", "It rains"}, {"start_image", {{"from", "$new:a"}, {"output", "last_frame"}}}})}}})}}}});
-    shot = added["id_map"]["$new:shot"];
+                          {"value", clip("Second", "1s", "b", {{"prompt", "It rains"}, {"start_image", {{"from", "$new:a"}, {"output", "last_frame"}}}})}}})}}}});
     a = added["id_map"]["$new:a"];
     b = added["id_map"]["$new:b"];
-    smp = added["id_map"]["$new:smp"];
   }
   ~Film() {
     engine.reset();

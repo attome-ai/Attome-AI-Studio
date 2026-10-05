@@ -594,7 +594,7 @@ void check_generative(const doc::Document &doc, const std::set<std::string> *tra
   const auto wit = root.find("workflows");
   const json &workflows = wit != root.end() && wit->is_object() ? *wit : none;
   std::vector<gen::Problem> found;
-  if (workflows_too)
+  if (workflows_too) // the project's library of Clip Workflows (a clip's own Instance is checked with the clip)
     for (auto it = workflows.begin(); it != workflows.end(); ++it)
       gen::check_workflow(workflows, it.key(), found);
   const gen::ClipLookup lookup = [&](string_view id) -> const json * {
@@ -701,23 +701,30 @@ public:
     json problems = json::array();
     for (const std::string &t : tracks)
       check_track(doc_, t, problems);
-    // A change to a workflow, or a clip taken away, can break a generative clip on any track: look at them all.
-    bool workflows = false, everywhere = false;
-    const auto touches = [&](const std::string &id) {
+    // A clip taken away can break a generative clip on any track (one that takes from it): look at them all. A change to
+    // the project's library of Clip Workflows can break any clip that uses one as a node. A change to a clip's own
+    // Instance is checked with that clip (note_instance), on its track.
+    bool library = false, everywhere = false;
+    const auto touches = [&](const std::string &id, bool gone) {
       const string_view prefix = id_prefix(id);
-      workflows = workflows || prefix == "cwf" || prefix == "nod" || prefix == "lnk";
+      if (prefix == "cwf") {
+        library = true;
+      } else if (prefix == "nod" || prefix == "lnk") {
+        const NodeRef *ref = gone ? nullptr : doc_.find(id);
+        library = library || !ref || id_prefix(ref->parent) != "clp"; // a node of the library, or one that is gone
+      }
     };
     for (const std::string &id : res_.created)
-      touches(id);
+      touches(id, false);
     for (const std::string &id : res_.modified)
-      touches(id);
+      touches(id, false);
     for (const std::string &id : res_.deleted) {
-      touches(id);
+      touches(id, true);
       everywhere = everywhere || id_prefix(id) == "clp";
     }
-    everywhere = (everywhere || workflows) && doc_.root().contains("workflows");
+    everywhere = everywhere || (library && doc_.root().contains("workflows"));
     if (everywhere || !tracks.empty())
-      check_generative(doc_, everywhere ? nullptr : &tracks, workflows, problems);
+      check_generative(doc_, everywhere ? nullptr : &tracks, library, problems);
     if (!problems.empty())
       return rejected(std::move(problems));
     return {};
@@ -998,8 +1005,19 @@ private:
     return {};
   }
 
+  // A node or a link of a generative clip's Instance: the clip is the one to check, with its track.
+  void note_instance(const std::string &id) {
+    for (const NodeRef *ref = doc_.find(id); ref && !ref->parent.empty(); ref = doc_.find(ref->parent))
+      if (id_prefix(ref->parent) == "clp") {
+        timing_clips_.insert(ref->parent);
+        return;
+      }
+  }
+
   void note_timing(const std::string &id, const Path &p) {
     const string_view prefix = id_prefix(id);
+    if (prefix == "nod" || prefix == "lnk")
+      note_instance(id);
     if ((prefix == "clp" && p.n >= 2 &&
          (p.seg[1] == "timing" || p.seg[1] == "media_ref" || p.seg[1] == "transform" || p.seg[1] == "audio" ||
           p.seg[1] == "effects")) ||
@@ -1071,6 +1089,8 @@ private:
       insert_at(*container, order_key, pos, id, container_path);
     if (prefix == "clp" || prefix == "trn" || prefix == "kf" || prefix == "fx")
       timing_clips_.insert(id);
+    if (prefix == "nod" || prefix == "lnk")
+      note_instance(id);
     res_.created.push_back(id);
     done(std::move(forward), {{"op", "remove"}, {"path", id}});
     return {};
@@ -1174,6 +1194,8 @@ private:
     ATM_TRY(Home h, home_of(t.id));
     if (id_prefix(h.parent) == "trk") // a removed clip may leave a transition without its clip
       left_tracks_.insert(h.parent);
+    if (const string_view prefix = id_prefix(t.id); prefix == "nod" || prefix == "lnk")
+      note_instance(t.id); // a node or a link of a clip's Instance: that clip is checked again
     json inverse = {{"op", "add"}, {"path", h.parent + "/" + h.collection + "/" + t.id}};
     if (json a = old_anchor(h); !a.is_null())
       inverse["anchor"] = std::move(a);

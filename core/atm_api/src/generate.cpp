@@ -55,7 +55,7 @@ StepCount count_steps(const GenRun &run) {
   StepCount n;
   std::set<std::string> seen;
   for (const GenClip &clip : run.clips)
-    for (const gen::Step &s : gen::steps(run.workflows, clip.workflow, clip.inputs, run.context))
+    for (const gen::Step &s : gen::steps(run.library, clip.instance, clip.inputs, run.context))
       if (seen.insert(s.key).second) {
         ++n.total;
         n.cached += in_cache(run.dir, s.key) ? 1 : 0;
@@ -96,7 +96,7 @@ std::vector<GenOutcome> run_generation(const GenRun &run, const GenProgress &pro
       finish("skipped");
       continue;
     }
-    const std::vector<gen::Step> steps = gen::steps(run.workflows, clip.workflow, clip.inputs, run.context);
+    const std::vector<gen::Step> steps = gen::steps(run.library, clip.instance, clip.inputs, run.context);
     if (steps.empty()) {
       out.error = engine_error("G_PLAN", "The steps of " + clip.name + " cannot be worked out.", "Check the clip's workflow with project.validate.");
       finish("failed");
@@ -201,8 +201,8 @@ std::vector<GenOutcome> run_generation(const GenRun &run, const GenProgress &pro
       continue;
     // The Take: what each exposed output of the clip's workflow is, and where its file lies.
     json outputs = json::object();
-    for (const gen::Port &port : gen::workflow_ports(run.workflows, clip.workflow).outputs) {
-      const gen::Made made = gen::output_key(run.workflows, clip.workflow, clip.inputs, port.name, run.context);
+    for (const gen::Port &port : gen::workflow_ports(run.library, clip.instance).outputs) {
+      const gen::Made made = gen::output_key(run.library, clip.instance, clip.inputs, port.name, run.context);
       const fs::path file = step_dir(run.dir, made.key) / gen::output_file(made.port);
       if (!made.key.empty() && storage::exists(file))
         outputs[port.name] = {{"key", made.key}, {"port", made.port},

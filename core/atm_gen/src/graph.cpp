@@ -91,13 +91,15 @@ std::string names(const std::vector<Port> &ports) {
 
 Port from_def(const PortDef &d) { return Port{d.name, d.type, d.required, d.list}; }
 
-Ports workflow_ports_at(const json &workflows, std::string_view workflow_id, int depth);
+Ports workflow_ports_at(const json &library, const json &workflow, int depth);
 
-Ports node_ports_at(const json &workflows, const json &node, int depth) {
+Ports node_ports_at(const json &library, const json &node, int depth) {
   Ports out;
   const std::string kind = string_at(node, "kind");
-  if (is_workflow_kind(kind))
-    return depth < kMaxDepth ? workflow_ports_at(workflows, string_at(node, "workflow"), depth + 1) : out;
+  if (is_workflow_kind(kind)) {
+    const json &inner = object_at(library, string_at(node, "workflow").c_str());
+    return depth < kMaxDepth && !inner.empty() ? workflow_ports_at(library, inner, depth + 1) : out;
+  }
   const KindDef *def = find_kind(kind);
   if (!def)
     return out;
@@ -108,48 +110,69 @@ Ports node_ports_at(const json &workflows, const json &node, int depth) {
   return out;
 }
 
-Ports workflow_ports_at(const json &workflows, std::string_view workflow_id, int depth) {
-  Ports out;
-  if (!workflows.is_object())
-    return out;
-  const auto wf = workflows.find(workflow_id);
-  if (wf == workflows.end() || !wf->is_object())
-    return out;
-  const json &nodes = object_at(*wf, "nodes");
-  const json &exposed = object_at(*wf, "exposed");
-  std::string node_id, port_name;
-  const json &inputs = object_at(exposed, "inputs");
+std::vector<ExposedInput> exposed_inputs_at(const json &library, const json &workflow, int depth) {
+  std::vector<ExposedInput> out;
+  const json &nodes = object_at(workflow, "nodes");
+  const json &inputs = object_at(object_at(workflow, "exposed"), "inputs");
   for (auto it = inputs.begin(); it != inputs.end(); ++it) {
-    if (!read_end(*it, node_id, port_name) || !nodes.contains(node_id))
+    if (!it->is_object())
       continue;
-    const json &node = nodes[node_id];
-    const Ports ports = node_ports_at(workflows, node, depth);
-    if (const Port *p = ports.input(port_name)) // a value typed into the node is the default: the input is then optional
-      out.inputs.push_back(Port{it.key(), p->type, p->required && !object_at(node, "inputs").contains(port_name), p->list});
-  }
-  const json &outputs = object_at(exposed, "outputs");
-  for (auto it = outputs.begin(); it != outputs.end(); ++it) {
-    if (!read_end(*it, node_id, port_name) || !nodes.contains(node_id))
+    ExposedInput e;
+    e.name = it.key();
+    if (!port_type_from_name(string_at(*it, "type"), e.type) || e.type == T::conditioning || e.type == T::latent)
       continue;
-    const Ports ports = node_ports_at(workflows, nodes[node_id], depth);
-    if (const Port *p = ports.output(port_name))
-      out.outputs.push_back(Port{it.key(), p->type, false, p->list});
+    e.label = string_at(*it, "label");
+    e.required = it->contains("required") && (*it)["required"].is_boolean() && (*it)["required"].get<bool>();
+    if (const auto d = it->find("default"); d != it->end())
+      e.def = *d;
+    if (const auto r = it->find("range"); r != it->end() && r->is_object())
+      e.range = *r;
+    if (const auto o = it->find("order"); o != it->end() && o->is_number_integer())
+      e.order = o->get<int64_t>();
+    if (const auto to = it->find("to"); to != it->end() && to->is_array())
+      for (const json &pair : *to) {
+        std::string node_id, port_name;
+        if (!read_end(pair, node_id, port_name) || !nodes.contains(node_id))
+          continue;
+        e.to.emplace_back(node_id, port_name);
+        const Ports ports = node_ports_at(library, nodes[node_id], depth);
+        if (const Port *p = ports.input(port_name)) {
+          e.list = e.list || p->list;
+          // The input leads to something that needs a value the node does not hold: the clip must give one.
+          if (p->required && e.def.is_null() && !object_at(nodes[node_id], "inputs").contains(port_name))
+            e.required = true;
+        }
+      }
+    out.push_back(std::move(e));
   }
+  std::stable_sort(out.begin(), out.end(), [](const ExposedInput &x, const ExposedInput &y) { return x.order != y.order ? x.order < y.order : x.name < y.name; });
+  return out;
+}
+
+Ports workflow_ports_at(const json &library, const json &workflow, int depth) {
+  Ports out;
+  for (const ExposedInput &e : exposed_inputs_at(library, workflow, depth))
+    out.inputs.push_back(Port{e.name, e.type, e.required, e.list});
+  const json &nodes = object_at(workflow, "nodes");
+  for (const ExposedOutput &o : exposed_outputs(workflow))
+    if (nodes.contains(o.node))
+      if (const Port *p = node_ports_at(library, nodes[o.node], depth).output(o.port))
+        out.outputs.push_back(Port{o.name, p->type, false, p->list});
   return out;
 }
 
 // Does the workflow `from` hold `target`, itself or through the workflows it uses as nodes?
-bool holds(const json &workflows, const std::string &from, const std::string &target, int depth) {
+bool holds(const json &library, const std::string &from, const std::string &target, int depth) {
   if (from == target)
     return true;
-  if (depth >= kMaxDepth || !workflows.is_object())
+  if (depth >= kMaxDepth || !library.is_object())
     return false;
-  const auto wf = workflows.find(from);
-  if (wf == workflows.end())
+  const auto wf = library.find(from);
+  if (wf == library.end())
     return false;
   const json &nodes = object_at(*wf, "nodes");
   for (auto it = nodes.begin(); it != nodes.end(); ++it)
-    if (is_workflow_kind(string_at(*it, "kind")) && holds(workflows, string_at(*it, "workflow"), target, depth + 1))
+    if (is_workflow_kind(string_at(*it, "kind")) && holds(library, string_at(*it, "workflow"), target, depth + 1))
       return true;
   return false;
 }
@@ -220,10 +243,19 @@ bool takes_from(const ClipLookup &lookup, const std::string &from, const std::st
 
 } // namespace
 
-const char *port_type_name(PortType type) {
-  static constexpr const char *kNames[] = {"text", "number", "integer", "boolean", "image", "video", "audio", "mask",
-                                           "conditioning", "latent"};
-  return kNames[size_t(type)];
+namespace {
+constexpr const char *kTypeNames[] = {"text", "number", "integer", "boolean", "image", "video", "audio", "mask", "conditioning", "latent"};
+}
+
+const char *port_type_name(PortType type) { return kTypeNames[size_t(type)]; }
+
+bool port_type_from_name(std::string_view name, PortType &type) {
+  for (size_t i = 0; i < std::size(kTypeNames); ++i)
+    if (name == kTypeNames[i]) {
+      type = PortType(i);
+      return true;
+    }
+  return false;
 }
 
 std::span<const KindDef> kind_defs() { return kKinds; }
@@ -261,11 +293,29 @@ const Port *Ports::output(std::string_view name) const {
   return nullptr;
 }
 
-Ports node_ports(const json &workflows, const json &node) { return node_ports_at(workflows, node, 0); }
+Ports node_ports(const json &library, const json &node) { return node_ports_at(library, node, 0); }
 
-Ports workflow_ports(const json &workflows, std::string_view workflow_id) {
-  return workflow_ports_at(workflows, workflow_id, 0);
+Ports workflow_ports(const json &library, const json &workflow) { return workflow_ports_at(library, workflow, 0); }
+
+Ports library_workflow_ports(const json &library, std::string_view library_id) {
+  return workflow_ports_at(library, object_at(library, std::string(library_id).c_str()), 0);
 }
+
+std::vector<ExposedInput> exposed_inputs(const json &library, const json &workflow) { return exposed_inputs_at(library, workflow, 0); }
+
+std::vector<ExposedOutput> exposed_outputs(const json &workflow) {
+  std::vector<ExposedOutput> out;
+  const json &outputs = object_at(object_at(workflow, "exposed"), "outputs");
+  for (auto it = outputs.begin(); it != outputs.end(); ++it) {
+    ExposedOutput o;
+    o.name = it.key();
+    if (it->is_object() && read_end(*it, "from", o.node, o.port))
+      out.push_back(std::move(o));
+  }
+  return out;
+}
+
+std::string primary_output(const json &workflow) { return string_at(object_at(workflow, "exposed"), "primary"); }
 
 bool can_link(const Port &from, const Port &to) {
   if (from.list && !to.list)
@@ -273,17 +323,19 @@ bool can_link(const Port &from, const Port &to) {
   return from.type == to.type || (from.type == PortType::integer && to.type == PortType::number);
 }
 
-void check_workflow(const json &workflows, const std::string &workflow_id, std::vector<Problem> &out) {
-  if (!workflows.is_object())
-    return;
-  const auto wit = workflows.find(workflow_id);
-  if (wit == workflows.end() || !wit->is_object())
-    return;
-  const json &nodes = object_at(*wit, "nodes");
-  const json &links = object_at(*wit, "links");
-  const json &exposed = object_at(*wit, "exposed");
+void check_workflow(const json &library, const std::string &library_id, std::vector<Problem> &out) {
+  if (const auto wit = library.is_object() ? library.find(library_id) : library.end(); wit != library.end() && wit->is_object())
+    check_workflow(library, *wit, library_id, library_id, out);
+}
+
+void check_workflow(const json &library, const json &workflow, const std::string &owner, const std::string &base, std::vector<Problem> &out) {
+  const json &workflows = library; // the project's library, for workflows used as nodes
+  const std::string &workflow_id = owner;
+  const json &nodes = object_at(workflow, "nodes");
+  const json &links = object_at(workflow, "links");
+  const json &exposed = object_at(workflow, "exposed");
   const auto add = [&](const char *rule, std::string path, std::string message, std::string hint) {
-    out.push_back(Problem{rule, std::move(path), workflow_id, std::move(message), std::move(hint)});
+    out.push_back(Problem{rule, std::move(path), owner, std::move(message), std::move(hint)});
   };
 
   // Nodes: a known kind, and typed values that fit their ports.
@@ -433,12 +485,13 @@ void check_workflow(const json &workflows, const std::string &workflow_id, std::
       break;
     }
 
-  // Exposed inputs and outputs lead to real ports; an exposed input has no link of its own.
+  // Exposed Inputs: what the clip sets. Each one says its own type; where it goes is optional, so an input nothing leads
+  // to is allowed: it does nothing, and the clip's value for it is kept.
   std::set<std::pair<std::string, std::string>> open;
   std::string node_id, port_name;
   const json &exposed_in = object_at(exposed, "inputs");
   for (auto it = exposed_in.begin(); it != exposed_in.end(); ++it) {
-    const std::string path = workflow_id + "/exposed/inputs/" + it.key();
+    const std::string path = base + "/exposed/inputs/" + it.key();
     static constexpr std::string_view kTimeKeys[] = {"record_in", "duration", "source_in", "t", "start", "in_offset",
                                                      "out_offset", "fade_in", "fade_out", "rate"};
     if (std::find(std::begin(kTimeKeys), std::end(kTimeKeys), it.key()) != std::end(kTimeKeys)) {
@@ -446,31 +499,104 @@ void check_workflow(const json &workflows, const std::string &workflow_id, std::
           "Pick another name, such as \"" + it.key() + "_value\".");
       continue;
     }
-    const bool pair = read_end(*it, node_id, port_name);
-    if (pair && nodes.contains(node_id) && !ports.contains(node_id))
-      continue; // a node already reported for its kind: its ports are unknown, not wrong
-    const auto found = pair ? ports.find(node_id) : ports.end();
-    if (found == ports.end() || !found->second.input(port_name)) {
-      add("G_PORT", path, "The exposed input \"" + it.key() + "\" does not lead to an input of a node of this workflow.",
-          "Write it as [\"nod_…\", \"<input port>\"].");
+    if (!it->is_object()) {
+      add("G_PORT", path, "The exposed input \"" + it.key() + "\" must be an object.",
+          "Write it as {\"type\": \"text\", \"to\": [[\"nod_…\", \"<input port>\"]]}.");
       continue;
     }
-    const auto key = std::make_pair(node_id, port_name);
-    if (const auto link = fed.find(key); link != fed.end())
-      add("G_FAN_IN", path, "Input \"" + port_name + "\" of node " + node_id + " is exposed and also fed by " + link->second + ".",
-          "An input is either exposed or linked. Remove one.");
-    open.insert(key);
+    PortType type = T::text;
+    const std::string type_name = string_at(*it, "type");
+    if (!port_type_from_name(type_name, type) || type == T::conditioning || type == T::latent) {
+      add("G_TYPE", path + "/type",
+          "The exposed input \"" + it.key() + "\" has the type \"" + type_name + "\", which a clip cannot set.",
+          "Use text, number, integer, boolean, image, video, audio or mask.");
+      continue;
+    }
+    for (const char *key : {"label"})
+      if (it->contains(key) && !(*it)[key].is_string())
+        add("G_TYPE", path + "/" + key, "\"" + std::string(key) + "\" of the exposed input \"" + it.key() + "\" must be text.", "Write a name for people to read.");
+    if (it->contains("required") && !(*it)["required"].is_boolean())
+      add("G_TYPE", path + "/required", "\"required\" of the exposed input \"" + it.key() + "\" must be true or false.", "Write true or false.");
+    if (it->contains("order") && !(*it)["order"].is_number_integer())
+      add("G_TYPE", path + "/order", "\"order\" of the exposed input \"" + it.key() + "\" must be a whole number.", "Rows are listed by order, then name.");
+    if (const auto range = it->find("range"); range != it->end()) {
+      bool fine = range->is_object();
+      if (fine && range->contains("options"))
+        fine = (*range)["options"].is_array();
+      else if (fine)
+        fine = range->contains("min") && range->contains("max") && (*range)["min"].is_number() && (*range)["max"].is_number() &&
+               (*range)["min"].get<double>() <= (*range)["max"].get<double>();
+      if (!fine)
+        add("G_RANGE", path + "/range", "The range of the exposed input \"" + it.key() + "\" must be {\"min\", \"max\"} or {\"options\": […]}.",
+            "Example: {\"min\": 1, \"max\": 15}.");
+    }
+    if (const auto def = it->find("default"); def != it->end())
+      if (const char *what = expected(*def, Port{it.key(), type, false, false}))
+        add("G_TYPE", path + "/default", "The default of the exposed input \"" + it.key() + "\" is " + port_type_name(type) + " and must be " + what + ".",
+            "Set a value of that type.");
+    const auto to = it->find("to");
+    if (to != it->end() && !to->is_array()) {
+      add("G_PORT", path + "/to", "\"to\" of the exposed input \"" + it.key() + "\" must be a list of [\"nod_…\", \"<input port>\"] pairs.",
+          "Write it as [[\"nod_…\", \"prompt\"]], or leave it out.");
+      continue;
+    }
+    const Port mine{it.key(), type, false, false};
+    if (to != it->end())
+      for (const json &pair : *to) {
+        if (!read_end(pair, node_id, port_name)) {
+          add("G_PORT", path + "/to", "A \"to\" of the exposed input \"" + it.key() + "\" is not a [\"nod_…\", \"<input port>\"] pair.",
+              "Write it as [\"nod_…\", \"<input port>\"].");
+          continue;
+        }
+        if (nodes.contains(node_id) && !ports.contains(node_id))
+          continue; // a node already reported for its kind: its ports are unknown, not wrong
+        const auto found = ports.find(node_id);
+        const Port *target = found == ports.end() ? nullptr : found->second.input(port_name);
+        if (!target) {
+          add("G_PORT", path + "/to", "The exposed input \"" + it.key() + "\" does not lead to an input of a node of this workflow.",
+              "Write it as [\"nod_…\", \"<input port>\"].");
+          continue;
+        }
+        if (!can_link(mine, *target))
+          add("G_TYPE", path + "/to",
+              "The " + std::string(port_type_name(type)) + " input \"" + it.key() + "\" cannot feed the " + port_type_name(target->type) +
+                  " input \"" + port_name + "\" of node " + node_id + ".",
+              "Give the exposed input the type of the input it feeds.");
+        const auto key = std::make_pair(node_id, port_name);
+        if (const auto link = fed.find(key); link != fed.end())
+          add("G_FAN_IN", path + "/to", "Input \"" + port_name + "\" of node " + node_id + " is exposed and also fed by " + link->second + ".",
+              "An input is either exposed or linked. Remove one.");
+        else if (open.contains(key))
+          add("G_FAN_IN", path + "/to", "Input \"" + port_name + "\" of node " + node_id + " is fed by two exposed inputs.",
+              "An input takes one source. Remove one of the two.");
+        open.insert(key);
+      }
   }
+  // Outputs: each leads to an output port of a node; one of them is the Primary Output.
+  std::set<std::string> output_names;
   const json &exposed_out = object_at(exposed, "outputs");
   for (auto it = exposed_out.begin(); it != exposed_out.end(); ++it) {
-    const bool pair = read_end(*it, node_id, port_name);
-    if (pair && nodes.contains(node_id) && !ports.contains(node_id))
+    const std::string path = base + "/exposed/outputs/" + it.key();
+    const bool pair = it->is_object() && read_end(*it, "from", node_id, port_name);
+    if (pair && nodes.contains(node_id) && !ports.contains(node_id)) {
+      output_names.insert(it.key()); // a node already reported for its kind: its ports are unknown, not wrong
       continue;
+    }
     const auto found = pair ? ports.find(node_id) : ports.end();
-    if (found == ports.end() || !found->second.output(port_name))
-      add("G_PORT", workflow_id + "/exposed/outputs/" + it.key(),
-          "The exposed output \"" + it.key() + "\" does not lead to an output of a node of this workflow.",
-          "Write it as [\"nod_…\", \"<output port>\"].");
+    if (found == ports.end() || !found->second.output(port_name)) {
+      add("G_PORT", path, "The exposed output \"" + it.key() + "\" does not lead to an output of a node of this workflow.",
+          "Write it as {\"from\": [\"nod_…\", \"<output port>\"]}.");
+      continue;
+    }
+    output_names.insert(it.key());
+  }
+  if (const auto primary = exposed.find("primary"); primary != exposed.end()) {
+    if (!primary->is_string() || !output_names.contains(primary->get<std::string>()))
+      add("G_PORT", base + "/exposed/primary", "The Primary Output must be the name of one of the workflow's outputs.",
+          output_names.empty() ? "Add an output first." : "Outputs: " + [&] { std::string n; for (const std::string &o : output_names) n += (n.empty() ? "" : ", ") + o; return n; }() + ".");
+  } else {
+    add("G_PRIMARY", base + "/exposed/primary", "The workflow has no Primary Output: nothing says which output is the clip's picture or sound.",
+        "Set exposed.primary to the name of an output.");
   }
 
   // Every required input gets its value from somewhere.
@@ -479,13 +605,13 @@ void check_workflow(const json &workflows, const std::string &workflow_id, std::
     for (const Port &port : mine.inputs)
       if (port.required && !typed.contains(port.name) && !fed.contains({id, port.name}) && !open.contains({id, port.name}))
         add("G_MISSING", id + "/inputs/" + port.name, "Node " + id + " needs its input \"" + port.name + "\".",
-            "Give it a value, link an output to it, or expose it as an input of the workflow.");
+            "Give it a value, link an output to it, or let the clip set it.");
   }
 }
 
-bool is_readiness_rule(std::string_view rule) { return rule == "G_MISSING"; }
+bool is_readiness_rule(std::string_view rule) { return rule == "G_MISSING" || rule == "G_PRIMARY"; }
 
-void check_clip(const json &workflows, const std::string &clip_id, const json &clip, const ClipLookup &lookup,
+void check_clip(const json &library, const std::string &clip_id, const json &clip, const ClipLookup &lookup,
                 std::vector<Problem> &out) {
   if (!is_workflow_clip(clip))
     return;
@@ -493,43 +619,71 @@ void check_clip(const json &workflows, const std::string &clip_id, const json &c
   const auto add = [&](const char *rule, std::string path, std::string message, std::string hint) {
     out.push_back(Problem{rule, clip_id + "/media_ref" + (path.empty() ? "" : "/" + path), clip_id, std::move(message), std::move(hint)});
   };
-  const std::string workflow = string_at(ref, "workflow");
-  if (!workflows.is_object() || !workflows.contains(workflow)) {
-    add("G_WORKFLOW", "workflow", "Clip " + clip_id + " uses the workflow \"" + workflow + "\", which is not in the project.",
-        "Set media_ref.workflow to the ID of a workflow under the project's \"workflows\".");
+  const json &instance = object_at(ref, "workflow");
+  if (instance.empty()) {
+    add("G_WORKFLOW", "workflow", "Clip " + clip_id + " has no workflow of its own.",
+        "A generative clip holds its own copy of a Clip Workflow in media_ref.workflow.");
     return;
   }
-  const Ports face = workflow_ports(workflows, workflow);
+  check_workflow(library, instance, clip_id, clip_id + "/media_ref/workflow", out);
+  const std::vector<ExposedInput> face = exposed_inputs(library, instance);
   const json &inputs = object_at(ref, "inputs");
-  const json &behind = object_at(object_at(workflows[workflow], "exposed"), "inputs");
-  const json &wf_nodes = object_at(workflows[workflow], "nodes");
+  const json &wf_nodes = object_at(instance, "nodes");
+  const auto exposed_named = [&](const std::string &name) -> const ExposedInput * {
+    for (const ExposedInput &e : face)
+      if (e.name == name)
+        return &e;
+    return nullptr;
+  };
   for (auto it = inputs.begin(); it != inputs.end(); ++it) {
-    const Port *port = face.input(it.key());
-    if (!port) {
-      add("G_PORT", "inputs/" + it.key(), "Workflow " + workflow + " exposes no input \"" + it.key() + "\".",
-          "Its inputs are: " + names(face.inputs) + ".");
+    const ExposedInput *input = exposed_named(it.key());
+    if (!input) {
+      std::string have;
+      for (const ExposedInput &e : face)
+        have += (have.empty() ? "" : ", ") + e.name;
+      add("G_PORT", "inputs/" + it.key(), "The workflow of clip " + clip_id + " exposes no input \"" + it.key() + "\".",
+          "Its inputs are: " + (have.empty() ? std::string("none") : have) + ".");
       continue;
     }
-    // The node this input leads to, and what its model says about the value.
-    std::string node_id, node_port;
-    if (const auto end = behind.find(it.key()); end != behind.end() && read_end(*end, node_id, node_port) && wf_nodes.contains(node_id))
-      if (const ModelDecl *model = model_of(wf_nodes[node_id])) {
-        if (is_optional_media(*port) && !model->takes(node_port)) {
-          add("G_SETTING", "inputs/" + it.key(), "The model " + model->id + " of workflow " + workflow + " takes no \"" + node_port + "\".",
-              "Remove the input, or use a workflow whose model accepts it.");
-          continue;
-        }
-        if (const std::string wrong = input_problem(*model, node_port, *it); !wrong.empty()) {
-          add("G_RANGE", "inputs/" + it.key(), "Input \"" + it.key() + "\" of clip " + clip_id + " " + wrong + ".",
-              "Set a value the model " + model->id + " accepts.");
-          continue;
-        }
+    const Port port{input->name, input->type, input->required, input->list};
+    // What the nodes this input feeds say about the value; an input that feeds none has nothing to ask.
+    bool refused = false;
+    for (const auto &[node_id, node_port] : input->to) {
+      const ModelDecl *model = wf_nodes.contains(node_id) ? model_of(wf_nodes[node_id]) : nullptr;
+      if (!model)
+        continue;
+      if (is_optional_media(port) && !model->takes(node_port)) {
+        add("G_SETTING", "inputs/" + it.key(), "The model " + model->id + " of the workflow of clip " + clip_id + " takes no \"" + node_port + "\".",
+            "Remove the input, or use a workflow whose model accepts it.");
+        refused = true;
+        break;
       }
+      if (const std::string wrong = input_problem(*model, node_port, *it); !wrong.empty()) {
+        add("G_RANGE", "inputs/" + it.key(), "Input \"" + it.key() + "\" of clip " + clip_id + " " + wrong + ".",
+            "Set a value the model " + model->id + " accepts.");
+        refused = true;
+        break;
+      }
+    }
+    if (refused)
+      continue;
     if (!is_clip_link(*it)) {
-      if (const char *what = expected(*it, *port))
+      if (const char *what = expected(*it, port))
         add("G_TYPE", "inputs/" + it.key(),
-            "Input \"" + it.key() + "\" of clip " + clip_id + " is " + port_type_name(port->type) + " and must be " + what + ".",
+            "Input \"" + it.key() + "\" of clip " + clip_id + " is " + port_type_name(port.type) + " and must be " + what + ".",
             "Set a value of that type, or link it to another clip: {\"from\": \"clp_…\", \"output\": \"<name>\"}.");
+      else if (input->range.is_object() && it->is_number()) { // the range the workflow says for the value
+        const json &r = input->range;
+        const double x = it->get<double>();
+        if (r.contains("min") && r.contains("max") && r["min"].is_number() && r["max"].is_number() && (x < r["min"].get<double>() || x > r["max"].get<double>()))
+          add("G_RANGE", "inputs/" + it.key(), "Input \"" + it.key() + "\" of clip " + clip_id + " is " + std::to_string(x) + "; the workflow takes " +
+              std::to_string(r["min"].get<double>()) + " to " + std::to_string(r["max"].get<double>()) + ".", "Set a value inside the range.");
+      } else if (input->range.is_object() && input->range.contains("options") && input->range["options"].is_array()) {
+        const auto &options = input->range["options"];
+        if (std::find(options.begin(), options.end(), *it) == options.end())
+          add("G_RANGE", "inputs/" + it.key(), "Input \"" + it.key() + "\" of clip " + clip_id + " is not one of: " + options.dump() + ".",
+              "Pick one of the options.");
+      }
       continue;
     }
     // A link to another generative clip: one of its outputs feeds this input.
@@ -548,21 +702,21 @@ void check_clip(const json &workflows, const std::string &clip_id, const json &c
           "A clip may not depend on its own result. Link to a clip that comes before it.");
       continue;
     }
-    const Ports theirs = workflow_ports(workflows, string_at(object_at(*other, "media_ref"), "workflow"));
+    const Ports theirs = workflow_ports(library, object_at(object_at(*other, "media_ref"), "workflow"));
     const Port *source = theirs.output(output);
     if (!source)
       add("G_PORT", "inputs/" + it.key() + "/output", "Clip " + from + " has no output \"" + output + "\".",
           "Its outputs are: " + names(theirs.outputs) + ".");
-    else if (!can_link(*source, *port))
+    else if (!can_link(*source, port))
       add("G_TYPE", "inputs/" + it.key(),
           "The " + std::string(port_type_name(source->type)) + " output \"" + output + "\" of clip " + from + " cannot feed the " +
-              port_type_name(port->type) + " input \"" + it.key() + "\".",
+              port_type_name(port.type) + " input \"" + it.key() + "\".",
           "Link an output of the same type.");
   }
-  for (const Port &port : face.inputs)
-    if (port.required && !inputs.contains(port.name))
-      add("G_MISSING", "inputs/" + port.name, "Clip " + clip_id + " needs a value for \"" + port.name + "\".",
-          "Set media_ref.inputs." + port.name + ".");
+  for (const ExposedInput &input : face)
+    if (input.required && input.def.is_null() && !inputs.contains(input.name))
+      add("G_MISSING", "inputs/" + input.name, "Clip " + clip_id + " needs a value for \"" + input.name + "\".",
+          "Set media_ref.inputs." + input.name + ".");
   if (const auto selected = ref.find("selected"); selected != ref.end() && !selected->is_null())
     if (!selected->is_string() || !object_at(ref, "takes").contains(selected->get_ref<const std::string &>()))
       add("G_TAKE", "selected", "The selected Take of clip " + clip_id + " is not one of its Takes.",

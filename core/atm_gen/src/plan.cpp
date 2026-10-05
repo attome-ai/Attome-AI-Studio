@@ -32,7 +32,7 @@ const json *selected_take(const json &ref) {
 }
 
 struct Planner {
-  const json &workflows;
+  const json &library;
   const KeyContext &context;
   const PlanOptions &options;
   std::map<std::string, const ClipIn *> by_id;
@@ -51,7 +51,7 @@ struct Planner {
       const json &out = take ? object_at(object_at(*take, "outputs"), output.c_str()) : object_at(json(), "");
       return Made{string_at(out, "key"), string_at(out, "port")};
     }
-    return output_key(workflows, p->workflow, p->inputs, output, context);
+    return output_key(library, object_at(*in.ref, "workflow"), p->inputs, output, context);
   }
 
   const ClipPlan *resolve(const std::string &id) {
@@ -64,7 +64,7 @@ struct Planner {
     ClipPlan p;
     p.id = in.id;
     p.name = in.name;
-    p.workflow = string_at(*in.ref, "workflow");
+    p.source = string_at(object_at(*in.ref, "workflow"), "source");
     p.inputs = json::object();
     bool whole = true;
     const json &written = object_at(*in.ref, "inputs");
@@ -81,7 +81,7 @@ struct Planner {
       p.inputs[it.key()] = made_by(m.key, m.port);
     }
     if (whole)
-      p.key = take_key(workflows, p.workflow, p.inputs, context);
+      p.key = take_key(library, object_at(*in.ref, "workflow"), p.inputs, context);
 
     const json *take = selected_take(*in.ref);
     const bool there = take && (!options.present || options.present(*take));
@@ -122,9 +122,9 @@ const char *clip_state_name(ClipState state) {
   return kNames[size_t(state)];
 }
 
-std::vector<ClipPlan> plan(const json &workflows, const std::vector<ClipIn> &clips, const KeyContext &context,
+std::vector<ClipPlan> plan(const json &library, const std::vector<ClipIn> &clips, const KeyContext &context,
                            const PlanOptions &options) {
-  Planner planner{workflows, context, options, {}, {}, {}};
+  Planner planner{library, context, options, {}, {}, {}};
   std::vector<const ClipIn *> ordered;
   for (const ClipIn &c : clips)
     if (c.ref && c.ref->is_object()) {

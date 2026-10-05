@@ -36,30 +36,37 @@ bool read_end(const json &pair, std::string &node, std::string &port) {
   return true;
 }
 
+bool read_end(const json &owner, const char *key, std::string &node, std::string &port) {
+  const auto it = owner.find(key);
+  return it != owner.end() && read_end(*it, node, port);
+}
+
 std::string hash_of(const json &what) { return blake3_hex(what.dump()); } // dump() sorts keys: one text per value
 
 // The keys of one workflow for one set of input values. Workflows used as nodes are walked the same way, one level
 // down, with their inputs bound to what the outer node gets.
 class Walk {
 public:
-  Walk(const json &workflows, std::string_view workflow_id, const json &inputs, const KeyContext &context, int depth,
+  // `library` is the project's workflows, for workflows used as nodes; `workflow` is the one to walk, as it is (a clip's
+  // Instance, or a library entry).
+  Walk(const json &library, const json &workflow, const json &inputs, const KeyContext &context, int depth,
        std::vector<Step> *sink = nullptr)
-      : workflows_(workflows), inputs_(inputs), context_(context), depth_(depth), sink_(sink) {
-    static const json none = json::object();
-    const auto wf = workflows.is_object() ? workflows.find(workflow_id) : workflows.end();
-    const json &workflow = workflows.is_object() && wf != workflows.end() ? *wf : none;
+      : workflows_(library), inputs_(inputs), context_(context), depth_(depth), sink_(sink) {
     nodes_ = &object_at(workflow, "nodes");
     exposed_ = &object_at(workflow, "exposed");
+    exposed_outputs_ = exposed_outputs(workflow);
     std::string from_node, from_port, to_node, to_port;
     const json &links = object_at(workflow, "links");
     for (auto it = links.begin(); it != links.end(); ++it)
       if (it->is_object() && it->contains("from") && it->contains("to") && read_end((*it)["from"], from_node, from_port) &&
           read_end((*it)["to"], to_node, to_port))
         fed_[{to_node, to_port}].push_back({from_node, from_port});
-    const json &open = object_at(*exposed_, "inputs");
-    for (auto it = open.begin(); it != open.end(); ++it)
-      if (read_end(*it, to_node, to_port))
-        open_[{to_node, to_port}] = it.key();
+    for (const ExposedInput &e : exposed_inputs(library, workflow)) { // where each Exposed Input goes, and what it holds when the clip gives nothing
+      for (const auto &[node, port] : e.to)
+        open_[{node, port}] = e.name;
+      if (!e.def.is_null())
+        defaults_[e.name] = e.def;
+    }
   }
 
   // What makes an output of a node: the node's key and the port; for a workflow node, what makes that output inside.
@@ -73,7 +80,7 @@ public:
       const json inner = bound(node_id, *it);
       if (inner.is_null())
         return {};
-      Walk walk(workflows_, string_at(*it, "workflow"), inner, context_, depth_ + 1, sink_);
+      Walk walk(workflows_, object_at(workflows_, string_at(*it, "workflow").c_str()), inner, context_, depth_ + 1, sink_);
       return walk.output(port);
     }
     const std::string key = key_of(node_id);
@@ -84,7 +91,7 @@ public:
     const json &outputs = object_at(*exposed_, "outputs");
     const auto it = outputs.find(name);
     std::string node, port;
-    if (it == outputs.end() || !read_end(*it, node, port))
+    if (it == outputs.end() || !it->is_object() || !read_end(*it, "from", node, port))
       return {};
     return made(node, port);
   }
@@ -114,9 +121,8 @@ public:
 
   std::vector<std::string> output_names() const {
     std::vector<std::string> names;
-    const json &outputs = object_at(*exposed_, "outputs");
-    for (auto it = outputs.begin(); it != outputs.end(); ++it)
-      names.push_back(it.key());
+    for (const ExposedOutput &o : exposed_outputs_)
+      names.push_back(o.name);
     return names;
   }
 
@@ -143,9 +149,12 @@ private:
       return sources;
     }
     const json *value = nullptr;
-    if (const auto open = open_.find(end); open != open_.end())
+    if (const auto open = open_.find(end); open != open_.end()) {
       if (const auto given = inputs_.find(open->second); inputs_.is_object() && given != inputs_.end())
         value = &*given;
+      else if (const auto def = defaults_.find(open->second); def != defaults_.end())
+        value = &def->second;
+    }
     if (!value)
       if (const auto typed = object_at(node, "inputs").find(port.name); typed != object_at(node, "inputs").end())
         value = &*typed;
@@ -209,7 +218,9 @@ private:
   std::vector<Step> *sink_ = nullptr;
   const json *nodes_ = nullptr, *exposed_ = nullptr;
   std::map<End, std::vector<End>> fed_;
-  std::map<End, std::string> open_;
+  std::map<End, std::string> open_;            // a node input -> the Exposed Input that feeds it
+  std::map<std::string, json> defaults_;       // Exposed Input -> its default
+  std::vector<ExposedOutput> exposed_outputs_;
   std::map<std::string, std::string> keys_;
   std::set<std::string> walking_;
 };
@@ -218,19 +229,17 @@ private:
 
 json made_by(std::string_view key, std::string_view port) { return {{"key", key}, {"port", port}}; }
 
-std::map<std::string, std::string> node_keys(const json &workflows, std::string_view workflow_id, const json &inputs,
-                                             const KeyContext &context) {
-  return Walk(workflows, workflow_id, inputs, context, 0).all();
+std::map<std::string, std::string> node_keys(const json &library, const json &workflow, const json &inputs, const KeyContext &context) {
+  return Walk(library, workflow, inputs, context, 0).all();
 }
 
-Made output_key(const json &workflows, std::string_view workflow_id, const json &inputs, std::string_view output,
-                const KeyContext &context) {
-  return Walk(workflows, workflow_id, inputs, context, 0).output(output);
+Made output_key(const json &library, const json &workflow, const json &inputs, std::string_view output, const KeyContext &context) {
+  return Walk(library, workflow, inputs, context, 0).output(output);
 }
 
-std::vector<Step> steps(const json &workflows, std::string_view workflow_id, const json &inputs, const KeyContext &context) {
+std::vector<Step> steps(const json &library, const json &workflow, const json &inputs, const KeyContext &context) {
   std::vector<Step> out;
-  Walk walk(workflows, workflow_id, inputs, context, 0, &out);
+  Walk walk(library, workflow, inputs, context, 0, &out);
   const std::vector<std::string> names = walk.output_names();
   for (const std::string &name : names)
     if (walk.output(name).key.empty())
@@ -238,8 +247,8 @@ std::vector<Step> steps(const json &workflows, std::string_view workflow_id, con
   return names.empty() ? std::vector<Step>{} : out;
 }
 
-std::string take_key(const json &workflows, std::string_view workflow_id, const json &inputs, const KeyContext &context) {
-  Walk walk(workflows, workflow_id, inputs, context, 0);
+std::string take_key(const json &library, const json &workflow, const json &inputs, const KeyContext &context) {
+  Walk walk(library, workflow, inputs, context, 0);
   json outputs = json::object();
   for (const std::string &name : walk.output_names()) {
     const Made m = walk.output(name);

@@ -23,32 +23,25 @@ try {
     $prj = $info.id; $seq = $info.sequences[0].id
     @"
 {"ops":[
- {"op":"add","path":"$prj/workflows/`$new:w","value":{"name":"Three blocks",
-   "nodes":{
-     "`$new:enc":{"kind":"attome.encode_prompt","model":"attome-mock"},
-     "`$new:smp":{"kind":"attome.sample","model":"attome-mock","settings":{"steps":4},"inputs":{"seconds":2,"width":640,"height":352}},
-     "`$new:dec":{"kind":"attome.decode","model":"attome-mock"}},
-   "links":{
-     "`$new:l1":{"from":["`$new:enc","conditioning"],"to":["`$new:smp","conditioning"]},
-     "`$new:l2":{"from":["`$new:smp","latent"],"to":["`$new:dec","latent"]}},
-   "exposed":{"inputs":{"prompt":["`$new:enc","prompt"],"seed":["`$new:smp","seed"]},
-              "outputs":{"video":["`$new:dec","video"]}}}},
  {"op":"add","path":"$seq/tracks/`$new:v1","value":{"kind":"video","name":"V1"}},
  {"op":"add","path":"`$new:v1/clips/`$new:a","value":{"name":"First","timing":{"record_in":"0","duration":"2","source_in":"0"},
-   "media_ref":{"type":"workflow","workflow":"`$new:w","inputs":{"prompt":"A robot walks","seed":3}}}}
+   "media_ref":{"type":"workflow","workflow":$(Get-ShotInstance -Exposed @('prompt', 'seed')),"inputs":{"prompt":"A robot walks","seed":3}}}}
 ]}
 "@ | Set-Content "$work\pt.json" -Encoding utf8
     & "$bin\attome.exe" patch $proj "$work\pt.json" | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'the setup patch was refused' }
   } finally { Remove-Item Env:\ATTOME_ENDPOINT -ErrorAction SilentlyContinue }
 
-  function Get-Workflow($run) {
-    $p = (Invoke-Attome $run --json get $proj (Invoke-Attome $run --json inspect $proj | ConvertFrom-Json).result.data.id | ConvertFrom-Json).result.object
-    ($p.workflows.PSObject.Properties | Where-Object { $_.Value.name -eq 'Three blocks' }).Value
+  function Get-Workflow($run) { # the clip's own workflow
+    $clip = (Get-Tracks $run)[0].clip_list[0].id
+    (Get-Object $run $clip).media_ref.workflow
   }
   function Describe($w) {
     $links = @($w.links.PSObject.Properties | ForEach-Object { "$($w.nodes.($_.Value.from[0]).kind -replace 'attome.','').$($_.Value.from[1])>$($w.nodes.($_.Value.to[0]).kind -replace 'attome.','').$($_.Value.to[1])" })
-    $sets = @($w.exposed.inputs.PSObject.Properties | ForEach-Object { "$($_.Name)>$($w.nodes.($_.Value[0]).kind -replace 'attome.','').$($_.Value[1])" })
+    $sets = @($w.exposed.inputs.PSObject.Properties | ForEach-Object {
+      $name = $_.Name
+      if (@($_.Value.to).Count) { foreach ($t in $_.Value.to) { "$name>$($w.nodes.($t[0]).kind -replace 'attome.','').$($t[1])" } } else { "$name>(unlinked)" }
+    })
     "links [$($links -join ', ')]  clip sets [$($sets -join ', ')]"
   }
 
@@ -68,11 +61,12 @@ try {
   try {
     if (-not $failed) {
       $w = Get-Workflow $run; "1. seed dropped on nothing: $(Describe $w)"
-      if ($w.exposed.inputs.PSObject.Properties.Name -contains 'seed') { $failed = '1. the seed is still set by the clip' }
+      if (-not ($w.exposed.inputs.PSObject.Properties.Name -contains 'seed')) { $failed = '1. the Exposed Input "seed" is gone: cutting a feed must leave it, unlinked' }
+      elseif (@($w.exposed.inputs.seed.to).Count -ne 0) { $failed = '1. the seed still feeds the sampler' }
       elseif (@($w.links.PSObject.Properties).Count -ne 2) { $failed = '1. a link changed' }
       else {
         $clip = (Get-Tracks $run)[0].clip_list[0].id
-        if ((Get-Object $run $clip).media_ref.inputs.PSObject.Properties.Name -contains 'seed') { $failed = '1. the clip still holds a seed for an input that is gone' }
+        if (-not ((Get-Object $run $clip).media_ref.inputs.PSObject.Properties.Name -contains 'seed')) { $failed = '1. the clip lost its value for the unlinked seed' }
       }
     }
     if (-not $failed) { # the link into the decoder picked up and let go on nothing; then put back from the output
@@ -84,7 +78,7 @@ try {
         "shot $work\wires_link_cut.jpg"           # the decoder's input is red: nothing behind it
         'drag @port:sample.latent:out @port:decode.latent'
         'wait 500'
-        'drag @clipin:+ @port:sample.seed'        # the clip sets the seed again, wired from its side
+        'drag @clipin:seed @port:sample.seed'     # the unlinked seed fed to the sampler again, from its row on the clip's side
         'wait 500'
         "shot $work\wires_back.jpg"
       )
@@ -92,7 +86,7 @@ try {
       if (-not $failed) {
         $w = Get-Workflow $run; "2. cut, linked again, seed wired from the clip's side: $(Describe $w)"
         if (@($w.links.PSObject.Properties).Count -ne 2) { $failed = '2. the decoder is not linked again' }
-        elseif (-not ($w.exposed.inputs.PSObject.Properties.Name -contains 'seed')) { $failed = '2. the clip does not set the seed again' }
+        elseif (@($w.exposed.inputs.seed.to).Count -ne 1) { $failed = '2. the seed does not feed the sampler again' }
       }
     }
     if (-not $failed) { # the Inspector: Disconnect, then a typed value of the input's type
@@ -113,7 +107,7 @@ try {
         $w = Get-Workflow $run
         $seed = ($w.nodes.PSObject.Properties | Where-Object { $_.Value.kind -eq 'attome.sample' }).Value.inputs.seed
         "3. Disconnect and a typed seed: $(Describe $w)  seed=$seed"
-        if ($w.exposed.inputs.PSObject.Properties.Name -contains 'seed') { $failed = '3. Disconnect did not take the seed from the clip' }
+        if (@($w.exposed.inputs.seed.to).Count -ne 0) { $failed = '3. Disconnect did not unlink the seed' }
         elseif ($seed -ne 42) { $failed = "3. the typed seed is $seed, not 42" }
       }
     }

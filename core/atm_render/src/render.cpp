@@ -396,14 +396,18 @@ Result<Composition> compile(const json &project, std::string_view sequence_id, c
         const auto ref = clip.find("media_ref");
         const auto timing = clip.find("timing");
         std::string type = ref == clip.end() ? "" : ref->value("type", "");
-        std::string take_path; // a generative clip plays the video of its selected Take; with none it shows nothing
+        std::string take_path; // a generative clip plays the Primary Output of its selected Take; with none it shows nothing
         if (type == "workflow") {
+          std::string primary; // the output its own workflow marks as the clip's picture
+          if (const auto instance = ref->find("workflow"); instance != ref->end() && instance->is_object())
+            if (const auto exposed = instance->find("exposed"); exposed != instance->end() && exposed->is_object())
+              primary = exposed->value("primary", std::string());
           const auto takes = ref->find("takes");
           const auto selected = ref->find("selected");
           if (takes != ref->end() && takes->is_object() && selected != ref->end() && selected->is_string())
             if (const auto take = takes->find(selected->get_ref<const std::string &>()); take != takes->end() && take->is_object())
               if (const auto outputs = take->find("outputs"); outputs != take->end() && outputs->is_object())
-                if (const auto made = outputs->find("video"); made != outputs->end() && made->is_object())
+                if (const auto made = outputs->find(primary); made != outputs->end() && made->is_object())
                   take_path = made->value("path", std::string());
           if (take_path.empty())
             continue;

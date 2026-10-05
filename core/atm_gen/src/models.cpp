@@ -231,34 +231,32 @@ std::string input_problem(const ModelDecl &m, std::string_view input, const json
 }
 
 namespace {
-void models_of(const json &workflows, const std::string &workflow_id, const std::function<bool(std::string_view)> &installed,
+void models_in(const json &library, const json &workflow, const std::string &owner, const std::function<bool(std::string_view)> &installed,
                std::vector<Problem> &out, std::vector<std::string> &seen);
 }
 
-void check_models(const json &workflows, const std::string &workflow_id, const std::function<bool(std::string_view)> &installed,
+void check_models(const json &library, const json &workflow, const std::string &owner, const std::function<bool(std::string_view)> &installed,
                   std::vector<Problem> &out) {
   std::vector<std::string> seen;
-  models_of(workflows, workflow_id, installed, out, seen);
+  models_in(library, workflow, owner, installed, out, seen);
 }
 
 namespace {
-// One workflow, then the workflows it uses as nodes, each looked at once.
-void models_of(const json &workflows, const std::string &workflow_id, const std::function<bool(std::string_view)> &installed,
+// One workflow, then the library workflows it uses as nodes, each looked at once.
+void models_in(const json &library, const json &workflow, const std::string &owner, const std::function<bool(std::string_view)> &installed,
                std::vector<Problem> &out, std::vector<std::string> &seen) {
-  if (!workflows.is_object() || std::find(seen.begin(), seen.end(), workflow_id) != seen.end())
-    return;
-  seen.push_back(workflow_id);
-  const auto wf = workflows.find(workflow_id);
-  if (wf == workflows.end() || !wf->is_object())
-    return;
-  const auto nodes = wf->find("nodes");
-  if (nodes == wf->end() || !nodes->is_object())
+  const auto nodes = workflow.is_object() ? workflow.find("nodes") : workflow.end();
+  if (!workflow.is_object() || nodes == workflow.end() || !nodes->is_object())
     return;
   for (auto it = nodes->begin(); it != nodes->end(); ++it) {
     const auto kind = it->find("kind");
     if (kind != it->end() && kind->is_string() && is_workflow_kind(kind->get_ref<const std::string &>())) {
-      if (const auto inner = it->find("workflow"); inner != it->end() && inner->is_string())
-        models_of(workflows, inner->get<std::string>(), installed, out, seen);
+      const auto inner = it->find("workflow");
+      if (inner != it->end() && inner->is_string() && library.is_object() && std::find(seen.begin(), seen.end(), inner->get<std::string>()) == seen.end()) {
+        seen.push_back(inner->get<std::string>());
+        if (const auto wf = library.find(inner->get<std::string>()); wf != library.end())
+          models_in(library, *wf, inner->get<std::string>(), installed, out, seen);
+      }
       continue;
     }
     const KindDef *def = kind != it->end() && kind->is_string() ? find_kind(kind->get_ref<const std::string &>()) : nullptr;
@@ -268,17 +266,17 @@ void models_of(const json &workflows, const std::string &workflow_id, const std:
     const std::string model = mit != it->end() && mit->is_string() ? mit->get<std::string>() : std::string();
     const std::string path = it.key() + "/model";
     if (model.empty()) {
-      out.push_back({"G_MODEL_UNSET", path, workflow_id, "Node " + it.key() + " (" + def->title + ") has no model chosen.",
+      out.push_back({"G_MODEL_UNSET", path, owner, "Node " + it.key() + " (" + def->title + ") has no model chosen.",
                      "Pick a model for the node."});
       continue;
     }
     const ModelDecl *decl = find_model(model);
     if (!decl)
-      out.push_back({"G_MODEL_UNKNOWN", path, workflow_id,
+      out.push_back({"G_MODEL_UNKNOWN", path, owner,
                      "Node " + it.key() + " uses the model \"" + model + "\", which this version of Attome does not know.",
                      "Pick a model from the Models panel, or update Attome."});
     else if (decl->needs_files && !(installed && installed(model)))
-      out.push_back({"G_MODEL_MISSING", path, workflow_id,
+      out.push_back({"G_MODEL_MISSING", path, owner,
                      "Node " + it.key() + " uses the model \"" + model + "\", which is not installed on this computer.",
                      "Download it in the Models panel (attome models fetch " + model + "), or show Attome the folder that already has it."});
   }

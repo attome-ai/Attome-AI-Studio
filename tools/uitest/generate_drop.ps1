@@ -21,15 +21,11 @@ try {
     $prj = $info.id; $seq = $info.sequences[0].id
     @"
 {"ops":[
- {"op":"add","path":"$prj/workflows/`$new:shot","value":{"name":"Shot","builtin":"shot:attome-mock",
-   "nodes":{"`$new:gen":{"kind":"attome.generate_video","model":"attome-mock"}},
-   "exposed":{"inputs":{"prompt":["`$new:gen","prompt"],"seed":["`$new:gen","seed"],"seconds":["`$new:gen","seconds"],"width":["`$new:gen","width"],"height":["`$new:gen","height"]},
-              "outputs":{"video":["`$new:gen","video"],"audio":["`$new:gen","audio"],"last_frame":["`$new:gen","last_frame"]}}}},
  {"op":"add","path":"$seq/tracks/`$new:v1","value":{"kind":"video","name":"V1"}},
  {"op":"add","path":"`$new:v1/clips/`$new:a","value":{"name":"First","timing":{"record_in":"0","duration":"32017/3200","source_in":"0"},
-   "media_ref":{"type":"workflow","workflow":"`$new:shot","inputs":{"prompt":"A robot walks"}}}},
+   "media_ref":{"type":"workflow","workflow":$(Get-VideoInstance 'a'),"inputs":{"prompt":"A robot walks"}}}},
  {"op":"add","path":"`$new:v1/clips/`$new:b","value":{"name":"Second","timing":{"record_in":"32017/3200","duration":"5","source_in":"0"},
-   "media_ref":{"type":"workflow","workflow":"`$new:shot","inputs":{"prompt":"It rains"}}}}
+   "media_ref":{"type":"workflow","workflow":$(Get-VideoInstance 'b'),"inputs":{"prompt":"It rains"}}}}
 ]}
 "@ | Set-Content "$work\pt.json" -Encoding utf8
     & "$bin\attome.exe" patch $proj "$work\pt.json" | Out-Null

@@ -25,12 +25,9 @@ try {
     $prj = $info.id; $seq = $info.sequences[0].id
     @"
 {"ops":[
- {"op":"add","path":"$prj/workflows/`$new:shot","value":{"name":"Shot",
-   "nodes":{"`$new:gen":{"kind":"attome.generate_video","model":"minimax-h3.fl2va.turbo8-int8","settings":{"steps":8},"inputs":{"seconds":5,"width":1280,"height":704}}},
-   "exposed":{"inputs":{"prompt":["`$new:gen","prompt"]},"outputs":{"video":["`$new:gen","video"]}}}},
  {"op":"add","path":"$seq/tracks/`$new:v1","value":{"kind":"video","name":"V1"}},
  {"op":"add","path":"`$new:v1/clips/`$new:a","value":{"name":"Shot","timing":{"record_in":"0","duration":"5","source_in":"0"},
-   "media_ref":{"type":"workflow","workflow":"`$new:shot","inputs":{"prompt":"A robot walks"}}}}
+   "media_ref":{"type":"workflow","workflow":$(Get-VideoInstance -Model 'minimax-h3.fl2va.turbo8-int8' -Settings '{"steps":8}' -Inputs '{"seconds":5,"width":1280,"height":704}' -Exposed @('prompt')),"inputs":{"prompt":"A robot walks"}}}}
 ]}
 "@ | Set-Content "$work\pt.json" -Encoding utf8
     & "$bin\attome.exe" patch $proj "$work\pt.json" | Out-Null

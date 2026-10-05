@@ -284,7 +284,7 @@ void App::refresh() {
           c.media_h = ref.value("height", 0);
           c.is_adjustment = ref.value("type", "") == "adjustment";
           c.is_generative = ref.value("type", "") == "workflow";
-          c.workflow = c.is_generative ? ref.value("workflow", std::string()) : std::string();
+          c.source = c.is_generative && ref.contains("workflow") && ref["workflow"].is_object() ? ref["workflow"].value("source", std::string()) : std::string();
           if (c.is_generative) {
             for (const json &take : ref.value("take_order", json::array()))
               if (take.is_string())
@@ -1832,7 +1832,7 @@ void App::draw_menu() {
             mode_ = 0;
           } else { // the workflow of the selected clip when it has one, else the one that was open, else the first
             const ClipUi *sel = selected();
-            open_workflow(sel && sel->is_generative ? sel->workflow : wf_id_, sel && sel->is_generative ? sel->id : std::string());
+            open_workflow(sel && sel->is_generative ? sel->id : wf_id_);
           }
         }
       }
@@ -2589,8 +2589,7 @@ void App::draw_generate_card(const ClipUi &c) {
       static const json none = json::object();
       const json *self = clip_json(c.id);
       const json &inputs = self ? object_in(object_in(*self, "media_ref"), "inputs") : none;
-      const json &workflows = object_in(doc_, "workflows");
-      const json &recipe = workflows.contains(c.workflow) ? workflows[c.workflow] : none;
+      const json &recipe = self ? object_in(object_in(*self, "media_ref"), "workflow") : none; // the clip's own workflow
       const json &face = object_in(object_in(recipe, "exposed"), "inputs");
       const TrackUi *track = nullptr;
       for (const TrackUi &t : tracks_)
@@ -2598,20 +2597,11 @@ void App::draw_generate_card(const ClipUi &c) {
           if (k.id == c.id)
             track = &t;
       if (face.contains("seconds") && track) {
-        // The lengths the model behind "seconds" makes.
+        // The lengths the workflow says it takes: the range of its Exposed Input.
         float lo = 1.0f, hi = 15.0f;
-        poll_gen_parts();
-        std::string node, port;
-        if (end_of(face["seconds"], node, port)) {
-          const std::string model = object_in(object_in(recipe, "nodes"), node.c_str()).value("model", std::string());
-          for (const json &m : wf_parts_.value("models", json::array()))
-            if (m.value("id", "") == model) {
-              const json range = m.value("seconds", json::object());
-              if (range.value("min", 0.0f) > 0.0f)
-                lo = range.value("min", lo);
-              if (range.value("max", 0.0f) > 0.0f)
-                hi = range.value("max", hi);
-            }
+        if (const json &range = object_in(face["seconds"], "range"); range.contains("min") && range.contains("max") && range["min"].is_number() && range["max"].is_number()) {
+          lo = range["min"].get<float>();
+          hi = range["max"].get<float>();
         }
         const float current = inputs.contains("seconds") && inputs["seconds"].is_number() ? inputs["seconds"].get<float>() : float(double(c.frames) / fps());
         const std::string key = c.id + "@" + std::to_string(revision_);
@@ -3778,8 +3768,8 @@ void App::draw_timeline() {
         if (mode != 1 && (ImGui::IsItemHovered() || ImGui::IsItemActive()))
           ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
         if (mode == 1 && c.is_generative && ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) { // its recipe
-          const std::string workflow = c.workflow, clip = c.id;
-          pending_ = [this, workflow, clip] { open_workflow(workflow, clip); };
+          const std::string clip = c.id;
+          pending_ = [this, clip] { open_workflow(clip); };
         }
         if (ImGui::IsItemActivated()) {
           drag_id_ = c.id;
@@ -4926,20 +4916,30 @@ const json *App::clip_json(const std::string &clip_id) const {
   return walk(doc_);
 }
 
-std::vector<const ClipUi *> App::clips_using(const std::string &workflow) const {
-  std::vector<const ClipUi *> out;
-  for (const TrackUi &t : tracks_)
-    for (const ClipUi &c : t.clips)
-      if (c.is_generative && c.workflow == workflow)
-        out.push_back(&c);
-  return out;
+// The open workflow: a clip's own (its Instance), or an entry of the project's library.
+const json *App::workflow_json() const {
+  if (wf_id_.empty())
+    return nullptr;
+  if (id_prefix(wf_id_) == "clp") {
+    const json *clip = clip_json(wf_id_);
+    if (!clip)
+      return nullptr;
+    const json &instance = object_in(object_in(*clip, "media_ref"), "workflow");
+    return instance.empty() ? nullptr : &instance;
+  }
+  const json &library = object_in(doc_, "workflows");
+  const auto it = library.find(wf_id_);
+  return it != library.end() && it->is_object() ? &*it : nullptr;
 }
 
-void App::open_workflow(const std::string &workflow, const std::string &clip) {
+// The path to the open workflow in a patch.
+std::string App::wf_base() const { return id_prefix(wf_id_) == "clp" ? wf_id_ + "/media_ref/workflow" : wf_id_; }
+
+void App::open_workflow(const std::string &target) {
   play(false);
   mode_ = 1;
-  wf_id_ = workflow;
-  wf_clip_ = clip;
+  wf_id_ = target;
+  wf_clip_ = id_prefix(target) == "clp" ? target : std::string();
   wf_node_.clear();
   wf_link_.clear();
   wf_moved_.clear();
@@ -4959,9 +4959,16 @@ void App::draw_workflows() {
   ImGui::PopStyleVar(2);
   ImGui::PopStyleColor();
 
-  const json &all = object_in(doc_, "workflows");
-  if (!all.contains(wf_id_)) { // the open one is gone (undo, or none was open): the first there is
-    wf_id_ = all.empty() ? std::string() : all.begin().key();
+  const json &library = object_in(doc_, "workflows");
+  if (!workflow_json()) { // the open one is gone (undo, or none was open): the first clip's, else the first of the library
+    wf_id_.clear();
+    for (const TrackUi &t : tracks_)
+      for (const ClipUi &c : t.clips)
+        if (wf_id_.empty() && c.is_generative)
+          wf_id_ = c.id;
+    if (wf_id_.empty() && !library.empty())
+      wf_id_ = library.begin().key();
+    wf_clip_ = id_prefix(wf_id_) == "clp" ? wf_id_ : std::string();
     wf_node_.clear();
     wf_link_.clear();
   }
@@ -4978,23 +4985,24 @@ void App::draw_workflows() {
     ImGui::PopStyleColor();
     ImGui::PopStyleVar();
   };
-  panel("##wf_left", left_w, [&] { draw_workflow_list(all); });
+  panel("##wf_left", left_w, [&] { draw_workflow_list(library); });
   ImGui::SameLine(0.0f, 0.0f);
   ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
   ImGui::PushStyleColor(ImGuiCol_ChildBg, hexv(look::bg));
   if (ImGui::BeginChild("##wf_canvas", ImVec2(std::max(120.0f, avail.x - left_w - right_w), avail.y), ImGuiChildFlags_None,
                         ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse))
-    draw_workflow_canvas(all);
+    draw_workflow_canvas(library);
   ImGui::EndChild();
   ImGui::PopStyleColor();
   ImGui::PopStyleVar();
   ImGui::SameLine(0.0f, 0.0f);
-  panel("##wf_side", right_w, [&] { draw_workflow_side(all); });
+  panel("##wf_side", right_w, [&] { draw_workflow_side(library); });
   ImGui::End();
 }
 
-// The left column: back to the timeline, the project's workflows, and the node kinds to add.
-void App::draw_workflow_list(const json &all) {
+// The left column: back to the timeline, the workflows of the project (each generative clip's own, and the library's), and
+// the node kinds to add.
+void App::draw_workflow_list(const json &library) {
   if (soft_button("wf_back", "<  Back to the timeline", ImVec2(-1.0f, 30.0f)))
     mode_ = 0;
   ImGui::Dummy(ImVec2(0.0f, 10.0f));
@@ -5003,30 +5011,47 @@ void App::draw_workflow_list(const json &all) {
   ImGui::PopFont();
   ImGui::Dummy(ImVec2(0.0f, 4.0f));
   ImGui::PushTextWrapPos(0.0f);
-  ImGui::TextColored(hexv(look::fg3), "A workflow is the recipe a generative clip is made with. Change it and every clip that uses it changes.");
+  ImGui::TextColored(hexv(look::fg3), "Every generative clip has its own copy of the workflow it was made from. Change one and no other clip changes.");
   ImGui::PopTextWrapPos();
   ImGui::Dummy(ImVec2(0.0f, 8.0f));
-  for (auto it = all.begin(); it != all.end(); ++it) {
-    const std::string id = it.key();
-    const size_t used = clips_using(id).size();
+  // One row: its name, what it is, and a click opens it.
+  const auto row = [&](const std::string &id, const std::string &name, const std::string &note) {
     const ImVec2 p = ImGui::GetCursorScreenPos();
     ImGui::InvisibleButton(("##wf_" + id).c_str(), ImVec2(-1.0f, 44.0f));
-    ui_mark("workflow:" + it->value("name", std::string("Workflow")));
+    ui_mark("workflow:" + name);
+    ui_mark("workflow:" + id);
     const bool hovered = ImGui::IsItemHovered(), open = id == wf_id_;
     if (ImGui::IsItemClicked() && !open)
-      open_workflow(id, {});
+      open_workflow(id);
     const ImVec2 q(p.x + ImGui::GetItemRectSize().x, p.y + 44.0f);
     ImDrawList *dl = ImGui::GetWindowDrawList();
     dl->AddRectFilled(p, q, hex(open ? look::raised : hovered ? look::panel2 : look::bg), 9.0f);
     if (open)
       dl->AddRectFilled(p, ImVec2(p.x + 3.0f, q.y), hex(look::accent), 2.0f);
     dl->PushClipRect(p, ImVec2(q.x - 8.0f, q.y), true);
-    dl->AddText(ImVec2(p.x + 12.0f, p.y + 6.0f), hex(look::fg), it->value("name", std::string("Workflow")).c_str());
-    const std::string model = it->value("builtin", std::string()).rfind("shot:", 0) == 0 ? it->value("builtin", std::string()).substr(5) : std::string();
-    const std::string note = (used == 1 ? "1 clip" : std::to_string(used) + " clips") + (model.empty() ? "" : "  -  " + model);
+    dl->AddText(ImVec2(p.x + 12.0f, p.y + 6.0f), hex(look::fg), name.c_str());
     dl->AddText(ImVec2(p.x + 12.0f, p.y + 24.0f), hex(look::fg3), note.c_str());
     dl->PopClipRect();
     ImGui::Dummy(ImVec2(0.0f, 4.0f));
+  };
+  bool any_clip = false;
+  for (const TrackUi &t : tracks_)
+    for (const ClipUi &c : t.clips)
+      if (c.is_generative) {
+        if (!any_clip)
+          section_label("CLIPS");
+        if (!any_clip)
+          ImGui::Dummy(ImVec2(0.0f, 4.0f));
+        any_clip = true;
+        row(c.id, c.name, c.source.empty() ? "its own workflow" : "from " + c.source);
+      }
+  if (!library.empty()) {
+    if (any_clip)
+      ImGui::Dummy(ImVec2(0.0f, 6.0f));
+    section_label("LIBRARY");
+    ImGui::Dummy(ImVec2(0.0f, 4.0f));
+    for (auto it = library.begin(); it != library.end(); ++it)
+      row(it.key(), it->value("name", std::string("Workflow")), "in the project's library");
   }
   if (soft_button("wf_new", "+  New workflow", ImVec2(-1.0f, 30.0f)))
     pending_ = [this] {
@@ -5036,7 +5061,7 @@ void App::draw_workflow_list(const json &all) {
                               {"value", {{"name", "Workflow"}, {"nodes", json::object()}, {"links", json::object()},
                                          {"exposed", {{"inputs", json::object()}, {"outputs", json::object()}}}}}}}),
                 "New workflow", &ids))
-        open_workflow(ids.value("$new:w", ""), {});
+        open_workflow(ids.value("$new:w", ""));
     };
 
   ImGui::Dummy(ImVec2(0.0f, 14.0f));
@@ -5045,13 +5070,13 @@ void App::draw_workflow_list(const json &all) {
   const json kinds = wf_parts_.value("kinds", json::array());
   for (const json &k : kinds) {
     const std::string id = k.value("id", ""), kind = k.value("kind", ""), title = k.value("title", id);
-    if (!soft_button(("wf_add_" + id).c_str(), title.c_str(), ImVec2(-1.0f, 30.0f), !wf_id_.empty()))
+    if (!soft_button(("wf_add_" + id).c_str(), title.c_str(), ImVec2(-1.0f, 30.0f), workflow_json() != nullptr))
       continue;
     // It has no place of its own yet: the graph lays it out by what it is linked to, until it is dragged somewhere. It
     // takes the model of a node that is there when that model runs this kind too, with the model's own defaults: the
     // usual case is one model for the whole workflow.
     json value = {{"kind", kind}};
-    const json &nodes = object_in(all.contains(wf_id_) ? all[wf_id_] : json::object(), "nodes");
+    const json &nodes = object_in(workflow_json() ? *workflow_json() : json::object(), "nodes");
     for (auto n = nodes.begin(); n != nodes.end() && !value.contains("model"); ++n)
       for (const json &m : wf_parts_.value("models", json::array()))
         if (m.value("id", "") == n->value("model", std::string("?")) && std::find(m["kinds"].begin(), m["kinds"].end(), id) != m["kinds"].end()) {
@@ -5065,7 +5090,7 @@ void App::draw_workflow_list(const json &all) {
         }
     pending_ = [this, value, title] {
       json ids;
-      if (patch(json::array({{{"op", "add"}, {"path", wf_id_ + "/nodes/$new:n"}, {"value", value}}}), ("Add " + title).c_str(), &ids)) {
+      if (patch(json::array({{{"op", "add"}, {"path", wf_base() + "/nodes/$new:n"}, {"value", value}}}), ("Add " + title).c_str(), &ids)) {
         wf_node_ = ids.value("$new:n", "");
         wf_link_.clear();
       }
@@ -5073,77 +5098,81 @@ void App::draw_workflow_list(const json &all) {
   }
   ImGui::Dummy(ImVec2(0.0f, 10.0f));
   ImGui::PushTextWrapPos(0.0f);
-  ImGui::TextColored(hexv(look::fg3), "Drag from a dot to a dot of the same colour to join them. Drag a joined dot away and let go on nothing to break "
+  ImGui::TextColored(hexv(look::fg3), "Drag from a port to a port of the same colour to join them. Drag a joined port away and let go on nothing to break "
                                       "the connection. The clip's side is wired the same way. Drag a node to move it, the background to look "
                                       "around; Delete removes what is selected.");
   ImGui::PopTextWrapPos();
 }
 
-// The edits that take a node away: the node, the links at its ports, what the workflow exposes of it, and the values
-// the clips hold for those exposed inputs (a clip may not hold a value for an input that is not there).
+// The edits that take a node away: the node, the links at its ports, what the Exposed Inputs feed of it (they stay, and feed
+// what they still feed) and the Outputs that came from it (the Primary Output moves to another when it was one of them).
 json App::remove_node_ops(const json &workflow, const std::string &node_id) const {
   json ops = json::array();
+  const std::string base = wf_base();
   std::string node, port;
   const json &links = object_in(workflow, "links");
   for (auto l = links.begin(); l != links.end(); ++l)
     if ((l->contains("from") && end_of((*l)["from"], node, port) && node == node_id) ||
         (l->contains("to") && end_of((*l)["to"], node, port) && node == node_id))
       ops.push_back({{"op", "remove"}, {"path", l.key()}});
-  const json &exposed = object_in(workflow, "exposed");
-  for (const char *side : {"inputs", "outputs"}) {
-    const json &names = object_in(exposed, side);
-    for (auto e = names.begin(); e != names.end(); ++e)
-      if (end_of(*e, node, port) && node == node_id) {
-        ops.push_back({{"op", "remove"}, {"path", wf_id_ + "/exposed/" + side + "/" + e.key()}});
-        if (std::string(side) == "inputs")
-          for (const json &op : unset_clip_input_ops(e.key()))
-            ops.push_back(op);
-      }
+  for (const gen::ExposedInput &e : gen::exposed_inputs(object_in(doc_, "workflows"), workflow)) {
+    json kept = json::array();
+    for (const auto &[n, p] : e.to)
+      if (n != node_id)
+        kept.push_back(json::array({n, p}));
+    if (kept.size() != e.to.size())
+      ops.push_back({{"op", "replace"}, {"path", base + "/exposed/inputs/" + e.name + "/to"}, {"value", std::move(kept)}});
   }
+  std::vector<std::string> outputs_after;
+  bool changed = false;
+  for (const gen::ExposedOutput &o : gen::exposed_outputs(workflow)) {
+    if (o.node == node_id) {
+      ops.push_back({{"op", "remove"}, {"path", base + "/exposed/outputs/" + o.name}});
+      changed = true;
+    } else {
+      outputs_after.push_back(o.name);
+    }
+  }
+  if (changed)
+    for (json &op : primary_ops(outputs_after, gen::primary_output(workflow)))
+      ops.push_back(std::move(op));
   ops.push_back({{"op", "remove"}, {"path", node_id}});
   return ops;
 }
 
-// Every clip that uses the open workflow and holds a value for the exposed input `name`: the edits that take it away.
-json App::unset_clip_input_ops(const std::string &name) const {
-  json ops = json::array();
-  const std::function<void(const json &)> walk = [&](const json &node) {
-    if (!node.is_object())
-      return;
-    for (auto it = node.begin(); it != node.end(); ++it) {
-      if (it.key() == "clips" && it->is_object()) {
-        for (auto c = it->begin(); c != it->end(); ++c) {
-          const json &ref = object_in(*c, "media_ref");
-          if (ref.value("type", std::string()) == "workflow" && ref.value("workflow", std::string()) == wf_id_ && object_in(ref, "inputs").contains(name))
-            ops.push_back({{"op", "remove"}, {"path", c.key() + "/media_ref/inputs/" + name}});
-        }
-      } else if (it.key() == "sequences" || it.key() == "tracks" || id_prefix(it.key()) == "seq" || id_prefix(it.key()) == "trk") {
-        walk(*it);
-      }
-    }
-  };
-  walk(doc_);
-  return ops;
-}
-
 void App::delete_in_workflow() {
-  const json &all = object_in(doc_, "workflows");
-  if (!all.contains(wf_id_))
+  const json *workflow = workflow_json();
+  if (!workflow)
     return;
   if (!wf_link_.empty()) {
     const std::string link = std::exchange(wf_link_, {});
     patch(json::array({{{"op", "remove"}, {"path", link}}}), "Remove link");
   } else if (!wf_node_.empty()) {
     const std::string node = std::exchange(wf_node_, {});
-    patch(remove_node_ops(all[wf_id_], node), "Remove node");
+    patch(remove_node_ops(*workflow, node), "Remove node");
   }
 }
 
-// The graph: boxes for the nodes, one box each for what the clip sets and what the clip gets, curves for what joins them.
-// Every dot can be dragged, as in ComfyUI: from an output to an input, from the clip's side to an input (the clip then
-// sets it), from an output to the clip's side (the clip then gets it). A dot that is already joined is picked up with its
-// connection: let go on another dot it moves there, let go on nothing it is gone.
-void App::draw_workflow_canvas(const json &all) {
+// The ops that keep exactly one Primary Output when the outputs of the open workflow change: `names` are the outputs that
+// will exist, `primary` the one marked now.
+json App::primary_ops(const std::vector<std::string> &names, const std::string &primary) const {
+  json ops = json::array();
+  const std::string path = wf_base() + "/exposed/primary";
+  if (names.empty()) {
+    if (!primary.empty())
+      ops.push_back({{"op", "remove"}, {"path", path}});
+  } else if (std::find(names.begin(), names.end(), primary) == names.end()) {
+    ops.push_back({{"op", primary.empty() ? "add" : "replace"}, {"path", path}, {"value", names.front()}});
+  }
+  return ops;
+}
+
+// The graph: boxes for the nodes, one box for the Exposed Inputs (what the clip sets) and one for the Outputs, curves for
+// what joins them. Every port can be dragged, as in ComfyUI: from an output to an input, from an Exposed Input to an
+// input (the clip then sets it there), from an output to the Outputs box (the clip then gets it). A port that is already
+// joined is picked up with its connection: let go on another port it moves there, let go on nothing it is cut. Cutting
+// what an Exposed Input feeds leaves the Exposed Input, unlinked.
+void App::draw_workflow_canvas(const json &library) {
   const ImVec2 win = ImGui::GetWindowPos(), size = ImGui::GetWindowSize(), mouse = ImGui::GetIO().MousePos;
   wf_view_ = size;
   ImDrawList *dl = ImGui::GetWindowDrawList();
@@ -5173,14 +5202,17 @@ void App::draw_workflow_canvas(const json &all) {
   for (float x = std::fmod(wf_pan_.x, grid); x < size.x; x += grid) // a dotted grid that moves with the view
     for (float y = std::fmod(wf_pan_.y, grid); y < size.y; y += grid)
       dl->AddRectFilled(ImVec2(win.x + x, win.y + y), ImVec2(win.x + x + 1.5f, win.y + y + 1.5f), hex(look::line, 170));
-  if (!all.contains(wf_id_)) {
+  const json *open = workflow_json();
+  if (!open) {
     const char *hint = "This project has no workflow yet. Add a generative clip from the Generate panel, or make a new workflow on the left.";
     dl->AddText(ImVec2(win.x + (size.x - text_size(hint).x) * 0.5f, win.y + size.y * 0.45f), hex(look::fg3), hint);
     return;
   }
-  const json &workflow = all[wf_id_];
+  const json &workflow = *open;
   const json &nodes = object_in(workflow, "nodes"), &links = object_in(workflow, "links");
-  const json &open_in = object_in(object_in(workflow, "exposed"), "inputs"), &open_out = object_in(object_in(workflow, "exposed"), "outputs");
+  const std::vector<gen::ExposedInput> exposed_in = gen::exposed_inputs(library, workflow);
+  const std::vector<gen::ExposedOutput> exposed_out = gen::exposed_outputs(workflow);
+  const std::string primary = gen::primary_output(workflow);
 
   struct Box {
     std::string id;
@@ -5195,22 +5227,22 @@ void App::draw_workflow_canvas(const json &all) {
     Box b;
     b.id = it.key();
     b.node = &*it;
-    b.ports = gen::node_ports(all, *it);
+    b.ports = gen::node_ports(library, *it);
     b.height = node_height(b.ports);
     index[b.id] = boxes.size();
     boxes.push_back(std::move(b));
   }
-  // What gives each input its value: a link, or the clip (an exposed input of the workflow).
+  // What gives each input its value: a link, or the clip (an Exposed Input of the workflow).
   using Key = std::pair<std::string, std::string>;
   std::map<Key, std::string> fed;    // {node, input} -> link id
-  std::map<Key, std::string> set_by; // {node, input} -> the name the clip sets it by
+  std::map<Key, std::string> set_by; // {node, input} -> the Exposed Input that feeds it
   std::string a_node, a_port, b_node, b_port;
   for (auto l = links.begin(); l != links.end(); ++l)
     if (l->contains("from") && l->contains("to") && end_of((*l)["from"], a_node, a_port) && end_of((*l)["to"], b_node, b_port))
       fed[{b_node, b_port}] = l.key();
-  for (auto e = open_in.begin(); e != open_in.end(); ++e)
-    if (end_of(*e, a_node, a_port))
-      set_by[{a_node, a_port}] = e.key();
+  for (const gen::ExposedInput &e : exposed_in)
+    for (const auto &[node, port] : e.to)
+      set_by[{node, port}] = e.name;
   // Where each node is: where it was put (its "ui"), else in a column by how far down the chain it is.
   std::map<std::string, int> depth;
   for (size_t pass = 0; pass < boxes.size(); ++pass)
@@ -5230,7 +5262,7 @@ void App::draw_workflow_canvas(const json &all) {
     if (const auto moved = wf_moved_.find(b.id); moved != wf_moved_.end())
       b.pos = moved->second;
   }
-  // The two boxes at the ends: what the clip sets (left of everything) and what the clip gets (right of everything).
+  // The two boxes at the ends: the Exposed Inputs (left of everything) and the Outputs (right of everything).
   float min_x = 300.0f, max_x = 300.0f, min_y = 40.0f;
   for (size_t i = 0; i < boxes.size(); ++i) {
     min_x = i == 0 ? boxes[i].pos.x : std::min(min_x, boxes[i].pos.x);
@@ -5239,7 +5271,7 @@ void App::draw_workflow_canvas(const json &all) {
   }
   const ImVec2 in_pos(min_x - 250.0f, min_y), out_pos(max_x + kNodeW + 90.0f, min_y);
   if (wf_fit_) { // the whole graph in view, never larger than life: until the user looks around on their own
-    float bottom = min_y + kNodeTitleH + float(std::max(open_in.size(), open_out.size()) + 1) * kPortRowH;
+    float bottom = min_y + kNodeTitleH + float(std::max(exposed_in.size(), exposed_out.size()) + 1) * kPortRowH;
     for (const Box &b : boxes)
       bottom = std::max(bottom, b.pos.y + b.height);
     const float width = out_pos.x + 190.0f - in_pos.x, height = bottom - min_y;
@@ -5257,15 +5289,15 @@ void App::draw_workflow_canvas(const json &all) {
     return -1;
   };
   ImGui::PushFont(g_fonts.ui, text_px); // the text of the canvas, at the zoom; popped at the end of the canvas
-  const float hit = std::max(12.0f, 18.0f * z); // a dot stays easy to hit when the graph is small
+  const float hit = std::max(12.0f, 18.0f * z); // a port stays easy to hit when the graph is small
 
-  // Every dot of the graph. A source gives a value (a node's output, a row of what the clip sets); a sink takes one (a
-  // node's input, a row of what the clip gets). The last row of each side box is "new": a name that does not exist yet.
+  // Every port of the graph. A source gives a value (a node's output, a row of the Exposed Inputs); a sink takes one (a
+  // node's input, a row of the Outputs). The last row of each side box is "new": a name that does not exist yet.
   struct End {
     bool source = false;
     int where = 0; // 0: a port of a node; 1: a named row of a side box; 2: the "new" row of a side box
     std::string node, port, name;
-    gen::Port def;      // the port (of a node, or the one a named row leads to)
+    gen::Port def;      // the port (of a node), or the type of the row
     bool typed = false; // def is known
     ImVec2 at;
   };
@@ -5276,58 +5308,43 @@ void App::draw_workflow_canvas(const json &all) {
     for (size_t i = 0; i < b.ports.outputs.size(); ++i)
       ends.push_back({true, 0, b.id, b.ports.outputs[i].name, {}, b.ports.outputs[i], true, out_port(b, i)});
   }
-  // The rows of a side box, in the order of the ports they lead to, so the curves do not cross on the way.
-  struct Row {
-    std::string name, node, port;
-    gen::Port def;
-    ImVec2 other;
-    bool found = false;
-  };
-  const auto rows_of = [&](const json &names, bool inputs) {
-    std::vector<Row> rows;
-    for (auto e = names.begin(); e != names.end(); ++e) {
-      Row r;
-      r.name = e.key();
-      if (end_of(*e, r.node, r.port) && index.count(r.node)) {
-        const Box &b = boxes[index[r.node]];
-        const int i = port_index(inputs ? b.ports.inputs : b.ports.outputs, r.port);
-        if (i >= 0) {
-          r.def = (inputs ? b.ports.inputs : b.ports.outputs)[size_t(i)];
-          r.other = inputs ? in_port(b, size_t(i)) : out_port(b, size_t(i));
-          r.found = true;
-        }
-      }
-      rows.push_back(std::move(r));
-    }
-    std::stable_sort(rows.begin(), rows.end(), [](const Row &x, const Row &y) { return x.found != y.found ? x.found : x.found && x.other.y < y.other.y; });
-    return rows;
-  };
-  const std::vector<Row> in_rows = rows_of(open_in, true), out_rows = rows_of(open_out, false);
   const float side_w = 190.0f * z, side_head = title_h - pad;
   const ImVec2 in_at = screen(in_pos), out_at = screen(out_pos);
   const auto side_row = [&](ImVec2 box, bool inputs, size_t row) { return ImVec2(inputs ? box.x + side_w : box.x, box.y + side_head + (float(row) + 0.5f) * row_h); };
-  for (size_t i = 0; i <= in_rows.size(); ++i) {
-    const bool fresh = i == in_rows.size();
-    ends.push_back({true, fresh ? 2 : 1, fresh ? std::string() : in_rows[i].node, fresh ? std::string() : in_rows[i].port,
-                    fresh ? std::string() : in_rows[i].name, fresh ? gen::Port() : in_rows[i].def, !fresh && in_rows[i].found, side_row(in_at, true, i)});
+  for (size_t i = 0; i <= exposed_in.size(); ++i) {
+    const bool fresh = i == exposed_in.size();
+    gen::Port def;
+    if (!fresh)
+      def = gen::Port{exposed_in[i].name, exposed_in[i].type, exposed_in[i].required, exposed_in[i].list};
+    ends.push_back({true, fresh ? 2 : 1, {}, {}, fresh ? std::string() : exposed_in[i].name, def, !fresh, side_row(in_at, true, i)});
   }
-  for (size_t i = 0; i <= out_rows.size(); ++i) {
-    const bool fresh = i == out_rows.size();
-    ends.push_back({false, fresh ? 2 : 1, fresh ? std::string() : out_rows[i].node, fresh ? std::string() : out_rows[i].port,
-                    fresh ? std::string() : out_rows[i].name, fresh ? gen::Port() : out_rows[i].def, !fresh && out_rows[i].found, side_row(out_at, false, i)});
+  for (size_t i = 0; i <= exposed_out.size(); ++i) {
+    const bool fresh = i == exposed_out.size();
+    gen::Port def;
+    bool typed = false;
+    if (!fresh && index.count(exposed_out[i].node))
+      if (const gen::Port *p = boxes[index[exposed_out[i].node]].ports.output(exposed_out[i].port)) {
+        def = *p;
+        def.name = exposed_out[i].name;
+        typed = true;
+      }
+    ends.push_back({false, fresh ? 2 : 1, fresh ? std::string() : exposed_out[i].node, fresh ? std::string() : exposed_out[i].port,
+                    fresh ? std::string() : exposed_out[i].name, def, typed, side_row(out_at, false, i)});
   }
   // What a clip can set or get: values and media. Conditioning and latents live in the engine and travel by links only.
   const auto for_clip = [](gen::PortType t) { return t != gen::PortType::conditioning && t != gen::PortType::latent; };
   // May `source` give its value to `sink`?
   const auto joins = [&](const End &source, const End &sink) {
     if (!source.source || sink.source || (source.where != 0 && sink.where != 0))
-      return false; // not a source and a sink, or the clip's two sides to each other
+      return false; // not a source and a sink, or the two sides of the clip to each other
     if (source.where == 0 && sink.where == 0)
       return source.node != sink.node && gen::can_link(source.def, sink.def);
     const End &port = source.where == 0 ? source : sink, &row = source.where == 0 ? sink : source;
     if (!for_clip(port.def.type))
       return false;
-    return row.where == 2 || !row.typed || row.def.type == port.def.type; // a name keeps the type the clips know it by
+    if (row.where == 2 || !row.typed)
+      return true;
+    return source.where == 0 ? gen::can_link(source.def, row.def) : gen::can_link(row.def, sink.def); // an Exposed Input keeps the type it says
   };
 
   // The connection that is being dragged, if any: the end that is held, and what was picked up with it.
@@ -5338,7 +5355,7 @@ void App::draw_workflow_canvas(const json &all) {
         held = &e;
   if (wf_drag_.active && !held)
     wf_drag_ = {};
-  const End *target = nullptr; // the dot the loose end would join
+  const End *target = nullptr; // the port the loose end would join
   if (held) {
     float best = std::max(11.0f, 14.0f * z);
     for (const End &e : ends) {
@@ -5350,9 +5367,9 @@ void App::draw_workflow_canvas(const json &all) {
     }
     if (!target) { // anywhere on a side box is its "new" row
       const bool on_in = !held->source && mouse.x >= in_at.x && mouse.x <= in_at.x + side_w && mouse.y >= in_at.y &&
-                         mouse.y <= in_at.y + side_head + float(in_rows.size() + 1) * row_h + 10.0f * z;
+                         mouse.y <= in_at.y + side_head + float(exposed_in.size() + 1) * row_h + 10.0f * z;
       const bool on_out = held->source && mouse.x >= out_at.x && mouse.x <= out_at.x + side_w && mouse.y >= out_at.y &&
-                          mouse.y <= out_at.y + side_head + float(out_rows.size() + 1) * row_h + 10.0f * z;
+                          mouse.y <= out_at.y + side_head + float(exposed_out.size() + 1) * row_h + 10.0f * z;
       for (const End &e : ends)
         if (e.where == 2 && ((on_in && e.source) || (on_out && !e.source)) && (held->source ? joins(*held, e) : joins(e, *held)))
           target = &e;
@@ -5366,7 +5383,7 @@ void App::draw_workflow_canvas(const json &all) {
         return &e;
     return nullptr;
   };
-  // A press on a dot starts a drag from it.
+  // A press on a port starts a drag from it.
   const auto dot_button = [&](const End &e, const char *id, const std::string &mark) {
     ImGui::SetCursorScreenPos(ImVec2(e.at.x - hit * 0.5f, e.at.y - hit * 0.5f));
     ImGui::InvisibleButton(id, ImVec2(hit, hit));
@@ -5406,57 +5423,113 @@ void App::draw_workflow_canvas(const json &all) {
     wf_node_.clear();
   }
 
-  // The clip's two sides.
-  const auto side_box = [&](ImVec2 p, const char *title, const std::vector<Row> &rows, bool inputs) {
-    const float h = side_head + float(rows.size() + 1) * row_h + 10.0f * z;
+  // The Exposed Inputs box: one row each, in their order. A row that feeds nothing is dimmed: it keeps the clip's value.
+  {
+    const ImVec2 p = in_at;
+    const float h = side_head + float(exposed_in.size() + 1) * row_h + 10.0f * z;
     dl->AddRectFilled(p, ImVec2(p.x + side_w, p.y + h), hex(look::panel), 10.0f * z);
     dl->AddRect(p, ImVec2(p.x + side_w, p.y + h), hex(look::line2), 10.0f * z, 0, 1.2f);
     ImGui::PushFont(g_fonts.bold, 12.0f * z);
-    dl->AddText(ImVec2(p.x + pad, p.y + 9.0f * z), hex(look::fg2), title);
+    dl->AddText(ImVec2(p.x + pad, p.y + 9.0f * z), hex(look::fg2), "THE CLIP SETS");
     ImGui::PopFont();
-    for (size_t row = 0; row <= rows.size(); ++row) {
-      const bool fresh = row == rows.size();
-      const End *e = end_at(inputs, fresh ? 2 : 1, fresh ? std::string() : rows[row].node, fresh ? std::string() : rows[row].port, fresh ? std::string() : rows[row].name);
+    for (size_t row = 0; row <= exposed_in.size(); ++row) {
+      const bool fresh = row == exposed_in.size();
+      const End *e = end_at(true, fresh ? 2 : 1, {}, {}, fresh ? std::string() : exposed_in[row].name);
       if (!e)
         continue;
       const ImVec2 dot = e->at;
-      const std::string label = fresh ? (inputs ? "new input" : "new output") : rows[row].name;
-      const bool cut = !fresh && rows[row].name == (inputs ? wf_drag_.cut_in : wf_drag_.cut_out);
-      const ImU32 colour = fresh || !e->typed ? hex(look::fg3) : port_colour(e->def.type);
-      if (!fresh && rows[row].found && !cut)
-        draw_link(dl, inputs ? dot : rows[row].other, inputs ? rows[row].other : dot, port_colour(rows[row].def.type, 170), 2.0f * z);
+      const gen::ExposedInput *input = fresh ? nullptr : &exposed_in[row];
+      const bool unlinked = input && input->to.empty();
+      const std::string label = fresh ? "new input" : input->label.empty() ? input->name : input->label;
+      const ImU32 colour = fresh ? hex(look::fg3) : port_colour(input->type, unlinked ? 110 : 255);
+      if (input)
+        for (const auto &[node, port] : input->to) {
+          if (node == wf_drag_.cut_node && port == wf_drag_.cut_port && input->name == wf_drag_.cut_in)
+            continue; // picked up: drawn at the pointer
+          if (!index.count(node))
+            continue;
+          const Box &b = boxes[index[node]];
+          if (const int i = port_index(b.ports.inputs, port); i >= 0)
+            draw_link(dl, dot, in_port(b, size_t(i)), port_colour(input->type, 170), 2.0f * z);
+        }
       if (fits(*e))
         dl->AddCircle(dot, port_r + (is_target(*e) ? 6.0f : 3.5f) * z, held && held->typed ? port_colour(held->def.type, is_target(*e) ? 255 : 130) : hex(look::fg2), 0, 2.0f);
-      if (fresh) { // a hollow dot: drag from it, or to it
+      if (fresh) { // a hollow port: drag from it, or to it
+        dl->AddCircleFilled(dot, port_r, hex(look::panel));
+        dl->AddCircle(dot, port_r, colour, 0, 1.6f);
+      } else if (unlinked) {
+        dl->AddCircleFilled(dot, port_r, hex(look::panel));
+        dl->AddCircle(dot, port_r, colour, 0, 1.8f);
+      } else {
+        dl->AddCircleFilled(dot, port_r, colour);
+      }
+      const ImVec2 ts = text_size(label.c_str());
+      dl->AddText(ImVec2(dot.x - pad - ts.x, dot.y - ts.y * 0.5f), hex(fresh || unlinked ? look::fg3 : look::fg), label.c_str());
+      if (dot_button(*e, ("##cin_" + (fresh ? std::string("+") : input->name)).c_str(), std::string("clipin:") + (fresh ? "+" : input->name)))
+        start(true, e->where, {}, {}, e->name);
+      if (ImGui::IsItemHovered() && !held) {
+        ImGui::PushFont(g_fonts.ui, text_px / z);
+        if (fresh)
+          ImGui::SetTooltip("Drag to an input of a node: the clip will set it.");
+        else
+          ImGui::SetTooltip("%s  (%s)%s\nDrag to an input of the same type to feed it.", input->name.c_str(), gen::port_type_name(input->type),
+                            unlinked ? "\nIt feeds nothing: the clip's value is kept, and does nothing." : "");
+        ImGui::PopFont();
+      }
+    }
+  }
+  // The Outputs box: one row each, the Primary Output marked.
+  {
+    const ImVec2 p = out_at;
+    const float h = side_head + float(exposed_out.size() + 1) * row_h + 10.0f * z;
+    dl->AddRectFilled(p, ImVec2(p.x + side_w, p.y + h), hex(look::panel), 10.0f * z);
+    dl->AddRect(p, ImVec2(p.x + side_w, p.y + h), hex(look::line2), 10.0f * z, 0, 1.2f);
+    ImGui::PushFont(g_fonts.bold, 12.0f * z);
+    dl->AddText(ImVec2(p.x + pad, p.y + 9.0f * z), hex(look::fg2), "THE CLIP GETS");
+    ImGui::PopFont();
+    for (size_t row = 0; row <= exposed_out.size(); ++row) {
+      const bool fresh = row == exposed_out.size();
+      const End *e = end_at(false, fresh ? 2 : 1, fresh ? std::string() : exposed_out[row].node, fresh ? std::string() : exposed_out[row].port,
+                            fresh ? std::string() : exposed_out[row].name);
+      if (!e)
+        continue;
+      const ImVec2 dot = e->at;
+      const std::string label = fresh ? "new output" : exposed_out[row].name;
+      const bool cut = !fresh && exposed_out[row].name == wf_drag_.cut_out;
+      const ImU32 colour = fresh || !e->typed ? hex(look::fg3) : port_colour(e->def.type);
+      if (!fresh && e->typed && !cut)
+        if (const auto &o = exposed_out[row]; index.count(o.node))
+          if (const int i = port_index(boxes[index[o.node]].ports.outputs, o.port); i >= 0)
+            draw_link(dl, out_port(boxes[index[o.node]], size_t(i)), dot, port_colour(e->def.type, 170), 2.0f * z);
+      if (fits(*e))
+        dl->AddCircle(dot, port_r + (is_target(*e) ? 6.0f : 3.5f) * z, held && held->typed ? port_colour(held->def.type, is_target(*e) ? 255 : 130) : hex(look::fg2), 0, 2.0f);
+      if (fresh) {
         dl->AddCircleFilled(dot, port_r, hex(look::panel));
         dl->AddCircle(dot, port_r, colour, 0, 1.6f);
       } else {
         dl->AddCircleFilled(dot, port_r, colour);
       }
-      const ImVec2 ts = text_size(label.c_str());
-      dl->AddText(ImVec2(inputs ? dot.x - pad - ts.x : dot.x + pad, dot.y - ts.y * 0.5f), hex(fresh ? look::fg3 : look::fg), label.c_str());
-      if (dot_button(*e, ((inputs ? "##cin_" : "##cout_") + label).c_str(), std::string(inputs ? "clipin:" : "clipout:") + (fresh ? "+" : label))) {
-        if (inputs) { // a source: the name, or a new one
-          start(true, e->where, e->node, e->port, e->name);
-        } else if (fresh) { // a sink that waits for an output
+      dl->AddText(ImVec2(dot.x + pad, dot.y - text_size(label.c_str()).y * 0.5f), hex(fresh ? look::fg3 : look::fg), label.c_str());
+      if (!fresh && exposed_out[row].name == primary) { // the Primary Output: a small mark on the right
+        const char *mark = "main";
+        dl->AddText(ImVec2(dot.x + side_w - pad - text_size(mark).x, dot.y - text_size(mark).y * 0.5f), hex(look::accent), mark);
+      }
+      if (dot_button(*e, ("##cout_" + (fresh ? std::string("+") : exposed_out[row].name)).c_str(), std::string("clipout:") + (fresh ? "+" : exposed_out[row].name))) {
+        if (fresh) { // a sink that waits for an output
           start(false, 2, {}, {}, {});
-        } else if (rows[row].found) { // picked up: the output it shows is held, the name is let go
-          start(true, 0, rows[row].node, rows[row].port, {});
-          wf_drag_.cut_out = rows[row].name;
+        } else if (e->typed) { // picked up: the output it shows is held, its name is let go
+          start(true, 0, exposed_out[row].node, exposed_out[row].port, {});
+          wf_drag_.cut_out = exposed_out[row].name;
         }
       }
       if (ImGui::IsItemHovered() && !held) {
         ImGui::PushFont(g_fonts.ui, text_px / z);
-        if (inputs)
-          ImGui::SetTooltip(fresh ? "Drag to an input of a node: the clip will set it." : "The clip sets \"%s\".\nDrag to another input of the same type to move it.", label.c_str());
-        else
-          ImGui::SetTooltip(fresh ? "Drag an output of a node here: the clip will get it." : "The clip gets \"%s\".\nDrag it away to take it back.", label.c_str());
+        ImGui::SetTooltip(fresh ? "Drag an output of a node here: the clip will get it." : "The clip gets \"%s\"%s.\nDrag it away to take it back.", label.c_str(),
+                          !fresh && exposed_out[row].name == primary ? ", and plays it" : "");
         ImGui::PopFont();
       }
     }
-  };
-  side_box(in_at, "THE CLIP SETS", in_rows, true);
-  side_box(out_at, "THE CLIP GETS", out_rows, false);
+  }
 
   // The nodes.
   for (Box &b : boxes) {
@@ -5501,7 +5574,7 @@ void App::draw_workflow_canvas(const json &all) {
     bool sub_bad = false;
     if (gen::is_workflow_kind(kind)) {
       const std::string inner = b.node->value("workflow", std::string());
-      sub = all.contains(inner) ? all[inner].value("name", inner) : "no workflow";
+      sub = library.contains(inner) ? library[inner].value("name", inner) : "no workflow";
     } else if (def && def->runs_model && model.empty()) {
       sub = "No model chosen";
       sub_bad = true;
@@ -5524,7 +5597,7 @@ void App::draw_workflow_canvas(const json &all) {
       const auto name = set_by.find({b.id, port.name});
       // A connection that was picked up is not here any more, as far as the picture goes.
       const bool has_link = link != fed.end() && link->second != wf_drag_.cut_link;
-      const bool exposed = name != set_by.end() && name->second != wf_drag_.cut_in;
+      const bool exposed = name != set_by.end() && !(b.id == wf_drag_.cut_node && port.name == wf_drag_.cut_port);
       const bool has_value = typed.contains(port.name);
       const bool needs = port.required && link == fed.end() && name == set_by.end() && !has_value;
       missing = missing || needs;
@@ -5553,9 +5626,11 @@ void App::draw_workflow_canvas(const json &all) {
             start(true, 0, from_node, from_port, {});
             wf_drag_.cut_link = link->second;
           }
-        } else if (name != set_by.end()) { // picked up: the clip's name for it is held
-          start(true, 1, b.id, port.name, name->second);
+        } else if (name != set_by.end()) { // picked up: the Exposed Input that feeds it is held, and this feed let go
+          start(true, 1, {}, {}, name->second);
           wf_drag_.cut_in = name->second;
+          wf_drag_.cut_node = b.id;
+          wf_drag_.cut_port = port.name;
         } else { // nothing joined: the input is held and looks for an output
           start(false, 0, b.id, port.name, {});
         }
@@ -5563,7 +5638,7 @@ void App::draw_workflow_canvas(const json &all) {
       if (ImGui::IsItemHovered() && !held) {
         ImGui::PushFont(g_fonts.ui, text_px / z);
         ImGui::SetTooltip("%s  (%s%s)%s", port.name.c_str(), gen::port_type_name(port.type), port.required ? "" : ", optional",
-                          needs ? "\nNothing gives it a value yet: drag an output or the clip's side onto it, or type a value on the right."
+                          needs ? "\nNothing gives it a value yet: drag an output or an Exposed Input onto it, or type a value on the right."
                           : has_link || exposed ? "\nDrag it away to break the connection." : "");
         ImGui::PopFont();
       }
@@ -5591,74 +5666,118 @@ void App::draw_workflow_canvas(const json &all) {
                 selected ? 2.0f : 1.3f);
   }
 
-  // The connection being dragged: a curve from the held dot to the pointer, and on release the edit.
+  // The connection being dragged: a curve from the held port to the pointer, and on release the edit.
   if (held) {
     const ImU32 colour = held->typed ? port_colour(held->def.type, 230) : hex(look::fg2);
     const ImVec2 loose = target ? target->at : mouse;
     draw_link(dl, held->source ? held->at : loose, held->source ? loose : held->at, colour, 2.4f * z);
     if (!ImGui::IsMouseDown(0)) {
       const WfDrag drag = wf_drag_;
+      const std::string base = wf_base();
       json ops = json::array();
       std::string label = "Link";
-      const auto cut = [&] { // what was picked up goes
+      const auto input_named = [&](const std::string &name) -> const gen::ExposedInput * {
+        for (const gen::ExposedInput &i : exposed_in)
+          if (i.name == name)
+            return &i;
+        return nullptr;
+      };
+      // The list of ports an Exposed Input feeds, as a patch value.
+      const auto to_list = [](const std::vector<std::pair<std::string, std::string>> &ends) {
+        json list = json::array();
+        for (const auto &[node, port] : ends)
+          list.push_back(json::array({node, port}));
+        return list;
+      };
+      // What was picked up goes: a link, a feed of an Exposed Input (the Exposed Input stays), or an Output (the name goes).
+      std::map<std::string, std::vector<std::pair<std::string, std::string>>> feeds; // Exposed Input -> what it feeds after the edit
+      for (const gen::ExposedInput &i : exposed_in)
+        feeds[i.name] = i.to;
+      std::set<std::string> feeds_changed;
+      std::vector<std::string> outputs_after;
+      for (const gen::ExposedOutput &o : exposed_out)
+        outputs_after.push_back(o.name);
+      bool outputs_changed = false;
+      const auto cut = [&] {
         if (!drag.cut_link.empty())
           ops.push_back({{"op", "remove"}, {"path", drag.cut_link}});
         if (!drag.cut_in.empty()) {
-          ops.push_back({{"op", "remove"}, {"path", wf_id_ + "/exposed/inputs/" + drag.cut_in}});
-          for (const json &op : unset_clip_input_ops(drag.cut_in))
-            ops.push_back(op);
+          auto &to = feeds[drag.cut_in];
+          to.erase(std::remove(to.begin(), to.end(), std::make_pair(drag.cut_node, drag.cut_port)), to.end());
+          feeds_changed.insert(drag.cut_in);
         }
-        if (!drag.cut_out.empty())
-          ops.push_back({{"op", "remove"}, {"path", wf_id_ + "/exposed/outputs/" + drag.cut_out}});
+        if (!drag.cut_out.empty()) {
+          ops.push_back({{"op", "remove"}, {"path", base + "/exposed/outputs/" + drag.cut_out}});
+          outputs_after.erase(std::remove(outputs_after.begin(), outputs_after.end(), drag.cut_out), outputs_after.end());
+          outputs_changed = true;
+        }
       };
-      const auto fresh_name = [](const json &names, const std::string &wanted) {
+      const auto fresh_name = [](const auto &used, const std::string &wanted) {
         std::string name = wanted;
-        for (int n = 2; names.contains(name); ++n)
+        for (int n = 2; std::any_of(used.begin(), used.end(), [&](const auto &u) { return u.name == name; }); ++n)
           name = wanted + "_" + std::to_string(n);
         return name;
       };
+      int64_t next_order = 0;
+      for (const gen::ExposedInput &i : exposed_in)
+        next_order = std::max(next_order, i.order + 1);
       if (!target) { // let go on nothing: the connection is broken
         cut();
-        label = "Disconnect";
+        label = drag.cut_out.empty() ? "Disconnect" : "Take back an output";
       } else {
         const End &source = held->source ? *held : *target, &sink = held->source ? *target : *held;
         if (sink.where == 0) { // onto an input of a node
           const auto link = fed.find({sink.node, sink.port});
           const auto name = set_by.find({sink.node, sink.port});
-          const bool back = (link != fed.end() && link->second == drag.cut_link) || (name != set_by.end() && name->second == drag.cut_in);
+          const bool back = (link != fed.end() && link->second == drag.cut_link) ||
+                            (name != set_by.end() && name->second == drag.cut_in && sink.node == drag.cut_node && sink.port == drag.cut_port);
           if (!back) { // put back where it came from changes nothing
-            // What gave the input its value until now gives way.
-            if (link != fed.end())
+            cut();
+            // What gave the input its value until now gives way: a link, a value typed in the node, another Exposed Input.
+            if (link != fed.end() && link->second != drag.cut_link)
               ops.push_back({{"op", "remove"}, {"path", link->second}});
             if (object_in(nodes[sink.node], "inputs").contains(sink.port))
               ops.push_back({{"op", "remove"}, {"path", sink.node + "/inputs/" + sink.port}});
-            if (name != set_by.end() && !(source.where == 1 && source.name == name->second)) {
-              ops.push_back({{"op", "remove"}, {"path", wf_id_ + "/exposed/inputs/" + name->second}});
-              for (const json &op : unset_clip_input_ops(name->second))
-                ops.push_back(op);
+            if (name != set_by.end()) {
+              auto &to = feeds[name->second];
+              to.erase(std::remove(to.begin(), to.end(), std::make_pair(sink.node, sink.port)), to.end());
+              feeds_changed.insert(name->second);
             }
             if (source.where == 0) { // an output of a node: a link
-              cut();
-              ops.push_back({{"op", "add"}, {"path", wf_id_ + "/links/$new:l"}, {"value", {{"from", {source.node, source.port}}, {"to", {sink.node, sink.port}}}}});
-            } else if (source.where == 1) { // a name the clip sets already: it leads here now
-              ops.push_back({{"op", "replace"}, {"path", wf_id_ + "/exposed/inputs/" + source.name}, {"value", json::array({sink.node, sink.port})}});
-              label = "Move what the clip sets";
-            } else { // a new name
-              ops.push_back({{"op", "add"}, {"path", wf_id_ + "/exposed/inputs/" + fresh_name(open_in, sink.port)}, {"value", json::array({sink.node, sink.port})}});
+              ops.push_back({{"op", "add"}, {"path", base + "/links/$new:l"}, {"value", {{"from", {source.node, source.port}}, {"to", {sink.node, sink.port}}}}});
+            } else if (source.where == 1) { // an Exposed Input: it feeds this input as well
+              feeds[source.name].push_back({sink.node, sink.port});
+              feeds_changed.insert(source.name);
+              label = "Let the clip set an input";
+            } else { // a new Exposed Input, with the type of the input it feeds
+              const gen::Port &port = sink.def;
+              const std::string fresh = fresh_name(exposed_in, sink.port);
+              ops.push_back({{"op", "add"},
+                             {"path", base + "/exposed/inputs/" + fresh},
+                             {"value", {{"type", gen::port_type_name(port.type)}, {"order", next_order}, {"to", to_list({{sink.node, sink.port}})}}}});
               label = "Let the clip set an input";
             }
           }
-        } else if (sink.where == 1) { // onto a name the clip gets: it shows this output now
+        } else if (sink.where == 1) { // onto an Output that exists: it shows this output now
           if (drag.cut_out != sink.name) {
             cut();
-            ops.push_back({{"op", "replace"}, {"path", wf_id_ + "/exposed/outputs/" + sink.name}, {"value", json::array({source.node, source.port})}});
+            ops.push_back({{"op", "replace"}, {"path", base + "/exposed/outputs/" + sink.name + "/from"}, {"value", json::array({source.node, source.port})}});
             label = "Change what the clip gets";
           }
-        } else if (drag.cut_out.empty()) { // a new name for the clip to get
-          ops.push_back({{"op", "add"}, {"path", wf_id_ + "/exposed/outputs/" + fresh_name(open_out, source.port)}, {"value", json::array({source.node, source.port})}});
+        } else if (drag.cut_out.empty()) { // a new Output
+          const std::string fresh = fresh_name(exposed_out, source.port);
+          ops.push_back({{"op", "add"}, {"path", base + "/exposed/outputs/" + fresh}, {"value", {{"from", {source.node, source.port}}}}});
+          outputs_after.push_back(fresh);
+          outputs_changed = true;
           label = "Give the clip an output";
         }
       }
+      for (const std::string &name : feeds_changed)
+        if (input_named(name))
+          ops.push_back({{"op", "replace"}, {"path", base + "/exposed/inputs/" + name + "/to"}, {"value", to_list(feeds[name])}});
+      if (outputs_changed)
+        for (json &op : primary_ops(outputs_after, primary))
+          ops.push_back(std::move(op));
       if (!ops.empty())
         pending_ = [this, ops, label] {
           json ids;
@@ -5688,16 +5807,20 @@ void App::draw_workflow_canvas(const json &all) {
 }
 
 // The right column: the selected node (its model, settings and inputs), else the workflow itself.
-void App::draw_workflow_side(const json &all) {
-  if (!all.contains(wf_id_)) {
+void App::draw_workflow_side(const json &library) {
+  const json *open = workflow_json();
+  if (!open) {
     ImGui::TextColored(hexv(look::fg3), "No workflow is open.");
     return;
   }
-  const json &workflow = all[wf_id_];
+  const json &workflow = *open;
   const json &nodes = object_in(workflow, "nodes"), &links = object_in(workflow, "links");
-  const json &open_in = object_in(object_in(workflow, "exposed"), "inputs"), &open_out = object_in(object_in(workflow, "exposed"), "outputs");
-  const std::vector<const ClipUi *> users = clips_using(wf_id_);
-  const std::string wf = wf_id_;
+  const std::vector<gen::ExposedInput> exposed_in = gen::exposed_inputs(library, workflow);
+  const std::vector<gen::ExposedOutput> exposed_out = gen::exposed_outputs(workflow);
+  const std::string primary = gen::primary_output(workflow);
+  const std::string base = wf_base();
+  const bool of_clip = id_prefix(wf_id_) == "clp";
+  const ClipUi *clip = of_clip ? find_clip(wf_id_) : nullptr;
   const float label_w = 104.0f;
 
   // A text field over a value of the document: the buffer follows the document until it is typed in, and the edit is
@@ -5723,82 +5846,44 @@ void App::draw_workflow_side(const json &all) {
     if (begin_card("##wf_card", "Workflow")) {
       ImGui::TextColored(hexv(look::fg2), "Name");
       ImGui::SameLine(label_w);
-      text_field("name:" + wf, workflow.value("name", std::string()), -1.0f, [this, wf, &workflow](const std::string &v) {
+      text_field("name:" + wf_id_, workflow.value("name", std::string()), -1.0f, [this, base, &workflow](const std::string &v) {
         const bool had = workflow.contains("name");
-        pending_ = [this, wf, v, had] { patch(json::array({{{"op", had ? "replace" : "add"}, {"path", wf + "/name"}, {"value", v}}}), "Rename workflow"); };
+        pending_ = [this, base, v, had] { patch(json::array({{{"op", had ? "replace" : "add"}, {"path", base + "/name"}, {"value", v}}}), "Rename workflow"); };
       });
       ui_mark("field:workflow_name");
       ImGui::PushTextWrapPos(0.0f);
-      if (users.empty()) {
-        ImGui::TextColored(hexv(look::fg3), "No clip uses it yet.");
+      if (of_clip) {
+        const std::string source = workflow.value("source", std::string());
+        ImGui::TextColored(hexv(look::fg2), "The workflow of the clip %s%s.", clip ? clip->name.c_str() : wf_id_.c_str(),
+                           source.empty() ? "" : (", copied from " + source).c_str());
+        ImGui::TextColored(hexv(look::fg3), "It is this clip's own: changing it changes no other clip.");
       } else {
-        std::string names;
-        for (const ClipUi *c : users)
-          names += (names.empty() ? "" : ", ") + c->name;
-        ImGui::TextColored(hexv(look::fg2), "Used by %zu clip%s: %s", users.size(), users.size() == 1 ? "" : "s", names.c_str());
-        if (users.size() > 1)
-          ImGui::TextColored(hexv(look::accent2), "A change here changes all of them.");
+        ImGui::TextColored(hexv(look::fg3), "A workflow of the project's library.");
       }
       ImGui::PopTextWrapPos();
-      // Opened from one of several clips: that clip can get the workflow to itself, and the others keep this one.
-      const ClipUi *from = wf_clip_.empty() ? nullptr : find_clip(wf_clip_);
-      if (from && from->workflow == wf && users.size() > 1) {
-        ImGui::Dummy(ImVec2(0.0f, 4.0f));
-        if (soft_button("wf_own_copy", ("Give \"" + from->name + "\" its own copy").c_str(), ImVec2(-1.0f, 30.0f))) {
-          // The copy: the same nodes, links and exposure under new IDs.
-          json copy = workflow;
-          copy.erase("builtin"); // the built-in Shot stays the one new clips of that model get
-          copy["name"] = workflow.value("name", std::string("Workflow")) + " (" + from->name + ")";
-          std::map<std::string, std::string> renamed;
-          json fresh_nodes = json::object();
-          int n = 0;
-          for (auto it = nodes.begin(); it != nodes.end(); ++it) {
-            renamed[it.key()] = "$new:n" + std::to_string(n++);
-            fresh_nodes[renamed[it.key()]] = *it;
-          }
-          const auto renamed_end = [&](const json &pair) {
-            std::string node, port;
-            return end_of(pair, node, port) && renamed.count(node) ? json::array({renamed[node], port}) : pair;
-          };
-          json fresh_links = json::object();
-          int l = 0;
-          for (auto it = links.begin(); it != links.end(); ++it)
-            fresh_links["$new:l" + std::to_string(l++)] = {{"from", renamed_end(it->value("from", json::array()))}, {"to", renamed_end(it->value("to", json::array()))}};
-          json fresh_in = json::object(), fresh_out = json::object();
-          for (auto it = open_in.begin(); it != open_in.end(); ++it)
-            fresh_in[it.key()] = renamed_end(*it);
-          for (auto it = open_out.begin(); it != open_out.end(); ++it)
-            fresh_out[it.key()] = renamed_end(*it);
-          copy["nodes"] = std::move(fresh_nodes);
-          copy["links"] = std::move(fresh_links);
-          copy["exposed"] = {{"inputs", std::move(fresh_in)}, {"outputs", std::move(fresh_out)}};
-          const std::string clip = from->id;
-          pending_ = [this, copy, clip] {
-            json ids;
-            if (patch(json::array({{{"op", "add"}, {"path", project_id_ + "/workflows/$new:w"}, {"value", copy}},
-                                   {{"op", "replace"}, {"path", clip + "/media_ref/workflow"}, {"value", "$new:w"}}}),
-                      "Own copy of the workflow", &ids))
-              open_workflow(ids.value("$new:w", ""), clip);
-          };
-        }
-      }
     }
     end_card();
     if (begin_card("##wf_face", "What the clip sets and gets")) {
       ImGui::PushTextWrapPos(0.0f);
-      std::string in, out;
-      for (auto it = open_in.begin(); it != open_in.end(); ++it)
-        in += (in.empty() ? "" : ", ") + it.key();
-      for (auto it = open_out.begin(); it != open_out.end(); ++it)
-        out += (out.empty() ? "" : ", ") + it.key();
+      std::string in, out, unlinked;
+      for (const gen::ExposedInput &e : exposed_in) {
+        (e.to.empty() ? unlinked : in) += ((e.to.empty() ? unlinked : in).empty() ? "" : ", ") + e.name;
+      }
+      for (const gen::ExposedOutput &o : exposed_out)
+        out += (out.empty() ? "" : ", ") + o.name + (o.name == primary ? " (main)" : "");
       ImGui::TextColored(hexv(look::fg2), "Sets: %s", in.empty() ? "nothing" : in.c_str());
+      if (!unlinked.empty())
+        ImGui::TextColored(hexv(look::fg3), "Not used by the workflow: %s", unlinked.c_str());
       ImGui::TextColored(hexv(look::fg2), "Gets: %s", out.empty() ? "nothing" : out.c_str());
-      ImGui::TextColored(hexv(look::fg3), "Select a node to choose its model and settings, and to say which of its inputs the clip sets.");
+      ImGui::TextColored(hexv(look::fg3), "Select a node to choose its model and settings, and to see what feeds its inputs.");
       ImGui::PopTextWrapPos();
     }
     end_card();
-    if (users.empty() && soft_button("wf_delete", "Delete this workflow", ImVec2(-1.0f, 30.0f)))
-      pending_ = [this, wf] { patch(json::array({{{"op", "remove"}, {"path", wf}}}), "Delete workflow"); };
+    if (!of_clip && soft_button("wf_delete", "Delete this workflow", ImVec2(-1.0f, 30.0f)))
+      pending_ = [this] {
+        const std::string id = wf_id_;
+        patch(json::array({{{"op", "remove"}, {"path", id}}}), "Delete workflow");
+      };
     return;
   }
 
@@ -5807,7 +5892,7 @@ void App::draw_workflow_side(const json &all) {
   const json &node = nodes[id];
   const std::string kind = node.value("kind", std::string()), short_kind = kind_id(kind);
   const gen::KindDef *def = gen::find_kind(kind);
-  const gen::Ports ports = gen::node_ports(all, node);
+  const gen::Ports ports = gen::node_ports(library, node);
   if (begin_card("##wf_node", kind_title(kind).c_str())) {
     if (def && def->runs_model) {
       // The models that run this kind of node. A new model brings its own settings: they start at its defaults.
@@ -5915,7 +6000,7 @@ void App::draw_workflow_side(const json &all) {
       }
     } else if (gen::is_workflow_kind(kind)) {
       const std::string inner = node.value("workflow", std::string());
-      ImGui::TextColored(hexv(look::fg2), "Runs the workflow \"%s\".", all.contains(inner) ? all[inner].value("name", inner).c_str() : inner.c_str());
+      ImGui::TextColored(hexv(look::fg2), "Runs the workflow \"%s\".", library.contains(inner) ? library[inner].value("name", inner).c_str() : inner.c_str());
     }
   }
   end_card();
@@ -5924,13 +6009,16 @@ void App::draw_workflow_side(const json &all) {
   // typed here, of the input's own type. Joining is done in the graph, by dragging the dots.
   if (begin_card("##wf_inputs", "Inputs")) {
     for (const gen::Port &port : ports.inputs) {
-      std::string link_id, from_node, from_port, exposed_as, a, b;
+      std::string link_id, from_node, from_port, a, b;
+      const gen::ExposedInput *feeder = nullptr; // the Exposed Input that feeds it
       for (auto l = links.begin(); l != links.end(); ++l)
         if (l->contains("to") && end_of((*l)["to"], a, b) && a == id && b == port.name && l->contains("from") && end_of((*l)["from"], from_node, from_port))
           link_id = l.key();
-      for (auto e = open_in.begin(); e != open_in.end(); ++e)
-        if (end_of(*e, a, b) && a == id && b == port.name)
-          exposed_as = e.key();
+      for (const gen::ExposedInput &e : exposed_in)
+        for (const auto &[n, p] : e.to)
+          if (n == id && p == port.name)
+            feeder = &e;
+      const std::string exposed_as = feeder ? feeder->name : std::string();
       const json &typed = object_in(node, "inputs");
       const bool has_value = typed.contains(port.name), linked = !link_id.empty(), by_clip = !exposed_as.empty();
       const bool plain = port.type == gen::PortType::text || port.type == gen::PortType::number || port.type == gen::PortType::integer ||
@@ -5959,10 +6047,12 @@ void App::draw_workflow_side(const json &all) {
           json ops = json::array();
           if (linked) {
             ops.push_back({{"op", "remove"}, {"path", link_id}});
-          } else {
-            ops.push_back({{"op", "remove"}, {"path", wf + "/exposed/inputs/" + exposed_as}});
-            for (const json &op : unset_clip_input_ops(exposed_as))
-              ops.push_back(op);
+          } else { // the Exposed Input stays, and feeds what it still feeds: with nothing left, it is unlinked and dimmed
+            json kept = json::array();
+            for (const auto &[n, p] : feeder->to)
+              if (!(n == id && p == port.name))
+                kept.push_back(json::array({n, p}));
+            ops.push_back({{"op", "replace"}, {"path", base + "/exposed/inputs/" + exposed_as + "/to"}, {"value", std::move(kept)}});
           }
           pending_ = [this, ops] { patch(ops, "Disconnect"); };
         }
@@ -6018,10 +6108,10 @@ void App::draw_workflow_side(const json &all) {
 
   if (begin_card("##wf_outputs", "Outputs")) {
     for (const gen::Port &port : ports.outputs) {
-      std::string exposed_as, a, b;
-      for (auto e = open_out.begin(); e != open_out.end(); ++e)
-        if (end_of(*e, a, b) && a == id && b == port.name)
-          exposed_as = e.key();
+      std::string exposed_as;
+      for (const gen::ExposedOutput &o : exposed_out)
+        if (o.node == id && o.port == port.name)
+          exposed_as = o.name;
       ImGui::GetWindowDrawList()->AddCircleFilled(ImVec2(ImGui::GetCursorScreenPos().x + 5.0f, ImGui::GetCursorScreenPos().y + 9.0f), 4.5f, port_colour(port.type));
       ImGui::Dummy(ImVec2(12.0f, 0.0f));
       ImGui::SameLine();
@@ -6033,10 +6123,18 @@ void App::draw_workflow_side(const json &all) {
       const float button_w = 92.0f;
       ImGui::Dummy(ImVec2(12.0f, 0.0f));
       ImGui::SameLine();
-      ImGui::TextColored(hexv(look::fg2), "to the clip, as \"%s\"", exposed_as.c_str());
+      ImGui::TextColored(hexv(look::fg2), "to the clip, as \"%s\"%s", exposed_as.c_str(), exposed_as == primary ? " (main)" : "");
       ImGui::SameLine(ImGui::GetWindowWidth() - button_w - 28.0f);
-      if (soft_button(("wf_cutout_" + port.name).c_str(), "Disconnect", ImVec2(button_w, 24.0f)))
-        pending_ = [this, wf, exposed_as] { patch(json::array({{{"op", "remove"}, {"path", wf + "/exposed/outputs/" + exposed_as}}}), "Disconnect"); };
+      if (soft_button(("wf_cutout_" + port.name).c_str(), "Disconnect", ImVec2(button_w, 24.0f))) {
+        json ops = json::array({{{"op", "remove"}, {"path", base + "/exposed/outputs/" + exposed_as}}});
+        std::vector<std::string> after;
+        for (const gen::ExposedOutput &o : exposed_out)
+          if (o.name != exposed_as)
+            after.push_back(o.name);
+        for (json &op : primary_ops(after, primary))
+          ops.push_back(std::move(op));
+        pending_ = [this, ops] { patch(ops, "Disconnect"); };
+      }
     }
     if (ports.outputs.empty())
       ImGui::TextColored(hexv(look::fg3), "It makes nothing.");

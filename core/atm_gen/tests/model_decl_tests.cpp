@@ -10,6 +10,14 @@ using atm::gen::Problem;
 
 namespace {
 
+// The ports an Exposed Input feeds: a list of [node, port] pairs. (In brace syntax {{"a", "b"}} is an object, not a list.)
+json to_(std::initializer_list<std::pair<std::string, std::string>> ends) {
+  json out = json::array();
+  for (const auto &e : ends)
+    out.push_back(json::array({e.first, e.second}));
+  return out;
+}
+
 // A model that makes video from the three blocks, takes a start picture but no references, and has three settings.
 json declaration(const char *id) {
   return {{"id", id},
@@ -34,9 +42,12 @@ json shot(const char *model) {
             {"l2", {{"from", {"smp", "latent"}}, {"to", {"dec", "latent"}}}}}},
           {"exposed",
            {{"inputs",
-             {{"prompt", {"enc", "prompt"}}, {"start_image", {"smp", "start_image"}}, {"references", {"smp", "references"}},
-              {"seconds", {"smp", "seconds"}}}},
-            {"outputs", {{"video", {"dec", "video"}}, {"last_frame", {"dec", "last_frame"}}}}}}};
+             {{"prompt", {{"type", "text"}, {"to", to_({{"enc", "prompt"}})}}},
+              {"start_image", {{"type", "image"}, {"to", to_({{"smp", "start_image"}})}}},
+              {"references", {{"type", "image"}, {"to", to_({{"smp", "references"}})}}},
+              {"seconds", {{"type", "number"}, {"to", to_({{"smp", "seconds"}})}}}}},
+            {"outputs", {{"video", {{"from", {"dec", "video"}}}}, {"last_frame", {{"from", {"dec", "last_frame"}}}}}},
+            {"primary", "video"}}}};
 }
 
 std::string rules(const std::vector<Problem> &problems) {
@@ -52,7 +63,7 @@ std::string rules(const std::vector<Problem> &problems) {
 
 std::vector<Problem> check(const json &workflow) {
   std::vector<Problem> out;
-  atm::gen::check_workflow({{"cwf", workflow}}, "cwf", out);
+  atm::gen::check_workflow(json::object(), workflow, "cwf", "cwf", out);
   return out;
 }
 
@@ -117,7 +128,8 @@ TEST_CASE("model declaration: a node that disagrees with its model is refused wh
     CHECK(rules(check(w)) == "G_RANGE"); // a whole number
   }
   { // a kind the model does not do
-    json w = {{"nodes", {{"gen", {{"kind", "attome.generate_video"}, {"model", "decl-b"}, {"inputs", {{"prompt", "x"}}}}}}}};
+    json w = {{"nodes", {{"gen", {{"kind", "attome.generate_video"}, {"model", "decl-b"}, {"inputs", {{"prompt", "x"}}}}}}},
+              {"exposed", {{"outputs", {{"video", {{"from", {"gen", "video"}}}}}}, {"primary", "video"}}}};
     const auto p = check(w);
     REQUIRE(p.size() == 1);
     CHECK(p[0].rule == "G_MODEL");
@@ -147,11 +159,10 @@ TEST_CASE("model declaration: a node that disagrees with its model is refused wh
 
 TEST_CASE("model declaration: a clip's values are held to the model behind the input", "[gen][models]") {
   use("decl-c");
-  const json workflows = {{"cwf", shot("decl-c")}};
   const auto check_clip = [&](json inputs) {
-    const json clip = {{"media_ref", {{"type", "workflow"}, {"workflow", "cwf"}, {"inputs", std::move(inputs)}}}};
+    const json clip = {{"media_ref", {{"type", "workflow"}, {"workflow", shot("decl-c")}, {"inputs", std::move(inputs)}}}};
     std::vector<Problem> out;
-    atm::gen::check_clip(workflows, "clp_a", clip, [](std::string_view) -> const json * { return nullptr; }, out);
+    atm::gen::check_clip(json::object(), "clp_a", clip, [](std::string_view) -> const json * { return nullptr; }, out);
     return out;
   };
   CHECK(check_clip({{"prompt", "x"}, {"seconds", 5}, {"start_image", "a.png"}}).empty());
@@ -173,12 +184,13 @@ TEST_CASE("model declaration: a model that is not chosen, not known or not insta
   w["nodes"]["enc"].erase("model");
   w["nodes"]["dec"]["model"] = "decl-nobody-has-this";
   CHECK(check(w).empty()); // the project is valid and opens
-  const json workflows = {{"cwf", w}, {"cwf_outer", {{"nodes", {{"a", {{"kind", "workflow"}, {"workflow", "cwf"}}},
-                                                               {"b", {{"kind", "workflow"}, {"workflow", "cwf"}}}}}}}};
+  const json library = {{"cwf", w}};
+  const json outer = {{"nodes", {{"a", {{"kind", "workflow"}, {"workflow", "cwf"}}}, {"b", {{"kind", "workflow"}, {"workflow", "cwf"}}}}}};
   std::map<std::string, std::string> by_node;
   const auto warn = [&](const char *id, bool installed) {
     std::vector<Problem> out;
-    atm::gen::check_models(workflows, id, [=](std::string_view) { return installed; }, out);
+    const json &workflow = std::string(id) == "cwf" ? w : outer;
+    atm::gen::check_models(library, workflow, id, [=](std::string_view) { return installed; }, out);
     by_node.clear();
     for (const Problem &p : out)
       by_node[p.path] = p.rule;
@@ -194,6 +206,6 @@ TEST_CASE("model declaration: a model that is not chosen, not known or not insta
 
   json ready = shot("decl-free"); // part of the engine: no files to install
   std::vector<Problem> out;
-  atm::gen::check_models({{"cwf", ready}}, "cwf", nullptr, out);
+  atm::gen::check_models(json::object(), ready, "cwf", nullptr, out);
   CHECK(out.empty());
 }

@@ -28,7 +28,7 @@ enum class ClipState { clean, dirty, empty, locked };
 const char *clip_state_name(ClipState state);
 
 struct ClipPlan {
-  std::string id, name, workflow;
+  std::string id, name, source; // source: the Clip Workflow the clip's Instance was copied from
   ClipState state = ClipState::empty;
   std::string reason;       // why it is dirty: "changed: prompt, seed", "the clip before it changed"
   bool out_of_step = false; // locked, and its Take is no longer what its inputs ask for
@@ -55,7 +55,7 @@ struct PlanOptions {
 
 // Every generative clip, in the order they would run: a clip comes after the clips it is linked to. A locked clip
 // never runs, and the clips after it start from its pinned Take.
-std::vector<ClipPlan> plan(const json &workflows, const std::vector<ClipIn> &clips, const KeyContext &context,
+std::vector<ClipPlan> plan(const json &library, const std::vector<ClipIn> &clips, const KeyContext &context,
                            const PlanOptions &options);
 
 } // namespace atm::gen

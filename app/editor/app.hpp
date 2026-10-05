@@ -65,7 +65,7 @@ struct ClipUi {
   float gain_db = 0.0f, pan = 0.0f;         // the clip's "audio" object
   bool is_adjustment = false;               // an adjustment layer: its effects change the tracks below it
   bool is_generative = false;               // its picture is made by a Clip Workflow (media_ref.type "workflow")
-  std::string workflow;                     // the workflow's ID
+  std::string source;                       // the Clip Workflow its Instance was copied from ("shot:<model>")
   std::string prompt;                       // its "prompt" input, when it has one as plain text
   bool has_prompt = false;
   std::vector<std::string> takes;           // its Takes, oldest first (media_ref.take_order)
@@ -142,15 +142,17 @@ private:
   void jump_effect_key(const ClipUi &clip, const EffectUi &fx, bool forward);
   void draw_text_panel();
   // Workflows mode: the node graph of a Clip Workflow (see the end of app.cpp).
-  void open_workflow(const std::string &workflow, const std::string &clip); // `clip`: the clip it was opened from, or ""
+  void open_workflow(const std::string &target); // a clip's own workflow (a clip ID), or an entry of the library (a cwf ID)
+  const json *workflow_json() const;             // the open workflow, or null
+  std::string wf_base() const;                   // the path to the open workflow in a patch
+  json primary_ops(const std::vector<std::string> &names, const std::string &primary) const;
   void draw_workflows();
-  void draw_workflow_list(const json &all);
-  void draw_workflow_canvas(const json &all);
-  void draw_workflow_side(const json &all);
+  void draw_workflow_list(const json &library);
+  void draw_workflow_canvas(const json &library);
+  void draw_workflow_side(const json &library);
   void delete_in_workflow(); // the selected link, else the selected node
   json remove_node_ops(const json &workflow, const std::string &node_id) const;
-  json unset_clip_input_ops(const std::string &name) const;
-  std::vector<const ClipUi *> clips_using(const std::string &workflow) const;
+
   void draw_models_panel();
   void draw_generate_panel();
   void poll_models();
@@ -287,7 +289,8 @@ private:
     bool active = false, source = false;
     int where = 0;
     std::string node, port, name;
-    std::string cut_link, cut_in, cut_out;
+    std::string cut_link, cut_in, cut_out; // what was picked up: a link, an Exposed Input's feed (and where), an Output
+    std::string cut_node, cut_port;
   } wf_drag_;
   json wf_parts_;                      // gen.nodes: the kinds, and the models with what they declare
   double next_wf_parts_poll_ = 0.0;
