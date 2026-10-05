@@ -261,7 +261,8 @@ Result<gen::StepResult> ComfyProvider::run(const gen::StepRequest &r) {
     const std::string text = queued->body.substr(0, 600);
     if (text.find("not in") != std::string::npos || text.find("value_not_in_list") != std::string::npos)
       return engine_error("E_MODEL_FILE", "ComfyUI cannot see the files of the model " + r.model + ".",
-                          "Add the Attome models folder to ComfyUI's extra_model_paths.yaml, or copy the files into ComfyUI's models folder, and restart ComfyUI.");
+                          "ComfyUI only looks in its own models folder. In the Models panel, choose ComfyUI's models folder as the folder for "
+                          "downloads and get the model there (or add Attome's folder to ComfyUI's extra_model_paths.yaml), then restart ComfyUI.");
     return engine_error("E_INTERNAL", "ComfyUI refused the request (status " + std::to_string(queued->status) + "): " + text);
   }
   const std::string id = answer["prompt_id"].get<std::string>();

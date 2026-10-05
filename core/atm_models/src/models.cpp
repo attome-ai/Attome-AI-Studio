@@ -179,6 +179,23 @@ FileStatus file_status(const CatalogFile &file, const fs::path &models_dir) {
   return {};
 }
 
+fs::path find_file(const CatalogFile &file, const fs::path &models_dir, const std::vector<fs::path> &also) {
+  const fs::path relative = to_path(file.path);
+  if (size_of(models_dir / relative) == file.size)
+    return models_dir / relative;
+  for (const fs::path &folder : also)
+    for (const fs::path &candidate : {folder / relative, folder / relative.filename()})
+      if (size_of(candidate) == file.size)
+        return candidate;
+  return {};
+}
+
+FileStatus file_status(const CatalogFile &file, const fs::path &models_dir, const std::vector<fs::path> &also) {
+  if (!find_file(file, models_dir, also).empty())
+    return {FileState::installed, file.size};
+  return file_status(file, models_dir);
+}
+
 Result<void> fetch_file(net::Transport &transport, const CatalogFile &file, const fs::path &models_dir,
                         const FetchProgress &progress, const FetchOptions &options) {
   ATM_PROFILE_SCOPE("models.fetch_file");
@@ -316,7 +333,7 @@ Result<void> fetch_file(net::Transport &transport, const CatalogFile &file, cons
 }
 
 Result<void> fetch_entry(net::Transport &transport, const CatalogEntry &entry, const fs::path &models_dir,
-                         const FetchProgress &progress, const FetchOptions &options) {
+                         const FetchProgress &progress, const FetchOptions &options, const std::vector<fs::path> &also) {
   set_done(progress, 0);
   size_t n = 0;
   for (const CatalogFile &file : entry.files) {
@@ -325,6 +342,10 @@ Result<void> fetch_entry(net::Transport &transport, const CatalogEntry &entry, c
     one.on_phase = [&](const std::string &text) {
       phase(progress, text + " (" + std::to_string(n) + " of " + std::to_string(entry.files.size()) + ")");
     };
+    if (!also.empty() && !find_file(file, models_dir, also).empty()) { // on disk already, here or where the user keeps it
+      set_done(progress, (progress.done ? progress.done->load() : 0) + file.size);
+      continue;
+    }
     ATM_CHECK(fetch_file(transport, file, models_dir, one, options));
   }
   return {};

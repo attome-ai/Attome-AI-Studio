@@ -5,6 +5,7 @@
 #include <cmath>
 #include <numeric>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 
@@ -1111,19 +1112,78 @@ void App::ask_project() {
       this, window_, user_folder(SDL_FOLDER_DOCUMENTS).c_str(), false);
 }
 
+void App::ask_models_folder(const std::string &purpose, const std::string &model) {
+  models_folder_purpose_ = purpose;
+  models_folder_model_ = model;
+  if (const char *picked = std::getenv("ATTOME_EDITOR_PICK_FOLDER")) { // a UI test: a script cannot drive the native dialog
+    std::lock_guard lock(dialog_mutex_);
+    dialog_models_folder_ = picked;
+    return;
+  }
+  SDL_ShowOpenFolderDialog(
+      [](void *self, const char *const *files, int) {
+        App *app = static_cast<App *>(self);
+        std::lock_guard lock(app->dialog_mutex_);
+        if (files && *files)
+          app->dialog_models_folder_ = *files;
+      },
+      this, window_, nullptr, false);
+}
+
 namespace {
 json default_effect(const eval::EffectDef &def, const std::string &file = {}); // below
+
+std::string size_text(int64_t bytes) {
+  char text[32];
+  if (bytes >= 995000000)
+    std::snprintf(text, sizeof text, "%.1f GB", double(bytes) / 1e9);
+  else
+    std::snprintf(text, sizeof text, "%.0f MB", double(bytes) / 1e6);
+  return text;
+}
 } // namespace
 
 void App::take_dialog_results() {
   std::vector<std::string> import;
-  std::string out, project, lut;
+  std::string out, project, lut, models_folder;
   {
     std::lock_guard lock(dialog_mutex_);
     import.swap(dialog_import_);
     out.swap(dialog_export_);
     project.swap(dialog_project_);
     lut.swap(dialog_lut_);
+    models_folder.swap(dialog_models_folder_);
+  }
+  if (!models_folder.empty()) {
+    const std::string model = models_folder_model_;
+    json r;
+    models_note_.clear();
+    models_note_model_ = model;
+    models_note_error_ = false;
+    if (models_folder_purpose_ == "move") {
+      if (rpc("models.set_folder", {{"folder", models_folder}}, r))
+        models_note_ = "Downloads now go to " + r.value("models_dir", models_folder) + ".";
+    } else {
+      json params = {{"folder", models_folder}};
+      if (!model.empty())
+        params["id"] = model;
+      if (rpc("models.locate", params, r)) {
+        const int found = r.value("found", 0), of = r.value("of", 0);
+        const int64_t missing = r.value("bytes_missing", int64_t(0));
+        models_note_error_ = found == 0;
+        if (found == 0)
+          models_note_ = model.empty() ? "No model files were found in that folder." : "None of this model's files are in that folder.";
+        else if (model.empty())
+          models_note_ = "Found " + std::to_string(found) + " model file" + (found == 1 ? "" : "s") + " there.";
+        else if (missing == 0)
+          models_note_ = "Found all " + std::to_string(of) + " files. Nothing to download.";
+        else
+          models_note_ = "Found " + std::to_string(found) + " of " + std::to_string(of) + " files. " + size_text(missing) + " left to download.";
+      }
+    }
+    next_models_poll_ = 0.0;
+    gen_models_loaded_ = false;
+    refresh_gen_status();
   }
   import.insert(import.end(), dropped_.begin(), dropped_.end());
   dropped_.clear();
@@ -2470,13 +2530,31 @@ void App::draw_generate_card(const ClipUi &c) {
     } else {
       if (job_failed(model_jobs_, model))
         ImGui::TextColored(kError, "%s", model_jobs_[model].value("error", json::object()).value("message", "The download failed.").c_str());
-      const std::string label = (bytes > 0 ? "Continue download, " : "Download, ") + gb(size - bytes);
-      if (soft_button("gen_download", label.c_str(), ImVec2(0.0f, 30.0f), true, true)) {
-        json started;
-        model_jobs_.erase(model);
-        if (rpc("models.fetch", {{"id", model}}, started))
-          model_jobs_[model] = {{"job", started.value("job_id", "")}, {"state", "running"}};
-        next_models_poll_ = 0.0;
+      // A drive without the room is said before the download, with the way out: another drive.
+      const int64_t room = models_.value("free_bytes", int64_t(-1));
+      if (room >= 0 && room < size - bytes && !models_.value("folder_fixed", false)) {
+        ImGui::TextColored(kError, "Not enough room on this drive: %s free, %s needed.", gb(room).c_str(), gb(size - bytes).c_str());
+        if (soft_button("gen_move", "Choose another drive...", ImVec2(0.0f, 30.0f), true, true))
+          ask_models_folder("move", model);
+      } else {
+        const std::string label = (bytes > 0 ? "Continue download, " : "Download, ") + gb(size - bytes);
+        if (soft_button("gen_download", label.c_str(), ImVec2(0.0f, 30.0f), true, true)) {
+          json started;
+          model_jobs_.erase(model);
+          if (rpc("models.fetch", {{"id", model}}, started))
+            model_jobs_[model] = {{"job", started.value("job_id", "")}, {"state", "running"}};
+          next_models_poll_ = 0.0;
+        }
+      }
+      // Someone who has the files (from ComfyUI, or another copy of Attome) points at them instead.
+      if (soft_button("gen_locate", "I already have it...", ImVec2(0.0f, 30.0f)))
+        ask_models_folder("locate", model);
+      if (!models_note_.empty() && models_note_model_ == model)
+        ImGui::TextColored(models_note_error_ ? kError : hexv(look::fg2), "%s", models_note_.c_str());
+      if (const std::string dir = models_.value("models_dir", ""); !dir.empty()) {
+        const size_t more = models_.value("folders", json::array()).size();
+        const std::string others = more == 0 ? "" : more == 1 ? " and 1 other folder" : " and " + std::to_string(more) + " other folders";
+        ImGui::TextColored(hexv(look::fg3), "Looked in %s%s.", dir.c_str(), others.c_str());
       }
     }
     ImGui::PopID();
@@ -2540,10 +2618,45 @@ void App::draw_models_panel() {
     ImGui::PushTextWrapPos(0.0f);
     ImGui::TextColored(hexv(look::fg2), "%s", dir.c_str());
     ImGui::PopTextWrapPos();
+    if (const int64_t room = models_.value("free_bytes", int64_t(-1)); room >= 0)
+      ImGui::TextColored(hexv(look::fg3), "%s free", gb(room).c_str());
     if (soft_button("models_folder", "Open folder", ImVec2(0.0f, 26.0f))) {
       std::string url = "file:///" + dir;
       std::replace(url.begin(), url.end(), '\\', '/');
       SDL_OpenURL(url.c_str());
+    }
+    if (!models_.value("folder_fixed", false)) { // downloads can go to another drive
+      ImGui::SameLine();
+      if (soft_button("models_move", "Change...", ImVec2(0.0f, 26.0f)))
+        ask_models_folder("move");
+    }
+    // Models that are on this computer already are used where they are.
+    if (soft_button("models_locate", "I already have models...", ImVec2(0.0f, 26.0f)))
+      ask_models_folder("locate");
+    if (!models_note_.empty() && models_note_model_.empty()) {
+      ImGui::PushTextWrapPos(0.0f);
+      ImGui::TextColored(models_note_error_ ? kError : hexv(look::fg2), "%s", models_note_.c_str());
+      ImGui::PopTextWrapPos();
+    }
+    const json folders = models_.value("folders", json::array());
+    if (!folders.empty()) {
+      ImGui::Spacing();
+      ImGui::TextColored(hexv(look::fg3), "Also used from:");
+      for (const json &f : folders) {
+        const std::string folder = f.is_string() ? f.get<std::string>() : std::string();
+        ImGui::PushID(folder.c_str());
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::TextColored(hexv(look::fg2), "%s", folder.c_str());
+        ImGui::PopTextWrapPos();
+        if (soft_button("models_forget", "Stop using", ImVec2(0.0f, 24.0f))) { // the files stay where they are
+          json unused;
+          rpc("models.forget_folder", {{"folder", folder}}, unused);
+          next_models_poll_ = 0.0;
+          gen_models_loaded_ = false;
+          pending_ = [this] { refresh_gen_status(); };
+        }
+        ImGui::PopID();
+      }
     }
     ImGui::Spacing();
   }

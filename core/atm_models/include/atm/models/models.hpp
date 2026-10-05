@@ -61,6 +61,16 @@ struct FileStatus {
 // Installed means a file of the right size under its final name; the hash was checked when it was put there.
 FileStatus file_status(const CatalogFile &file, const std::filesystem::path &models_dir);
 
+// Where the whole file is: the models folder first, then each of `also`, the folders the user said already hold models
+// (a ComfyUI's models folder, a folder of files they downloaded). In those it is looked for under its catalog path and
+// then by its name alone. Empty when it is nowhere. A file in `also` is known by its size only: hashing tens of
+// gigabytes at every look is not affordable.
+std::filesystem::path find_file(const CatalogFile &file, const std::filesystem::path &models_dir,
+                                const std::vector<std::filesystem::path> &also);
+// The same question as file_status, with `also` counted: a file found there is installed.
+FileStatus file_status(const CatalogFile &file, const std::filesystem::path &models_dir,
+                       const std::vector<std::filesystem::path> &also);
+
 struct FetchOptions {
   // Failed tries in a row before a file is given up; each try continues where the last one stopped, and a try that
   // brought bytes starts the count again, so a long download survives many short drops.
@@ -83,8 +93,9 @@ struct FetchProgress {
 // what the catalog says; the .part file is removed), and the transport's N_* errors after the last attempt.
 Result<void> fetch_file(net::Transport &transport, const CatalogFile &file, const std::filesystem::path &models_dir,
                         const FetchProgress &progress, const FetchOptions &options = {});
-// Every file of an entry, in order. Files already installed are skipped.
+// Every file of an entry, in order. Files already installed, or found whole in one of `also`, are skipped.
 Result<void> fetch_entry(net::Transport &transport, const CatalogEntry &entry, const std::filesystem::path &models_dir,
-                         const FetchProgress &progress, const FetchOptions &options = {});
+                         const FetchProgress &progress, const FetchOptions &options = {},
+                         const std::vector<std::filesystem::path> &also = {});
 
 } // namespace atm::models

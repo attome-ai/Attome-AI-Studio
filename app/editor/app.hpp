@@ -154,6 +154,9 @@ private:
   void ask_lut(const std::string &target);
   void ask_export();
   void ask_project();
+  // Asks for a folder for the model store. `purpose` is "locate" (the folder already holds model files; `model` is the
+  // one being looked for, or "" for any) or "move" (downloads go there from now on).
+  void ask_models_folder(const std::string &purpose, const std::string &model = {});
   void take_dialog_results();
   // Where a clip lands on a track and which clips slide right to make room for it (eval::land), by clip ID.
   struct TrackLanding {
@@ -312,6 +315,9 @@ private:
   std::map<std::string, json> model_jobs_; // by entry ID
   double next_models_poll_ = 0.0;
   bool models_busy_ = false; // a download is running: the panel keeps polling
+  // what the last folder choice came to ("Found 4 of 6 files..."), and the model it was about ("" = the Models panel)
+  std::string models_note_, models_note_model_;
+  bool models_note_error_ = false;
   // generative clips that cannot run here, by clip ID: the problems gen.status reports (a model not chosen, not
   // known, or not installed). A clip that is not in the map is ready.
   std::map<std::string, json> gen_problems_;
@@ -340,6 +346,7 @@ private:
   std::mutex dialog_mutex_;
   std::vector<std::string> dialog_import_;
   std::string dialog_export_, dialog_project_, dialog_lut_, lut_target_;
+  std::string dialog_models_folder_, models_folder_purpose_, models_folder_model_;
   std::vector<std::string> dropped_;
 };
 

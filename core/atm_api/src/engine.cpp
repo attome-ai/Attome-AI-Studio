@@ -158,7 +158,8 @@ void run_gen(const std::shared_ptr<Job> &job, GenRun run, std::shared_ptr<Finish
 
 // A model download as a job: units are bytes, `detail` says which file is being downloaded or checked. Stopping it
 // keeps what arrived; the next models.fetch of the same entry continues from there.
-void run_fetch(const std::shared_ptr<Job> &job, models::CatalogEntry entry, fs::path dir, std::shared_ptr<net::Transport> transport) {
+void run_fetch(const std::shared_ptr<Job> &job, models::CatalogEntry entry, fs::path dir, std::vector<fs::path> also,
+               std::shared_ptr<net::Transport> transport) {
   prof::set_thread_name("atm-fetch");
   models::FetchProgress progress;
   progress.done = &job->units_done;
@@ -168,7 +169,7 @@ void run_fetch(const std::shared_ptr<Job> &job, models::CatalogEntry entry, fs::
     std::lock_guard lock(job->mutex);
     job->detail = text;
   };
-  const auto result = models::fetch_entry(*transport, entry, dir, progress);
+  const auto result = models::fetch_entry(*transport, entry, dir, progress, {}, also);
   std::lock_guard lock(job->mutex);
   job->seconds = std::chrono::duration<double>(Clock::now() - job->started).count();
   if (result) {
@@ -351,6 +352,8 @@ struct Engine::Impl {
   std::map<std::string, std::shared_ptr<Job>> jobs;
   std::vector<std::shared_ptr<gen::Provider>> providers;
   std::string comfyui_address;
+  fs::path chosen_models_dir;          // the user's own place for downloads; empty = the default one
+  std::vector<fs::path> model_folders; // other folders that already hold model files; never written to
   std::shared_ptr<FinishedQueue> finished = std::make_shared<FinishedQueue>();
 
   ~Impl() {
@@ -1295,14 +1298,15 @@ struct Engine::Impl {
 
   // ---- gen.* (Clip Workflows: what can run here) -----------------------------------------------------------------
 
-  // Every file of the model is in the models folder. A model that is not in the catalog has no files to look for.
+  // Every file of the model is on this computer: in the models folder or in a folder the user pointed at. A model
+  // that is not in the catalog has no files to look for.
   bool model_installed(std::string_view id) const {
     const models::CatalogEntry *entry = models::find_entry(models::builtin_catalog(), id);
     if (!entry)
       return false;
     const fs::path dir = models_dir();
     for (const models::CatalogFile &f : entry->files)
-      if (models::file_status(f, dir).state != models::FileState::installed)
+      if (models::file_status(f, dir, model_folders).state != models::FileState::installed)
         return false;
     return true;
   }
@@ -1327,7 +1331,7 @@ struct Engine::Impl {
           int64_t on_disk = 0;
           const fs::path dir = models_dir();
           for (const models::CatalogFile &f : entry->files)
-            on_disk += models::file_status(f, dir).bytes;
+            on_disk += models::file_status(f, dir, model_folders).bytes;
           w["title"] = entry->title;
           w["size"] = entry->size();
           w["bytes_missing"] = entry->size() - on_disk;
@@ -1873,7 +1877,147 @@ struct Engine::Impl {
 
   // ---- models.* (the model store: what can be downloaded, what is on disk) --------------------------------------
 
-  fs::path models_dir() const { return cfg.models_dir.empty() ? models::default_models_dir() : to_path(cfg.models_dir); }
+  // ATTOME_MODELS_DIR says where the models are for this run, whatever was chosen in the Models panel.
+  static bool models_dir_fixed() {
+    const char *dir = std::getenv("ATTOME_MODELS_DIR");
+    return dir && *dir;
+  }
+  fs::path models_dir() const {
+    if (!chosen_models_dir.empty() && !models_dir_fixed())
+      return chosen_models_dir;
+    return cfg.models_dir.empty() ? models::default_models_dir() : to_path(cfg.models_dir);
+  }
+
+  static bool same_folder(const fs::path &a, const fs::path &b) {
+    std::error_code ec;
+    return fs::weakly_canonical(a, ec) == fs::weakly_canonical(b, ec);
+  }
+  bool knows_folder(const fs::path &folder) const {
+    return std::any_of(model_folders.begin(), model_folders.end(), [&](const fs::path &f) { return same_folder(f, folder); });
+  }
+  static int64_t free_bytes(const fs::path &dir) { // of the nearest folder that exists: the models folder may not, yet
+    std::error_code ec;
+    for (fs::path at = dir; !at.empty(); at = at.parent_path()) {
+      if (const fs::space_info space = fs::space(at, ec); !ec)
+        return int64_t(space.available);
+      if (at == at.parent_path())
+        break;
+    }
+    return -1;
+  }
+  json folders_json() const {
+    json list = json::array();
+    for (const fs::path &f : model_folders)
+      list.push_back(to_utf8(f));
+    return list;
+  }
+  Result<void> save_model_folders() {
+    const fs::path path = settings_path();
+    if (path.empty())
+      return {};
+    json all = settings();
+    if (chosen_models_dir.empty())
+      all.erase("models_dir");
+    else
+      all["models_dir"] = to_utf8(chosen_models_dir);
+    all["model_folders"] = folders_json();
+    ATM_CHECK(storage::make_dirs(path.parent_path()));
+    return storage::atomic_write(path, all.dump(2) + "\n");
+  }
+  bool fetch_running() const {
+    return std::any_of(jobs.begin(), jobs.end(),
+                       [](const auto &j) { return j.second->kind == "models.fetch" && j.second->state.load() == Job::running; });
+  }
+
+  // How many of `files` are whole in `folder`.
+  static int files_in(const std::vector<const models::CatalogFile *> &files, const fs::path &folder) {
+    int n = 0;
+    for (const models::CatalogFile *f : files)
+      n += !models::find_file(*f, folder, {folder}).empty();
+    return n;
+  }
+
+  // "I already have this model": the folder a person picked is looked at, and remembered when it holds model files.
+  // People pick the folder they know, which is rarely the exact one: ComfyUI's own folder, its models folder, or the
+  // subfolder a file is in all work.
+  Result<json> models_locate(const json &params) {
+    ATM_TRY(const std::string *folder, string_param(params, "folder"));
+    const std::string id = params.value("id", std::string());
+    const models::CatalogEntry *entry = id.empty() ? nullptr : models::find_entry(models::builtin_catalog(), id);
+    if (!id.empty() && !entry)
+      return fail(ErrorCode::NotFound, "M_UNKNOWN_MODEL", "There is no model \"" + id + "\" in the catalog.", {}, "List them with models.list.");
+    std::error_code ec;
+    const fs::path picked = to_path(*folder);
+    if (folder->empty() || !fs::is_directory(picked, ec))
+      return fail(ErrorCode::NotFound, "M_FOLDER", "\"" + *folder + "\" is not a folder.", {}, "Choose the folder the model files are in.");
+    std::vector<const models::CatalogFile *> files;
+    for (const models::CatalogEntry &e : models::builtin_catalog())
+      if (!entry || &e == entry)
+        for (const models::CatalogFile &f : e.files)
+          if (std::none_of(files.begin(), files.end(), [&](const models::CatalogFile *have) { return have->path == f.path; }))
+            files.push_back(&f);
+    fs::path best;
+    int found = 0;
+    for (const fs::path &candidate : {picked, picked / "models", picked / "ComfyUI" / "models", picked.parent_path()})
+      if (const int n = files_in(files, candidate); n > found) {
+        found = n;
+        best = candidate;
+      }
+    json out = {{"found", found}, {"of", int(files.size())}, {"added", false}};
+    if (found == 0)
+      return out;
+    out["folder"] = to_utf8(best);
+    if (!same_folder(best, models_dir()) && !knows_folder(best)) {
+      model_folders.push_back(best);
+      ATM_CHECK(save_model_folders());
+      out["added"] = true;
+    }
+    if (entry) {
+      int64_t missing = 0;
+      const fs::path dir = models_dir();
+      for (const models::CatalogFile &f : entry->files)
+        missing += f.size - models::file_status(f, dir, model_folders).bytes;
+      out["bytes_missing"] = missing;
+      out["title"] = entry->title;
+    }
+    return out;
+  }
+
+  Result<json> models_forget_folder(const json &params) {
+    ATM_TRY(const std::string *folder, string_param(params, "folder"));
+    const size_t before = model_folders.size();
+    std::erase_if(model_folders, [&](const fs::path &f) { return same_folder(f, to_path(*folder)); });
+    if (model_folders.size() != before)
+      ATM_CHECK(save_model_folders());
+    return json{{"folders", folders_json()}, {"removed", model_folders.size() != before}};
+  }
+
+  // Where downloads go from now on. What is in the old folder stays there and stays usable: it becomes one of the
+  // folders that are looked in.
+  Result<json> models_set_folder(const json &params) {
+    ATM_TRY(const std::string *folder, string_param(params, "folder"));
+    if (models_dir_fixed())
+      return fail(ErrorCode::InvalidArgument, "M_FOLDER_FIXED", "The models folder is set by ATTOME_MODELS_DIR for this run.", {},
+                  "Start Attome without ATTOME_MODELS_DIR to choose the folder here.");
+    if (fetch_running())
+      return fail(ErrorCode::InvalidArgument, "M_BUSY", "A model is being downloaded.", {},
+                  "Stop the download, or wait for it, then change the folder.");
+    const fs::path old = models_dir();
+    const fs::path next = folder->empty() ? fs::path() : to_path(*folder);
+    std::error_code ec;
+    if (!next.empty()) {
+      fs::create_directories(next, ec);
+      if (!fs::is_directory(next, ec))
+        return fail(ErrorCode::IoError, "M_DISK", "The folder " + *folder + " cannot be used.", {}, "Choose a folder you can save files in.");
+    }
+    chosen_models_dir = next;
+    const fs::path now = models_dir();
+    std::erase_if(model_folders, [&](const fs::path &f) { return same_folder(f, now); });
+    if (!same_folder(old, now) && fs::is_directory(old, ec) && !fs::is_empty(old, ec) && !knows_folder(old))
+      model_folders.push_back(old);
+    ATM_CHECK(save_model_folders());
+    return json{{"models_dir", to_utf8(now)}, {"free_bytes", free_bytes(now)}, {"folders", folders_json()}};
+  }
 
   Result<json> models_list(const json &) {
     const fs::path dir = models_dir();
@@ -1883,7 +2027,7 @@ struct Engine::Impl {
       int64_t on_disk = 0;
       bool all = true;
       for (const models::CatalogFile &f : e.files) {
-        const models::FileStatus st = models::file_status(f, dir);
+        const models::FileStatus st = models::file_status(f, dir, model_folders);
         on_disk += st.bytes;
         all = all && st.state == models::FileState::installed;
         files.push_back({{"path", f.path},
@@ -1903,7 +2047,8 @@ struct Engine::Impl {
         entry["job_id"] = job_id;
       entries.push_back(std::move(entry));
     }
-    return json{{"models_dir", to_utf8(dir)}, {"entries", std::move(entries)}};
+    return json{{"models_dir", to_utf8(dir)}, {"free_bytes", free_bytes(dir)}, {"folders", folders_json()},
+                {"folder_fixed", models_dir_fixed()}, {"entries", std::move(entries)}};
   }
 
   Result<json> models_fetch(const json &params) {
@@ -1922,21 +2067,21 @@ struct Engine::Impl {
     // Room on the disk for what is still missing, before any byte is fetched.
     int64_t missing = 0;
     for (const models::CatalogFile &f : entry->files)
-      missing += f.size - models::file_status(f, dir).bytes;
+      missing += f.size - models::file_status(f, dir, model_folders).bytes;
     std::error_code ec;
     fs::create_directories(dir, ec);
     const fs::space_info space = fs::space(dir, ec);
     if (!ec && int64_t(space.available) < missing)
       return fail(ErrorCode::IoError, "M_DISK", entry->title + " needs " + std::to_string(missing / 1000000000) + " GB more, and " +
                                                     to_utf8(dir) + " has " + std::to_string(int64_t(space.available) / 1000000000) + " GB free.",
-                  {}, "Free some space, or set ATTOME_MODELS_DIR to a folder on a larger disk.");
+                  {}, "Free some space, or choose a folder on another drive in the Models panel.");
     auto job = std::make_shared<Job>();
     job->id = new_id("job");
     job->kind = "models.fetch";
     job->output = entry->id;
     job->units_total.store(entry->size());
     jobs[job->id] = job;
-    job->thread = std::thread(run_fetch, job, *entry, dir, cfg.transport ? cfg.transport : std::shared_ptr<net::Transport>(net::system_transport()));
+    job->thread = std::thread(run_fetch, job, *entry, dir, model_folders, cfg.transport ? cfg.transport : std::shared_ptr<net::Transport>(net::system_transport()));
     return json{{"job_id", job->id}, {"id", entry->id}, {"bytes_total", entry->size()}, {"bytes_missing", missing}, {"models_dir", to_utf8(dir)}};
   }
 
@@ -2186,12 +2331,25 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
        "clip":{"type":"string"},"take":{"type":"string"}},"required":["project","clip","take"]})",
      &Impl::gen_select_take},
     {"models.list", "models", false,
-     "The models this version can download, with their size, licence and what is already on disk (installed, partial, downloading, missing).",
+     "The models this version can download, with their size, licence and what is already on disk (installed, partial, downloading, missing); "
+     "the folder downloads go to with its free space, and the other folders that are looked in.",
      "", &Impl::models_list},
     {"models.fetch", "models", false,
      "Download a model from the catalog as a background job (units are bytes; follow it with jobs.get, stop it with jobs.cancel). "
      "A stopped or interrupted download continues from where it was; every file is checked against its SHA-256 before it is put in place.",
      R"({"type":"object","properties":{"id":{"type":"string","description":"An id from models.list"}},"required":["id"]})", &Impl::models_fetch},
+    {"models.locate", "models", false,
+     "Use model files that are already on this computer instead of downloading them: give the folder they are in (a ComfyUI "
+     "folder, its models folder, or a folder of the files themselves). Returns how many of the catalog's files were found there "
+     "(of one model with id) and, with id, the bytes still to download. A folder that holds some is remembered and looked in from then on.",
+     R"({"type":"object","properties":{"folder":{"type":"string"},"id":{"type":"string","description":"An id from models.list"}},"required":["folder"]})",
+     &Impl::models_locate},
+    {"models.forget_folder", "models", false, "Stop looking for model files in a folder given to models.locate. Nothing is deleted.",
+     R"({"type":"object","properties":{"folder":{"type":"string"}},"required":["folder"]})", &Impl::models_forget_folder},
+    {"models.set_folder", "models", false,
+     "Choose the folder downloads go to (for example on a drive with more room); \"\" goes back to the default one. Models in the "
+     "folder used before stay usable. The choice is remembered.",
+     R"({"type":"object","properties":{"folder":{"type":"string"}},"required":["folder"]})", &Impl::models_set_folder},
     {"jobs.get", "core", false, "State and progress of a job.",
      R"({"type":"object","properties":{"job_id":{"type":"string"}},"required":["job_id"]})", &Impl::jobs_get},
     {"jobs.cancel", "core", false, "Stop a running job.",
@@ -2230,6 +2388,14 @@ Engine::Engine(EngineConfig config) : impl_(std::make_unique<Impl>()) {
   if (comfyui.empty())
     comfyui = impl_->settings().value("comfyui", std::string());
   impl_->set_comfyui(comfyui);
+  if (!Impl::models_dir_fixed()) { // a run that names its models folder is not mixed with the user's own folders
+    const json saved = impl_->settings();
+    if (const std::string dir = saved.value("models_dir", std::string()); !dir.empty())
+      impl_->chosen_models_dir = to_path(dir);
+    for (const json &f : saved.value("model_folders", json::array()))
+      if (f.is_string() && !f.get_ref<const std::string &>().empty())
+        impl_->model_folders.push_back(to_path(f.get<std::string>()));
+  }
   for (const Impl::Tool &tool : Impl::kTools)
     impl_->by_name.emplace(tool.name, &tool);
   // What each catalog model declares, for the validator: known whether or not the files are on this machine.

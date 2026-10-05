@@ -280,7 +280,7 @@ void models_of(const json &workflows, const std::string &workflow_id, const std:
     else if (decl->needs_files && !(installed && installed(model)))
       out.push_back({"G_MODEL_MISSING", path, workflow_id,
                      "Node " + it.key() + " uses the model \"" + model + "\", which is not installed on this computer.",
-                     "Download it in the Models panel (attome models fetch " + model + ")."});
+                     "Download it in the Models panel (attome models fetch " + model + "), or show Attome the folder that already has it."});
   }
 }
 } // namespace
