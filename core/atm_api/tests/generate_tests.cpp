@@ -8,6 +8,7 @@
 #include "atm/api/engine.hpp"
 #include "atm/api/gen_mock.hpp"
 #include "atm/base/id.hpp"
+#include "atm/gen/keys.hpp"
 #include "atm/render/render.hpp"
 #include "atm/storage/file.hpp"
 
@@ -493,4 +494,141 @@ TEST_CASE("generate: a new Take never repeats the seed of an earlier Take; a fai
   const json node = g.get(clip["node"]);
   CHECK(node["kind"] == "attome.sample");
   CHECK(clip["error"]["message"].is_string());
+}
+
+TEST_CASE("generate: {name} in a text is a Variable; one Variable moves every clip that reads it; a picture Variable feeds several clips", "[gen][generate][variables]") {
+  // The text itself.
+  const json vars = {{"var_a", {{"name", "style"}, {"type", "text"}, {"value", "anime"}}},
+                     {"var_b", {{"name", "hero"}, {"type", "text"}, {"value", "a robot"}}},
+                     {"var_c", {{"name", "n"}, {"type", "number"}, {"value", 3}}}};
+  CHECK(atm::gen::expand_variables("A {hero} in the {style} style, {n} times", vars) == "A a robot in the anime style, 3 times");
+  CHECK(atm::gen::expand_variables("{nobody} and {style}", vars) == "{nobody} and anime"); // unknown: left as it is
+  CHECK(atm::gen::expand_variables("{ style }, {}, {style", vars) == "{ style }, {}, {style");
+  CHECK(atm::gen::expand_variables("no braces", vars) == "no braces");
+  CHECK(atm::gen::unknown_variables("{hero} {nobody} {nobody} {a: b} {style}", vars) == std::vector<std::string>{"nobody"});
+  CHECK(atm::gen::expand_variables("{style}", json::object()) == "{style}");
+
+  // In clips: both prompts use {style}; the second also reads a Variable node of the same Variable. A third clip reads nothing.
+  Film f;
+  const json made = f.patch(json::array({{{"op", "add"}, {"path", f.root + "/variables/$new:style"}, {"value", {{"name", "style"}, {"type", "text"}, {"value", "anime"}}}},
+                                         {{"op", "replace"}, {"path", f.a + "/media_ref/inputs/prompt"}, {"value", "A robot in the {style} style"}}}));
+  const std::string style = made["id_map"]["$new:style"];
+  REQUIRE(f.wait(f.run())["state"] == "done");
+  CHECK(f.states() == "First=clean Second=clean");
+  // The run was given the expanded text: the sampler's input is "A robot in the anime style".
+  const json take_inputs = f.get(f.a)["media_ref"]["takes"].begin()->at("inputs");
+  CHECK(take_inputs["prompt"] == "A robot in the {style} style"); // what the clip holds is what the user wrote
+
+  // One change of the Variable: First uses it, so it is out of date; Second reads it by nothing and is not, except it starts from First.
+  f.patch(json::array({{{"op", "replace"}, {"path", style + "/value"}, {"value", "film"}}}));
+  CHECK(f.states() == "First=dirty Second=dirty");
+  CHECK(f.status_of(f.a)["state"] == "dirty");
+  const int encodes = f.mock->encodes;
+  REQUIRE(f.wait(f.run())["state"] == "done");
+  CHECK(f.mock->encodes == encodes + 1); // only First's prompt is encoded again: Second's text did not change
+  CHECK(f.states() == "First=clean Second=clean");
+  // The name is not a Variable of the project (renamed): the text stays as written, and the clip is out of date once.
+  f.patch(json::array({{{"op", "replace"}, {"path", style + "/name"}, {"value", "look"}}}));
+  CHECK(f.status_of(f.a)["state"] == "dirty");
+  f.patch(json::array({{{"op", "replace"}, {"path", style + "/name"}, {"value", "style"}}}));
+  CHECK(f.status_of(f.a)["state"] == "clean"); // back as it was: the same key, the Take is good again
+}
+
+TEST_CASE("generate: a Variable node of the same Variable in two clips: one change moves both, and no other clip", "[gen][generate][variables]") {
+  Film f;
+  const auto node_of = [&](const std::string &clip, const char *kind) {
+    const json nodes = f.get(clip)["media_ref"]["workflow"]["nodes"];
+    for (auto it = nodes.begin(); it != nodes.end(); ++it)
+      if (it->value("kind", std::string()) == kind)
+        return it.key();
+    return std::string();
+  };
+  // A third clip that reads nothing, started apart from the other two.
+  const json track = f.get(f.a); // (only to read the track below)
+  (void)track;
+  const std::string enc_a = node_of(f.a, "attome.encode_prompt"), enc_b = node_of(f.b, "attome.encode_prompt");
+  const json made = f.patch(json::array(
+      {{{"op", "add"}, {"path", f.root + "/variables/$new:v"}, {"value", {{"name", "mood"}, {"type", "text"}, {"value", "calm"}}}},
+       {{"op", "replace"}, {"path", f.a + "/media_ref/workflow/exposed/inputs/prompt/to"}, {"value", json::array()}},
+       {{"op", "replace"}, {"path", f.b + "/media_ref/workflow/exposed/inputs/prompt/to"}, {"value", json::array()}},
+       {{"op", "add"}, {"path", f.a + "/media_ref/workflow/nodes/$new:na"}, {"value", {{"kind", "attome.variable"}, {"variable", "$new:v"}, {"type", "text"}}}},
+       {{"op", "add"}, {"path", f.b + "/media_ref/workflow/nodes/$new:nb"}, {"value", {{"kind", "attome.variable"}, {"variable", "$new:v"}, {"type", "text"}}}},
+       {{"op", "add"}, {"path", f.a + "/media_ref/workflow/links/$new:la"}, {"value", {{"from", {"$new:na", "value"}}, {"to", {enc_a, "prompt"}}}}},
+       {{"op", "add"}, {"path", f.b + "/media_ref/workflow/links/$new:lb"}, {"value", {{"from", {"$new:nb", "value"}}, {"to", {enc_b, "prompt"}}}}}}));
+  const std::string mood = made["id_map"]["$new:v"];
+  CHECK(ok(*f.engine, "project.validate", {{"project", f.project}})["ok"] == true);
+  REQUIRE(f.wait(f.run())["state"] == "done");
+  CHECK(f.states() == "First=clean Second=clean");
+  f.patch(json::array({{{"op", "replace"}, {"path", mood + "/value"}, {"value", "tense"}}}));
+  CHECK(f.states() == "First=dirty Second=dirty"); // both follow the one change
+  const int encodes = f.mock->encodes;
+  REQUIRE(f.wait(f.run())["state"] == "done");
+  CHECK(f.mock->encodes == encodes + 1); // both read the same text now, so it is encoded once: the cache is by content
+  CHECK(f.states() == "First=clean Second=clean");
+}
+
+TEST_CASE("generate: a picture kept as a Variable feeds several clips, and replacing it once updates them all", "[gen][generate][variables]") {
+  Film f;
+  const auto node_of = [&](const std::string &clip, const char *kind) {
+    const json nodes = f.get(clip)["media_ref"]["workflow"]["nodes"];
+    for (auto it = nodes.begin(); it != nodes.end(); ++it)
+      if (it->value("kind", std::string()) == kind)
+        return it.key();
+    return std::string();
+  };
+  const std::string smp_a = node_of(f.a, "attome.sample"), smp_b = node_of(f.b, "attome.sample");
+  const json made = f.patch(json::array(
+      {{{"op", "add"}, {"path", f.root + "/variables/$new:hero"}, {"value", {{"name", "hero"}, {"type", "image"}, {"value", "hero_v1.png"}}}},
+       {{"op", "replace"}, {"path", f.a + "/media_ref/workflow/exposed/inputs/start_image/to"}, {"value", json::array()}},
+       {{"op", "add"}, {"path", f.a + "/media_ref/workflow/nodes/$new:na"}, {"value", {{"kind", "attome.variable"}, {"variable", "$new:hero"}, {"type", "image"}}}},
+       {{"op", "add"}, {"path", f.a + "/media_ref/workflow/links/$new:la"}, {"value", {{"from", {"$new:na", "value"}}, {"to", {smp_a, "start_image"}}}}},
+       // the second clip reads the same picture as a reference
+       {{"op", "add"}, {"path", f.b + "/media_ref/workflow/nodes/$new:nb"}, {"value", {{"kind", "attome.variable"}, {"variable", "$new:hero"}, {"type", "image"}}}},
+       {{"op", "add"}, {"path", f.b + "/media_ref/workflow/links/$new:lb"}, {"value", {{"from", {"$new:nb", "value"}}, {"to", {smp_b, "references"}}}}}}));
+  const std::string hero = made["id_map"]["$new:hero"];
+  CHECK(ok(*f.engine, "project.validate", {{"project", f.project}})["ok"] == true);
+  REQUIRE(f.wait(f.run())["state"] == "done");
+  CHECK(f.states() == "First=clean Second=clean");
+  f.patch(json::array({{{"op", "replace"}, {"path", hero + "/value"}, {"value", "hero_v2.png"}}}));
+  CHECK(f.states() == "First=dirty Second=dirty"); // the picture was replaced once: every clip that reads it follows
+}
+
+TEST_CASE("generate: Presets keep a clip's input values for its Clip Workflow, and put them on another clip in one edit", "[gen][generate][preset]") {
+  Film f;
+  f.patch(json::array({{{"op", "replace"}, {"path", f.a + "/media_ref/inputs/prompt"}, {"value", "Close-up of a robot"}},
+                       {{"op", "replace"}, {"path", f.a + "/media_ref/inputs/seed"}, {"value", 42}}}));
+  const json saved = ok(*f.engine, "gen.save_preset", {{"project", f.project}, {"clip", f.a}, {"name", "Close-up"}});
+  const std::string preset = saved["preset"];
+  CHECK(atm::id_prefix(preset) == "pre");
+  const json stored = ok(*f.engine, "project.get", {{"project", f.project}, {"id", preset}})["object"];
+  CHECK(stored["name"] == "Close-up");
+  CHECK(stored["values"]["seed"] == 42);
+  CHECK(stored["values"]["prompt"] == "Close-up of a robot");
+  CHECK(ok(*f.engine, "project.validate", {{"project", f.project}})["ok"] == true);
+
+  // Applied to the second clip: its values are those of the Preset, as one edit that undoes in one step.
+  const std::string before = [&] { ok(*f.engine, "project.save", {{"project", f.project}}); return *atm::storage::read_file(fs::path(f.project) / "project.json"); }();
+  const json applied = ok(*f.engine, "gen.apply_preset", {{"project", f.project}, {"clip", f.b}, {"preset", preset}});
+  CHECK(applied["applied"] == 2);
+  CHECK(applied["skipped"].empty());
+  CHECK(f.get(f.b)["media_ref"]["inputs"]["seed"] == 42);
+  CHECK(f.get(f.b)["media_ref"]["inputs"]["prompt"] == "Close-up of a robot");
+  ok(*f.engine, "project.undo", {{"project", f.project}});
+  ok(*f.engine, "project.save", {{"project", f.project}});
+  CHECK(*atm::storage::read_file(fs::path(f.project) / "project.json") == before);
+
+  // Saved again under the same name: it replaces the Preset. An input the second clip's workflow lacks is skipped.
+  f.patch(json::array({{{"op", "replace"}, {"path", f.a + "/media_ref/inputs/seed"}, {"value", 43}},
+                       {{"op", "add"}, {"path", f.a + "/media_ref/workflow/exposed/inputs/mood"}, {"value", {{"type", "text"}}}},
+                       {{"op", "add"}, {"path", f.a + "/media_ref/inputs/mood"}, {"value", "calm"}}}));
+  const json again = ok(*f.engine, "gen.save_preset", {{"project", f.project}, {"clip", f.a}, {"name", "Close-up"}});
+  const json presets = ok(*f.engine, "project.get", {{"project", f.project}, {"id", f.root}})["object"]["presets"];
+  CHECK(presets.size() == 1);
+  const json skipping = ok(*f.engine, "gen.apply_preset", {{"project", f.project}, {"clip", f.b}, {"preset", again["preset"]}});
+  CHECK(skipping["skipped"] == json::array({"mood"}));
+  CHECK(f.get(f.b)["media_ref"]["inputs"]["seed"] == 43);
+  CHECK(ok(*f.engine, "project.validate", {{"project", f.project}})["ok"] == true);
+  // A name is needed; the Preset has to be one.
+  CHECK(err(*f.engine, "gen.save_preset", {{"project", f.project}, {"clip", f.a}, {"name", ""}}).rule != "");
+  CHECK(err(*f.engine, "gen.apply_preset", {{"project", f.project}, {"clip", f.b}, {"preset", f.a}}).rule == "G_PRESET");
 }

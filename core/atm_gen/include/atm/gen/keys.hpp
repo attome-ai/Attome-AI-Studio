@@ -50,6 +50,13 @@ struct KeyContext {
   std::function<Made(std::string_view reference, std::string_view port)> reference;
 };
 
+// A text may name a Variable of the project in braces: "A {character} in the {style} style". Each {name} is the value of the Variable of
+// that name (text, number or yes/no, written as text); a name that is no Variable's is left as it is. The key of the node that reads the
+// text holds the expanded text, so changing a Variable moves the keys of exactly the nodes whose texts use it.
+std::string expand_variables(std::string_view text, const json &variables);
+// The names in braces that no Variable of the project has, in the order they appear.
+std::vector<std::string> unknown_variables(std::string_view text, const json &variables);
+
 // A value another clip made, as an input: {"key": "<cache key of the node that made it>", "port": "<its output>"}.
 // A clip linked to another clip is given this in place of the link.
 json made_by(std::string_view key, std::string_view port);

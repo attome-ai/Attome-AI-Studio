@@ -2038,6 +2038,67 @@ struct Engine::Impl {
     return project_patch({{"project", to_utf8(pr->dir)}, {"patch", {{"ops", std::move(ops)}, {"label", "Reset workflow"}}}});
   }
 
+  // A Preset: the input values of a clip kept under a name, for the Clip Workflow the clip was made from (its "source"). A Preset
+  // of the same name and source is replaced.
+  Result<json> gen_save_preset(const json &params) {
+    ATM_TRY(Project *pr, project(params));
+    ATM_TRY(const std::string *clip, string_param(params, "clip"));
+    ATM_TRY(const std::string *name, string_param(params, "name"));
+    const doc::NodeRef *ref = pr->doc.find(*clip);
+    const json media = ref ? ref->node->value("media_ref", json::object()) : json::object();
+    if (media.value("type", std::string()) != "workflow")
+      return fail(ErrorCode::UnknownId, "G_WORKFLOW", "\"" + *clip + "\" is not a generative clip.", {}, "Pass the ID of a generative clip.");
+    if (name->empty())
+      return bad_param("name", "must not be empty");
+    const std::string source = media.value("workflow", json::object()).value("source", std::string());
+    const json &presets = pr->doc.root().contains("presets") && pr->doc.root()["presets"].is_object() ? pr->doc.root()["presets"] : json::object();
+    json ops = json::array();
+    for (auto it = presets.begin(); it != presets.end(); ++it)
+      if (it->value("name", std::string()) == *name && it->value("source", std::string()) == source)
+        ops.push_back({{"op", "remove"}, {"path", it.key()}});
+    // Only what the clip's workflow has an input for; values the workflow does not list are not part of a Preset.
+    json values = json::object();
+    const json face = media.value("workflow", json::object()).value("exposed", json::object()).value("inputs", json::object());
+    const json held = media.value("inputs", json::object());
+    for (auto it = held.begin(); it != held.end(); ++it)
+      if (face.contains(it.key()))
+        values[it.key()] = *it;
+    ops.push_back({{"op", "add"}, {"path", pr->doc.root().value("id", std::string()) + "/presets/$new:p"},
+                   {"value", {{"name", *name}, {"source", source}, {"values", std::move(values)}}}});
+    ATM_TRY(json applied, project_patch({{"project", to_utf8(pr->dir)}, {"patch", {{"ops", std::move(ops)}, {"label", "Save preset"}}}}));
+    return json{{"preset", applied["id_map"].value("$new:p", std::string())}, {"revision", applied["revision"]}};
+  }
+
+  // A Preset put on a clip: its values go into the clip's inputs, for the inputs the clip's workflow has, in one edit. The rest are
+  // reported as skipped.
+  Result<json> gen_apply_preset(const json &params) {
+    ATM_TRY(Project *pr, project(params));
+    ATM_TRY(const std::string *clip, string_param(params, "clip"));
+    ATM_TRY(const std::string *preset, string_param(params, "preset"));
+    const doc::NodeRef *ref = pr->doc.find(*clip);
+    const doc::NodeRef *pre = pr->doc.find(*preset);
+    const json media = ref ? ref->node->value("media_ref", json::object()) : json::object();
+    if (media.value("type", std::string()) != "workflow")
+      return fail(ErrorCode::UnknownId, "G_WORKFLOW", "\"" + *clip + "\" is not a generative clip.", {}, "Pass the ID of a generative clip.");
+    if (!pre || id_prefix(*preset) != "pre")
+      return fail(ErrorCode::UnknownId, "G_PRESET", "\"" + *preset + "\" is not a Preset of this project.", {}, "List them with project.get on the project's ID: its \"presets\".");
+    const json face = media.value("workflow", json::object()).value("exposed", json::object()).value("inputs", json::object());
+    const json have = media.value("inputs", json::object());
+    const json values = pre->node->value("values", json::object());
+    json ops = json::array(), skipped = json::array();
+    for (auto it = values.begin(); it != values.end(); ++it) {
+      if (!face.contains(it.key())) {
+        skipped.push_back(it.key());
+        continue;
+      }
+      ops.push_back({{"op", have.contains(it.key()) ? "replace" : "add"}, {"path", *clip + "/media_ref/inputs/" + it.key()}, {"value", *it}});
+    }
+    if (ops.empty())
+      return json{{"applied", 0}, {"skipped", std::move(skipped)}};
+    ATM_TRY(json applied, project_patch({{"project", to_utf8(pr->dir)}, {"patch", {{"ops", std::move(ops)}, {"label", "Apply preset"}}}}));
+    return json{{"applied", values.size() - skipped.size()}, {"skipped", std::move(skipped)}, {"revision", applied["revision"]}};
+  }
+
   Result<json> gen_select_take(const json &params) {
     ATM_TRY(Project *pr, project(params));
     ATM_TRY(const std::string *clip, string_param(params, "clip"));
@@ -2523,6 +2584,18 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
      R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},
        "clip":{"type":"string"}},"required":["project","clip"]})",
      &Impl::gen_reset_clip},
+    {"gen.save_preset", "gen", true,
+     "Keep a generative clip's input values under a name as a Preset of the Clip Workflow it was made from (a Preset of the same name "
+     "and source is replaced). The project's \"presets\" hold them.",
+     R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},
+       "clip":{"type":"string"},"name":{"type":"string"}},"required":["project","clip","name"]})",
+     &Impl::gen_save_preset},
+    {"gen.apply_preset", "gen", true,
+     "Put a Preset's values on a generative clip, for the inputs its workflow has, in one undoable edit. Returns how many were set and "
+     "which were skipped (inputs the clip's workflow lacks).",
+     R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},
+       "clip":{"type":"string"},"preset":{"type":"string","description":"A pre_ ID"}},"required":["project","clip","preset"]})",
+     &Impl::gen_apply_preset},
     {"gen.select_take", "gen", true,
      "Choose which Take of a generative clip plays. The clip's inputs go back to what made that Take; clips that start from it become dirty.",
      R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},
