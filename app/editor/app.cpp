@@ -1073,6 +1073,22 @@ void App::ask_import() {
       this, window_, filters, 2, user_folder(SDL_FOLDER_VIDEOS).c_str(), true);
 }
 
+// A file for a media input of a generative clip: the picture, video or sound it is given.
+void App::ask_input(const std::string &clip, const std::string &name) {
+  static const SDL_DialogFileFilter filters[] = {
+      {"Pictures, video and sound", "png;jpg;jpeg;bmp;gif;tga;mp4;mov;m4v;mkv;avi;webm;mp3;wav;m4a;aac;flac"}, {"All files", "*"}};
+  input_clip_ = clip;
+  input_name_ = name;
+  SDL_ShowOpenFileDialog(
+      [](void *self, const char *const *files, int) {
+        App *app = static_cast<App *>(self);
+        std::lock_guard lock(app->dialog_mutex_);
+        if (files && *files)
+          app->dialog_input_ = *files;
+      },
+      this, window_, filters, 2, user_folder(SDL_FOLDER_PICTURES).c_str(), false);
+}
+
 void App::ask_lut(const std::string &target) {
   static const SDL_DialogFileFilter filters[] = {{"Colour look-up tables", "cube"}, {"All files", "*"}};
   lut_target_ = target;
@@ -1147,7 +1163,7 @@ std::string size_text(int64_t bytes) {
 
 void App::take_dialog_results() {
   std::vector<std::string> import;
-  std::string out, project, lut, models_folder;
+  std::string out, project, lut, models_folder, input;
   {
     std::lock_guard lock(dialog_mutex_);
     import.swap(dialog_import_);
@@ -1155,6 +1171,13 @@ void App::take_dialog_results() {
     project.swap(dialog_project_);
     lut.swap(dialog_lut_);
     models_folder.swap(dialog_models_folder_);
+    input.swap(dialog_input_);
+  }
+  if (!input.empty() && !input_clip_.empty()) { // the file chosen for a media input
+    const std::string base = input_clip_ + "/media_ref/inputs/" + input_name_;
+    const json *clip = clip_json(input_clip_);
+    const bool had = clip && clip->value("media_ref", json::object()).value("inputs", json::object()).contains(input_name_);
+    patch(json::array({{{"op", had ? "replace" : "add"}, {"path", base}, {"value", input}}}), "Choose file");
   }
   if (!models_folder.empty()) {
     const std::string model = models_folder_model_;
@@ -2559,35 +2582,285 @@ void App::start_generation(json params) {
   }
 }
 
-// A generative clip's card. A node whose model is missing is the common case on a project from another computer: the
-// card says which model, how large the download is, and starts it.
-void App::draw_generate_card(const ClipUi &c) {
-  const auto found = gen_problems_.find(c.id);
-  if (!begin_card("##generate", "Generate", found == gen_problems_.end() ? nullptr : "cannot run yet")) {
+// The project's Variables: a value kept once, read by Variable nodes in any clip's workflow. Each has a name, a Data Type and a
+// value; change the value and every clip that reads it is out of date.
+void App::draw_variables_card() {
+  const json &vars = object_in(doc_, "variables");
+  if (!begin_card("##variables", "Variables", vars.empty() ? nullptr : (std::to_string(vars.size()) + (vars.size() == 1 ? " variable" : " variables")).c_str())) {
     end_card();
     return;
   }
-  if (found == gen_problems_.end()) {
-    // Ready to run: the prompt, what state the clip is in, and the buttons that generate.
-    const std::string id = c.id;
-    if (c.has_prompt) {
-      ImGui::PushStyleColor(ImGuiCol_FrameBg, hexv(look::raised));
+  ImGui::PushStyleColor(ImGuiCol_FrameBg, hexv(look::raised));
+  for (auto v = vars.begin(); v != vars.end(); ++v) {
+    const std::string vid = v.key(), name = v->value("name", vid), type = v->value("type", std::string("text"));
+    const json now = v->contains("value") ? (*v)["value"] : json(nullptr);
+    ImGui::PushID(vid.c_str());
+    ImGui::TextColored(hexv(look::fg), "%s", name.c_str());
+    ui_mark("variable:" + name);
+    ImGui::SameLine();
+    ImGui::TextColored(hexv(look::fg3), "%s", type.c_str());
+    ImGui::SameLine(ImGui::GetContentRegionMax().x - 18.0f);
+    if (soft_button(("variable_remove_" + name).c_str(), "x", ImVec2(18.0f, 18.0f), true, false, look::panel2))
+      pending_ = [this, vid] { patch(json::array({{{"op", "remove"}, {"path", vid}}}), "Remove variable"); };
+    const auto put = [this, vid, had = v->contains("value")](json value) {
+      pending_ = [this, vid, value, had] { patch(json::array({{{"op", had ? "replace" : "add"}, {"path", vid + "/value"}, {"value", value}}}), "Change variable"); };
+    };
+    const std::string key = "var:" + vid;
+    if (type == "boolean") {
+      bool on = now.is_boolean() && now.get<bool>();
+      if (ImGui::Checkbox("##b", &on))
+        put(on);
+      ui_mark("check:variable_" + name);
+    } else if (type == "number" || type == "integer") {
+      std::array<char, 512> &buf = wf_text_[key];
+      if (wf_editing_ != key)
+        copy_to(buf.data(), buf.size(), now.is_number() ? now.dump() : std::string());
+      ImGui::SetNextItemWidth(-1.0f);
+      ImGui::InputText("##n", buf.data(), buf.size(), ImGuiInputTextFlags_CharsDecimal);
+      ui_mark("field:variable_" + name);
+      if (ImGui::IsItemActive())
+        wf_editing_ = key;
+      else if (wf_editing_ == key)
+        wf_editing_.clear();
+      if (ImGui::IsItemDeactivatedAfterEdit() && buf[0]) {
+        char *end = nullptr;
+        const double typed = std::strtod(buf.data(), &end);
+        if (end != buf.data())
+          put(type == "integer" ? json(int64_t(std::llround(typed))) : json(typed));
+      }
+    } else { // text, and the media types by their path
+      std::array<char, 512> &buf = wf_text_[key];
+      if (wf_editing_ != key)
+        copy_to(buf.data(), buf.size(), now.is_string() ? now.get<std::string>() : std::string());
+      ImGui::SetNextItemWidth(-1.0f);
+      ImGui::InputText("##t", buf.data(), buf.size());
+      ui_mark("field:variable_" + name);
+      if (ImGui::IsItemActive())
+        wf_editing_ = key;
+      else if (wf_editing_ == key)
+        wf_editing_.clear();
+      if (ImGui::IsItemDeactivatedAfterEdit() && (!now.is_string() || now.get<std::string>() != buf.data()))
+        put(std::string(buf.data()));
+    }
+    ImGui::PopID();
+    ImGui::Dummy(ImVec2(0.0f, 4.0f));
+  }
+  ImGui::PopStyleColor();
+  if (vars.empty()) {
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::TextColored(hexv(look::fg3), "A value that several clips read, such as a style or a character. Add one, then read it with a Variable node.");
+    ImGui::PopTextWrapPos();
+  }
+  if (!add_variable_open_) {
+    if (soft_button("variable_add", "Add variable", ImVec2(0.0f, 26.0f)))
+      pending_ = [this] {
+        add_variable_open_ = true;
+        add_variable_name_[0] = 0;
+      };
+  } else {
+    ImGui::PushStyleColor(ImGuiCol_FrameBg, hexv(look::raised));
+    ImGui::SetNextItemWidth(-1.0f);
+    ImGui::InputTextWithHint("##new_variable", "Name of the variable", add_variable_name_, sizeof add_variable_name_);
+    ui_mark("field:new_variable_name");
+    ImGui::PopStyleColor();
+    static const char *types[] = {"text", "number", "integer", "boolean", "image", "video", "audio", "mask"};
+    for (int i = 0; i < 8; ++i) {
+      if (i % 4)
+        ImGui::SameLine();
+      if (soft_button((std::string("variable_type_") + types[i]).c_str(), types[i], ImVec2(0.0f, 26.0f), true, add_variable_type_ == i))
+        add_variable_type_ = i;
+    }
+    const std::string name = add_variable_name_;
+    bool taken = false;
+    for (auto v = vars.begin(); v != vars.end(); ++v)
+      taken = taken || v->value("name", std::string()) == name;
+    if (taken)
+      ImGui::TextColored(kError, "There is a variable with that name.");
+    if (soft_button("variable_add_ok", "Add", ImVec2(70.0f, 28.0f), !name.empty() && !taken, true))
+      pending_ = [this, name] {
+        const std::string type = types[add_variable_type_];
+        json value = {{"name", name}, {"type", type}};
+        if (type == "text")
+          value["value"] = "";
+        else if (type == "number")
+          value["value"] = 0.0;
+        else if (type == "integer")
+          value["value"] = 0;
+        else if (type == "boolean")
+          value["value"] = false;
+        if (patch(json::array({{{"op", "add"}, {"path", project_id_ + "/variables/$new:v"}, {"value", value}}}), "Add variable"))
+          add_variable_open_ = false;
+      };
+    ImGui::SameLine();
+    if (soft_button("variable_add_cancel", "Cancel", ImVec2(70.0f, 28.0f)))
+      add_variable_open_ = false;
+  }
+  end_card();
+}
+
+// The Workflow card of a generative clip: the Exposed Inputs of its own workflow, one row each in the workflow's order, each
+// with a control that fits its Data Type. An input the workflow does not use is dimmed, and a click on its name opens the
+// graph. Two rows are not inputs but what Input nodes read of the clip: its Length (the Clip node) and what it starts from
+// (a Clip Reference node); they are here because they are what people ask of a clip first.
+void App::draw_workflow_card(const ClipUi &c) {
+  static const json none = json::object();
+  const std::string id = c.id;
+  const json *self = clip_json(c.id);
+  const json &media = self ? object_in(*self, "media_ref") : none;
+  const json &wf = object_in(media, "workflow");
+  const json &have = object_in(media, "inputs");
+  const std::vector<gen::ExposedInput> rows = gen::exposed_inputs(object_in(doc_, "workflows"), wf);
+  if (!begin_card("##workflow", "Workflow", wf.value("name", std::string()).c_str())) {
+    end_card();
+    return;
+  }
+  const float label_w = 88.0f;
+  const std::string base = id + "/media_ref/inputs/";
+  // The one edit of a value: add or replace, and a failed edit shows the stored value again.
+  const auto put = [this, id, base, &have](const std::string &name, json value, const char *label) {
+    const bool had = have.contains(name);
+    pending_ = [this, base, name, value, had, label] {
+      if (!patch(json::array({{{"op", had ? "replace" : "add"}, {"path", base + name}, {"value", value}}}), label))
+        insp_rev_ = 0;
+    };
+  };
+  bool starts_row = false;
+  for (const gen::ExposedInput &e : rows)
+    starts_row = starts_row || (e.name == "start_image");
+  int64_t next_order = 0;
+  for (const gen::ExposedInput &e : rows)
+    next_order = std::max<int64_t>(next_order, e.order + 1);
+  const auto draw_row = [&](const gen::ExposedInput &e) {
+    if (e.name == "start_image")
+      return; // what it starts from has its own row below
+    const std::string key = id + "/" + e.name, shown = e.label.empty() ? e.name : e.label;
+    const bool unused = e.to.empty(), is_set = have.contains(e.name);
+    const json now = is_set ? have[e.name] : e.def;
+    const bool multi = e.type == gen::PortType::text && !(e.range.is_object() && e.range.contains("options"));
+    const bool media_type = e.type == gen::PortType::image || e.type == gen::PortType::video || e.type == gen::PortType::audio || e.type == gen::PortType::mask;
+    ImGui::PushID(e.name.c_str());
+    // The name: dimmed when the workflow does not use it; a click opens the graph where its port is.
+    ImGui::PushStyleColor(ImGuiCol_Text, hexv(unused ? look::fg3 : look::fg2));
+    ImGui::TextUnformatted(shown.c_str());
+    ImGui::PopStyleColor();
+    ui_mark("input:" + e.name);
+    if (ImGui::IsItemHovered() && unused)
+      ImGui::SetTooltip("The workflow does not use this input. Its value is kept. Click to see it in the workflow.");
+    if (ImGui::IsItemClicked() && unused)
+      pending_ = [this, id] { open_workflow(id); };
+    if (e.required && !is_set && e.def.is_null()) {
+      ImGui::SameLine();
+      ImGui::TextColored(kError, "needed");
+    }
+    // Remove: the input goes, with the clip's value for it; what it fed is left needing a value.
+    ImGui::SameLine(ImGui::GetContentRegionMax().x - 18.0f);
+    if (soft_button(("input_remove_" + e.name).c_str(), "x", ImVec2(18.0f, 18.0f), true, false, look::panel2))
+      pending_ = [this, id, name = e.name, is_set] {
+        json ops = json::array();
+        if (is_set)
+          ops.push_back({{"op", "remove"}, {"path", id + "/media_ref/inputs/" + name}});
+        ops.push_back({{"op", "remove"}, {"path", id + "/media_ref/workflow/exposed/inputs/" + name}});
+        patch(ops, "Remove input");
+      };
+    ImGui::PushStyleColor(ImGuiCol_FrameBg, hexv(look::raised));
+    if (e.type == gen::PortType::boolean) {
+      bool on = now.is_boolean() && now.get<bool>();
+      if (ImGui::Checkbox(("##b_" + e.name).c_str(), &on))
+        put(e.name, on, "Change input");
+      ui_mark("check:input_" + e.name);
+    } else if (e.range.is_object() && e.range.contains("options") && e.range["options"].is_array()) {
+      const std::string current = now.is_string() ? now.get<std::string>() : now.is_null() ? std::string() : now.dump();
+      ImGui::SetNextItemWidth(-1.0f);
+      if (ImGui::BeginCombo("##o", current.empty() ? "Choose" : current.c_str())) {
+        for (const json &option : e.range["options"])
+          if (ImGui::Selectable((option.is_string() ? option.get<std::string>() : option.dump()).c_str(), option == now) && option != now)
+            put(e.name, option, "Change input");
+        ImGui::EndCombo();
+      }
+      ui_mark("combo:input_" + e.name);
+    } else if (e.type == gen::PortType::number || e.type == gen::PortType::integer) {
+      const bool whole = e.type == gen::PortType::integer;
+      const bool ranged = e.range.is_object() && e.range.contains("min") && e.range.contains("max") && e.range["min"].is_number() && e.range["max"].is_number();
+      float &v = wf_value_["in:" + key];
+      if (wf_editing_ != "in:" + key)
+        v = now.is_number() ? now.get<float>() : ranged ? e.range["min"].get<float>() : 0.0f;
+      if (ranged) {
+        const float lo = e.range["min"].get<float>(), hi = e.range["max"].get<float>();
+        slim_slider(("input_" + e.name).c_str(), &v, lo, hi > lo ? hi : lo + 1.0f, ImGui::GetContentRegionAvail().x - 56.0f, "");
+        if (ImGui::IsItemActive())
+          wf_editing_ = "in:" + key;
+        else if (wf_editing_ == "in:" + key)
+          wf_editing_.clear();
+        if (whole)
+          v = std::round(v);
+        if (ImGui::IsItemDeactivatedAfterEdit())
+          put(e.name, whole ? json(int64_t(std::llround(v))) : json(std::round(double(v) * 100.0) / 100.0), "Change input");
+        ImGui::SameLine();
+        ImGui::PushFont(g_fonts.mono, 13.0f);
+        ImGui::TextColored(hexv(look::fg2), whole ? "%.0f" : "%.2f", v);
+        ImGui::PopFont();
+      } else { // no range: a number typed in
+        std::array<char, 512> &buf = wf_text_["in:" + key];
+        if (wf_editing_ != "in:" + key)
+          copy_to(buf.data(), buf.size(), now.is_number() ? now.dump() : std::string());
+        ImGui::SetNextItemWidth(-1.0f);
+        ImGui::InputText("##n", buf.data(), buf.size(), ImGuiInputTextFlags_CharsDecimal);
+        ui_mark("field:input_" + e.name);
+        if (ImGui::IsItemActive())
+          wf_editing_ = "in:" + key;
+        else if (wf_editing_ == "in:" + key)
+          wf_editing_.clear();
+        if (ImGui::IsItemDeactivatedAfterEdit() && buf[0]) {
+          char *end = nullptr;
+          const double typed = std::strtod(buf.data(), &end);
+          if (end != buf.data())
+            put(e.name, whole ? json(int64_t(std::llround(typed))) : json(typed), "Change input");
+        }
+      }
+    } else if (media_type) {
+      const std::string path = now.is_string() ? now.get<std::string>() : std::string();
+      if (soft_button(("input_choose_" + e.name).c_str(), "Choose...", ImVec2(0.0f, 26.0f)))
+        pending_ = [this, id, name = e.name] { ask_input(id, name); };
+      if (is_set) {
+        ImGui::SameLine();
+        if (soft_button(("input_clear_" + e.name).c_str(), "Clear", ImVec2(0.0f, 26.0f)))
+          pending_ = [this, base, name = e.name] { patch(json::array({{{"op", "remove"}, {"path", base + name}}}), "Clear input"); };
+      }
+      ImGui::SameLine();
+      ImGui::AlignTextToFramePadding();
+      ImGui::TextColored(hexv(path.empty() ? look::fg3 : look::fg), "%s", path.empty() ? "None" : fs::path(std::u8string(path.begin(), path.end())).filename().string().c_str());
+    } else if (e.name == "prompt" && multi) { // the prompt: a box of its own, as before
       ImGui::InputTextMultiline("##prompt", prompt_buf_, sizeof prompt_buf_, ImVec2(-1.0f, 92.0f));
       ui_mark("field:prompt");
-      ImGui::PopStyleColor();
       if (ImGui::IsItemDeactivatedAfterEdit() && c.prompt != prompt_buf_) {
         const std::string value = prompt_buf_;
-        pending_ = [this, id, value] {
-          if (!patch(json::array({{{"op", "replace"}, {"path", id + "/media_ref/inputs/prompt"}, {"value", value}}}), "Edit prompt"))
+        pending_ = [this, id, value, has = have.contains("prompt")] {
+          if (!patch(json::array({{{"op", has ? "replace" : "add"}, {"path", id + "/media_ref/inputs/prompt"}, {"value", value}}}), "Edit prompt"))
             insp_rev_ = 0;
         };
       }
+    } else { // text
+      std::array<char, 512> &buf = wf_text_["in:" + key];
+      if (wf_editing_ != "in:" + key)
+        copy_to(buf.data(), buf.size(), now.is_string() ? now.get<std::string>() : std::string());
+      ImGui::InputTextMultiline("##t", buf.data(), buf.size(), ImVec2(-1.0f, 52.0f));
+      ui_mark("field:input_" + e.name);
+      if (ImGui::IsItemActive())
+        wf_editing_ = "in:" + key;
+      else if (wf_editing_ == "in:" + key)
+        wf_editing_.clear();
+      if (ImGui::IsItemDeactivatedAfterEdit() && (!now.is_string() || now.get<std::string>() != buf.data()))
+        put(e.name, std::string(buf.data()), "Change input");
     }
-    // What this clip sets of its workflow, besides the prompt: how long it is, and what it starts from. They belong to
-    // the clip, so they are here and not on the panel new clips come from.
-    {
-      static const json none = json::object();
-      const json *self = clip_json(c.id);
+    ImGui::PopStyleColor();
+    ImGui::PopID();
+    ImGui::Dummy(ImVec2(0.0f, 4.0f));
+  };
+  (void)label_w;
+  (void)starts_row;
+
+  // What the clip's Input nodes read of it: its length, and what it starts from.
+  const auto draw_clip_rows = [&] {
       const json &recipe = self ? object_in(object_in(*self, "media_ref"), "workflow") : none; // the clip's own workflow
       const json &face = object_in(object_in(recipe, "exposed"), "inputs");
       const TrackUi *track = nullptr;
@@ -2708,16 +2981,16 @@ void App::draw_generate_card(const ClipUi &c) {
           if (before && !taker.empty()) {
             if (ImGui::Selectable(("The last frame of " + before->name).c_str(), named == "previous") && named != "previous") {
               json ops = json::array();
-              const std::string base = id + "/media_ref/workflow";
+              const std::string wbase = id + "/media_ref/workflow";
               if (!reference.empty()) { // already starts from a clip: only which one changes
                 ops.push_back({{"op", "replace"}, {"path", reference + "/settings/clip"}, {"value", "previous"}});
               } else {
                 if (face["start_image"].contains("to"))
-                  ops.push_back({{"op", "replace"}, {"path", base + "/exposed/inputs/start_image/to"}, {"value", json::array()}});
-                ops.push_back({{"op", "add"}, {"path", base + "/nodes/$new:ref"}, {"value", {{"kind", "attome.clip_reference"}, {"settings", {{"clip", "previous"}}}, {"ui", {{"x", -520}, {"y", 20}}}}}});
-                ops.push_back({{"op", "add"}, {"path", base + "/nodes/$new:frame"}, {"value", {{"kind", "attome.get_frame"}, {"settings", {{"frame", "last"}}}, {"ui", {{"x", -260}, {"y", 20}}}}}});
-                ops.push_back({{"op", "add"}, {"path", base + "/links/$new:l1"}, {"value", {{"from", {"$new:ref", "video"}}, {"to", {"$new:frame", "video"}}}}});
-                ops.push_back({{"op", "add"}, {"path", base + "/links/$new:l2"}, {"value", {{"from", {"$new:frame", "image"}}, {"to", {taker, "start_image"}}}}});
+                  ops.push_back({{"op", "replace"}, {"path", wbase + "/exposed/inputs/start_image/to"}, {"value", json::array()}});
+                ops.push_back({{"op", "add"}, {"path", wbase + "/nodes/$new:ref"}, {"value", {{"kind", "attome.clip_reference"}, {"settings", {{"clip", "previous"}}}, {"ui", {{"x", -520}, {"y", 20}}}}}});
+                ops.push_back({{"op", "add"}, {"path", wbase + "/nodes/$new:frame"}, {"value", {{"kind", "attome.get_frame"}, {"settings", {{"frame", "last"}}}, {"ui", {{"x", -260}, {"y", 20}}}}}});
+                ops.push_back({{"op", "add"}, {"path", wbase + "/links/$new:l1"}, {"value", {{"from", {"$new:ref", "video"}}, {"to", {"$new:frame", "video"}}}}});
+                ops.push_back({{"op", "add"}, {"path", wbase + "/links/$new:l2"}, {"value", {{"from", {"$new:frame", "image"}}, {"to", {taker, "start_image"}}}}});
               }
               pending_ = [this, ops] { patch(ops, "Start from the clip before"); };
             }
@@ -2728,7 +3001,77 @@ void App::draw_generate_card(const ClipUi &c) {
         ui_mark("combo:gen_start");
         ImGui::PopStyleColor();
       }
+  };
+  // The prompt first, then the clip's length and what it starts from (what people set first), then the rest in the workflow's order.
+  for (const gen::ExposedInput &e : rows)
+    if (e.name == "prompt")
+      draw_row(e);
+  draw_clip_rows();
+  for (const gen::ExposedInput &e : rows)
+    if (e.name != "prompt")
+      draw_row(e);
+
+  // Add input: a name and a Data Type; the Exposed Input is made on the clip's own workflow, unlinked, and shows on the
+  // Clip Inputs node at once.
+  if (!wf.empty()) {
+    if (!add_input_open_) {
+      if (soft_button("input_add", "Add input", ImVec2(0.0f, 26.0f)))
+        pending_ = [this] {
+          add_input_open_ = true;
+          add_input_name_[0] = 0;
+        };
+    } else {
+      ImGui::PushStyleColor(ImGuiCol_FrameBg, hexv(look::raised));
+      ImGui::SetNextItemWidth(-1.0f);
+      ImGui::InputTextWithHint("##new_input", "Name of the input", add_input_name_, sizeof add_input_name_);
+      ui_mark("field:new_input_name");
+      ImGui::PopStyleColor();
+      static const char *types[] = {"text", "number", "integer", "boolean", "image", "video", "audio", "mask"};
+      for (int i = 0; i < 8; ++i) {
+        if (i % 4)
+          ImGui::SameLine();
+        if (soft_button((std::string("input_type_") + types[i]).c_str(), types[i], ImVec2(0.0f, 26.0f), true, add_input_type_ == i))
+          add_input_type_ = i;
+      }
+      std::string name, label = add_input_name_;
+      for (char ch : label)
+        name += std::isalnum(static_cast<unsigned char>(ch)) ? char(std::tolower(static_cast<unsigned char>(ch))) : '_';
+      while (!name.empty() && name.front() == '_')
+        name.erase(name.begin());
+      while (!name.empty() && name.back() == '_')
+        name.pop_back();
+      bool taken = false;
+      for (const gen::ExposedInput &e : rows)
+        taken = taken || e.name == name;
+      if (taken)
+        ImGui::TextColored(kError, "There is an input with that name.");
+      if (soft_button("input_add_ok", "Add", ImVec2(70.0f, 28.0f), !name.empty() && !taken, true))
+        pending_ = [this, id, name, label, next_order] {
+          json value = {{"type", types[add_input_type_]}, {"order", next_order}};
+          if (label != name)
+            value["label"] = label;
+          if (patch(json::array({{{"op", "add"}, {"path", id + "/media_ref/workflow/exposed/inputs/" + name}, {"value", value}}}), "Add input"))
+            add_input_open_ = false;
+        };
+      ImGui::SameLine();
+      if (soft_button("input_add_cancel", "Cancel", ImVec2(70.0f, 28.0f)))
+        add_input_open_ = false;
     }
+  }
+  end_card();
+}
+
+// A generative clip's card. A node whose model is missing is the common case on a project from another computer: the
+// card says which model, how large the download is, and starts it.
+void App::draw_generate_card(const ClipUi &c) {
+  const auto found = gen_problems_.find(c.id);
+  if (!begin_card("##generate", "Generate", found == gen_problems_.end() ? nullptr : "cannot run yet")) {
+    end_card();
+    return;
+  }
+  if (found == gen_problems_.end()) {
+    // Ready to run: what state the clip is in, and the buttons that generate.
+    const std::string id = c.id;
     const auto known = gen_state_.find(c.id);
     const json st = known != gen_state_.end() ? known->second : json::object();
     const std::string state = st.value("state", "empty");
@@ -4331,6 +4674,7 @@ void App::draw_inspector() {
       ImGui::TextColored(hexv(look::fg3), "revision %llu", static_cast<unsigned long long>(revision_));
     }
     end_card();
+    draw_variables_card();
     ImGui::PushTextWrapPos(0.0f);
     ImGui::TextColored(hexv(look::fg3),
                        "Select a clip to edit it. Drag a clip to move it, drag its edges to trim, press S to split "
@@ -4425,8 +4769,10 @@ void App::draw_inspector() {
     end_card();
   }
 
-  if (c->is_generative)
+  if (c->is_generative) {
+    draw_workflow_card(*c);
     draw_generate_card(*c);
+  }
 
   if (c->is_text) {
     if (begin_card("##text", "Text")) {

@@ -34,6 +34,7 @@ try {
     'type It starts to rain'
     'click @rail:Generate'               # leaves the field
     'wait 400'
+    "shot $work\takes_before_combo.jpg"
     'click @combo:gen_start'             # it starts from the last frame of the first clip
     'click @option:gen_start_previous'
     'wait 400'

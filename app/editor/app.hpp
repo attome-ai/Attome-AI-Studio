@@ -158,6 +158,9 @@ private:
   void poll_models();
   void poll_gen_parts(); // gen.nodes, every few seconds: the kinds and the models with what they declare
   const json *clip_json(const std::string &clip_id) const; // the clip's object in doc_                       // models.list and the download jobs, twice a second while something shows them
+  void draw_workflow_card(const ClipUi &clip);   // the Exposed Inputs of a generative clip's own workflow, one row each
+  void draw_variables_card();                    // the project's Variables, on the Project card
+  void ask_input(const std::string &clip, const std::string &name);
   void draw_generate_card(const ClipUi &clip); // a generative clip: why it cannot run here, and the download that fixes it
   void delete_selected();
   void split_at_playhead();
@@ -387,7 +390,10 @@ private:
   // results of the native dialogs, which may arrive on another thread
   std::mutex dialog_mutex_;
   std::vector<std::string> dialog_import_;
-  std::string dialog_export_, dialog_project_, dialog_lut_, lut_target_;
+  std::string dialog_export_, dialog_project_, dialog_lut_, lut_target_, dialog_input_, input_clip_, input_name_;
+  bool add_input_open_ = false, add_variable_open_ = false; // the small forms of the Workflow card and the Variables card
+  char add_input_name_[64] = "", add_variable_name_[64] = "";
+  int add_input_type_ = 0, add_variable_type_ = 0;
   std::string dialog_models_folder_, models_folder_purpose_, models_folder_model_;
   std::vector<std::string> dropped_;
 };
