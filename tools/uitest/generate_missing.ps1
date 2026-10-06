@@ -44,9 +44,18 @@ try {
   $failed = $run.Errors
   try {
     if (-not $failed) {
-      $check = (Invoke-Attome $run --json validate $proj | ConvertFrom-Json).result
+      # The daemon is asked while other editors start and stop on this computer: a call that gets no answer is asked again (a few times),
+      # and a real refusal is shown with its text, not as "not valid".
+      $answer = $null
+      foreach ($try in 1..5) {
+        $answer = Invoke-Attome $run --json validate $proj | ConvertFrom-Json
+        if ($answer -and $answer.result) { break }
+        Start-Sleep -Milliseconds 700
+      }
+      $check = $answer.result
       "validate: ok=$($check.ok) warnings=$(@($check.warnings).Count) first=$(@($check.warnings)[0].rule)"
-      if (-not $check.ok) { $failed = 'the project with a missing model is not valid' }
+      if (-not $check) { $failed = "validate gave no result: $($answer | ConvertTo-Json -Compress -Depth 4)" }
+      elseif (-not $check.ok) { $failed = "the project with a missing model is not valid: $($check | ConvertTo-Json -Compress -Depth 5)" }
       elseif (@($check.warnings)[0].rule -ne 'G_MODEL_MISSING') { $failed = 'no G_MODEL_MISSING warning' }
       elseif (@(Get-ChildItem $models -Recurse -File).Count -ne 0) { $failed = 'something was downloaded' }
     }

@@ -1,5 +1,6 @@
 # UI test: the interface size (UX review U18). Ctrl+plus makes everything larger (the whole UI is drawn at that size, text stays sharp; never so large that the window has no room left),
-# Ctrl+minus smaller, Ctrl+0 back to 100 %; the choice is kept in the preferences. Widgets stay inside their panels and stay clickable.
+# Ctrl+minus smaller, Ctrl+0 back to 100 %; the choice is kept in the preferences. Widgets stay inside their panels and stay clickable, and
+# the default panel layout is made again for the new size (the Monitor keeps its height).
 # Virtual input only (uitest.psm1). Needs a build. Exit code 0 = pass.
 #   .\tools\uitest\ux_scale.ps1
 
@@ -31,6 +32,8 @@ try {
     "shot $work\scale_100.jpg"
     'key Plus ctrl', 'key Plus ctrl', 'key Plus ctrl', 'key Plus ctrl', 'wait 600'      # 100 % + 4 * 10 % = 140 %
     "shot $work\scale_140.jpg"
+    # the panels are made again for the larger size: the timeline does not keep the share it had in points, so the Monitor is not squeezed
+    'high @monitor 230'
     'expect @button:monitor_loop', 'inside @button:monitor_loop', 'click @button:monitor_loop', 'wait 400'
     'expect @clip:One', 'click @clip:One', 'wait 400'
     "shot $work\scale_140_clip.jpg"

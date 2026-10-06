@@ -291,7 +291,12 @@ private:
   bool open_project_has_clips() const;
   void draw_shortcuts_sheet();  // Help > Keyboard shortcuts (F1)
   void draw_monitor_full();     // the picture over the whole window (Ctrl+F; Esc leaves)
-  void build_layout(unsigned dock_id);
+  void build_layout(unsigned dock_id, bool force = false);
+  float bottom_share() const; // the share of the window the timeline panel gets by default: 40 %, less when the interface is drawn larger
+  float built_bottom_ = 0.0f; // the share the default layout was built with (0: a saved layout was loaded)
+  float built_scale_ = 1.0f;  // the interface size it was built for
+  float built_bottom_px_ = 0.0f; // the height in layout points the timeline panel was given: a divider that was dragged no longer has it
+  unsigned dock_root_ = 0;
   void shortcuts();
 
   const ClipUi *selected(const TrackUi **track = nullptr) const;

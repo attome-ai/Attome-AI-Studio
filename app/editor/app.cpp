@@ -2514,8 +2514,20 @@ void App::frame(double dt) {
   }
   draw_rail();
   const ImGuiID dock = ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport());
+  dock_root_ = dock;
   if (!layout_done_)
     build_layout(dock);
+  if (layout_done_ && built_bottom_ > 0.0f && std::fabs(ui_scale_now_ - built_scale_) > 0.01f && !ImGui::IsMouseDown(0)) {
+    // The interface size changed. If the panels are still where the default put them (nobody has dragged a divider), the default is made
+    // again for the new size: the timeline keeps no more than the room it needs, so the Monitor and the Inspector are not squeezed.
+    ImGuiDockNode *root = ImGui::DockBuilderGetNode(dock);
+    const ImGuiDockNode *bottom = root && root->IsSplitNode() ? root->ChildNodes[1] : nullptr;
+    // The nodes keep their size in layout points when the interface gets larger (the window has fewer points), so "where the default put it"
+    // is the height it was given, not the share.
+    if (bottom && std::fabs(bottom->Size.y - built_bottom_px_) < 8.0f)
+      build_layout(dock, true);
+    built_scale_ = ui_scale_now_; // either way, this size has been looked at
+  }
   draw_media();
   draw_viewer();
   draw_timeline();
@@ -2536,17 +2548,31 @@ void App::frame(double dt) {
   frame_ms_ = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - frame_start).count();
 }
 
-void App::build_layout(unsigned dock_id) {
+float App::bottom_share() const {
+  // 40 % at 100 %; at 130 % the timeline keeps about the room it had in points (a little less), so the top row has 0.63 of the window.
+  return ui_scale_now_ <= 1.0f ? 0.40f : std::max(0.30f, 0.40f - 0.25f * (ui_scale_now_ - 1.0f));
+}
+
+void App::build_layout(unsigned dock_id, bool force) {
   layout_done_ = true;
-  if (ImGui::DockBuilderGetNode(dock_id) && ImGui::DockBuilderGetNode(dock_id)->IsSplitNode())
+  if (!force && ImGui::DockBuilderGetNode(dock_id) && ImGui::DockBuilderGetNode(dock_id)->IsSplitNode()) {
+    built_bottom_ = 0.0f;
     return; // a saved layout was loaded
+  }
+  built_bottom_ = bottom_share();
+  built_scale_ = ui_scale_now_;
+  built_bottom_px_ = built_bottom_ * ImGui::GetMainViewport()->WorkSize.y;
   ImGui::DockBuilderRemoveNode(dock_id);
   ImGui::DockBuilderAddNode(dock_id, ImGuiDockNodeFlags_DockSpace);
   ImGui::DockBuilderSetNodeSize(dock_id, ImGui::GetMainViewport()->WorkSize);
   ImGuiID top = 0, bottom = 0, left = 0, rest = 0, right = 0, center = 0;
-  ImGui::DockBuilderSplitNode(dock_id, ImGuiDir_Down, 0.40f, &bottom, &top);
-  ImGui::DockBuilderSplitNode(top, ImGuiDir_Left, 0.23f, &left, &rest);
-  ImGui::DockBuilderSplitNode(rest, ImGuiDir_Right, 0.22f, &right, &center);
+  ImGui::DockBuilderSplitNode(dock_id, ImGuiDir_Down, built_bottom_, &bottom, &top);
+  // The side panels keep the width in layout points they have at 100 % (the window has fewer points when everything is larger).
+  const float width = std::max(1.0f, ImGui::GetMainViewport()->WorkSize.x);
+  const float left_share = std::clamp(0.23f * 1600.0f / width, 0.23f, 0.34f);                                        // 368 points in a window 1600 points wide
+  const float right_share = std::clamp(0.22f * 1600.0f * (1.0f - 0.23f) / (width * (1.0f - left_share)), 0.22f, 0.36f); // and 271 for the Inspector
+  ImGui::DockBuilderSplitNode(top, ImGuiDir_Left, left_share, &left, &rest);
+  ImGui::DockBuilderSplitNode(rest, ImGuiDir_Right, right_share, &right, &center);
   ImGui::DockBuilderDockWindow("Media", left);
   ImGui::DockBuilderDockWindow("Monitor", center);
   ImGui::DockBuilderDockWindow("Inspector", right);
@@ -2738,6 +2764,8 @@ void App::draw_menu() {
       ImGui::Separator();
       ImGui::MenuItem("Profiler", nullptr, &show_profiler_);
       ImGui::Separator();
+      if (ImGui::MenuItem("Reset the panel layout", nullptr, false, open && mode_ == 0))
+        pending_ = [this] { build_layout(dock_root_, true); };
       if (ImGui::BeginMenu("Interface size")) {
         for (const float v : {0.8f, 1.0f, 1.25f, 1.5f, 2.0f}) {
           char label[24];
