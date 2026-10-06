@@ -294,7 +294,7 @@ json voice_workflow(const ModelDecl &model) {
           {"links", {{"$new:l_len", {{"from", json::array({say, "audio"})}, {"to", json::array({"$new:len", "audio"})}}}}},
           {"exposed",
            {{"inputs", std::move(inputs)},
-            {"outputs", {{"audio", {{"from", {say, "audio"}}}}, {"length", {{"from", {"$new:len", "seconds"}}}}}},
+            {"outputs", {{"audio", {{"from", {say, "audio"}}}}, {"length", {{"from", {"$new:len", "seconds"}}}}, {"words", {{"from", {say, "words"}}}}}},
             {"primary", "audio"}}}};
 }
 

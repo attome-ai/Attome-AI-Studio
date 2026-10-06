@@ -422,6 +422,14 @@ Result<gen::StepResult> ComfyProvider::run(const gen::StepRequest &r) {
       return engine_error("E_INTERNAL", "The video could not be fetched from ComfyUI (status " + std::to_string(status) + ").");
   }
   if (speech) {
+    // Models that know when each word is said (Kokoro) return it as text on the node; it is kept as the step's "words" output.
+    if (const auto words_file = r.outputs.find("words"); words_file != r.outputs.end())
+      for (const json &node : outputs)
+        if (node.is_object() && node.contains("text") && node["text"].is_array() && !node["text"].empty() && node["text"][0].is_string()) {
+          std::ofstream words(to_path(words_file->second), std::ios::binary);
+          words << node["text"][0].get<std::string>();
+          break;
+        }
     const auto flac = storage::read_file(flac_path);
     int rate = 0;
     const int64_t samples = flac ? flac_samples(*flac, rate) : 0;

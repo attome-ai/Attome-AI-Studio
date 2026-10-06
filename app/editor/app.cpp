@@ -6510,22 +6510,34 @@ void App::draw_inspector() {
     if (track->kind == "audio" && !c->takes.empty() && clip_json(c->id) &&
         clip_json(c->id)->value("media_ref", json::object()).value("inputs", json::object()).contains("text")) { // a voice: its words as captions
       if (begin_card("##captions", "Captions")) {
+        bool has_captions = false; // clips made from this voice
+        if (doc_.contains("sequences") && doc_["sequences"].contains(seq_id_) && doc_["sequences"][seq_id_].contains("tracks"))
+          for (const auto &track_json : doc_["sequences"][seq_id_]["tracks"])
+            if (track_json.contains("clips"))
+              for (const auto &clip_json_item : track_json["clips"])
+                has_captions = has_captions || clip_json_item.value("caption_of", std::string()) == c->id;
         ImGui::PushTextWrapPos(0.0f);
-        ImGui::TextColored(hexv(look::fg2), "Show what this voice says, one word at a time, over the picture. The words are timed by their length: a guess, close for a steady voice.");
+        ImGui::TextColored(hexv(look::fg2), has_captions ? "The captions of this voice. After the voice was made again, put them back on its words."
+                                                          : "Show what this voice says, one word at a time, over the picture. Timed from the words the voice model reports (Kokoro does), else by their length.");
         ImGui::PopTextWrapPos();
         ImGui::Spacing();
         const std::string cid = c->id;
-        const auto make = [&](const char *style, const char *button) {
-          if (soft_button((std::string("make_captions_") + style).c_str(), button, ImVec2(0.0f, 28.0f), true, std::string(style) == "pop"))
-            pending_ = [this, cid, style = std::string(style)] {
-              json ops = json::array({{{"op", "add_captions"}, {"id", "$new:caps"}, {"clip", cid}, {"style", style}}});
-              if (timeline_edit(std::move(ops), "Make captions"))
-                say("Captions made on the Captions track, one clip for each sentence. Edit a caption's look in its Text card.", false, true);
-            };
-        };
-        make("pop", "Make captions");
-        ImGui::SameLine(0.0f, 6.0f);
-        make("box", "With a box");
+        if (has_captions) {
+          if (soft_button("sync_captions", "Re-time captions", ImVec2(0.0f, 28.0f), true, true))
+            pending_ = [this, cid] { timeline_edit(json::array({{{"op", "sync_captions"}, {"clip", cid}}}), "Re-time captions"); };
+        } else {
+          const auto make = [&](const char *style, const char *button) {
+            if (soft_button((std::string("make_captions_") + style).c_str(), button, ImVec2(0.0f, 28.0f), true, std::string(style) == "pop"))
+              pending_ = [this, cid, style = std::string(style)] {
+                json ops = json::array({{{"op", "add_captions"}, {"id", "$new:caps"}, {"clip", cid}, {"style", style}}});
+                if (timeline_edit(std::move(ops), "Make captions"))
+                  say("Captions made on the Captions track, one clip for each sentence. Edit a caption's look in its Text card.", false, true);
+              };
+          };
+          make("pop", "Make captions");
+          ImGui::SameLine(0.0f, 6.0f);
+          make("box", "With a box");
+        }
       }
       end_card();
     }

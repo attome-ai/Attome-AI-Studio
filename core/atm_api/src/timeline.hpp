@@ -18,6 +18,8 @@ struct Context {
   std::string sequence;                                    // the edited sequence's ID
   Rational rate;                                           // its frame rate
   std::function<Result<json>(const std::string &)> probe; // media.probe for clips added by path
+  // When each word of a generative clip's speech is said, as the selected Take has it ([{"text","start","end"}], seconds): null when it has none.
+  std::function<json(const std::string &)> words_of;
 };
 
 struct Built {

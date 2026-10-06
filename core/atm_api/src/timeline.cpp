@@ -74,6 +74,8 @@ public:
       return wrap(add_adjustment());
     if (name == "add_captions")
       return wrap(add_captions());
+    if (name == "sync_captions")
+      return wrap(sync_captions());
     if (name == "add_transition")
       return wrap(add_transition());
     if (name == "make_room")
@@ -105,7 +107,7 @@ public:
     if (name == "slide")
       return wrap(slide());
     return fail("E_OP", "\"" + name + "\" is not a timeline op.",
-                "Use add_track, add_clip, add_text, add_captions, add_adjustment, add_transition, make_room, delete, ripple_delete, move, trim, "
+                "Use add_track, add_clip, add_text, add_captions, sync_captions, add_adjustment, add_transition, make_room, delete, ripple_delete, move, trim, "
                 "split, duplicate, slip, roll, slide, add_effect, remove_effect, set_effect_enabled, link, unlink or "
                 "set_property (guide.get topic \"timeline\").");
   }
@@ -580,27 +582,54 @@ private:
 
     const double seconds = duration->to_seconds_lossy();
     const auto rational_of = [&](double s_) { return *Rational::make(int64_t(std::llround(s_ * 1000.0)), 1000); };
-    double elapsed = 0.0;
+    // When each word starts, in seconds from the start of the stretch: from the words of the clip's Take when the model knew them
+    // (the same number of words as here), else a guess from the letters.
+    std::vector<double> word_start;
+    bool exact = false;
+    double cumulative = 0.0;
+    for (const auto &sentence : sentences)
+      for (const Word &w : sentence) {
+        word_start.push_back(seconds * cumulative / total);
+        cumulative += w.weight;
+      }
+    if (op_.contains("clip") && ctx_.words_of) {
+      const json known = ctx_.words_of(op_.value("clip", std::string()));
+      if (known.is_array() && known.size() == word_start.size()) {
+        std::vector<double> times;
+        bool usable = true;
+        for (const json &w : known)
+          usable = usable && w.is_object() && w.contains("start") && w["start"].is_number() && (times.empty() || w["start"].get<double>() >= times.back());
+        for (const json &w : known)
+          times.push_back(usable ? w["start"].get<double>() : 0.0);
+        if (usable) {
+          for (size_t i = 0; i < times.size(); ++i)
+            word_start[i] = std::min(times[i], seconds);
+          exact = true;
+        }
+      }
+    }
+    if (exact)
+      out_.notes.push_back("Captions are timed from the words the voice model reported.");
+    size_t flat = 0;
     int index = 0;
-    for (const auto &sentence : sentences) {
-      double sentence_weight = 0.0;
-      for (const Word &w : sentence)
-        sentence_weight += w.weight;
-      const double begin = elapsed, length = seconds * sentence_weight / total;
+    for (size_t si = 0; si < sentences.size(); ++si) {
+      const auto &sentence = sentences[si];
+      const size_t first = flat, count = sentence.size();
+      const double begin = word_start[first];
+      const double end = si + 1 < sentences.size() ? word_start[first + count] : seconds;
       json words = json::array();
       std::string full;
-      double inside = 0.0;
       for (const Word &w : sentence) {
         std::string lower;
         for (const char ch : w.text)
           if (static_cast<unsigned char>(ch) >= 0x80 || std::isalnum(static_cast<unsigned char>(ch)) || ch == '-' || ch == '\'')
             lower += char(std::tolower(static_cast<unsigned char>(ch)));
-        json word = {{"text", w.text}, {"at", rational_of(inside).to_string()}};
+        json word = {{"text", w.text}, {"at", rational_of(word_start[flat] - begin).to_string()}};
         if (std::find(emphasis.begin(), emphasis.end(), lower) != emphasis.end())
           word["color"] = emphasis_color;
         words.push_back(std::move(word));
         full += (full.empty() ? "" : " ") + w.text;
-        inside += seconds * w.weight / total;
+        ++flat;
       }
       json content = {{"text", full}, {"size", size}, {"color", color}, {"bold", true}, {"words", std::move(words)}, {"word_pop", 0.6}};
       if (style == "pop") {
@@ -610,14 +639,64 @@ private:
         content["background"] = {{"color", "#000000"}, {"opacity", 0.65}, {"padding", 0.3}, {"radius", 0.3}};
       }
       json value = {{"name", "Caption " + std::to_string(index + 1)},
-                    {"timing", {{"record_in", plus(*at, rational_of(begin)).to_string()}, {"duration", rational_of(length).to_string()}, {"source_in", "0"}}},
+                    {"timing", {{"record_in", plus(*at, rational_of(begin)).to_string()}, {"duration", minus(rational_of(std::max(end, begin + 0.05)), rational_of(begin)).to_string()}, {"source_in", "0"}}}, // end minus begin as rationals: neighbours meet exactly
                     {"media_ref", {{"type", "text"}}},
                     {"content", std::move(content)},
                     {"transform", {{"position", json::array({0.5, y})}, {"opacity", 1.0}}}};
+      if (op_.contains("clip") && op_["clip"].is_string())
+        value["caption_of"] = op_["clip"]; // the voice clip they were made from: sync_captions finds them by it
       push({{"op", "add"}, {"path", track_id + "/clips/" + placeholder(".c" + std::to_string(index))}, {"value", std::move(value)}});
-      elapsed += length;
       ++index;
     }
+    return {};
+  }
+
+  // sync_captions: the captions made from a voice clip ({"clip": the voice}) follow its words again, after the voice was made anew (another line,
+  // speed or voice): each caption's start, length and words are set from the words the Take reports. The words must be the same ones as the captions
+  // have; for another text, make the captions again.
+  Result<void> sync_captions() {
+    ATM_TRY(auto voice, clip("clip"));
+    const std::string voice_id = op_.value("clip", std::string());
+    const Span vs = span_of(*voice.first);
+    const json known = ctx_.words_of ? ctx_.words_of(voice_id) : json(nullptr);
+    if (!known.is_array() || known.empty())
+      return fail("E_NO_WORDS", "The voice clip's Take does not say when its words are said.", "Only models that know it (Kokoro) do; run the clip first.");
+    struct Found {
+      std::string id;
+      Rational in;
+      const json *node;
+    };
+    std::vector<Found> found;
+    for (const std::string &tid : track_order())
+      if (const json *t = track(tid); t && t->contains("clips"))
+        for (auto it = (*t)["clips"].begin(); it != (*t)["clips"].end(); ++it)
+          if (it->value("caption_of", std::string()) == voice_id)
+            found.push_back({it.key(), span_of(*it).in, &*it});
+    if (found.empty())
+      return fail("E_NO_CAPTIONS", "No captions were made from this clip.", "Make them with add_captions.");
+    std::sort(found.begin(), found.end(), [](const Found &a, const Found &b) { return compare(a.in, b.in) < 0; });
+    size_t have = 0;
+    for (const Found &f : found)
+      have += f.node->value("content", json::object()).value("words", json::array()).size();
+    if (have != known.size())
+      return fail("E_WORDS_DIFFER", "The captions have " + std::to_string(have) + " words and the voice now says " + std::to_string(known.size()) + ".",
+                  "The text changed: make the captions again.");
+    const double seconds = vs.duration.to_seconds_lossy();
+    const auto rational_of = [&](double s_) { return *Rational::make(int64_t(std::llround(s_ * 1000.0)), 1000); };
+    size_t flat = 0;
+    for (size_t k = 0; k < found.size(); ++k) {
+      json words = found[k].node->value("content", json::object()).value("words", json::array());
+      const double begin = std::min(known[flat].value("start", 0.0), seconds);
+      for (json &w : words) {
+        w["at"] = rational_of(std::max(0.0, std::min(known[flat].value("start", 0.0), seconds) - begin)).to_string();
+        ++flat;
+      }
+      const double end = k + 1 < found.size() ? std::min(known[flat].value("start", seconds), seconds) : seconds;
+      push({{"op", "replace"}, {"path", found[k].id + "/timing/record_in"}, {"value", plus(vs.in, rational_of(begin)).to_string()}});
+      push({{"op", "replace"}, {"path", found[k].id + "/timing/duration"}, {"value", minus(rational_of(std::max(end, begin + 0.05)), rational_of(begin)).to_string()}});
+      push({{"op", "replace"}, {"path", found[k].id + "/content/words"}, {"value", std::move(words)}});
+    }
+    out_.notes.push_back("Re-timed " + std::to_string(found.size()) + " captions from the voice's words.");
     return {};
   }
 

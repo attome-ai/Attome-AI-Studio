@@ -54,7 +54,22 @@ try {
         }
       }
     }
-    if (-not $failed) { # editing the text makes it a plain text again
+    if (-not $failed) { # the voice is made again, twice as fast: the card offers to re-time, and the captions follow its words
+      $before = [double](ConvertFrom-Rational (First-Caption $run | ForEach-Object { $_.timing.duration }))
+      $v = @(Get-Tracks $run) | Where-Object { $_.kind -eq 'audio' } | Select-Object -First 1
+      $vo = Get-Object $run $v.clip_list[0].id
+      $node = ($vo.media_ref.workflow.nodes.PSObject.Properties | Where-Object { $_.Value.kind -eq 'attome.generate_speech' }).Name
+      [IO.File]::WriteAllText("$work\sp.json", (@{ project = $proj; patch = @{ ops = @(@{ op = 'replace'; path = "$node/settings/speed"; value = 2.0 }); label = 'faster' } } | ConvertTo-Json -Depth 6 -Compress), (New-Object Text.UTF8Encoding($false)))
+      $null = Invoke-Attome $run --json call project.patch "$work\sp.json"
+      $null = Invoke-Attome $run --json gen run $proj
+      $sync = Invoke-EditorScript -Project $proj -Endpoint $run.Endpoint -Script @('click @clip:Voice_1', 'wait 500', 'expect @button:sync_captions', 'click @button:sync_captions', 'wait 900')
+      $failed = $sync.Errors
+      if (-not $failed) {
+        $after = [double](ConvertFrom-Rational (First-Caption $run | ForEach-Object { $_.timing.duration }))
+        "first caption: $([math]::Round($before,2)) s before, $([math]::Round($after,2)) s after the voice got twice as fast"
+        if ($after -gt $before * 0.7) { $failed = 'the captions did not follow the faster voice' }
+      }
+    }    if (-not $failed) { # editing the text makes it a plain text again
       $edit = Invoke-EditorScript -Project $proj -Endpoint $run.Endpoint -Script @(
         'click @clip:Caption_1', 'wait 500'
         'click @field:text_content', 'key A ctrl', 'type Bye now'

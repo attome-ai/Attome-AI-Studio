@@ -1,4 +1,4 @@
-﻿---
+---
 name: short-video-voice
 description: Add a voiceover to a Short with Attome Generate speech - Kokoro (clean preset voices, per-word timestamps) or OmniVoice (voice by description) on the user's ComfyUI GPU; make samples to choose from, fit speeds to the scenes, time the captions from the voice, set loudness.
 ---
@@ -30,7 +30,7 @@ Installing Kokoro needed `pip install --no-deps kokoro` + `--only-binary=:all: l
 2. `scripts/create_voice_clips.ps1` - one `gen.create_clip` per narration line at the scene starts (edit `$lines`). Saves clip ids to `%TEMP%\voice_ids.txt` (the later scripts read it).
 3. `scripts/switch_to_kokoro.ps1 -Voice am_michael` sets model/settings/voice on every line and runs `attome gen run`; it pushes later lines so none overlap.
 4. `scripts/fit_kokoro_speeds.ps1` - Kokoro at speed 1.0 is slower than a Short wants. Sets each line's speed = natural length / 3.75 s (1.0-1.4), re-runs, places lines at their scene starts (never overlapping) and writes `%TEMP%\voices.json` (start/end per line, used by the music ducking).
-5. `scripts/sync_captions_to_voice.ps1` - **captions timed from the voice**: `kokoro_align.py` re-synthesizes each line with the same text/voice/speed and reads Kokoro's per-token start/end, merges tokens to words, and retimes every caption + shadow clip. Word counts must match (it stops if not). Re-run after ANY change to a line, its speed or voice. (For OmniVoice there are no timestamps; use word-length weights with punctuation pauses.)
+5. **Captions timed from the voice:** `timeline.edit` op `add_captions {clip: <voice clip>}` makes one word-by-word caption clip per sentence on a Captions track, timed from the words the voice model reported (Kokoro returns them as the Take's `words` output; OmniVoice does not, so those are timed by word length). After a voice is made again (another line, speed or voice) run `sync_captions {clip: <voice clip>}`; if the text changed it says so and you make the captions again. The older scripts `sync_captions_to_voice.ps1` and `kokoro_align.py` are the manual route for projects whose captions are separate word clips.
 6. `scripts/voice_louder.ps1` - Kokoro files peak ~0.35: gives each voice clip `audio.gain_db` so its peak is ~0.9 (max +10 dB). On an **audio-track clip** the top-level `volume` field is ignored by the renderer; use `audio.gain_db` (and `fade_in`/`fade_out`, `pan`). `volume` does work on a picture clip (volume 0 mutes the sound it came with).
 
 Verify: `attome validate`, contact sheet, then `attome render`. Say plainly that you did not hear it.

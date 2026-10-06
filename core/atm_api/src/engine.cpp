@@ -941,7 +941,8 @@ struct Engine::Impl {
          "- add_track {kind (video | audio), name?, position? (top | bottom), below? / above? (track ID), sync_lock? (true: the track's clips follow make_room and ripple_delete)}\n"
          "- delete {clip} or {transition}; ripple_delete {clip} (closes the gap, on the tracks locked to the cut too); move {clip, to?, track?}; trim {clip, edge (in | out), to or delta}; "
          "add_captions {clip (a voice clip) or text + at + duration, style? (pop | plain | box), size? (0.07), y? (0.72), color?, emphasis? [words shown in emphasis_color], track?} - "
-         "one text clip for each sentence, shown one word at a time, each word popping in; the words are timed by their letters (a guess); goes on a Captions track on top; "
+         "one text clip for each sentence, shown one word at a time, each word popping in; with clip, the words are timed from what the voice model reported (Kokoro does) and otherwise by their letters (a guess); goes on a Captions track on top; "
+         "sync_captions {clip (the voice)} - after the voice was made anew, the captions made from it get their times from its words again; "
          "split {clip, at}; duplicate {clips: [{clip, at, track?} or {snapshot, at, track}, ...]} (copies with their effects, keyframes and fades, each at a time and "
          "optionally on another track of the same kind; clips that were linked stay linked; the copies are named \"$new:<op id>.c0\", \".c1\" ...; a generative "
          "clip's copy has the same workflow and inputs and no Takes); slip {clip, delta} (shows another part of its file, stays in place); roll {between: "
@@ -1373,6 +1374,26 @@ struct Engine::Impl {
     ATM_TRY(Rational rate, Rational::parse(root["sequences"][ctx.sequence].value("rate", std::string("30"))));
     ctx.rate = rate;
     ctx.probe = [this](const std::string &path) { return media_probe({{"path", path}}); };
+    ctx.words_of = [pr](const std::string &clip_id) -> json {
+      const doc::NodeRef *ref = pr->doc.find(clip_id);
+      if (!ref)
+        return nullptr;
+      const json &media = (*ref->node).contains("media_ref") ? (*ref->node)["media_ref"] : json::object();
+      const std::string selected = media.value("selected", std::string());
+      if (selected.empty() || !media.contains("takes") || !media["takes"].contains(selected))
+        return nullptr;
+      const json &outputs = media["takes"][selected].value("outputs", json::object());
+      if (!outputs.contains("words") || !outputs["words"].is_object())
+        return nullptr;
+      fs::path file = to_path(outputs["words"].value("path", std::string()));
+      if (file.is_relative())
+        file = pr->dir / file;
+      const auto text = storage::read_file(file);
+      if (!text)
+        return nullptr;
+      const json list = json::parse(*text, nullptr, false);
+      return list.is_array() ? list : json(nullptr);
+    };
 
     ATM_TRY(doc::Document scratch, doc::Document::from_json(root));
     json all = json::array(), id_map = json::object(), notes = json::array();
@@ -2789,7 +2810,7 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
      "has every op's fields and a complete example. Times accept \"2.5s\", \"75@30\" or timecode.",
      R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},
        "ops":{"type":"array","items":{"type":"object","properties":{
-         "op":{"type":"string","enum":["add_track","add_clip","add_text","add_captions","add_adjustment","add_transition","delete",
+         "op":{"type":"string","enum":["add_track","add_clip","add_text","add_captions","sync_captions","add_adjustment","add_transition","delete",
                                        "ripple_delete","move","trim","split","duplicate","slip","roll","slide","add_effect","remove_effect",
                                        "set_effect_enabled","link","unlink","set_property"]},
          "id":{"type":"string","description":"$new:name for what this op creates"}},"required":["op"]}},

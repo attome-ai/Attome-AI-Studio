@@ -1,3 +1,4 @@
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
 #include <chrono>
@@ -855,6 +856,76 @@ TEST_CASE("generate: a clip whose workflow decides its length gets it from the r
   CHECK(length_of(f.b) == "1");
   (void)made;
   (void)smp;
+}
+
+TEST_CASE("generate: speech: captions take their word times from what the voice reported, and follow it when it is made anew", "[gen][generate][speech][captions]") {
+  auto mock = std::make_shared<MockProvider>();
+  const fs::path dir = fs::temp_directory_path() / atm::new_id("attome-voice-words");
+  fs::create_directories(dir);
+  const std::string project = (dir / "Words.attome").string();
+  atm::api::EngineConfig cfg;
+  cfg.models_dir = (dir / "models").string();
+  cfg.providers = {mock};
+  Engine engine(cfg);
+  ok(engine, "project.create", {{"path", project}, {"rate", "30"}, {"canvas", "320x176"}});
+  const auto wait = [&](const json &started) {
+    for (int i = 0; i < 3000; ++i) {
+      const json state = ok(engine, "jobs.get", {{"job_id", started["job_id"]}});
+      if (state["state"] != "running") {
+        (void)ok(engine, "gen.status", {{"project", project}});
+        return state;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return json{{"state", "timeout"}};
+  };
+  const auto get = [&](const std::string &id) { return ok(engine, "project.get", {{"project", project}, {"id", id}})["object"]; };
+  const auto seconds = [](const std::string &r) {
+    const size_t slash = r.find('/');
+    return slash == std::string::npos ? std::stod(r) : std::stod(r.substr(0, slash)) / std::stod(r.substr(slash + 1));
+  };
+  const auto edit = [&](json ops) { return engine.call("timeline.edit", {{"project", project}, {"ops", std::move(ops)}}); };
+
+  const json voice = ok(engine, "gen.create_clip", {{"project", project}, {"prompt", "Hello there my friend. Free popcorn today!"}, {"model", atm::api::kMockVoice}, {"at", "0@1"}});
+  const std::string clip = voice["clip"];
+  // Before a run there are no word times: captions are a guess, from the letters; nothing is said about the voice's words.
+  REQUIRE(wait(ok(engine, "gen.run", {{"project", project}, {"clips", json::array({clip})}}))["state"] == "done");
+  CHECK(get(clip)["media_ref"]["takes"].begin()->at("outputs").contains("words")); // the Take keeps them
+  const auto made = edit(json::array({{{"op", "add_captions"}, {"id", "$new:c"}, {"clip", clip}}}));
+  REQUIRE(made);
+  const std::string c0 = (*made)["id_map"]["$new:c.c0"], c1 = (*made)["id_map"]["$new:c.c1"];
+  // The mock says a word in 0.4 s: four words in the first sentence (0 to 1.6 s), three in the second (1.6 s on).
+  CHECK(seconds(get(c0)["timing"]["record_in"]) == Catch::Approx(0.0).margin(0.002));
+  CHECK(seconds(get(c0)["timing"]["duration"]) == Catch::Approx(1.6).margin(0.002));
+  CHECK(seconds(get(c1)["timing"]["record_in"]) == Catch::Approx(1.6).margin(0.002));
+  CHECK(seconds(get(c0)["content"]["words"][2]["at"]) == Catch::Approx(0.8).margin(0.002)); // the third word, exactly
+  CHECK(get(c0)["caption_of"] == clip);
+  CHECK(made->value("notes", json::array()).dump().find("reported") != std::string::npos);
+
+  // The voice is made faster: its words come twice as quickly. The captions are put right with one op, and keep their looks.
+  const json node = get(clip)["media_ref"]["workflow"]["nodes"];
+  std::string say;
+  for (auto it = node.begin(); it != node.end(); ++it)
+    if (it->value("kind", std::string()) == "attome.generate_speech")
+      say = it.key();
+  ok(engine, "project.patch", {{"project", project}, {"patch", {{"ops", json::array({{{"op", "replace"}, {"path", say + "/settings/speed"}, {"value", 2.0}}})}}}});
+  REQUIRE(wait(ok(engine, "gen.run", {{"project", project}, {"clips", json::array({clip})}}))["state"] == "done");
+  const auto synced = edit(json::array({{{"op", "sync_captions"}, {"clip", clip}}}));
+  REQUIRE(synced);
+  CHECK(seconds(get(c0)["timing"]["duration"]) == Catch::Approx(0.8).margin(0.002));
+  CHECK(seconds(get(c1)["timing"]["record_in"]) == Catch::Approx(0.8).margin(0.002));
+  CHECK(seconds(get(c0)["content"]["words"][2]["at"]) == Catch::Approx(0.4).margin(0.002));
+  CHECK(get(c0)["content"].contains("outline")); // the look is untouched
+
+  // The text changed: the words no longer match, and it says so instead of guessing.
+  ok(engine, "project.patch", {{"project", project}, {"patch", {{"ops", json::array({{{"op", "replace"}, {"path", clip + "/media_ref/inputs/text"}, {"value", "Only two"}}})}}}});
+  REQUIRE(wait(ok(engine, "gen.run", {{"project", project}, {"clips", json::array({clip})}}))["state"] == "done");
+  const auto refused = edit(json::array({{{"op", "sync_captions"}, {"clip", clip}}}));
+  REQUIRE_FALSE(refused);
+  CHECK(refused.error().rule == "E_WORDS_DIFFER");
+  CHECK(ok(engine, "project.validate", {{"project", project}})["ok"] == true);
+  std::error_code ec;
+  fs::remove_all(dir, ec);
 }
 
 TEST_CASE("generate: speech: a Voice clip goes on an audio track, is as long as what it says, and its text is the clip's own", "[gen][generate][speech]") {

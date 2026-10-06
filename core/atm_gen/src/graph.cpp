@@ -35,7 +35,7 @@ constexpr PortDef kFrameInputs[] = {{"video", T::video, true}, {"at", T::number}
 constexpr PortDef kFrameOutputs[] = {{"image", T::image}};
 constexpr PortDef kDurationInputs[] = {{"media", T::video}, {"audio", T::audio}}; // the length of a video, or of a sound
 constexpr PortDef kSpeechInputs[] = {{"text", T::text, true}, {"instruct", T::text}, {"seed", T::integer}};
-constexpr PortDef kSpeechOutputs[] = {{"audio", T::audio}};
+constexpr PortDef kSpeechOutputs[] = {{"audio", T::audio}, {"words", T::text}}; // words: when each word is said, as JSON text (some models know)
 constexpr PortDef kDurationOutputs[] = {{"seconds", T::number}};
 // The Input nodes. A Variable node's one output takes the type the node says; the table gives the default.
 constexpr PortDef kProjectOutputs[] = {{"width", T::integer}, {"height", T::integer}, {"frame_rate", T::number}};

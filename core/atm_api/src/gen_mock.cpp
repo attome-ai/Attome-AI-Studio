@@ -202,6 +202,23 @@ Result<gen::StepResult> MockProvider::run(const gen::StepRequest &r) {
     }
     if (const std::string *out = out_path(r, "audio"))
       ATM_CHECK(storage::atomic_write(to_path(*out), wav));
+    if (const std::string *out = out_path(r, "words")) { // each word its own 0.4 s (at speed 1), one after the other
+      json list = json::array();
+      double at = 0.0;
+      size_t from = 0;
+      const double each = 0.4 / speed;
+      while (from < text.size()) {
+        while (from < text.size() && (text[from] == ' ' || text[from] == '\n' || text[from] == '\t'))
+          ++from;
+        size_t to = from;
+        while (to < text.size() && text[to] != ' ' && text[to] != '\n' && text[to] != '\t')
+          ++to;
+        if (to > from)
+          list.push_back({{"text", text.substr(from, to - from)}, {"start", at}, {"end", at + each}}), at += each;
+        from = to;
+      }
+      ATM_CHECK(storage::atomic_write(to_path(*out), list.dump()));
+    }
     if (r.progress)
       r.progress("speaking", 1, 1);
     gen::StepResult done;
