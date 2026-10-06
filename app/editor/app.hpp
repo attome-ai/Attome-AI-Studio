@@ -109,6 +109,11 @@ public:
   void play(bool on);    // start or stop playback; the sound follows the playhead
   std::string audio_report() const; // one line about the audio state, for the self-test
   bool wants_quit() const { return quit_; }
+  float ui_scale() const { return ui_scale_; } // the interface size asked for, 1 = 100 %
+  void set_ui_scale(float s);
+  // The size the UI is drawn at in a window of w x h layout points: what was asked for, but never so large that less than about
+  // 1180 x 690 points are left for the layout (the panels would be squeezed to nothing). main.cpp calls it every frame.
+  float apply_ui_scale(float w, float h);
   void shutdown();
 
 private:
@@ -209,6 +214,8 @@ private:
   bool export_sheet_ = false;
   int exp_res_ = 2, exp_quality_ = 1;        // the chosen resolution (see draw_export) and quality: 0 small, 1 standard, 2 high
   bool exp_sound_ = true;
+  int exp_format_ = 0;                       // 0 video (MP4), 1 the sound only (WAV), 2 one picture (JPEG, the frame at the playhead)
+  int exp_range_ = 0;                        // 0 the whole film, 1 from In to Out
   char exp_path_[512] = {};
   void load_export_choices();
   void save_export_choices();
@@ -335,6 +342,18 @@ private:
   bool shortcuts_open_ = false;          // the Keyboard shortcuts sheet
   int safe_mode_ = 0;                    // the Monitor's guides: 0 off, 1 Shorts / Reels / TikTok, 2 title safe
   bool loop_ = false;                    // playback starts again at the end
+  float ui_scale_ = 1.0f;                // interface size (View menu, Ctrl+plus/minus), kept in the preferences
+  float ui_scale_now_ = 1.0f;            // the size in use: ui_scale_, or less in a window too small for it
+  float window_w_ = 0.0f, window_h_ = 0.0f; // the window in layout points at 100 %, from the last frame
+  int64_t mark_in_ = -1, mark_out_ = -1; // the In and Out marks (I and O), in frames: playing, looping and exporting can use just that part; -1 = not set. Out is where it ends, not drawn.
+  float mon_zoom_ = 0.0f;                // the Monitor's zoom: 0 fits the stage, 1 shows one picture pixel for each screen pixel (100 %), 2 is 200 %
+  ImVec2 mon_pan_{};                     // where a zoomed picture is moved to, from the middle of the stage
+  void set_mark(bool in);
+  void clear_marks();
+  int64_t play_start() const { return mark_in_ >= 0 ? mark_in_ : 0; }
+  int64_t play_end() const { return mark_out_ > 0 ? std::min(mark_out_, total_frames_) : total_frames_; }
+  void set_monitor_zoom(float zoom);
+  std::pair<int, int> preview_size() const; // the picture the Monitor renders: fitted, or the whole canvas when zoomed
   bool mon_full_ = false;                // the picture fills the window
   ImVec2 mon_pic_min_{}, mon_pic_max_{}; // where the Monitor drew the picture last (for the full-window view)
   bool fit_pending_ = std::getenv("ATTOME_EDITOR_SCRIPT") == nullptr; // show the whole film in the timeline on open and on "Fit" (a UI test script keeps 90 px a second until it asks)

@@ -105,6 +105,31 @@ App::App(SDL_Window *window, SDL_Renderer *renderer, float scale, std::string pr
   for (std::string line; std::getline(recent, line);)
     if (!line.empty())
       recent_.push_back(line);
+  std::ifstream size(fs::path(std::u8string(pref_dir_.begin(), pref_dir_.end())) / "ui_scale.txt");
+  float saved = 1.0f;
+  if (size >> saved)
+    ui_scale_ = std::clamp(saved, 0.75f, 2.0f);
+}
+
+float App::apply_ui_scale(float w, float h) {
+  window_w_ = w;
+  window_h_ = h;
+  ui_scale_now_ = ui_scale_ <= 1.0f ? ui_scale_ : std::max(1.0f, std::min({ui_scale_, w / 1180.0f, h / 690.0f}));
+  return ui_scale_now_;
+}
+
+// The interface size: 80 % to 200 %, in steps; main.cpp reads it every frame.
+void App::set_ui_scale(float s) {
+  ui_scale_ = std::clamp(std::round(s * 20.0f) / 20.0f, 0.75f, 2.0f);
+  std::ofstream(fs::path(std::u8string(pref_dir_.begin(), pref_dir_.end())) / "ui_scale.txt") << ui_scale_;
+  std::erase_if(toasts_, [](const Toast &t) { return t.text.starts_with("Interface size "); }); // one toast, not one for each press
+  std::string text = "Interface size " + std::to_string(int(std::lround(ui_scale_ * 100.0f))) + " %";
+  if (ui_scale_ > 1.0f && window_w_ > 0.0f) {
+    const float allowed = std::max(1.0f, std::min({ui_scale_, window_w_ / 1180.0f, window_h_ / 690.0f}));
+    if (allowed < ui_scale_ - 0.02f)
+      text += ", the window has room for " + std::to_string(int(std::lround(allowed * 100.0f))) + " %";
+  }
+  say(std::move(text));
 }
 
 // The recent list: this project first, no repeats, at most eight, kept in the preferences folder.
@@ -189,8 +214,8 @@ void App::play(bool on) {
   playing_ = on;
   play_accum_ = 0.0;
   if (on) {
-    if (playhead_ >= total_frames_ - 1)
-      playhead_ = 0;
+    if (playhead_ >= play_end() - 1)
+      playhead_ = play_start();
     audio_out_.play(playhead_ * int64_t(media::kAudioRate) * rate_.den() / rate_.num());
   } else {
     audio_out_.stop();
@@ -479,12 +504,55 @@ void App::refresh() {
     selected_clip_.clear();
   refresh_gen_status();
 
-  // The viewer renders a fitted, smaller picture of the canvas.
+  if (mark_in_ >= total_frames_)
+    mark_in_ = -1;
+  if (mark_out_ > total_frames_)
+    mark_out_ = total_frames_;
+  if (mark_out_ >= 0 && mark_out_ <= mark_in_)
+    mark_out_ = -1;
+
   if (auto comp = render::compile(doc_, {}, project_path_)) {
-    const double fit = std::min({1.0, 1280.0 / canvas_w_, 720.0 / canvas_h_});
     audio_mixer_.set_composition(*comp);
-    preview_.set_composition(std::move(*comp), int(canvas_w_ * fit), int(canvas_h_ * fit));
+    const auto [pw, ph] = preview_size();
+    preview_.set_composition(std::move(*comp), pw, ph);
   }
+}
+
+// The viewer renders a fitted, smaller picture of the canvas; zoomed in, the whole canvas, so 100 % shows real pixels.
+std::pair<int, int> App::preview_size() const {
+  const double fit = mon_zoom_ > 0.0f ? std::min({1.0, 3840.0 / canvas_w_, 2160.0 / canvas_h_}) : std::min({1.0, 1280.0 / canvas_w_, 720.0 / canvas_h_});
+  return {int(canvas_w_ * fit), int(canvas_h_ * fit)};
+}
+
+void App::set_monitor_zoom(float zoom) {
+  const bool bigger_picture = (zoom > 0.0f) != (mon_zoom_ > 0.0f);
+  mon_zoom_ = zoom;
+  mon_pan_ = ImVec2(0.0f, 0.0f);
+  if (bigger_picture && total_frames_ > 0)
+    if (auto comp = render::compile(doc_, {}, project_path_)) {
+      const auto [pw, ph] = preview_size();
+      preview_.set_composition(std::move(*comp), pw, ph);
+    }
+}
+
+// I and O: the part that plays, loops and exports. Out is where the part ends: the frame at the playhead is not in it.
+void App::set_mark(bool in) {
+  if (total_frames_ <= 0)
+    return;
+  const int64_t at = std::clamp<int64_t>(playhead_, 0, total_frames_);
+  if (in) {
+    mark_in_ = std::min(at, total_frames_ - 1);
+    if (mark_out_ >= 0 && mark_out_ <= mark_in_)
+      mark_out_ = -1;
+  } else {
+    mark_out_ = std::max<int64_t>(at, 1);
+    if (mark_in_ >= mark_out_)
+      mark_in_ = -1;
+  }
+}
+
+void App::clear_marks() {
+  mark_in_ = mark_out_ = -1;
 }
 
 void App::poll(double now) {
@@ -1548,6 +1616,16 @@ void App::load_export_choices() {
   }
 }
 
+// `path` with the extension of what is exported (.mp4, .wav or .jpg) in place of one of those.
+static std::string with_extension(std::string path, const char *extension) {
+  for (const char *old : {".mp4", ".wav", ".jpg", ".jpeg"})
+    if (path.size() >= std::strlen(old) && path.compare(path.size() - std::strlen(old), std::strlen(old), old) == 0) {
+      path.resize(path.size() - std::strlen(old));
+      break;
+    }
+  return path + extension;
+}
+
 void App::save_export_choices() {
   std::ofstream(fs::path(std::u8string(pref_dir_.begin(), pref_dir_.end())) / "export.txt") << exp_res_ << ' ' << exp_quality_ << ' ' << (exp_sound_ ? 1 : 0);
 }
@@ -1557,6 +1635,15 @@ void App::start_export(const std::string &path) {
   int w = 0, h = 0;
   export_size(exp_res_, w, h);
   json params = {{"project", project_path_}, {"output", path}, {"height", h}, {"bitrate", export_bitrate()}, {"audio", exp_sound_}};
+  static const char *kFormat[] = {"mp4", "wav", "jpeg"};
+  params["format"] = kFormat[std::clamp(exp_format_, 0, 2)];
+  const auto at_frame = [&](int64_t f) { return std::to_string(f) + "@" + rate_.to_string(); };
+  if (exp_format_ == 2) {
+    params["from"] = at_frame(std::clamp<int64_t>(playhead_, 0, std::max<int64_t>(0, total_frames_ - 1)));
+  } else if (exp_range_ == 1 && (mark_in_ >= 0 || mark_out_ >= 0)) {
+    params["from"] = at_frame(play_start());
+    params["to"] = at_frame(play_end());
+  }
   if (!rpc("render.sequence", params, result))
     return;
   save_export_choices();
@@ -1660,6 +1747,10 @@ void App::ask_export() {
   }
   if (!export_sheet_ && !export_open_) {
     load_export_choices();
+    exp_format_ = 0;
+    exp_range_ = (mark_in_ >= 0 || mark_out_ >= 0) ? 1 : 0; // marks were set: the part is what is meant
+    if (exp_path_[0])
+      copy_to(exp_path_, sizeof exp_path_, with_extension(exp_path_, ".mp4"));
     if (!exp_path_[0])
       copy_to(exp_path_, sizeof exp_path_, user_folder(SDL_FOLDER_VIDEOS) + project_name_ + ".mp4");
     export_sheet_ = true;
@@ -1667,7 +1758,8 @@ void App::ask_export() {
 }
 
 void App::ask_export_path() {
-  static const SDL_DialogFileFilter filters[] = {{"MP4 video", "mp4"}};
+  static const SDL_DialogFileFilter kFilters[] = {{"MP4 video", "mp4"}, {"WAV sound", "wav"}, {"JPEG picture", "jpg;jpeg"}};
+  const SDL_DialogFileFilter *filters = &kFilters[std::clamp(exp_format_, 0, 2)];
   const std::string start = exp_path_[0] ? std::string(exp_path_) : user_folder(SDL_FOLDER_VIDEOS) + project_name_ + ".mp4";
   SDL_ShowSaveFileDialog(
       [](void *self, const char *const *files, int) {
@@ -1894,8 +1986,20 @@ void App::shortcuts() {
     select_all_clips();
   if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_F, false))
     mon_full_ = !mon_full_;
+  if (io.KeyCtrl && (ImGui::IsKeyPressed(ImGuiKey_Equal, false) || ImGui::IsKeyPressed(ImGuiKey_KeypadAdd, false)))
+    set_ui_scale(ui_scale_ + 0.1f);
+  if (io.KeyCtrl && (ImGui::IsKeyPressed(ImGuiKey_Minus, false) || ImGui::IsKeyPressed(ImGuiKey_KeypadSubtract, false)))
+    set_ui_scale(ui_scale_ - 0.1f);
+  if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_0, false))
+    set_ui_scale(1.0f);
   if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_L, false))
     loop_ = !loop_;
+  if (!io.KeyCtrl && !io.KeyAlt && ImGui::IsKeyPressed(ImGuiKey_I, false))
+    set_mark(true);
+  if (!io.KeyCtrl && !io.KeyAlt && ImGui::IsKeyPressed(ImGuiKey_O, false))
+    set_mark(false);
+  if (io.KeyAlt && ImGui::IsKeyPressed(ImGuiKey_X, false))
+    clear_marks();
   if (ImGui::IsKeyPressed(ImGuiKey_UpArrow, false))
     jump_cut(false);
   if (ImGui::IsKeyPressed(ImGuiKey_DownArrow, false))
@@ -2108,6 +2212,27 @@ bool begin_card(const char *id, const char *title, const char *right = nullptr) 
   ImGui::PopStyleVar(2);
   ImGui::PopStyleColor(2);
   if (title) {
+    // A click on the title folds the card away and brings it back (kept while the editor is open): a long Inspector gets short.
+    static std::set<std::string> folded;
+    const bool is_folded = folded.count(id) > 0;
+    const ImVec2 at = ImGui::GetCursorScreenPos();
+    ImGui::InvisibleButton("##fold", ImVec2(ImGui::GetContentRegionAvail().x, 18.0f));
+    ui_mark(std::string("card:") + title);
+    const bool hovered = ImGui::IsItemHovered();
+    if (ImGui::IsItemClicked()) {
+      if (is_folded)
+        folded.erase(id);
+      else
+        folded.insert(id);
+    }
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    const ImU32 ink = hex(hovered ? look::fg : look::fg3);
+    const float cy = at.y + 9.0f;
+    if (is_folded) // a chevron: right when folded, down when open
+      dl->AddTriangleFilled(ImVec2(at.x + 1.0f, cy - 4.5f), ImVec2(at.x + 1.0f, cy + 4.5f), ImVec2(at.x + 7.0f, cy), ink);
+    else
+      dl->AddTriangleFilled(ImVec2(at.x - 1.0f, cy - 3.0f), ImVec2(at.x + 9.0f, cy - 3.0f), ImVec2(at.x + 4.0f, cy + 4.0f), ink);
+    ImGui::SetCursorScreenPos(ImVec2(at.x + 16.0f, at.y));
     ImGui::PushFont(g_fonts.bold, 14.0f);
     ImGui::TextUnformatted(title);
     ImGui::PopFont();
@@ -2115,7 +2240,10 @@ bool begin_card(const char *id, const char *title, const char *right = nullptr) 
       ImGui::SameLine(ImGui::GetContentRegionMax().x - text_size(right).x);
       ImGui::TextColored(hexv(look::fg3), "%s", right);
     }
-    ImGui::Spacing();
+    ImGui::SetCursorScreenPos(ImVec2(at.x, at.y + 17.0f));
+    ImGui::Dummy(ImVec2(1.0f, 0.0f)); // an item at the new place, so the card's size grows to it (a folded card has nothing else)
+    if (is_folded)
+      return false;
   }
   return open;
 }
@@ -2332,13 +2460,13 @@ void App::frame(double dt) {
       play_accum_ -= double(step);
       playhead_ += step;
     }
-    if (playhead_ >= total_frames_) {
-      if (loop_ && total_frames_ > 0) { // back to the start and on
-        playhead_ = 0;
-        audio_out_.play(0);
+    if (playhead_ >= play_end()) {
+      if (loop_ && total_frames_ > 0) { // back to the start (the In mark) and on
+        playhead_ = play_start();
+        audio_out_.play(playhead_ * int64_t(media::kAudioRate) * rate_.den() / rate_.num());
         play_accum_ = 0.0;
       } else {
-        playhead_ = std::max<int64_t>(0, total_frames_ - 1);
+        playhead_ = mark_out_ > 0 ? play_end() : std::max<int64_t>(0, total_frames_ - 1);
         play(false);
       }
     }
@@ -2587,6 +2715,19 @@ void App::draw_menu() {
         mon_full_ = !mon_full_;
       if (ImGui::MenuItem("Loop playback", "Ctrl+L", loop_, open))
         loop_ = !loop_;
+      if (ImGui::MenuItem("Mark In at the playhead", "I", false, open))
+        set_mark(true);
+      if (ImGui::MenuItem("Mark Out at the playhead", "O", false, open))
+        set_mark(false);
+      if (ImGui::MenuItem("Clear In and Out", "Alt+X", false, open && (mark_in_ >= 0 || mark_out_ >= 0)))
+        clear_marks();
+      ImGui::Separator();
+      if (ImGui::MenuItem("Monitor: fit", nullptr, mon_zoom_ == 0.0f, open))
+        set_monitor_zoom(0.0f);
+      if (ImGui::MenuItem("Monitor: 100 %", nullptr, mon_zoom_ == 1.0f, open))
+        set_monitor_zoom(1.0f);
+      if (ImGui::MenuItem("Monitor: 200 %", nullptr, mon_zoom_ == 2.0f, open))
+        set_monitor_zoom(2.0f);
       ImGui::Separator();
       if (ImGui::MenuItem("Safe-area guides: none", nullptr, safe_mode_ == 0, open))
         safe_mode_ = 0;
@@ -2596,6 +2737,19 @@ void App::draw_menu() {
         safe_mode_ = 2;
       ImGui::Separator();
       ImGui::MenuItem("Profiler", nullptr, &show_profiler_);
+      ImGui::Separator();
+      if (ImGui::BeginMenu("Interface size")) {
+        for (const float v : {0.8f, 1.0f, 1.25f, 1.5f, 2.0f}) {
+          char label[24];
+          std::snprintf(label, sizeof label, "%d %%", int(std::lround(v * 100.0f)));
+          if (ImGui::MenuItem(label, nullptr, std::fabs(ui_scale_ - v) < 0.02f))
+            set_ui_scale(v);
+        }
+        ImGui::TextDisabled("Ctrl + plus, Ctrl + minus, Ctrl + 0");
+        if (ui_scale_now_ < ui_scale_ - 0.02f)
+          ImGui::TextDisabled("This window has room for %d %%", int(std::lround(ui_scale_now_ * 100.0f)));
+        ImGui::EndMenu();
+      }
     });
     menu("Help", [&] {
       if (menu_item("Keyboard shortcuts", "F1"))
@@ -4845,6 +4999,80 @@ void App::draw_text_style(const ClipUi &c) {
   const json content = cj ? cj->value("content", json::object()) : json::object();
   const json outline = content.value("outline", json::object()), shadow = content.value("shadow", json::object()), box = content.value("background", json::object());
   const std::string id = c.id;
+  // Font, slant, alignment and line spacing: the fields font, italic, align and line_spacing of the text's content.
+  const auto set_content = [&](const char *key, json value, const char *label) { // add, replace or (null) take away a field of the content
+    pending_ = [this, id, key = std::string(key), value = std::move(value), label = std::string(label), had = content.contains(key)] {
+      json ops = json::array();
+      if (value.is_null()) {
+        if (had)
+          ops.push_back({{"op", "remove"}, {"path", id + "/content/" + key}});
+      } else {
+        ops.push_back({{"op", had ? "replace" : "add"}, {"path", id + "/content/" + key}, {"value", value}});
+      }
+      if (!ops.empty())
+        patch(std::move(ops), label.c_str());
+    };
+  };
+  ImGui::Spacing();
+  {
+    ImGui::TextColored(hexv(look::fg2), "Font");
+    ImGui::SameLine(88.0f);
+    const std::string current = content.value("font", std::string());
+    ImGui::PushStyleColor(ImGuiCol_FrameBg, hexv(look::raised));
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+    if (ImGui::BeginCombo("##textfont", current.empty() ? "Default" : current.c_str())) {
+      if (ImGui::Selectable("Default", current.empty()))
+        set_content("font", json(nullptr), "Text font");
+      ui_mark("font:Default");
+      for (const std::string &name : media::list_fonts()) {
+        if (ImGui::Selectable(name.c_str(), name == current))
+          set_content("font", name, "Text font");
+        if (name == current)
+          ImGui::SetItemDefaultFocus();
+        ui_mark("font:" + name);
+      }
+      ImGui::EndCombo();
+    }
+    ui_mark("field:text_font");
+    ImGui::PopStyleColor();
+
+    ImGui::TextColored(hexv(look::fg2), "Slant");
+    ImGui::SameLine(88.0f);
+    bool italic = content.value("italic", false);
+    if (ImGui::Checkbox("Italic", &italic))
+      set_content("italic", italic, "Text slant");
+    ui_mark("check:italic");
+    ImGui::TextColored(hexv(look::fg2), "Align");
+    ImGui::SameLine(88.0f);
+    static const char *kAligns[] = {"left", "center", "right"};
+    static const char *kAlignNames[] = {"Left", "Center", "Right"};
+    const std::string align = content.value("align", std::string("center"));
+    const float align_w = (ImGui::GetContentRegionAvail().x - 2.0f * 4.0f) / 3.0f;
+    for (int i = 0; i < 3; ++i) {
+      if (i)
+        ImGui::SameLine(0.0f, 4.0f);
+      if (soft_button((std::string("text_align_") + kAligns[i]).c_str(), kAlignNames[i], ImVec2(align_w, 26.0f), true, align == kAligns[i]))
+        set_content("align", i == 1 ? json(nullptr) : json(kAligns[i]), "Text alignment");
+      if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("How the lines of the text sit against each other");
+    }
+    ImGui::TextColored(hexv(look::fg2), "Lines");
+    ImGui::SameLine(88.0f);
+    float &spacing = fx_edit_[id + "/line_spacing"];
+    if (fx_edit_active_ != id + "/line_spacing")
+      spacing = content.value("line_spacing", 1.0f);
+    if (slim_slider("text_line_spacing", &spacing, 0.6f, 2.0f, ImGui::GetContentRegionAvail().x - 52.0f, ""))
+      fx_edit_active_ = id + "/line_spacing";
+    if (ImGui::IsItemDeactivatedAfterEdit()) {
+      const float value = std::round(spacing * 20.0f) / 20.0f;
+      fx_edit_active_.clear();
+      set_content("line_spacing", std::fabs(value - 1.0f) < 0.01f ? json(nullptr) : json(value), "Text line spacing");
+    }
+    ImGui::SameLine();
+    ImGui::PushFont(g_fonts.mono, 13.0f);
+    ImGui::TextColored(hexv(look::fg2), "%3.2f", spacing);
+    ImGui::PopFont();
+  }
   ImGui::Spacing();
   ImGui::TextColored(hexv(look::fg2), "Style");
   struct Look {
@@ -5160,6 +5388,10 @@ void App::draw_viewer() {
       mon_full_ = true;
     if (view_button("monitor_loop", "Loop", loop_, "Playback starts again at the end (Ctrl+L)"))
       loop_ = !loop_;
+    static const char *kZoom[] = {"Zoom: fit", "Zoom: 100 %", "Zoom: 200 %"};
+    if (view_button("monitor_zoom", kZoom[std::clamp(int(mon_zoom_), 0, 2)], mon_zoom_ > 0.0f,
+                    "Fit the picture, or 100 % and 200 % (100 % is one picture pixel for each screen pixel). Scroll or middle-drag to move it."))
+      pending_ = [this] { set_monitor_zoom(mon_zoom_ == 0.0f ? 1.0f : mon_zoom_ == 1.0f ? 2.0f : 0.0f); };
     static const char *kGuides[] = {"Guides", "Guides: Shorts", "Guides: title safe"};
     if (view_button("monitor_guides", kGuides[std::clamp(safe_mode_, 0, 2)], safe_mode_ != 0,
                     "Show where the phone apps put their own buttons and text over the picture, or the title-safe frame. Click for the next."))
@@ -5175,8 +5407,26 @@ void App::draw_viewer() {
   ImVec2 size(bw, bw / aspect);
   if (size.y > bh)
     size = ImVec2(bh * aspect, bh);
-  const ImVec2 p0(s0.x + (s1.x - s0.x - size.x) * 0.5f, s0.y + (s1.y - s0.y - size.y) * 0.5f);
+  if (mon_zoom_ > 0.0f) { // a screen pixel is 1 / framebuffer scale layout points
+    const float per_point = std::max(0.5f, ImGui::GetIO().DisplayFramebufferScale.x);
+    size = ImVec2(float(canvas_w_) * mon_zoom_ / per_point, float(canvas_h_) * mon_zoom_ / per_point);
+    const bool over_stage = ImGui::IsMouseHoveringRect(s0, s1) && ImGui::IsWindowHovered();
+    ImGuiIO &mio = ImGui::GetIO();
+    if (over_stage) {
+      if (ImGui::IsMouseDragging(ImGuiMouseButton_Middle, 0.0f)) {
+        mon_pan_.x += mio.MouseDelta.x;
+        mon_pan_.y += mio.MouseDelta.y;
+      }
+      mon_pan_.x += mio.MouseWheelH * 40.0f;
+      mon_pan_.y += mio.MouseWheel * 40.0f;
+    }
+    const float room_x = std::max(0.0f, (size.x - (s1.x - s0.x)) * 0.5f + 80.0f), room_y = std::max(0.0f, (size.y - (s1.y - s0.y)) * 0.5f + 80.0f);
+    mon_pan_.x = std::clamp(mon_pan_.x, -room_x, room_x);
+    mon_pan_.y = std::clamp(mon_pan_.y, -room_y, room_y);
+  }
+  const ImVec2 p0(s0.x + (s1.x - s0.x - size.x) * 0.5f + mon_pan_.x, s0.y + (s1.y - s0.y - size.y) * 0.5f + mon_pan_.y);
   const ImVec2 p1(p0.x + size.x, p0.y + size.y);
+  ImGui::PushClipRect(s0, s1, true); // a zoomed picture stays on the stage
   dl->AddRectFilled(ImVec2(p0.x - 1, p0.y - 1), ImVec2(p1.x + 1, p1.y + 1), hex(0x000000, 90), 7.0f);
   if (texture_ && total_frames_ > 0)
     dl->AddImageRounded(ImTextureID(reinterpret_cast<intptr_t>(texture_)), p0, p1, ImVec2(0, 0), ImVec2(1, 1),
@@ -5302,19 +5552,39 @@ void App::draw_viewer() {
     }
   }
 
+  ImGui::PopClipRect();
+
   // Transport: timecode on the left, the controls centred.
   const float ty = origin.y + height - foot;
   dl->AddLine(ImVec2(origin.x, ty), ImVec2(origin.x + width, ty), hex(look::line));
   ImGui::PushFont(g_fonts.mono, 19.0f);
   const std::string now_tc = timecode(playhead_);
+  const float now_w = ImGui::CalcTextSize(now_tc.c_str()).x;
   dl->AddText(ImVec2(origin.x + 16.0f, ty + 20.0f), hex(look::fg), now_tc.c_str());
   ImGui::PopFont();
   ImGui::PushFont(g_fonts.mono, 13.0f);
   const std::string total_tc = "/ " + timecode(total_frames_);
-  dl->AddText(ImVec2(origin.x + 16.0f + 150.0f, ty + 24.0f), hex(look::fg3), total_tc.c_str());
+  const float total_w = ImGui::CalcTextSize(total_tc.c_str()).x;
+  // The controls are centred when the timecodes leave room; in a narrow Monitor the length goes first, then the controls move right.
+  const float ctrl_half = 66.0f;
+  float cx = origin.x + width * 0.5f;
+  const float left_block = origin.x + 16.0f + now_w + 14.0f;
+  const bool room_for_total = cx - ctrl_half >= left_block + total_w + 10.0f;
+  if (room_for_total)
+    dl->AddText(ImVec2(origin.x + 16.0f + now_w + 10.0f, ty + 24.0f), hex(look::fg3), total_tc.c_str());
+  else
+    cx = std::min(std::max(cx, left_block + ctrl_half), origin.x + width - 10.0f - ctrl_half);
+  if (mark_in_ >= 0 || mark_out_ >= 0) { // the part, on the right: In, Out and how long
+    char part[96];
+    std::snprintf(part, sizeof part, "In %s   Out %s   %.1f s", mark_in_ >= 0 ? timecode(mark_in_).c_str() : "start", mark_out_ > 0 ? timecode(mark_out_).c_str() : "end",
+                  double(play_end() - play_start()) / fps());
+    const ImVec2 sz = ImGui::CalcTextSize(part);
+    if (origin.x + width - 16.0f - sz.x > cx + ctrl_half + 12.0f)
+      dl->AddText(ImVec2(origin.x + width - 16.0f - sz.x, ty + 24.0f), hex(look::accent), part);
+  }
   ImGui::PopFont();
 
-  const float cx = origin.x + width * 0.5f, cy = ty + 28.0f;
+  const float cy = ty + 28.0f;
   const auto skip_button = [&](const char *id, float x, bool forward, const char *tip) {
     ImGui::SetCursorScreenPos(ImVec2(x - 18.0f, cy - 18.0f));
     ImGui::InvisibleButton(id, ImVec2(36.0f, 36.0f));
@@ -5550,6 +5820,20 @@ void App::draw_timeline() {
     dl->AddText(ImVec2(x + 5.0f, origin.y + 6.0f), hex(look::fg3), label);
   }
   ImGui::PopFont();
+  if (mark_in_ >= 0 || mark_out_ >= 0) { // the part between In and Out
+    const float xa = x_of(double(play_start())), xb = x_of(double(play_end()));
+    dl->PushClipRect(ImVec2(win.x + header_w, origin.y), ImVec2(win.x + view_w, origin.y + ruler_h), true);
+    dl->AddRectFilled(ImVec2(xa, origin.y), ImVec2(xb, origin.y + ruler_h), hex(look::accent, 46));
+    if (mark_in_ >= 0) {
+      dl->AddLine(ImVec2(xa, origin.y), ImVec2(xa, origin.y + ruler_h), hex(look::accent), 2.0f);
+      dl->AddTriangleFilled(ImVec2(xa, origin.y), ImVec2(xa + 8.0f, origin.y), ImVec2(xa, origin.y + 8.0f), hex(look::accent));
+    }
+    if (mark_out_ > 0) {
+      dl->AddLine(ImVec2(xb, origin.y), ImVec2(xb, origin.y + ruler_h), hex(look::accent), 2.0f);
+      dl->AddTriangleFilled(ImVec2(xb, origin.y), ImVec2(xb - 8.0f, origin.y), ImVec2(xb, origin.y + 8.0f), hex(look::accent));
+    }
+    dl->PopClipRect();
+  }
 
   dl->PushClipRect(ImVec2(win.x + header_w, win.y), ImVec2(win.x + view_w, win.y + view_h), true);
   for (int ti = 0; ti < rows; ++ti) {
@@ -6477,7 +6761,9 @@ void App::draw_inspector() {
     field("Name", name_buf_, sizeof name_buf_, "/name", "Rename clip", false);
     field("Start", in_buf_, sizeof in_buf_, "/timing/record_in", "Move clip", true);
     field("Duration", dur_buf_, sizeof dur_buf_, "/timing/duration", "Trim clip", true);
-    ImGui::TextColored(hexv(look::fg3), "Times accept 00:00:12:15, 12.5s or 375@30.");
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::TextColored(hexv(look::fg3), "Times: 00:00:12:15, 12.5s or 375@30");
+    ImGui::PopTextWrapPos();
   }
   end_card();
   ImGui::PopStyleColor();
@@ -7104,15 +7390,54 @@ void App::draw_export() {
     if (soft_button("export_browse", "Browse...", ImVec2(102.0f, ImGui::GetFrameHeight())))
       pending_ = [this] { ask_export_path(); };
     {
+      static const char *kExt[] = {".mp4", ".wav", ".jpg"};
       std::string path = exp_path_;
-      if (path.size() < 4 || path.substr(path.size() - 4) != ".mp4")
-        path += ".mp4";
+      if (path.size() < 4 || path.substr(path.size() - 4) != kExt[std::clamp(exp_format_, 0, 2)])
+        path += kExt[std::clamp(exp_format_, 0, 2)];
       std::error_code ec;
       if (fs::exists(fs::path(std::u8string(path.begin(), path.end())), ec))
         ImGui::TextColored(ImVec4(0.89f, 0.64f, 0.23f, 1.0f), "A file with this name is there. It will be replaced.");
     }
     ImGui::Spacing();
 
+    section_label("WHAT");
+    {
+      static const char *kFormats[] = {"Video (MP4)", "Sound only (WAV)", "One picture (JPEG)"};
+      static const char *kFormatIds[] = {"video", "sound", "picture"};
+      static const char *kExt2[] = {".mp4", ".wav", ".jpg"};
+      for (int i = 0; i < 3; ++i) {
+        if (i)
+          ImGui::SameLine();
+        if (soft_button((std::string("export_format_") + kFormatIds[i]).c_str(), kFormats[i], ImVec2(160.0f, 30.0f), true, exp_format_ == i)) {
+          exp_format_ = i;
+          copy_to(exp_path_, sizeof exp_path_, with_extension(exp_path_, kExt2[i]));
+        }
+      }
+    }
+    ImGui::Spacing();
+    {
+      const bool marked = mark_in_ >= 0 || mark_out_ >= 0;
+      if (exp_format_ == 2) {
+        section_label("WHICH FRAME");
+        ImGui::TextColored(hexv(look::fg3), "The frame at the playhead, %s.", timecode(playhead_).c_str());
+      } else {
+        section_label("PART");
+        if (!marked) {
+          ImGui::TextColored(hexv(look::fg3), "The whole film. Press I and O in the editor to mark just a part.");
+        } else {
+          char part[96];
+          std::snprintf(part, sizeof part, "In to Out, %.1f s", double(play_end() - play_start()) / fps());
+          if (soft_button("export_part_whole", "Whole film", ImVec2(150.0f, 30.0f), true, exp_range_ == 0))
+            exp_range_ = 0;
+          ImGui::SameLine();
+          if (soft_button("export_part_marked", part, ImVec2(190.0f, 30.0f), true, exp_range_ == 1))
+            exp_range_ = 1;
+        }
+      }
+    }
+    ImGui::Spacing();
+
+    if (exp_format_ != 1) {
     section_label("SIZE");
     static const char *kRes[] = {"Project", "720p", "1080p", "1440p", "4K"};
     for (int i = 0; i < 5; ++i) {
@@ -7133,6 +7458,8 @@ void App::draw_export() {
     }
     ImGui::Spacing();
 
+    }
+    if (exp_format_ == 0) {
     section_label("QUALITY");
     static const char *kQuality[] = {"Small", "Standard", "High"};
     for (int i = 0; i < 3; ++i) {
@@ -7142,7 +7469,7 @@ void App::draw_export() {
         exp_quality_ = i;
     }
     {
-      const double seconds = double(total_frames_) / fps(), bits = double(export_bitrate());
+      const double seconds = double((exp_range_ == 1 && (mark_in_ >= 0 || mark_out_ >= 0)) ? play_end() - play_start() : total_frames_) / fps(), bits = double(export_bitrate());
       const double bytes = (bits + (exp_sound_ ? 192000.0 : 0.0)) * seconds / 8.0;
       ImGui::TextColored(hexv(look::fg3), "About %s for %.0f s, %.1f Mbit/s. %s", size_text(int64_t(bytes)).c_str(), seconds, bits / 1e6,
                          exp_quality_ == 0 ? "Smallest file; fine for a preview."
@@ -7154,15 +7481,20 @@ void App::draw_export() {
     if (ImGui::Checkbox("Include the sound", &sound))
       exp_sound_ = sound;
     ui_mark("check:export_sound");
+    } else if (exp_format_ == 1) {
+      const double seconds = double((exp_range_ == 1 && (mark_in_ >= 0 || mark_out_ >= 0)) ? play_end() - play_start() : total_frames_) / fps();
+      ImGui::TextColored(hexv(look::fg3), "About %s: 48 kHz stereo, not compressed.", size_text(int64_t(seconds * 192000.0)).c_str());
+    }
     ImGui::Spacing();
     ImGui::Spacing();
     if (soft_button("export_cancel", "Cancel", ImVec2(110.0f, 34.0f)))
       export_sheet_ = false;
     ImGui::SameLine(ImGui::GetContentRegionAvail().x - 120.0f + ImGui::GetCursorPosX());
     if (soft_button("export_start", "Export", ImVec2(120.0f, 34.0f), exp_path_[0] != 0, true)) {
+      static const char *kExt3[] = {".mp4", ".wav", ".jpg"};
       std::string path = exp_path_;
-      if (path.size() < 4 || path.substr(path.size() - 4) != ".mp4")
-        path += ".mp4";
+      if (path.size() < 4 || path.substr(path.size() - 4) != kExt3[std::clamp(exp_format_, 0, 2)])
+        path += kExt3[std::clamp(exp_format_, 0, 2)];
       export_sheet_ = false;
       pending_ = [this, path] { start_export(path); };
     }
@@ -7259,12 +7591,13 @@ void App::draw_shortcuts_sheet() {
     };
     static const std::vector<Group> groups = {
         {"Playing", {{"Space", "Play or pause"}, {"Left / Right", "One frame back or forward"}, {"Shift+Left / Right", "One second back or forward"},
-                     {"Up / Down", "The previous or next cut"}, {"Home / End", "The start or the end"}, {"Ctrl+L", "Loop playback"}, {"Ctrl+F", "Full screen preview (Esc leaves)"}}},
+                     {"Up / Down", "The previous or next cut"}, {"Home / End", "The start or the end"}, {"Ctrl+L", "Loop playback"}, {"Ctrl+F", "Full screen preview (Esc leaves)"},
+                     {"I / O", "Mark In and Out at the playhead: play, loop and export just that part"}, {"Alt+X", "Clear In and Out"}}},
         {"Clips", {{"Click, Ctrl+click, Shift+click", "Select one, add or remove one, a range on the track"}, {"Drag on empty space", "A box that selects what it touches"},
                    {"Ctrl+A", "Select all clips"}, {"S", "Split at the playhead"}, {"Delete", "Delete the selected clips"},
                    {"Ctrl+C / X / V", "Copy, cut, paste at the playhead"}, {"Ctrl+D", "Duplicate after the clips"}, {"Esc", "Select nothing"}, {"Right click", "The menu of a clip or of the empty timeline"}}},
         {"Project", {{"Ctrl+Z / Ctrl+Y", "Undo, redo (Ctrl+Shift+Z also redoes)"}, {"Ctrl+S", "Save now"}, {"Ctrl+I", "Import media"}, {"Ctrl+E", "Export"}, {"F1", "This list"}}},
-        {"Timeline", {{"Shift+Z", "Fit the whole film in the window"}, {"+ / -", "Zoom in or out"}, {"Ctrl+mouse wheel", "Zoom about the pointer"}, {"Alt while dragging", "No snapping"}}},
+        {"Timeline", {{"Shift+Z", "Fit the whole film in the window"}, {"+ / -", "Zoom in or out"}, {"Ctrl+mouse wheel", "Zoom about the pointer"}, {"Alt while dragging", "No snapping"}, {"Ctrl+plus / minus / 0", "Make the whole editor larger, smaller, or 100 %"}}},
         {"Workflows", {{"Double click", "Open the workflow of a clip; a search to add a node on the canvas"}, {"Ctrl+C / V / D", "Copy, paste, duplicate nodes"}, {"Ctrl+A", "Select all nodes"},
                        {"Delete", "Delete the selected node or link"}, {"Shift+drag", "A box that selects nodes"}, {"Esc", "Clear the selection, then leave the canvas"}}}};
     ImGui::PushFont(g_fonts.bold, 18.0f);

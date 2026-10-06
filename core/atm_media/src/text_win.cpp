@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <cmath>
 #include <mutex>
+#include <string>
+#include <vector>
 
 #include <windows.h>
 
@@ -52,7 +54,42 @@ std::wstring widen(const std::string &s) {
 
 } // namespace
 
-Result<TextBitmap> render_text(const std::string &utf8, float size_px, bool bold, int max_width) {
+const std::vector<std::string> &list_fonts() {
+  static const std::vector<std::string> names = [] {
+    std::vector<std::string> out;
+    Factories *f = factories();
+    ComPtr<IDWriteFontCollection> collection;
+    if (!f->dwrite || FAILED(f->dwrite->GetSystemFontCollection(&collection, FALSE)))
+      return out;
+    for (UINT32 i = 0; i < collection->GetFontFamilyCount(); ++i) {
+      ComPtr<IDWriteFontFamily> family;
+      ComPtr<IDWriteLocalizedStrings> strings;
+      if (FAILED(collection->GetFontFamily(i, &family)) || FAILED(family->GetFamilyNames(&strings)))
+        continue;
+      UINT32 at = 0;
+      BOOL found = FALSE;
+      strings->FindLocaleName(L"en-us", &at, &found);
+      UINT32 length = 0;
+      if (FAILED(strings->GetStringLength(found ? at : 0, &length)))
+        continue;
+      std::wstring w(size_t(length) + 1, L'\0');
+      if (FAILED(strings->GetString(found ? at : 0, w.data(), length + 1)))
+        continue;
+      w.resize(length);
+      const int n = WideCharToMultiByte(CP_UTF8, 0, w.data(), int(w.size()), nullptr, 0, nullptr, nullptr);
+      std::string utf8(size_t(std::max(0, n)), '\0');
+      WideCharToMultiByte(CP_UTF8, 0, w.data(), int(w.size()), utf8.data(), n, nullptr, nullptr);
+      if (!utf8.empty() && utf8[0] != '@')
+        out.push_back(std::move(utf8));
+    }
+    std::sort(out.begin(), out.end());
+    out.erase(std::unique(out.begin(), out.end()), out.end());
+    return out;
+  }();
+  return names;
+}
+
+Result<TextBitmap> render_text(const std::string &utf8, float size_px, const TextStyle &style, int max_width) {
   ATM_PROFILE_SCOPE("text.raster");
   Factories *f = factories();
   if (!f->d2d || !f->dwrite || !f->wic)
@@ -62,16 +99,44 @@ Result<TextBitmap> render_text(const std::string &utf8, float size_px, bool bold
     return TextBitmap{};
   size_px = std::min(size_px, 2000.0f);
 
+  // The family asked for, when this system has it; else Segoe UI.
+  std::wstring family = L"Segoe UI";
+  if (!style.font.empty()) {
+    ComPtr<IDWriteFontCollection> collection;
+    UINT32 at = 0;
+    BOOL found = FALSE;
+    const std::wstring asked = widen(style.font);
+    if (SUCCEEDED(f->dwrite->GetSystemFontCollection(&collection, FALSE)) && SUCCEEDED(collection->FindFamilyName(asked.c_str(), &at, &found)) && found)
+      family = asked;
+  }
+  const int align = std::clamp(style.align, -1, 1);
   ComPtr<IDWriteTextFormat> format;
-  if (FAILED(f->dwrite->CreateTextFormat(L"Segoe UI", nullptr, bold ? DWRITE_FONT_WEIGHT_BOLD : DWRITE_FONT_WEIGHT_NORMAL,
-                                         DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, size_px, L"en-us", &format)))
+  const auto make_format = [&] {
+    format.Reset();
+    return SUCCEEDED(f->dwrite->CreateTextFormat(family.c_str(), nullptr, style.bold ? DWRITE_FONT_WEIGHT_BOLD : DWRITE_FONT_WEIGHT_NORMAL,
+                                                 style.italic ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, size_px,
+                                                 L"en-us", &format));
+  };
+  if (!make_format())
     return fail(ErrorCode::Unsupported, "M_TEXT", "The text font could not be created.");
-  format->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+  format->SetTextAlignment(align < 0 ? DWRITE_TEXT_ALIGNMENT_LEADING : align > 0 ? DWRITE_TEXT_ALIGNMENT_TRAILING : DWRITE_TEXT_ALIGNMENT_CENTER);
   format->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
   const float wrap = float(std::max(16, max_width));
   ComPtr<IDWriteTextLayout> layout;
   if (FAILED(f->dwrite->CreateTextLayout(text.c_str(), UINT32(text.size()), format.Get(), wrap, 10000.0f, &layout)))
     return fail(ErrorCode::Unsupported, "M_TEXT", "The text could not be laid out.");
+  if (std::fabs(style.line_spacing - 1.0f) > 0.01f) { // the font's own line height times the spacing; the glyphs stay in the middle of their line
+    UINT32 count = 0;
+    layout->GetLineMetrics(nullptr, 0, &count);
+    std::vector<DWRITE_LINE_METRICS> lines(count);
+    if (count > 0 && SUCCEEDED(layout->GetLineMetrics(lines.data(), count, &count))) {
+      const float spacing = std::clamp(style.line_spacing, 0.5f, 3.0f), height = lines[0].height;
+      format->SetLineSpacing(DWRITE_LINE_SPACING_METHOD_UNIFORM, height * spacing, lines[0].baseline + (height * spacing - height) * 0.5f);
+      layout.Reset();
+      if (FAILED(f->dwrite->CreateTextLayout(text.c_str(), UINT32(text.size()), format.Get(), wrap, 10000.0f, &layout)))
+        return fail(ErrorCode::Unsupported, "M_TEXT", "The text could not be laid out.");
+    }
+  }
   DWRITE_TEXT_METRICS m{};
   layout->GetMetrics(&m);
 
@@ -81,7 +146,8 @@ Result<TextBitmap> render_text(const std::string &utf8, float size_px, bool bold
   if (int64_t(w) * h > 64'000'000)
     return fail(ErrorCode::InvalidArgument, "M_TEXT_SIZE", "The text is too large to draw.", {}, "Use a smaller size.");
   // Centre the text in its box: the layout is `wrap` wide, so shift by the free space.
-  const float shift = (float(w - 2 * pad) - wrap) * 0.5f;
+  // Left or right: the layout's own left edge of the text, so right-to-left text is placed by what is drawn, not by the alignment's name.
+  const float shift = align == 0 ? (float(w - 2 * pad) - wrap) * 0.5f : -m.left;
 
   ComPtr<IWICBitmap> bitmap;
   if (FAILED(f->wic->CreateBitmap(UINT(w), UINT(h), GUID_WICPixelFormat32bppPBGRA, WICBitmapCacheOnLoad, &bitmap)))

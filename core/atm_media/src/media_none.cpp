@@ -35,7 +35,11 @@ const std::string &Encoder::name() const {
 #endif
 
 #if !defined(ATM_TEXT_FREETYPE)
-Result<TextBitmap> render_text(const std::string &, float, bool, int) { return unsupported("Text rendering"); }
+Result<TextBitmap> render_text(const std::string &, float, const TextStyle &, int) { return unsupported("Text rendering"); }
+const std::vector<std::string> &list_fonts() {
+  static const std::vector<std::string> none;
+  return none;
+}
 #endif
 
 } // namespace atm::media

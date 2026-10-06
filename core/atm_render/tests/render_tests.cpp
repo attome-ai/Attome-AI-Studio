@@ -432,6 +432,89 @@ TEST_CASE("render: text clips draw in a colour, move and scale, and shape Arabic
   }
 }
 
+TEST_CASE("render: a text can have its own font, a slant, an alignment and a line spacing", "[media]") {
+  const auto draw = [](const std::string &text, const media::TextStyle &style) {
+    auto bitmap = media::render_text(text, 60.0f, style, 2000);
+    REQUIRE(bitmap);
+    return std::move(*bitmap);
+  };
+  // The mean column of the lit pixels in rows [y0, y1).
+  const auto centre_x = [](const media::TextBitmap &b, int y0, int y1) {
+    double sum = 0.0, weight = 0.0;
+    for (int y = std::max(0, y0); y < std::min(b.height, y1); ++y)
+      for (int x = 0; x < b.width; ++x) {
+        const double a = b.alpha[size_t(y) * size_t(b.width) + size_t(x)];
+        sum += a * x;
+        weight += a;
+      }
+    return weight > 0.0 ? sum / weight : -1.0;
+  };
+
+  { // alignment: a short line under a long one sits at the left, in the middle or at the right of it
+    media::TextStyle left, middle, right;
+    left.align = -1;
+    right.align = 1;
+    const std::string text = "WIDE WIDE WIDE\nI";
+    const auto a = draw(text, left), b = draw(text, middle), c = draw(text, right);
+    const double xl = centre_x(a, a.height * 6 / 10, a.height), xm = centre_x(b, b.height * 6 / 10, b.height), xr = centre_x(c, c.height * 6 / 10, c.height);
+    CHECK(xl < xm - 20.0);
+    CHECK(xm < xr - 20.0);
+    CHECK(a.width == b.width); // the block is as wide as its widest line whatever the alignment
+    CHECK(b.width == c.width);
+  }
+  { // italic: the top of an upright stroke is further right than its foot
+    media::TextStyle upright, slanted;
+    slanted.italic = true;
+    const auto u = draw("I", upright), i = draw("I", slanted);
+    const double lean_upright = centre_x(u, 0, u.height / 2) - centre_x(u, u.height / 2, u.height);
+    const double lean_slanted = centre_x(i, 0, i.height / 2) - centre_x(i, i.height / 2, i.height);
+    CHECK(lean_slanted > lean_upright + 3.0);
+  }
+  { // line spacing: two lines take more height when spaced wider, and less when spaced tighter
+    media::TextStyle natural, wide, tight;
+    wide.line_spacing = 2.0f;
+    tight.line_spacing = 0.7f;
+    const int h1 = draw("one\ntwo", natural).height, h2 = draw("one\ntwo", wide).height, h3 = draw("one\ntwo", tight).height;
+    CHECK(h2 > h1 + 20);
+    CHECK(h3 < h1 - 5);
+  }
+  { // a font that is not on this system is the default; the list is sorted and has no repeats
+    media::TextStyle unknown;
+    unknown.font = "No Such Typeface 12345";
+    const auto base = draw("Hello there", media::TextStyle{}), other = draw("Hello there", unknown);
+    CHECK(base.width == other.width);
+    CHECK(base.alpha == other.alpha);
+    const auto &fonts = media::list_fonts();
+    CHECK(std::is_sorted(fonts.begin(), fonts.end()));
+    CHECK(std::adjacent_find(fonts.begin(), fonts.end()) == fonts.end());
+#if defined(_WIN32) && !defined(ATM_TEXT_FREETYPE)
+    REQUIRE(!fonts.empty());
+    if (std::find(fonts.begin(), fonts.end(), "Consolas") != fonts.end()) { // every letter of a monospaced font is as wide as the next
+      media::TextStyle mono;
+      mono.font = "Consolas";
+      const int narrow = draw("iiiiiiiiii", mono).width, wide = draw("WWWWWWWWWW", mono).width;
+      CHECK(std::abs(narrow - wide) <= 6);
+      CHECK(draw("iiiiiiiiii", media::TextStyle{}).width < narrow - 20); // Segoe UI's i is narrow
+    }
+#endif
+  }
+  { // the clip's content reaches the renderer: align, italic, font and line_spacing are read from it
+    json clip = {{"timing", {{"record_in", "0"}, {"duration", "1"}, {"source_in", "0"}}},
+                 {"media_ref", {{"type", "text"}}},
+                 {"content", {{"text", "WIDE WIDE\nI"}, {"size", 0.2}, {"color", "#ffffff"}, {"align", "left"}, {"italic", true}, {"font", "Segoe UI"}, {"line_spacing", 1.5}}}};
+    json track = {{"kind", "video"}, {"clips", {{"clp_t", clip}}}};
+    const json doc = {{"sequences", {{"seq_1", {{"rate", "30"}, {"canvas", {{"width", 320}, {"height", 240}}}, {"track_order", {"trk_v"}}, {"tracks", {{"trk_v", track}}}}}}},
+                      {"sequence_order", {"seq_1"}}};
+    auto comp = atm::render::compile(doc);
+    REQUIRE(comp);
+    REQUIRE(comp->layers.size() == 1);
+    CHECK(comp->layers[0].text_align == -1);
+    CHECK(comp->layers[0].text_italic);
+    CHECK(comp->layers[0].text_font == "Segoe UI");
+    CHECK(comp->layers[0].line_spacing == Catch::Approx(1.5f));
+  }
+}
+
 TEST_CASE("render: a text can have an outline, a shadow and a box behind it, drawn from the clip's content", "[media]") {
   // One layer of text on black, 320 x 240, with the look given as the clip's "content" does.
   const auto draw = [&](const json &look) {

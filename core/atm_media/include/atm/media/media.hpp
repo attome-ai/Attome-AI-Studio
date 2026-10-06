@@ -111,7 +111,22 @@ struct TextBitmap {
   int width = 0, height = 0;
   std::vector<uint8_t> alpha; // width * height
 };
-Result<TextBitmap> render_text(const std::string &utf8, float size_px, bool bold, int max_width);
+// How a text is drawn: the font (a family name from list_fonts(); empty or unknown = the default: Segoe UI, Noto Sans), bold, italic, where the
+// lines sit against each other (-1 left, 0 centre, 1 right) and the distance between lines as a multiple of the font's own (1 = natural).
+struct TextStyle {
+  bool bold = false, italic = false;
+  std::string font;
+  int align = 0;
+  float line_spacing = 1.0f;
+};
+Result<TextBitmap> render_text(const std::string &utf8, float size_px, const TextStyle &style, int max_width);
+inline Result<TextBitmap> render_text(const std::string &utf8, float size_px, bool bold, int max_width) {
+  TextStyle style;
+  style.bold = bold;
+  return render_text(utf8, size_px, style, max_width);
+}
+// The font families a text can use, sorted: the ones installed on Windows, the bundled Noto fonts elsewhere.
+const std::vector<std::string> &list_fonts();
 
 // The folder holding the bundled fonts (Noto, Lucide icons), as UTF-8, or empty when it is missing: ATTOME_FONTS,
 // then fonts/ next to the program, then ../share/attome/fonts.

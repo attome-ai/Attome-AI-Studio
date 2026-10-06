@@ -197,10 +197,69 @@ void run_fetch(const std::shared_ptr<Job> &job, models::CatalogEntry entry, fs::
   }
 }
 
+// A little-endian 16-bit stereo WAV of `stereo` (interleaved floats), from stereo frame `from` to `to`.
+std::string wav_bytes(const std::vector<float> &stereo, size_t from, size_t to) {
+  const size_t frames = to > from ? to - from : 0;
+  std::string wav(44 + frames * 4, '\0');
+  const auto put = [&](size_t at, uint32_t v, int bytes) {
+    for (int i = 0; i < bytes; ++i)
+      wav[at + size_t(i)] = char((v >> (8 * i)) & 255);
+  };
+  wav.replace(0, 4, "RIFF");
+  put(4, uint32_t(36 + frames * 4), 4);
+  wav.replace(8, 8, "WAVEfmt ");
+  put(16, 16, 4);
+  put(20, 1, 2); // PCM
+  put(22, 2, 2); // stereo
+  put(24, uint32_t(media::kAudioRate), 4);
+  put(28, uint32_t(media::kAudioRate * 4), 4);
+  put(32, 4, 2);
+  put(34, 16, 2);
+  wav.replace(36, 4, "data");
+  put(40, uint32_t(frames * 4), 4);
+  for (size_t i = 0; i < frames * 2; ++i) {
+    const float v = std::clamp(stereo[from * 2 + i], -1.0f, 1.0f);
+    put(44 + i * 2, uint32_t(uint16_t(int16_t(std::lround(v * 32767.0f)))), 2);
+  }
+  return wav;
+}
+
+// "Sound only" and "a picture of one frame" as jobs: nothing to encode, so one unit.
+void run_extract(const std::shared_ptr<Job> &job, render::Composition comp, std::string path, bool sound, int64_t first, int64_t last, int width, int height) {
+  prof::set_thread_name("atm-render-0");
+  const auto finish = [&](Job::State state, const Error *error = nullptr) {
+    std::lock_guard lock(job->mutex);
+    if (error)
+      job->error = *error;
+    job->seconds = std::chrono::duration<double>(Clock::now() - job->started).count();
+    job->state.store(state);
+  };
+  if (sound) {
+    auto mixed = render::mix_audio(comp);
+    if (!mixed)
+      return finish(Job::failed, &mixed.error());
+    const size_t total = mixed->size() / 2;
+    const auto at = [&](int64_t frame) { return std::min(total, size_t(comp.frame_hns(frame) * media::kAudioRate / media::kHnsPerSecond)); };
+    if (auto written = storage::atomic_write(to_path(path), wav_bytes(*mixed, at(first), at(last))); !written)
+      return finish(Job::failed, &written.error());
+  } else {
+    render::Renderer renderer(std::move(comp), width, height);
+    std::vector<uint8_t> nv12(media::nv12_size(renderer.width(), renderer.height()));
+    if (auto r = renderer.render(first, nv12.data()); !r)
+      return finish(Job::failed, &r.error());
+    std::vector<uint8_t> bgrx(size_t(renderer.width()) * size_t(renderer.height()) * 4);
+    media::nv12_to_bgrx(nv12.data(), renderer.width(), renderer.height(), bgrx.data());
+    if (auto r = media::write_jpeg(path, bgrx.data(), renderer.width() & ~1, renderer.height() & ~1, 0.95f); !r)
+      return finish(Job::failed, &r.error());
+  }
+  job->units_done.store(1);
+  finish(Job::done);
+}
+
 // The export runs as a pipeline: this thread renders frames into a few slots while "atm-encode" converts and
 // encodes the previous ones, so the two never wait for each other. The encoder starts (hardware set-up, about half a
 // second) and the audio is mixed while the first frames render.
-void run_export(const std::shared_ptr<Job> &job, render::Composition comp, media::EncodeSettings settings) {
+void run_export(const std::shared_ptr<Job> &job, render::Composition comp, media::EncodeSettings settings, int64_t first, int64_t last) {
   prof::set_thread_name("atm-render-0");
   const auto finish = [&](Job::State state, const Error *error = nullptr) {
     std::lock_guard lock(job->mutex);
@@ -253,8 +312,8 @@ void run_export(const std::shared_ptr<Job> &job, render::Composition comp, media
       std::lock_guard lock(job->mutex);
       job->encoder = (*encoder)->name();
     }
-    size_t audio_pos = 0; // stereo frames already written
     const size_t audio_frames = audio.size() / 2;
+    size_t audio_pos = std::min(audio_frames, size_t(comp.frame_hns(first) * media::kAudioRate / media::kHnsPerSecond)); // stereo frames already written
     for (;;) {
       int index = -1;
       {
@@ -268,7 +327,7 @@ void run_export(const std::shared_ptr<Job> &job, render::Composition comp, media
         ready.pop_front();
       }
       const int64_t f = slots[size_t(index)].frame;
-      Result<void> r = (*encoder)->video(slots[size_t(index)].pixels.data(), f);
+      Result<void> r = (*encoder)->video(slots[size_t(index)].pixels.data(), f - first);
       {
         std::lock_guard lock(mutex);
         free_slots.push_back(index);
@@ -277,20 +336,20 @@ void run_export(const std::shared_ptr<Job> &job, render::Composition comp, media
       // Audio is interleaved about half a second at a time, so the muxer never holds much of one stream.
       const size_t audio_to =
           std::min(audio_frames, size_t(comp.frame_hns(f + 1) * media::kAudioRate / media::kHnsPerSecond));
-      if (r && (audio_to - audio_pos >= size_t(media::kAudioRate / 2) || f + 1 == comp.frames) && audio_to > audio_pos) {
+      if (r && (audio_to - audio_pos >= size_t(media::kAudioRate / 2) || f + 1 == last) && audio_to > audio_pos) {
         r = (*encoder)->audio(audio.data() + audio_pos * 2, audio_to - audio_pos);
         audio_pos = audio_to;
       }
       if (!r)
         return stop(r.error());
-      job->units_done.store(f + 1);
+      job->units_done.store(f + 1 - first);
     }
     if (auto r = (*encoder)->finish(); !r)
       stop(r.error());
   });
 
   bool cancelled = false;
-  for (int64_t f = 0; f < comp.frames; ++f) {
+  for (int64_t f = first; f < last; ++f) {
     int index = -1;
     {
       std::unique_lock lock(mutex);
@@ -820,6 +879,17 @@ struct Engine::Impl {
     return it != pr.doc.root().end() && it->is_object() ? *it : none;
   }
 
+  Result<json> fonts_list(const json &) {
+    json names = json::array();
+    for (const std::string &n : media::list_fonts())
+      names.push_back(n);
+#if defined(_WIN32)
+    return json{{"fonts", std::move(names)}, {"default", "Segoe UI"}};
+#else
+    return json{{"fonts", std::move(names)}, {"default", "Noto Sans"}};
+#endif
+  }
+
   Result<json> skill_list(const json &params) {
     json list = json::array();
     const Project *pr = nullptr;
@@ -923,8 +993,9 @@ struct Engine::Impl {
          "trim, split, delete, slip, roll, slide) apply to both; add \"unlink\": true to an op to edit one alone (for "
          "J and L cuts). A dissolve between two linked clips also cross-fades their sound.\n"
          "- add_text {text (\\n for a new line), at? (0), duration? (3s), placement? (center | lower_third | top | "
-         "bottom) or position?, size? (0.08 of the height), color? (#ffffff), bold? (true), rotation?, fade_in?, "
-         "fade_out?} - "
+         "bottom) or position?, size? (0.08 of the height), color? (#ffffff), bold? (true), italic? (false), font? (a family from fonts.list), align? (left | center | right: the lines of a "
+         "text against each other), line_spacing? (1 = the font's own, 0.5..3), outline? {color, width}, shadow? {color, x, y, blur, opacity}, "
+         "background? {color, opacity, padding, radius}, rotation?, fade_in?, fade_out?} - "
          "goes on a Titles track on top\n"
          "- add_adjustment {at?, duration? (2s), blur? (radius, e.g. 0.02) or effects? [{type, ...params}], opacity?, fade_in?, fade_out?} - changes "
          "everything below; goes on an Effects track under the titles\n"
@@ -1119,9 +1190,27 @@ struct Engine::Impl {
     if (comp.frames <= 0)
       return fail(ErrorCode::InvalidArgument, "R_EMPTY", "The sequence has no media clips to render.", {},
                   "Add a clip whose media_ref is {\"type\": \"file\", \"path\": …} first.");
+    const std::string format = params.value("format", std::string("mp4"));
+    if (format != "mp4" && format != "wav" && format != "jpeg")
+      return bad_param("format", "is \"mp4\" (video, the default), \"wav\" (the sound only) or \"jpeg\" (a picture of the frame at \"from\")");
+    // The part to export: "from" (the first frame, default the start) and "to" (where it ends, that frame not drawn, default the end).
+    const Rational frame_rate = *Rational::make(comp.rate_num, comp.rate_den);
+    int64_t first = 0, last = comp.frames;
+    for (const char *key : {"from", "to"}) {
+      if (!params.contains(key) || params[key].is_null())
+        continue;
+      ATM_TRY(RationalTime t, parse_time(params[key], {.rate = frame_rate}));
+      ATM_TRY(int64_t f, to_frames(t, frame_rate, Round::floor));
+      (std::string(key) == "from" ? first : last) = f;
+    }
+    first = std::clamp<int64_t>(first, 0, comp.frames - 1);
+    last = std::clamp<int64_t>(last, first + 1, comp.frames);
+    const char *extension = format == "mp4" ? ".mp4" : format == "wav" ? ".wav" : ".jpg";
     fs::path out_path = fs::absolute(to_path(*output));
-    if (out_path.extension() != ".mp4")
-      out_path += ".mp4";
+    if (format == "jpeg" && out_path.extension() == ".jpeg")
+      out_path.replace_extension(".jpg");
+    if (out_path.extension() != extension)
+      out_path += extension;
     if (!params.value("overwrite", true) && storage::exists(out_path))
       return fail(ErrorCode::OutputExists, "R_EXISTS", "\"" + to_utf8(out_path) + "\" already exists.", {},
                   "Pass \"overwrite\": true or choose another name.");
@@ -1145,9 +1234,14 @@ struct Engine::Impl {
     job->id = new_id("job");
     job->kind = "render.sequence";
     job->output = settings.path;
-    job->units_total.store(comp.frames);
     jobs[job->id] = job;
-    job->thread = std::thread(run_export, job, std::move(comp), settings);
+    if (format != "mp4") {
+      job->units_total.store(1);
+      job->thread = std::thread(run_extract, job, std::move(comp), settings.path, format == "wav", first, last, settings.width, settings.height);
+      return json{{"job_id", job->id}, {"output", job->output}, {"frames", last - first}, {"format", format}};
+    }
+    job->units_total.store(last - first);
+    job->thread = std::thread(run_export, job, std::move(comp), settings, first, last);
     return json{{"job_id", job->id}, {"output", job->output}, {"frames", job->units_total.load()},
                 {"width", settings.width & ~1}, {"height", settings.height & ~1}};
   }
@@ -2826,6 +2920,10 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
        "task_id":{"type":"string"}},
        "required":["project","paths"]})",
      &Impl::media_import},
+    {"fonts.list", "core", false,
+     "The font families a text clip can use (content.font, or font on add_text): the ones installed on this computer, or the bundled ones. A name not in "
+     "the list falls back to the default font.",
+     R"({"type":"object","properties":{}})", &Impl::fonts_list},
     {"skill.list", "skill", false,
      "START HERE for a kind of video you have not made before (a Short, ...): the skills available, built in and the project's own, each "
      "with what it is for. Read one with skill.get; it says which Tools to call in which order and what to ask the user.",
@@ -2895,11 +2993,14 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
        "required":["project"]})",
      &Impl::see_contact_sheet},
     {"render.sequence", "core", false,
-     "Export a sequence to an H.264 + AAC .mp4 as a background job. Returns job_id at once; follow it with jobs.get.",
+     "Export a sequence to an H.264 + AAC .mp4 as a background job (with format wav its sound only, with jpeg one frame as a picture); from and to export only a part. Returns job_id at once; follow it with jobs.get.",
      R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},
        "output":{"type":"string","description":"Absolute path of the .mp4 to write"},
        "height":{"type":"integer","description":"Output height, default the canvas height"},
        "bitrate":{"type":"integer"},"audio":{"type":"boolean"},
+       "format":{"type":"string","enum":["mp4","wav","jpeg"],"description":"mp4 video (the default), wav the sound only, jpeg one frame: the one at from"},
+       "from":{"type":"string","description":"Where the export starts, such as 2.5s or 00:00:02:15; default the start"},
+       "to":{"type":"string","description":"Where the export ends, the frame there not included; default the end"},
        "overwrite":{"type":"boolean","description":"Default true"},"sequence":{"type":"string"}},
        "required":["project","output"]})",
      &Impl::render_sequence},

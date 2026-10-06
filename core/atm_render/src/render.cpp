@@ -516,6 +516,13 @@ Result<Composition> compile(const json &project, std::string_view sequence_id, c
             l.text = content->value("text", "");
             l.text_size = std::clamp(content->value("size", 0.08f), 0.005f, 1.0f);
             l.text_bold = content->value("bold", false);
+            l.text_italic = content->value("italic", false);
+            if (const auto font = content->find("font"); font != content->end() && font->is_string())
+              l.text_font = font->get<std::string>();
+            if (const auto align = content->find("align"); align != content->end() && align->is_string())
+              l.text_align = align->get<std::string>() == "left" ? -1 : align->get<std::string>() == "right" ? 1 : 0;
+            if (const auto spacing = content->find("line_spacing"); spacing != content->end() && spacing->is_number())
+              l.line_spacing = std::clamp(spacing->get<float>(), 0.5f, 3.0f);
             const auto parse_color = [](const std::string &color, uint32_t fallback) {
               return color.size() == 7 && color[0] == '#' ? uint32_t(std::strtoul(color.c_str() + 1, nullptr, 16)) & 0xFFFFFF : fallback;
             };
@@ -1685,10 +1692,17 @@ void Renderer::draw(const Layer &l, int64_t frame, uint8_t *out, bool &cleared, 
     char look[160];
     std::snprintf(look, sizeof look, "|%.3f|%.3f,%.3f,%.3f|%.3f,%.3f", double(l.outline_width), double(l.shadow_x), double(l.shadow_y), double(l.shadow_blur),
                   double(l.box_padding), double(l.box_radius));
-    const std::string key = shown_text + "\x1f" + std::to_string(px_size) + (l.text_bold ? "b" : "n") + std::to_string(width_) + look;
+    const std::string key = shown_text + "\x1f" + std::to_string(px_size) + (l.text_bold ? "b" : "n") + (l.text_italic ? "i" : "u") + std::to_string(l.text_align) + "|" +
+                            l.text_font + "|" + std::to_string(int(std::lround(l.line_spacing * 100.0f))) + std::to_string(width_) + look;
     TextEntry &entry = text_[l.clip_id];
     if (entry.key != key) {
-      auto bitmap = media::render_text(shown_text, float(px_size), l.text_bold, int(float(width_) * 0.9f));
+      media::TextStyle style;
+      style.bold = l.text_bold;
+      style.italic = l.text_italic;
+      style.font = l.text_font;
+      style.align = l.text_align;
+      style.line_spacing = l.line_spacing;
+      auto bitmap = media::render_text(shown_text, float(px_size), style, int(float(width_) * 0.9f));
       if (!bitmap) {
         if (warning_.empty())
           warning_ = bitmap.error().message;

@@ -312,6 +312,7 @@ int main(int argc, char **argv) {
   std::string output;
   int height = 0;
   double bitrate_mbps = 0.0;
+  std::string render_from, render_to, render_format;
   double seconds = 5.0;
 
   auto *cmd_probe = app.add_subcommand("probe", "Size, frame rate and duration of a media file");
@@ -323,8 +324,17 @@ int main(int argc, char **argv) {
   cmd_render->add_option("-o,--output", output, "The .mp4 file to write")->required();
   cmd_render->add_option("--height", height, "Output height in pixels (default: the canvas height)");
   cmd_render->add_option("--bitrate", bitrate_mbps, "Video bitrate in Mbit/s (default: 6 bits per pixel a second, 12.4 for a 1080x1920 Short; 6-8 is plenty for one)");
+  cmd_render->add_option("--from", render_from, "Export only a part: where it starts (2.5s, 00:00:02:15)");
+  cmd_render->add_option("--to", render_to, "Export only a part: where it ends");
+  cmd_render->add_option("--format", render_format, "mp4 (default), wav (the sound only) or jpeg (one picture, at --from)");
   cmd_render->callback([&] {
     json params = {{"project", abs_path(project)}, {"output", abs_path(output)}};
+    if (!render_from.empty())
+      params["from"] = render_from;
+    if (!render_to.empty())
+      params["to"] = render_to;
+    if (!render_format.empty())
+      params["format"] = render_format;
     if (height > 0)
       params["height"] = height;
     if (bitrate_mbps > 0.0)

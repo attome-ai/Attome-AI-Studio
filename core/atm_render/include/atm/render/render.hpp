@@ -71,7 +71,10 @@ struct Layer {
   Transform xf;
   // Text clips (media_ref.type "text"): no file, the picture is the text. `text_size` is the font height as a
   // fraction of the canvas height; the colour is 0xRRGGBB.
-  bool is_text = false, text_bold = false;
+  bool is_text = false, text_bold = false, text_italic = false;
+  std::string text_font;      // content.font: a family name (empty: the default)
+  int text_align = 0;         // content.align: left -1, centre 0, right 1; how the lines of a text sit against each other
+  float line_spacing = 1.0f;  // content.line_spacing: a multiple of the font's own line height
   // Picture clips (media_ref.type "image"): a still file, the same on every frame, with its transparency.
   bool is_image = false;
   std::string text;

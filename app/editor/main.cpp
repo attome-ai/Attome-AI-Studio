@@ -203,6 +203,7 @@ int main(int argc, char **argv) {
     bool selftest_playing = false;
 
     auto last = std::chrono::steady_clock::now();
+    float last_scale = 1.0f; // the size the last frame was drawn at: the pointer's position is scaled by it
     int awake = 4; // frames to draw before the loop may sleep again
     bool running = true;
     while (running && !app.wants_quit()) {
@@ -210,8 +211,28 @@ int main(int argc, char **argv) {
       // Nothing moving: wait for input instead of redrawing. The timeout keeps the polls of the daemon alive.
       bool have = (awake > 0 || app.busy()) ? SDL_PollEvent(&event) : SDL_WaitEventTimeout(&event, 100);
       while (have) {
-        if (!driver || atm::editor::UiDriver::passes(event))
-          ImGui_ImplSDL3_ProcessEvent(&event);
+        if (!driver || atm::editor::UiDriver::passes(event)) {
+          SDL_Event scaled = event; // the UI is drawn ui_scale times larger: the pointer's window position is in layout points
+          const float k = last_scale;
+          if (k != 1.0f) {
+            if (scaled.type == SDL_EVENT_MOUSE_MOTION) {
+              scaled.motion.x /= k;
+              scaled.motion.y /= k;
+              scaled.motion.xrel /= k;
+              scaled.motion.yrel /= k;
+            } else if (scaled.type == SDL_EVENT_MOUSE_BUTTON_DOWN || scaled.type == SDL_EVENT_MOUSE_BUTTON_UP) {
+              scaled.button.x /= k;
+              scaled.button.y /= k;
+            } else if (scaled.type == SDL_EVENT_MOUSE_WHEEL) {
+              scaled.wheel.mouse_x /= k;
+              scaled.wheel.mouse_y /= k;
+            } else if (scaled.type == SDL_EVENT_DROP_FILE || scaled.type == SDL_EVENT_DROP_POSITION) {
+              scaled.drop.x /= k;
+              scaled.drop.y /= k;
+            }
+          }
+          ImGui_ImplSDL3_ProcessEvent(&scaled);
+        }
         if (event.type == SDL_EVENT_QUIT ||
             (event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED && event.window.windowID == SDL_GetWindowID(window)))
           running = false;
@@ -243,6 +264,20 @@ int main(int argc, char **argv) {
       ATM_PROFILE_FRAME();
       ImGui_ImplSDLRenderer3_NewFrame();
       ImGui_ImplSDL3_NewFrame();
+      const float k = app.apply_ui_scale(io.DisplaySize.x, io.DisplaySize.y); // what was asked for, held back in a window too small for it
+      last_scale = k;
+      float render_scale = 1.0f; // SDL draws the layout points larger; the font atlas is made at that density, so the text stays sharp
+      if (k != 1.0f) {
+        render_scale = k * io.DisplayFramebufferScale.x;
+        io.DisplaySize = ImVec2(io.DisplaySize.x / k, io.DisplaySize.y / k);
+        io.DisplayFramebufferScale = ImVec2(io.DisplayFramebufferScale.x * k, io.DisplayFramebufferScale.y * k);
+      }
+      // The backend also reads the mouse from the OS every frame, in unscaled window points: say where the pointer is in layout points last.
+      if (k != 1.0f && !driver && SDL_GetMouseFocus() == window) {
+        float mx = 0.0f, my = 0.0f;
+        SDL_GetMouseState(&mx, &my);
+        io.AddMousePosEvent(mx / k, my / k);
+      }
       if (driver) {
         driver->before_frame();
         if (driver->done())
@@ -255,7 +290,9 @@ int main(int argc, char **argv) {
         ATM_PROFILE_SCOPE("ui.present");
         SDL_SetRenderDrawColor(renderer, 13, 15, 21, 255);
         SDL_RenderClear(renderer);
+        SDL_SetRenderScale(renderer, render_scale, render_scale);
         ImGui_ImplSDLRenderer3_RenderDrawData(ImGui::GetDrawData(), renderer);
+        SDL_SetRenderScale(renderer, 1.0f, 1.0f);
         if (driver)
           driver->after_render(renderer);
         SDL_RenderPresent(renderer);

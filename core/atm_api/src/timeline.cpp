@@ -493,6 +493,9 @@ private:
     for (const char *k : {"scale", "rotation", "anchor", "crop"})
       if (op_.contains(k))
         value["transform"][k] = op_[k];
+    for (const char *k : {"font", "italic", "align", "line_spacing", "outline", "shadow", "background"}) // how the text is drawn
+      if (op_.contains(k))
+        value["content"][k] = op_[k];
     ATM_TRY(json keys, fade_keys(duration, op_.value("opacity", 1.0)));
     if (!keys.is_null())
       value["transform"]["keyframes"]["opacity"] = std::move(keys);
@@ -636,6 +639,9 @@ private:
         ++flat;
       }
       json content = {{"text", full}, {"size", size}, {"color", color}, {"bold", true}, {"words", std::move(words)}, {"word_pop", 0.6}};
+      for (const char *k : {"font", "italic"}) // a caption is one line: the family and the slant; its look comes from "style"
+        if (op_.contains(k))
+          content[k] = op_[k];
       if (style == "pop") {
         content["outline"] = {{"color", "#000000"}, {"width", 0.1}};
         content["shadow"] = {{"color", "#000000"}, {"x", 0.06}, {"y", 0.07}, {"blur", 0.05}, {"opacity", 0.5}};

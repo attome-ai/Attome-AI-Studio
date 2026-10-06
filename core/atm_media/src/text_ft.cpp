@@ -260,8 +260,15 @@ void layout_paragraph(const std::u32string &p, FT_Face *faces, bool bold, float 
 
 } // namespace
 
-Result<TextBitmap> render_text(const std::string &utf8, float size_px, bool bold, int max_width) {
+const std::vector<std::string> &list_fonts() {
+  static const std::vector<std::string> names = {"Noto Sans"}; // the fonts that come with Attome
+  return names;
+}
+
+Result<TextBitmap> render_text(const std::string &utf8, float size_px, const TextStyle &style, int max_width) {
   ATM_PROFILE_SCOPE("text.raster");
+  const bool bold = style.bold; // one family is bundled: the font name is not used here
+  const int align = std::clamp(style.align, -1, 1);
   static std::mutex mutex; // the faces are shared and FreeType faces are not thread-safe
   const std::lock_guard<std::mutex> hold(mutex);
   Fonts &f = fonts();
@@ -301,7 +308,7 @@ Result<TextBitmap> render_text(const std::string &utf8, float size_px, bool bold
     descent = std::max(descent, d);
     gap = std::max(gap, float(m.height) / 64.0f - a - d);
   }
-  const float line_h = ascent + descent + gap;
+  const float line_h = (ascent + descent + gap) * std::clamp(style.line_spacing, 0.5f, 3.0f);
   float widest = 0.0f;
   for (const Line &l : lines)
     widest = std::max(widest, l.width);
@@ -318,15 +325,16 @@ Result<TextBitmap> render_text(const std::string &utf8, float size_px, bool bold
   out.alpha.assign(size_t(w) * size_t(h), 0);
   for (size_t li = 0; li < lines.size(); ++li) {
     const Line &line = lines[li];
-    const float left = float(pad) + (widest - line.width) * 0.5f;
-    const float baseline = float(pad) + line_h * float(li) + ascent;
+    const float left = float(pad) + (align < 0 ? 0.0f : align > 0 ? widest - line.width : (widest - line.width) * 0.5f);
+    const float baseline = float(pad) + line_h * float(li) + ascent + (line_h - (ascent + descent + gap)) * 0.5f;
     for (const Glyph &g : line.glyphs) {
       // Whole pixels place the bitmap; the fraction goes to FreeType so glyphs sit at their exact positions.
       const float gx = left + g.x, gy = baseline - g.y;
       const float ix = std::floor(gx), iy = std::floor(gy);
       FT_Vector delta{FT_Pos(std::lround((gx - ix) * 64.0f)), -FT_Pos(std::lround((gy - iy) * 64.0f))};
       FT_Face face = f.faces[g.face];
-      FT_Set_Transform(face, nullptr, &delta);
+      FT_Matrix slant{0x10000, 0x3000, 0, 0x10000}; // italic: leaned by about 11 degrees
+      FT_Set_Transform(face, style.italic ? &slant : nullptr, &delta);
       if (FT_Load_Glyph(face, g.id, FT_LOAD_NO_HINTING | FT_LOAD_NO_BITMAP) != 0 ||
           FT_Render_Glyph(face->glyph, FT_RENDER_MODE_NORMAL) != 0)
         continue;

@@ -289,16 +289,19 @@ void UiDriver::before_frame() {
         fail(c.line, "unknown key \"" + arg(1) + "\"");
         return;
       }
-      bool ctrl = false, shift = false;
+      bool ctrl = false, shift = false, alt = false;
       for (size_t i = 2; i < c.words.size(); ++i) {
         ctrl = ctrl || c.words[i] == "ctrl";
         shift = shift || c.words[i] == "shift";
+        alt = alt || c.words[i] == "alt";
       }
       d.frames.push_back([=](ImGuiIO &in) {
         if (ctrl)
           in.AddKeyEvent(ImGuiMod_Ctrl, true);
         if (shift)
           in.AddKeyEvent(ImGuiMod_Shift, true);
+        if (alt)
+          in.AddKeyEvent(ImGuiMod_Alt, true);
         in.AddKeyEvent(*key, true);
       });
       d.frames.push_back([=](ImGuiIO &in) {
@@ -307,6 +310,8 @@ void UiDriver::before_frame() {
           in.AddKeyEvent(ImGuiMod_Ctrl, false);
         if (shift)
           in.AddKeyEvent(ImGuiMod_Shift, false);
+        if (alt)
+          in.AddKeyEvent(ImGuiMod_Alt, false);
       });
       d.frames.push_back([](ImGuiIO &) {});
       d.frames.push_back([](ImGuiIO &) {});
