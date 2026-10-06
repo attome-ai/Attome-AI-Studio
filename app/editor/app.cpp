@@ -2417,7 +2417,7 @@ void App::build_layout(unsigned dock_id) {
   ImGui::DockBuilderSetNodeSize(dock_id, ImGui::GetMainViewport()->WorkSize);
   ImGuiID top = 0, bottom = 0, left = 0, rest = 0, right = 0, center = 0;
   ImGui::DockBuilderSplitNode(dock_id, ImGuiDir_Down, 0.40f, &bottom, &top);
-  ImGui::DockBuilderSplitNode(top, ImGuiDir_Left, 0.19f, &left, &rest);
+  ImGui::DockBuilderSplitNode(top, ImGuiDir_Left, 0.23f, &left, &rest);
   ImGui::DockBuilderSplitNode(rest, ImGuiDir_Right, 0.22f, &right, &center);
   ImGui::DockBuilderDockWindow("Media", left);
   ImGui::DockBuilderDockWindow("Monitor", center);

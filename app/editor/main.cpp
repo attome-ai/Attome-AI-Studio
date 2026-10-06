@@ -96,7 +96,7 @@ void apply_theme() {
   style.FramePadding = ImVec2(10.0f, 6.0f);
   style.ItemSpacing = ImVec2(8.0f, 7.0f);
   style.ScrollbarSize = 12.0f;
-  style.DockingSeparatorSize = 4.0f;
+  style.DockingSeparatorSize = 5.0f; // wide enough to find and grab
   style.WindowMenuButtonPosition = ImGuiDir_Right; // the dock arrow sits at the far right of a panel tab bar
   ImVec4 *c = style.Colors;
   c[ImGuiCol_Text] = rgb(0xeceff6);
@@ -123,7 +123,7 @@ void apply_theme() {
   c[ImGuiCol_Header] = rgb(0x232a39);
   c[ImGuiCol_HeaderHovered] = rgb(0x2b3347);
   c[ImGuiCol_HeaderActive] = rgb(0x333c50);
-  c[ImGuiCol_Separator] = rgb(0x0d0f15);
+  c[ImGuiCol_Separator] = rgb(0x2b3347); // a visible line between panels: it is the handle that resizes them
   c[ImGuiCol_SeparatorHovered] = rgb(0xff7a3d, 0.8f);
   c[ImGuiCol_SeparatorActive] = rgb(0xff7a3d);
   c[ImGuiCol_Tab] = rgb(0x141821);
@@ -177,7 +177,7 @@ int main(int argc, char **argv) {
     if (pref_dir.back() != '\\' && pref_dir.back() != '/')
       pref_dir += '\\';
   }
-  const std::string ini = pref_dir + "layout_v6.ini";
+  const std::string ini = pref_dir + "layout_v7.ini";
 
   IMGUI_CHECKVERSION();
   ImGui::CreateContext();
