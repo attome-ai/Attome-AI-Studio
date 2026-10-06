@@ -1325,17 +1325,20 @@ private:
         return *Rational::make(std::llround(v * 1e6), 1000000);
       };
       const Span s = span_of(node);
-      const Span after = {s.in, scaled(s.duration), scaled(s.source_in)};
-      if (after.duration.num() <= 0)
-        return fail("E_PARAM", "Clip " + mid + " would be empty at that speed.");
-      // The file must still cover it: its length as played at the new speed.
+      Span after = {s.in, scaled(s.duration), scaled(s.source_in)};
+      // The same part of the file is played, so it always fits; the rounding of the new times to a millionth of a second can still put
+      // the end a hair past the file's (a clip that runs to the end of its file): then it ends with the file.
       const json ref = node.value("media_ref", json::object());
       if (ref.value("type", "") == "file")
         if (const auto total = Rational::parse(ref.value("duration", std::string())); total && total->num() > 0) {
           const Rational played = *Rational::make(std::llround(std::floor(total->to_seconds_lossy() / speed * 1e6)), 1000000);
+          if (compare(after.source_in, played) >= 0)
+            after.source_in = minus(played, *Rational::make(1, 1000));
           if (compare(plus(after.source_in, after.duration), played) > 0)
-            return fail("E_MEDIA_RANGE", "At that speed clip " + mid + " would run past the end of its file.", "Trim it first, or use a higher speed.");
+            after.duration = minus(played, after.source_in);
         }
+      if (after.duration.num() <= 0)
+        return fail("E_PARAM", "Clip " + mid + " would be empty at that speed.");
       if (std::fabs(speed - 1.0) < 1e-9)
         push({{"op", "remove"}, {"path", mid + "/timing/speed"}});
       else

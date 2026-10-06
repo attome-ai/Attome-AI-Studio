@@ -336,6 +336,13 @@ TEST_CASE("timeline.edit: set_speed plays a clip and its sound faster or slower,
   CHECK_FALSE(f.get(a)["timing"].contains("speed"));
   CHECK(f.get(a)["timing"]["duration"] == "2");
   CHECK(f.fail_rule(json::array({{{"op", "set_speed"}, {"clip", a}, {"speed", 20}}})) == "E_PARAM");
+
+  // A clip that plays its file to the very end takes any speed, many times over (the rounding of its times never refuses one).
+  const json whole = f.ok(json::array({{{"op", "add_clip"}, {"id", "$new:w"}, {"path", file}}}));
+  const std::string w = whole["id_map"]["$new:w"];
+  for (const double sp : {0.62, 1.37, 0.33, 2.71, 0.1, 9.9, 1.0, 0.75, 1.25})
+    f.ok(json::array({{{"op", "set_speed"}, {"clip", w}, {"speed", sp}}}));
+  CHECK(f.engine.call("project.validate", {{"project", f.project}})->at("ok") == true);
   CHECK(f.engine.call("project.validate", {{"project", f.project}})->at("ok") == true);
 }
 
