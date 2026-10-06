@@ -933,6 +933,16 @@ TEST_CASE("generate: speech: a Voice clip goes on an audio track, is as long as 
   CHECK(mock->speeches == 2);
   CHECK(ok(engine, "gen.run", {{"project", project}, {"clips", json::array({first["clip"]})}, {"dry_run", true}})["steps_cached"] == 2);
   CHECK(ok(engine, "project.validate", {{"project", project}})["ok"] == true);
+
+  // A model with ready-made voices: the Voice input is a choice (options and a default), not a text to type.
+  const json choir = ok(engine, "gen.create_clip", {{"project", project}, {"prompt", "Hello there."}, {"model", atm::api::kMockChoir}, {"at", "60@1"}});
+  const json choir_in = get(choir["clip"])["media_ref"]["workflow"]["exposed"]["inputs"]["voice"];
+  REQUIRE(choir_in.contains("range"));
+  CHECK(choir_in["range"]["options"] == json::array({"ada", "bo", "cy"}));
+  CHECK(choir_in["default"] == "bo");
+  CHECK_FALSE(get(first["clip"])["media_ref"]["workflow"]["exposed"]["inputs"]["voice"].contains("range")); // a voice by description stays text
+  ok(engine, "project.patch", {{"project", project}, {"patch", {{"ops", json::array({{{"op", "add"}, {"path", choir["clip"].get<std::string>() + "/media_ref/inputs/voice"}, {"value", "cy"}}})}}}});
+  CHECK(ok(engine, "project.validate", {{"project", project}})["ok"] == true);
   std::error_code ec;
   fs::remove_all(dir, ec);
 }

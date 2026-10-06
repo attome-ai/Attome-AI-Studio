@@ -4,6 +4,7 @@
 
 #include <array>
 #include <cstdint>
+#include <cstdlib>
 #include <functional>
 #include <map>
 #include <mutex>
@@ -43,6 +44,7 @@ struct EffectUi { // one effect of a clip or adjustment layer: its ID, the eval:
 
 struct ClipUi {
   std::string id, name, path;
+  std::string media_path; // the file its picture or sound comes from: the media file, or the selected Take's output; "" for text and effects
   int64_t start = 0, frames = 0; // in sequence frames
   int64_t start_floor = 0;       // the exact start rounded down: the last frame at which another clip may end before it
   int64_t end_ceil = 0;          // the exact end rounded up: the first frame at which another clip may start without overlapping
@@ -88,7 +90,9 @@ struct TrackUi {
   std::string id, name, kind;
   std::vector<ClipUi> clips;
   std::vector<TransitionUi> transitions;
-  bool sync = false; // locked to the cut ("sync_lock"): its clips follow when time is taken out of another track
+  bool sync = false; // follows the cut ("sync_lock"): its clips follow when time is taken out of another track
+  bool locked = false;                           // the editor does not change its clips
+  bool muted = false, hidden = false, solo = false; // no sound; no picture; only the solo tracks are heard
 };
 
 class App {
@@ -113,9 +117,26 @@ private:
   bool patch(json ops, const char *label, json *id_map = nullptr);
   bool timeline_edit(json ops, const char *label); // timeline.edit: high-level ops, one undoable step
   void set_track_lock(const std::string &track_id, bool locked); // the track's sync_lock, an undoable edit
+  void set_track_flag(const std::string &track_id, const char *flag, bool on, const char *label); // locked, muted, hidden or solo
+  const TrackUi *track_of(const std::string &clip_id) const;
   void refresh();
   void poll(double now);
-  void say(std::string text, bool error = false);
+  void save_project();
+  void note_save_state(const json &history); // "unsaved" and "save_error" of history.list
+  // What the app says about what it did: a toast at the bottom of the window, with Undo when the edit can be undone.
+  void say(std::string text, bool error = false, bool undo = false);
+  struct Toast {
+    std::string text;
+    bool error = false, undo = false;
+    double born = 0.0;
+  };
+  std::vector<Toast> toasts_;
+  void draw_toasts();
+  bool unsaved_ = false;       // edits the daemon has not written to project.json yet
+  std::string save_error_;     // why the last automatic save failed
+  std::string saved_at_;       // "14:02": when the project was last seen saved
+  std::string selected_media_; // the card clicked in the Media panel (a click selects; two clicks or "+" add it)
+  std::string reveal_clip_;    // a clip to scroll the timeline to (a new one)
 
   // actions
   // `track` and `at` (frames) place a single file where a card was dropped; without them the engine picks the place.
@@ -127,6 +148,7 @@ private:
   void add_adjustment(const eval::EffectDef &def, const std::string &file = {}, const std::string &track = {}, int64_t at = -1);
   void add_clip_effect(const std::string &clip_id, const eval::EffectDef &def); // an effect on one clip alone
   void draw_effects_panel();
+  void add_transition_at(const std::string &from, const std::string &to, const std::string &kind); // a transition on a cut: "dissolve", "wipe", "push", "slide", "iris", "zoom_in", "zoom_out"
   void draw_effect_card(const ClipUi &clip, const eval::EffectDef &def, bool show_amount);
   void draw_effect_cards(const ClipUi &clip);
   // Keyframes of effect parameters: the value at the playhead, and the edits that write a key there.
@@ -141,6 +163,7 @@ private:
   void toggle_effect_key(const std::string &fx_id, size_t param);
   void jump_effect_key(const ClipUi &clip, const EffectUi &fx, bool forward);
   void draw_text_panel();
+  void draw_text_style(const ClipUi &clip); // the Text card's style rows: ready-made looks, outline, shadow, box
   // Workflows mode: the node graph of a Clip Workflow (see the end of app.cpp).
   void open_workflow(const std::string &target); // a clip's own workflow (a clip ID), or an entry of the library (a cwf ID)
   const json *workflow_json() const;             // the open workflow, or null
@@ -169,14 +192,34 @@ private:
   void draw_presets_card();                                           // every Preset of the project, with a way to take one away
   void draw_generate_card(const ClipUi &clip); // a generative clip: why it cannot run here, and the download that fixes it
   void delete_selected();
+  bool is_picked(const std::string &clip_id) const { return clip_id == selected_clip_ || picked_.count(clip_id) > 0; }
+  std::vector<const ClipUi *> picked_clips() const;   // the selected clips, with the clips linked to them
+  void select_clips(const std::vector<std::string> &ids, bool extend);
+  void copy_picked(bool cut);
+  void paste_clips(int64_t at, const std::string &first_track = {});
+  void duplicate_picked();
+  void select_all_clips();
+  void draw_clip_menu(const ClipUi &clip);
+  void draw_timeline_menu();
   void split_at_playhead();
   void history_step(bool undo);
   void start_export(const std::string &path);
+  // The Export sheet: where to save, the size, the quality (with the file size it comes to), the sound. Opens from the Export
+  // button and Ctrl+E; "Export" there starts the render and the same window shows its progress.
+  bool export_sheet_ = false;
+  int exp_res_ = 2, exp_quality_ = 1;        // the chosen resolution (see draw_export) and quality: 0 small, 1 standard, 2 high
+  bool exp_sound_ = true;
+  char exp_path_[512] = {};
+  void load_export_choices();
+  void save_export_choices();
+  void export_size(int res, int &w, int &h) const;   // the picture size a resolution gives for this project's canvas
+  int64_t export_bitrate() const;
   void ask_import();
   // Asks for a .cube file. `target` is "" (a new adjustment layer), a clip ID (add the LUT to that clip) or an effect ID
   // (change the file of that LUT).
   void ask_lut(const std::string &target);
   void ask_export();
+  void ask_export_path(); // the system's Save window, for the path in the Export sheet
   void ask_project();
   // Asks for a folder for the model store. `purpose` is "locate" (the folder already holds model files; `model` is the
   // one being looked for, or "" for any) or "move" (downloads go there from now on).
@@ -230,12 +273,17 @@ private:
   void draw_media();
   void jump_cut(bool forward);
   void draw_welcome();
+  void note_recent(const std::string &path);          // the project goes to the top of the recent list
+  void create_project(const std::string &name, int shape, int rate);
   void draw_viewer();
   void draw_timeline();
   void draw_inspector();
   void draw_history();
   void draw_profiler();
   void draw_export();
+  bool open_project_has_clips() const;
+  void draw_shortcuts_sheet();  // Help > Keyboard shortcuts (F1)
+  void draw_monitor_full();     // the picture over the whole window (Ctrl+F; Esc leaves)
   void build_layout(unsigned dock_id);
   void shortcuts();
 
@@ -264,10 +312,33 @@ private:
 
   // ui
   std::string selected_clip_, selected_track_;
+  std::set<std::string> picked_;      // every selected clip when there are several (it includes selected_clip_); empty for one or none
+  struct Snap { // a clip as Copy took it
+    json clip;
+    std::string track;
+    bool audio = false;
+    int64_t start = 0, frames = 0;
+  };
+  std::vector<Snap> clipboard_;
+  bool box_active_ = false, box_extend_ = false;      // a box dragged on the empty timeline to select with
+  ImVec2 box_from_{};
+  int64_t menu_frame_ = 0;                            // the frame under the pointer when a timeline menu was opened
+  std::string menu_track_;                            // and the track
+  bool drag_extend_ = false;                          // the press that started this drag held Ctrl or Shift
   int64_t playhead_ = 0;
   bool playing_ = false;
   double play_accum_ = 0.0;
   float pps_ = 90.0f; // pixels per second
+  std::vector<std::string> recent_;      // recent projects, newest first
+  char new_name_[128] = "My Short";       // the welcome page's new project: its name, shape (0 9:16, 1 16:9, 2 1:1) and frame rate (0 24, 1 30, 2 60)
+  int new_shape_ = 0, new_rate_ = 1;
+  bool shortcuts_open_ = false;          // the Keyboard shortcuts sheet
+  int safe_mode_ = 0;                    // the Monitor's guides: 0 off, 1 Shorts / Reels / TikTok, 2 title safe
+  bool loop_ = false;                    // playback starts again at the end
+  bool mon_full_ = false;                // the picture fills the window
+  ImVec2 mon_pic_min_{}, mon_pic_max_{}; // where the Monitor drew the picture last (for the full-window view)
+  bool fit_pending_ = std::getenv("ATTOME_EDITOR_SCRIPT") == nullptr; // show the whole film in the timeline on open and on "Fit" (a UI test script keeps 90 px a second until it asks)
+  float track_h_ = 44.0f;     // height of a track in the timeline
   std::string status_;
   bool status_error_ = false;
   double frame_ms_ = 0.0; // time the last frame spent building the UI (the loop sleeps when idle)
@@ -326,6 +397,8 @@ private:
   ImVec2 wf_pan_ = ImVec2(60.0f, 50.0f), wf_view_ = ImVec2(800.0f, 600.0f); // where the graph is looked at; the canvas size
   float wf_zoom_ = 1.0f;               // how large the graph is drawn
   bool wf_fit_ = true;                 // keep the whole graph in view, until the user pans or zooms
+  int wf_nodes_total_ = 0;             // nodes in the open workflow, last frame (the mini-map shows from a size on)
+  bool wf_fit_all_ = std::getenv("ATTOME_EDITOR_SCRIPT") != nullptr && std::getenv("ATTOME_UI_READABLE_FIT") == nullptr;            // "Fit" was pressed: the whole graph even when it is small there (else not below 75 %, where text can be read)
   std::map<std::string, ImVec2> wf_moved_; // nodes being dragged: where they are until the move is saved
   // A connection being dragged on the graph: the dot that is held (a source gives a value, a sink takes one; `where` is
   // 0 for a node's port, 1 for a named row of the clip's side, 2 for the clip side's "new" row) and what was picked up
@@ -367,6 +440,12 @@ private:
   // media panel
   Thumbs thumbs_;
   std::map<std::string, SDL_Texture *> thumb_tex_;
+  struct StripInfo {
+    SDL_Texture *tex = nullptr;
+    int frame_w = 0, frame_h = 0, count = 0;
+  };
+  std::map<std::string, StripInfo> strips_;            // frames across a picture file, by path (the filmstrip of a clip)
+  std::map<std::string, std::vector<float>> peaks_;    // the waveform of a sound file, by path: a value per 20 ms
   std::vector<std::string> media_paths_;
   std::set<std::string> opened_cards_; // "<clip id>:fade" and "<clip id>:transition": cards the user added before anything is set
   std::set<std::string> audio_only_; // media files without a picture
@@ -383,6 +462,7 @@ private:
   float gain_db_ = 0.0f, pan_ = 0.0f, audio_fade_in_s_ = 0.0f, audio_fade_out_s_ = 0.0f;
   float amount_ = 1.0f;                    // an adjustment layer's opacity: how much of its effect shows
   std::map<std::string, float> fx_edit_;   // effect sliders being dragged, by "<effect id>/<param>"
+  std::string fx_edit_active_;             // the slider of fx_edit_ that is being dragged
   int wipe_dir_ = 0;                       // the side a new wipe or push enters from (eval::WipeDirection)
   float zoom_amount_ = float(eval::kZoomDefault); // how much bigger a new zoom grows the picture
 

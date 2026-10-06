@@ -432,6 +432,108 @@ TEST_CASE("render: text clips draw in a colour, move and scale, and shape Arabic
   }
 }
 
+TEST_CASE("render: a text can have an outline, a shadow and a box behind it, drawn from the clip's content", "[media]") {
+  // One layer of text on black, 320 x 240, with the look given as the clip's "content" does.
+  const auto draw = [&](const json &look) {
+    json clip = {{"timing", {{"record_in", "0"}, {"duration", "1"}, {"source_in", "0"}}},
+                 {"media_ref", {{"type", "text"}}},
+                 {"content", {{"text", "HI"}, {"size", 0.25}, {"color", "#ff0000"}, {"bold", true}}}};
+    for (auto it = look.begin(); it != look.end(); ++it)
+      clip["content"][it.key()] = *it;
+    json track = {{"kind", "video"}, {"clips", {{"clp_t", clip}}}};
+    const json doc = {{"sequences", {{"seq_1", {{"rate", "30"}, {"canvas", {{"width", 320}, {"height", 240}}}, {"track_order", {"trk_v"}}, {"tracks", {{"trk_v", track}}}}}}},
+                      {"sequence_order", {"seq_1"}}};
+    auto comp = atm::render::compile(doc);
+    REQUIRE(comp);
+    REQUIRE(comp->layers.size() == 1);
+    atm::render::Renderer renderer(*comp, 320, 240);
+    std::vector<uint8_t> nv12(media::nv12_size(320, 240)), rgb(320 * 240 * 4);
+    REQUIRE(renderer.render(0, nv12.data()));
+    media::nv12_to_bgrx(nv12.data(), 320, 240, rgb.data());
+    return rgb;
+  };
+  // Pixels that are not black, and pixels that are red (the text), and pixels that are white (an outline here).
+  const auto count = [](const std::vector<uint8_t> &rgb, const auto &test) {
+    int n = 0;
+    for (size_t i = 0; i < rgb.size(); i += 4)
+      n += test(rgb[i + 2], rgb[i + 1], rgb[i]) ? 1 : 0;
+    return n;
+  };
+  const auto lit = [](int r, int g, int b) { return r + g + b > 60; };
+  const auto red = [](int r, int g, int b) { return r > 150 && g < 80 && b < 80; };
+  const auto white = [](int r, int g, int b) { return r > 200 && g > 200 && b > 200; };
+  const auto grey = [](int r, int g, int b) { return r > 30 && r < 140 && std::abs(r - g) < 14 && std::abs(g - b) < 14; };
+
+  const auto plain = draw(json::object());
+  const int plain_lit = count(plain, lit), plain_red = count(plain, red);
+  CHECK(plain_red > 400);
+  CHECK(count(plain, white) == 0);
+
+  const auto outlined = draw({{"outline", {{"color", "#ffffff"}, {"width", 0.12}}}});
+  CHECK(count(outlined, white) > 200);                       // an outline of its own colour
+  CHECK(count(outlined, red) > plain_red * 8 / 10);          // the text is still drawn over it
+  CHECK(count(outlined, lit) > plain_lit + 300);             // and it is bigger than the text alone
+
+  const auto shadowed = draw({{"shadow", {{"color", "#ffffff"}, {"x", 0.1}, {"y", 0.1}, {"blur", 0.0}, {"opacity", 0.5}}}});
+  CHECK(count(shadowed, grey) > 150);                        // a half-strength copy, shifted
+  CHECK(count(shadowed, lit) > plain_lit + 150);
+  const auto no_shadow = draw({{"shadow", {{"color", "#ffffff"}, {"x", 0.1}, {"y", 0.1}, {"opacity", 0.0}}}});
+  CHECK(count(no_shadow, lit) == plain_lit);                 // opacity 0: no shadow, whatever else is set
+
+  const auto boxed = draw({{"background", {{"color", "#ffffff"}, {"opacity", 1.0}, {"padding", 0.3}, {"radius", 0.3}}}});
+  CHECK(count(boxed, white) > plain_lit * 2);                // a white box far bigger than the letters
+  CHECK(count(boxed, red) > plain_red * 8 / 10);             // with the red text on it
+
+  // The look is part of the picture's cache: changing it changes the picture, and a repeat gives the same one.
+  CHECK(draw({{"outline", {{"color", "#ffffff"}, {"width", 0.12}}}}) == outlined);
+  CHECK(draw({{"outline", {{"color", "#ffffff"}, {"width", 0.05}}}}) != outlined);
+}
+
+TEST_CASE("render: captions show one word at a time, from its start until the next, popping in", "[media]") {
+  // Words "ONE" at 0 s, "TWO" at 1 s, "THREE" at 2 s, in a clip from 0 s to 3 s on a 30 fps sequence, 320 x 240.
+  json clip = {{"timing", {{"record_in", "0"}, {"duration", "3"}, {"source_in", "0"}}},
+               {"media_ref", {{"type", "text"}}},
+               {"content", {{"text", "ONE TWO THREE"}, {"size", 0.2}, {"color", "#ffffff"}, {"bold", true}, {"word_pop", 1.0},
+                            {"words", json::array({{{"text", "ONE"}, {"at", "0"}}, {{"text", "TWO"}, {"at", "1"}, {"color", "#ff0000"}}, {{"text", "THREE"}, {"at", "2"}}})}}}};
+  json track = {{"kind", "video"}, {"clips", {{"clp_c", clip}}}};
+  const json doc = {{"sequences", {{"seq_1", {{"rate", "30"}, {"canvas", {{"width", 320}, {"height", 240}}}, {"track_order", {"trk_v"}}, {"tracks", {{"trk_v", track}}}}}}},
+                    {"sequence_order", {"seq_1"}}};
+  auto comp = atm::render::compile(doc);
+  REQUIRE(comp);
+  REQUIRE(comp->layers.size() == 1);
+  CHECK(comp->layers[0].words.size() == 3);
+  atm::render::Renderer renderer(*comp, 320, 240);
+  const auto frame = [&](int n) {
+    std::vector<uint8_t> nv12(media::nv12_size(320, 240)), rgb(320 * 240 * 4);
+    REQUIRE(renderer.render(n, nv12.data()));
+    media::nv12_to_bgrx(nv12.data(), 320, 240, rgb.data());
+    return rgb;
+  };
+  const auto lit = [](const std::vector<uint8_t> &rgb) {
+    int n = 0;
+    for (size_t i = 0; i < rgb.size(); i += 4)
+      n += int(rgb[i]) + int(rgb[i + 1]) + int(rgb[i + 2]) > 200 ? 1 : 0;
+    return n;
+  };
+  const auto red = [](const std::vector<uint8_t> &rgb) {
+    int n = 0;
+    for (size_t i = 0; i < rgb.size(); i += 4)
+      n += rgb[i + 2] > 150 && rgb[i + 1] < 80 && rgb[i] < 80 ? 1 : 0;
+    return n;
+  };
+  const auto one = frame(20), two = frame(50), three = frame(80);   // late in each word's time
+  CHECK(lit(one) > 300);
+  CHECK(red(one) == 0);                                              // "ONE" in the text's colour
+  CHECK(red(two) > 300);                                             // "TWO" in its own colour
+  CHECK(red(three) == 0);
+  CHECK(frame(20) == one);                                           // the same frame is the same picture
+  CHECK(one != two);
+  CHECK(lit(three) > lit(one));                                      // "THREE" is longer than "ONE": more pixels
+  // Popping: the word starts smaller and is full size five frames in.
+  CHECK(lit(frame(30)) < lit(frame(36)) * 9 / 10);                   // frame 30 is the first of "TWO"
+  CHECK(lit(frame(36)) > 0);
+}
+
 namespace {
 
 // A clip of one colour (0xRRGGBB) with a sine tone, `seconds` long at 30 fps.
@@ -733,6 +835,51 @@ TEST_CASE("render: a sound file on an audio track, with gain in dB, pan, fades a
   CHECK(channel_rms(faded, 0, 3.95, 4.0) < 0.1 * level);              // ends in silence
   const auto linear = mix_with({{"fade_out", "2"}, {"fade_curve", "linear"}}, json::object());
   CHECK(channel_rms(linear, 0, 2.9, 3.1) / level < 0.56);             // linear: 0.5 half way
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}
+
+TEST_CASE("render: a muted track is silent, solo tracks silence the others, a hidden track shows no picture; the film keeps its length", "[media]") {
+  const fs::path dir = fs::temp_directory_path() / atm::new_id("attome-switches");
+  fs::create_directories(dir);
+  const std::string music = (dir / "music.wav").string();
+  write_wav(music, 4.0);
+  const auto track = [&](json extra) {
+    json t = {{"kind", "audio"},
+              {"clips", {{"clp_m", {{"timing", {{"record_in", "0"}, {"duration", "4"}, {"source_in", "0"}}}, {"media_ref", {{"type", "file"}, {"path", music}}}}}}}};
+    t.update(extra);
+    return t;
+  };
+  // Two sound tracks with the same file; `a` and `b` are extra fields of the two tracks.
+  const auto mix_of = [&](json a, json b) {
+    const json doc = {{"sequences", {{"seq_1", {{"rate", "30"}, {"track_order", {"trk_a", "trk_b"}}, {"tracks", {{"trk_a", track(a)}, {"trk_b", track(b)}}}}}}},
+                      {"sequence_order", {"seq_1"}}};
+    auto comp = atm::render::compile(doc);
+    REQUIRE(comp);
+    CHECK(comp->frames == 120); // a muted track still gives the film its length
+    auto mixed = atm::render::mix_audio(*comp);
+    REQUIRE(mixed);
+    return *mixed;
+  };
+  const double both = channel_rms(mix_of(json::object(), json::object()), 0, 1.0, 3.0);
+  CHECK(both > 0.3);
+  const double one = channel_rms(mix_of({{"muted", true}}, json::object()), 0, 1.0, 3.0);
+  CHECK(one / both == Catch::Approx(0.5).margin(0.02)); // half of what two tracks give
+  CHECK(channel_rms(mix_of({{"muted", true}}, {{"muted", true}}), 0, 1.0, 3.0) < 0.0001);
+  CHECK(channel_rms(mix_of({{"solo", true}}, json::object()), 0, 1.0, 3.0) / both == Catch::Approx(0.5).margin(0.02)); // only the solo track
+  CHECK(channel_rms(mix_of({{"solo", true}}, {{"solo", true}}), 0, 1.0, 3.0) / both == Catch::Approx(1.0).margin(0.02));
+  CHECK(channel_rms(mix_of({{"solo", true}, {"muted", true}}, json::object()), 0, 1.0, 3.0) < 0.0001); // muted beats solo
+
+  // A hidden picture track: its layer stays (so the length does) but draws nothing.
+  json text_clip = {{"timing", {{"record_in", "0"}, {"duration", "2"}, {"source_in", "0"}}}, {"media_ref", {{"type", "text"}}}, {"content", {{"text", "Hi"}}}};
+  json video_track = {{"kind", "video"}, {"hidden", true}, {"clips", {{"clp_t", text_clip}}}};
+  json seq = {{"rate", "30"}, {"track_order", {"trk_v"}}, {"tracks", {{"trk_v", video_track}}}};
+  const json doc = {{"sequences", {{"seq_1", seq}}}, {"sequence_order", {"seq_1"}}};
+  auto comp = atm::render::compile(doc);
+  REQUIRE(comp);
+  CHECK(comp->frames == 60);
+  REQUIRE(comp->layers.size() == 1);
+  CHECK(comp->layers[0].opacity == 0.0f);
   std::error_code ec;
   fs::remove_all(dir, ec);
 }

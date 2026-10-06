@@ -1,3 +1,4 @@
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
 #include <cmath>
@@ -70,6 +71,99 @@ TEST_CASE("timeline.edit: titles and a blur land on their own tracks, with fades
   // The whole call is one undo step.
   REQUIRE(f.engine.call("project.undo", {{"project", f.project}}));
   CHECK(f.tracks().empty());
+}
+
+TEST_CASE("timeline.edit: duplicate copies clips with effects and keyframes, keeps links, and refuses an overlap", "[timeline]") {
+  Fixture f;
+  const json r = f.ok(json::array(
+      {{{"op", "add_text"}, {"id", "$new:a"}, {"text", "One"}, {"duration", "2s"}, {"fade_in", "0.5s"}},
+       {{"op", "add_text"}, {"id", "$new:b"}, {"text", "Two"}, {"at", "3s"}, {"duration", "2s"}}}));
+  const std::string a = r["id_map"]["$new:a"], b = r["id_map"]["$new:b"];
+  f.ok(json::array({{{"op", "add_effect"}, {"target", a}, {"type", "gaussian_blur"}, {"radius", 0.02}}}));
+
+  // Copy both, 10 s later: new clips, the same text and fades, the effect with an ID of its own, nothing shared.
+  const json copied = f.ok(json::array({{{"op", "duplicate"}, {"id", "$new:d"},
+                                         {"clips", json::array({{{"clip", a}, {"at", "10s"}}, {{"clip", b}, {"at", "13s"}}})}}}));
+  const std::string a2 = copied["id_map"]["$new:d.c0"], b2 = copied["id_map"]["$new:d.c1"];
+  REQUIRE_FALSE(a2.empty());
+  CHECK(a2 != a);
+  const json ca = f.get(a2), cb = f.get(b2);
+  CHECK(ca["content"]["text"] == "One");
+  CHECK(cb["content"]["text"] == "Two");
+  CHECK(ca["timing"]["record_in"] == "10");
+  CHECK(cb["timing"]["record_in"] == "13");
+  CHECK(ca["timing"]["duration"] == f.get(a)["timing"]["duration"]);
+  CHECK(ca["transform"]["keyframes"].contains("opacity")); // the fade came along
+  REQUIRE(ca.contains("effects"));
+  REQUIRE(ca["effects"].size() == 1);
+  CHECK(ca["effects"].begin().key() != f.get(a)["effects"].begin().key());
+  CHECK(f.get(a)["effects"].size() == 1); // the original is as it was
+
+  // On another track of the same kind, at a time of its own.
+  const json other = f.ok(json::array({{{"op", "add_track"}, {"id", "$new:t2"}, {"kind", "video"}, {"name", "Second"}}}));
+  const std::string t2 = other["id_map"]["$new:t2"];
+  const json moved = f.ok(json::array({{{"op", "duplicate"}, {"id", "$new:m"}, {"clips", json::array({{{"clip", a}, {"at", "1s"}, {"track", t2}}})}}}));
+  const std::string a3 = moved["id_map"]["$new:m.c0"];
+  bool found = false;
+  for (const json &t : f.tracks())
+    if (t["id"] == t2)
+      for (const json &c : t["clip_list"])
+        found = found || c["id"] == a3;
+  CHECK(found);
+
+  // A copy that lands on a clip of the same track is refused as a whole, and nothing of it is kept.
+  const size_t before = f.tracks()[0]["clip_list"].size();
+  CHECK(f.fail_rule(json::array({{{"op", "duplicate"}, {"clips", json::array({{{"clip", a}, {"at", "3s"}}})}}})) == "R_TRACK_OVERLAP");
+  CHECK(f.tracks()[0]["clip_list"].size() == before);
+  CHECK(f.fail_rule(json::array({{{"op", "duplicate"}, {"clips", json::array()}}})) == "E_PARAM");
+  CHECK(f.fail_rule(json::array({{{"op", "duplicate"}, {"clips", json::array({{{"clip", "clp_nope"}, {"at", "1s"}}})}}})) == "E_UNKNOWN_CLIP");
+  CHECK(f.engine.call("project.validate", {{"project", f.project}})->at("ok") == true);
+}
+
+TEST_CASE("timeline.edit: add_captions makes a clip for each sentence with its words timed, on a Captions track", "[timeline]") {
+  Fixture f;
+  const json r = f.ok(json::array({{{"op", "add_captions"}, {"id", "$new:cap"}, {"text", "What if you were invisible? Let's find out. Day one: free popcorn!"},
+                                    {"at", "1s"}, {"duration", "10s"}, {"emphasis", json::array({"invisible", "free"})}}}));
+  // Three sentences: three text clips, one after the other, together exactly the 10 s asked for, starting at 1 s.
+  const json caps = f.tracks();
+  REQUIRE(caps.size() == 1);
+  CHECK(caps[0]["name"] == "Captions");
+  const json clips = caps[0]["clip_list"];
+  REQUIRE(clips.size() == 3);
+  const auto seconds = [](const std::string &r_) {
+    const size_t slash = r_.find('/');
+    return slash == std::string::npos ? std::stod(r_) : std::stod(r_.substr(0, slash)) / std::stod(r_.substr(slash + 1));
+  };
+  double end = 1.0;
+  for (const json &c : clips) {
+    CHECK(seconds(c["record_in"]) == Catch::Approx(end).margin(0.002));
+    end = seconds(c["record_in"]) + seconds(c["duration"]);
+  }
+  CHECK(end == Catch::Approx(11.0).margin(0.01));
+  const json first = f.get(r["id_map"]["$new:cap.c0"]);
+  CHECK(first["content"]["text"] == "What if you were invisible?");
+  REQUIRE(first["content"]["words"].size() == 5);
+  CHECK(first["content"]["words"][0]["at"] == "0");
+  double previous = -1.0;
+  for (const json &w : first["content"]["words"]) { // the words start one after the other
+    const double at = seconds(w["at"]);
+    CHECK(at > previous);
+    previous = at;
+  }
+  CHECK(first["content"]["words"][4]["color"] == "#FFE600"); // "invisible?": a word in emphasis, even with its mark
+  CHECK_FALSE(first["content"]["words"][0].contains("color"));
+  CHECK(first["content"]["word_pop"].get<double>() > 0.0);
+  CHECK(first["content"].contains("outline"));
+  CHECK(f.get(r["id_map"]["$new:cap.c2"])["content"]["words"][2]["color"] == "#FFE600"); // "free" in the last sentence
+  CHECK(f.engine.call("project.validate", {{"project", f.project}})->at("ok") == true);
+
+  // From a voice clip's own text and time; a second call uses the same Captions track; style "plain" has no outline.
+  const json again = f.ok(json::array({{{"op", "add_captions"}, {"id", "$new:b"}, {"text", "Plain words."}, {"at", "20s"}, {"duration", "2s"}, {"style", "plain"}}}));
+  CHECK(f.tracks().size() == 1);
+  CHECK_FALSE(f.get(again["id_map"]["$new:b.c0"])["content"].contains("outline"));
+  CHECK(f.fail_rule(json::array({{{"op", "add_captions"}, {"text", "Late."}, {"at", "1s"}, {"duration", "2s"}}})) == "R_TRACK_OVERLAP");
+  CHECK(f.fail_rule(json::array({{{"op", "add_captions"}, {"at", "1s"}, {"duration", "2s"}}})) == "E_PARAM");
+  CHECK(f.fail_rule(json::array({{{"op", "add_captions"}, {"text", "x"}}})) == "E_PARAM");
 }
 
 TEST_CASE("timeline.edit: bad ops are refused with the op's index and a hint", "[timeline]") {

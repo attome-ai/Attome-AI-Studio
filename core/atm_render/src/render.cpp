@@ -269,6 +269,83 @@ void draw_transformed(uint8_t *out, int W, int H, const media::FrameView &v, con
   });
 }
 
+// The mask grown by `r` pixels in every direction (a disk): the outline of a text. The result is `r` larger on each side, so the
+// text stays in the middle of it. `margin` makes it bigger by that much without growing the shape (room for a blur).
+media::TextBitmap grow_mask(const media::TextBitmap &m, int r, int margin = 0) {
+  media::TextBitmap out;
+  const int pad = std::max(r, 0) + std::max(margin, 0);
+  out.width = m.width + 2 * pad;
+  out.height = m.height + 2 * pad;
+  out.alpha.assign(size_t(out.width) * size_t(out.height), 0);
+  std::vector<std::pair<int, int>> spans; // for each row offset of the disk, how far it reaches sideways
+  for (int dy = -r; dy <= r; ++dy)
+    spans.emplace_back(dy, int(std::floor(std::sqrt(double(r * r - dy * dy)) + 0.5)));
+  for (int y = 0; y < m.height; ++y)
+    for (int x = 0; x < m.width; ++x) {
+      const uint8_t a = m.alpha[size_t(y) * size_t(m.width) + size_t(x)];
+      if (a == 0)
+        continue;
+      for (const auto &[dy, hw] : spans) {
+        uint8_t *row = out.alpha.data() + size_t(y + dy + pad) * size_t(out.width);
+        for (int dx = -hw; dx <= hw; ++dx) {
+          uint8_t &o = row[x + dx + pad];
+          if (o < a)
+            o = a;
+        }
+      }
+    }
+  return out;
+}
+
+// A box blur of radius `r`, twice over (close to a soft shadow).
+media::TextBitmap blur_mask(media::TextBitmap m, int r) {
+  if (r <= 0 || m.width == 0)
+    return m;
+  std::vector<float> tmp(m.alpha.size());
+  for (int pass = 0; pass < 2; ++pass) {
+    for (int y = 0; y < m.height; ++y) { // along the rows
+      float sum = 0.0f;
+      const uint8_t *row = m.alpha.data() + size_t(y) * size_t(m.width);
+      for (int x = -r; x <= r; ++x)
+        sum += x >= 0 && x < m.width ? float(row[x]) : 0.0f;
+      for (int x = 0; x < m.width; ++x) {
+        tmp[size_t(y) * size_t(m.width) + size_t(x)] = sum / float(2 * r + 1);
+        const int add = x + r + 1, drop = x - r;
+        sum += (add < m.width ? float(row[add]) : 0.0f) - (drop >= 0 ? float(row[drop]) : 0.0f);
+      }
+    }
+    for (int x = 0; x < m.width; ++x) { // down the columns
+      float sum = 0.0f;
+      for (int y = -r; y <= r; ++y)
+        sum += y >= 0 && y < m.height ? tmp[size_t(y) * size_t(m.width) + size_t(x)] : 0.0f;
+      for (int y = 0; y < m.height; ++y) {
+        m.alpha[size_t(y) * size_t(m.width) + size_t(x)] = uint8_t(std::clamp(sum / float(2 * r + 1) + 0.5f, 0.0f, 255.0f));
+        const int add = y + r + 1, drop = y - r;
+        sum += (add < m.height ? tmp[size_t(add) * size_t(m.width) + size_t(x)] : 0.0f) - (drop >= 0 ? tmp[size_t(drop) * size_t(m.width) + size_t(x)] : 0.0f);
+      }
+    }
+  }
+  return m;
+}
+
+// A rounded rectangle mask a text fits in, `pad` pixels bigger than the text on every side, with corners of radius `radius`.
+media::TextBitmap rounded_box(int text_w, int text_h, float pad, float radius) {
+  media::TextBitmap out;
+  out.width = text_w + 2 * int(std::lround(pad));
+  out.height = text_h + 2 * int(std::lround(pad));
+  out.alpha.assign(size_t(out.width) * size_t(out.height), 255);
+  const float r = std::min(radius, float(std::min(out.width, out.height)) * 0.5f);
+  if (r < 0.5f)
+    return out;
+  for (int y = 0; y < out.height; ++y)
+    for (int x = 0; x < out.width; ++x) {
+      const float cx = std::clamp(float(x) + 0.5f, r, float(out.width) - r), cy = std::clamp(float(y) + 0.5f, r, float(out.height) - r);
+      const float dist = std::hypot(float(x) + 0.5f - cx, float(y) + 0.5f - cy);
+      out.alpha[size_t(y) * size_t(out.width) + size_t(x)] = uint8_t(std::clamp((r - dist + 0.5f) * 255.0f, 0.0f, 255.0f));
+    }
+  return out;
+}
+
 // Draws a coverage mask in `rgb` into the NV12 canvas as `pl` places it, turned and cropped like a picture. The colour
 // is converted to Y, U and V once.
 void draw_text(uint8_t *out, int W, int H, const media::TextBitmap &m, const Placement &pl, int alpha, uint32_t rgb) {
@@ -379,6 +456,11 @@ Result<Composition> compile(const json &project, std::string_view sequence_id, c
   };
   std::vector<Dissolve> dissolves;
   int track_index = 0;
+  bool any_solo = false; // when a track is solo, only the solo tracks are heard
+  for (const json &track_id : *order) {
+    const auto tit = track_id.is_string() ? tracks->find(track_id.get_ref<const std::string &>()) : tracks->end();
+    any_solo = any_solo || (tit != tracks->end() && tit->value("solo", false));
+  }
   for (const json &track_id : *order) {
     const auto tit = track_id.is_string() ? tracks->find(track_id.get_ref<const std::string &>()) : tracks->end();
     if (tit == tracks->end())
@@ -389,6 +471,8 @@ Result<Composition> compile(const json &project, std::string_view sequence_id, c
       return it != obj.end() && it->is_number() ? it->get<double>() : fallback;
     };
     const double track_db = number(*tit, "volume_db", 0.0), track_pan = number(*tit, "pan", 0.0);
+    const bool track_hidden = video && tit->value("hidden", false);
+    const bool track_silent = tit->value("muted", false) || (any_solo && !tit->value("solo", false));
     const auto clips = tit->find("clips");
     if (clips != tit->end() && clips->is_object())
       for (auto it = clips->begin(); it != clips->end(); ++it) {
@@ -432,9 +516,50 @@ Result<Composition> compile(const json &project, std::string_view sequence_id, c
             l.text = content->value("text", "");
             l.text_size = std::clamp(content->value("size", 0.08f), 0.005f, 1.0f);
             l.text_bold = content->value("bold", false);
-            const std::string color = content->value("color", "#ffffff");
-            if (color.size() == 7 && color[0] == '#')
-              l.text_color = uint32_t(std::strtoul(color.c_str() + 1, nullptr, 16)) & 0xFFFFFF;
+            const auto parse_color = [](const std::string &color, uint32_t fallback) {
+              return color.size() == 7 && color[0] == '#' ? uint32_t(std::strtoul(color.c_str() + 1, nullptr, 16)) & 0xFFFFFF : fallback;
+            };
+            l.text_color = parse_color(content->value("color", "#ffffff"), 0xFFFFFF);
+            const auto clamped = [](const json &o, const char *key, float fallback, float lo, float hi) {
+              const auto v = o.find(key);
+              return v != o.end() && v->is_number() ? std::clamp(v->get<float>(), lo, hi) : fallback;
+            };
+            if (const auto o = content->find("outline"); o != content->end() && o->is_object()) {
+              l.outline_width = clamped(*o, "width", 0.0f, 0.0f, 0.5f);
+              l.outline_color = parse_color(o->value("color", "#000000"), 0x000000);
+            }
+            l.word_pop = clamped(*content, "word_pop", 0.0f, 0.0f, 1.0f);
+            if (const auto w = content->find("words"); w != content->end() && w->is_array()) {
+              const auto frames_of = [&](const json &o, const char *key) -> int64_t {
+                const auto r = Rational::parse(o.value(key, std::string("0")));
+                if (!r)
+                  return 0;
+                const auto f = to_frames(*r, rate, Round::nearest_even);
+                return f ? *f : 0;
+              };
+              for (const json &word : *w)
+                if (word.is_object() && word.contains("text")) {
+                  Layer::Word one;
+                  one.text = word.value("text", std::string());
+                  one.start = frames_of(word, "at");
+                  one.color = word.contains("color") && word["color"].is_string() ? int64_t(parse_color(word["color"].get<std::string>(), 0xFFFFFF)) : -1;
+                  l.words.push_back(std::move(one));
+                }
+              std::sort(l.words.begin(), l.words.end(), [](const Layer::Word &a, const Layer::Word &b) { return a.start < b.start; });
+            }
+            if (const auto o = content->find("shadow"); o != content->end() && o->is_object()) {
+              l.shadow_x = clamped(*o, "x", 0.06f, -1.0f, 1.0f);
+              l.shadow_y = clamped(*o, "y", 0.06f, -1.0f, 1.0f);
+              l.shadow_blur = clamped(*o, "blur", 0.0f, 0.0f, 1.0f);
+              l.shadow_opacity = clamped(*o, "opacity", 0.0f, 0.0f, 1.0f);
+              l.shadow_color = parse_color(o->value("color", "#000000"), 0x000000);
+            }
+            if (const auto o = content->find("background"); o != content->end() && o->is_object()) {
+              l.box_opacity = clamped(*o, "opacity", 0.0f, 0.0f, 1.0f);
+              l.box_padding = clamped(*o, "padding", 0.3f, 0.0f, 2.0f);
+              l.box_radius = clamped(*o, "radius", 0.3f, 0.0f, 1.0f);
+              l.box_color = parse_color(o->value("color", "#000000"), 0x000000);
+            }
           }
         }
         l.is_adjustment = type == "adjustment";
@@ -562,6 +687,10 @@ Result<Composition> compile(const json &project, std::string_view sequence_id, c
           }
         if (const auto vol = clip.find("volume"); vol != clip.end() && vol->is_number())
           l.volume = std::clamp(vol->get<float>(), 0.0f, 4.0f);
+        if (track_silent) // muted, or not solo while another track is: the clip stays, without sound
+          l.gain = 0.0f, l.volume = 0.0f;
+        if (track_hidden) // hidden: the clip stays, without picture
+          l.opacity = 0.0f, l.opacity_keys = {};
         c.frames = std::max(c.frames, l.start_frame + l.frames);
         c.layers.push_back(std::move(l));
       }
@@ -1528,13 +1657,38 @@ void Renderer::draw(const Layer &l, int64_t frame, uint8_t *out, bool &cleared, 
     return;
   }
   if (l.is_text) {
-    if (l.text.empty())
+    // A caption shows the word that is on at this frame (the one that started last), popping in; a text shows all of itself.
+    std::string shown_text = l.text;
+    uint32_t shown_color = l.text_color;
+    Transform text_xf = p.xf;
+    if (!l.words.empty()) {
+      const int64_t rel = frame - l.origin_frame;
+      const Layer::Word *word = nullptr;
+      for (const Layer::Word &w : l.words)
+        if (w.start <= rel)
+          word = &w;
+      if (!word)
+        return; // before the first word
+      shown_text = word->text;
+      if (word->color >= 0)
+        shown_color = uint32_t(word->color);
+      if (l.word_pop > 0.0f) {
+        const float age = std::clamp(float(rel - word->start) / 5.0f, 0.0f, 1.0f), ease = 1.0f - (1.0f - age) * (1.0f - age);
+        const float k = 1.0f - 0.35f * l.word_pop * (1.0f - ease);
+        text_xf.scale_x *= k;
+        text_xf.scale_y *= k;
+      }
+    }
+    if (shown_text.empty())
       return;
     const int px_size = std::max(1, int(std::lround(l.text_size * float(height_))));
-    const std::string key = l.text + "\x1f" + std::to_string(px_size) + (l.text_bold ? "b" : "n") + std::to_string(width_);
+    char look[160];
+    std::snprintf(look, sizeof look, "|%.3f|%.3f,%.3f,%.3f|%.3f,%.3f", double(l.outline_width), double(l.shadow_x), double(l.shadow_y), double(l.shadow_blur),
+                  double(l.box_padding), double(l.box_radius));
+    const std::string key = shown_text + "\x1f" + std::to_string(px_size) + (l.text_bold ? "b" : "n") + std::to_string(width_) + look;
     TextEntry &entry = text_[l.clip_id];
     if (entry.key != key) {
-      auto bitmap = media::render_text(l.text, float(px_size), l.text_bold, int(float(width_) * 0.9f));
+      auto bitmap = media::render_text(shown_text, float(px_size), l.text_bold, int(float(width_) * 0.9f));
       if (!bitmap) {
         if (warning_.empty())
           warning_ = bitmap.error().message;
@@ -1542,6 +1696,16 @@ void Renderer::draw(const Layer &l, int64_t frame, uint8_t *out, bool &cleared, 
       }
       entry.key = key;
       entry.bitmap = std::move(*bitmap);
+      entry.outline = l.outline_width > 0.0f ? grow_mask(entry.bitmap, int(std::lround(l.outline_width * float(px_size)))) : media::TextBitmap{};
+      entry.shadow = media::TextBitmap{};
+      if (l.shadow_opacity > 0.0f) {
+        entry.shadow = entry.bitmap;
+        const int blur = int(std::lround(l.shadow_blur * float(px_size)));
+        if (blur > 0)
+          entry.shadow = blur_mask(grow_mask(entry.bitmap, 0, blur), blur);
+      }
+      entry.box = l.box_opacity > 0.0f ? rounded_box(entry.bitmap.width, entry.bitmap.height, l.box_padding * float(px_size), l.box_radius * float(px_size))
+                                       : media::TextBitmap{};
     }
     if (entry.bitmap.width == 0)
       return;
@@ -1549,8 +1713,24 @@ void Renderer::draw(const Layer &l, int64_t frame, uint8_t *out, bool &cleared, 
       media::fill_black(out, width_, height_);
     cleared = true;
     ATM_PROFILE_SCOPE("composite.text");
-    const Placement pl(p.xf, width_, height_, float(entry.bitmap.width), float(entry.bitmap.height));
-    draw_text(out, width_, height_, entry.bitmap, pl, int(p.opacity * 256.0f + 0.5f), l.text_color);
+    const int alpha = int(p.opacity * 256.0f + 0.5f);
+    if (entry.box.width > 0) { // the box behind everything
+      const Placement pl(text_xf, width_, height_, float(entry.box.width), float(entry.box.height));
+      draw_text(out, width_, height_, entry.box, pl, int(float(alpha) * l.box_opacity), l.box_color);
+    }
+    if (entry.shadow.width > 0) { // a copy shifted by a share of the text's size, in screen space
+      Transform moved = text_xf;
+      moved.pos_x += l.shadow_x * float(px_size) / float(width_);
+      moved.pos_y += l.shadow_y * float(px_size) / float(height_);
+      const Placement pl(moved, width_, height_, float(entry.shadow.width), float(entry.shadow.height));
+      draw_text(out, width_, height_, entry.shadow, pl, int(float(alpha) * l.shadow_opacity), l.shadow_color);
+    }
+    if (entry.outline.width > 0) {
+      const Placement pl(text_xf, width_, height_, float(entry.outline.width), float(entry.outline.height));
+      draw_text(out, width_, height_, entry.outline, pl, alpha, l.outline_color);
+    }
+    const Placement pl(text_xf, width_, height_, float(entry.bitmap.width), float(entry.bitmap.height));
+    draw_text(out, width_, height_, entry.bitmap, pl, alpha, shown_color);
     return;
   }
   if (failed_.count(l.clip_id))

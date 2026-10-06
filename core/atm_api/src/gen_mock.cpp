@@ -126,17 +126,24 @@ MockProvider::MockProvider() {
                       {"settings", {{"speed", {{"type", "number"}, {"min", 0.5}, {"max", 2.0}, {"default", 1.0}}}}}};
   if (auto model = gen::parse_model(voice))
     gen::register_model(std::move(*model));
+  json choir = voice;
+  choir["id"] = kMockChoir;
+  choir["title"] = "Mock choir (voices to choose from)";
+  choir["voices"] = {"ada", "bo", "cy"};
+  choir["default_voice"] = "bo";
+  if (auto model = gen::parse_model(choir))
+    gen::register_model(std::move(*model));
 }
 
 bool MockProvider::offers(std::string_view model, std::string_view kind) const {
-  if (model == kMockVoice)
+  if (model == kMockVoice || model == kMockChoir)
     return kind == "generate_speech";
   if (model != kMockModel)
     return false;
   return closed ? kind == "generate_video" : gen::find_kind(kind) != nullptr;
 }
 
-std::string MockProvider::fingerprint(std::string_view model) const { return model == kMockModel || model == kMockVoice ? version : std::string(); }
+std::string MockProvider::fingerprint(std::string_view model) const { return model == kMockModel || model == kMockVoice || model == kMockChoir ? version : std::string(); }
 
 Result<gen::StepResult> MockProvider::run(const gen::StepRequest &r) {
   ATM_PROFILE_SCOPE("gen.mock.step");

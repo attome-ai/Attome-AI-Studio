@@ -36,10 +36,13 @@ std::unordered_map<std::string, Mark> g_marks;
 std::optional<ImGuiKey> key_named(const std::string &name) {
   if (name.size() == 1 && name[0] >= 'A' && name[0] <= 'Z')
     return ImGuiKey(int(ImGuiKey_A) + (name[0] - 'A'));
+  if (name.size() == 1 && name[0] >= '0' && name[0] <= '9')
+    return ImGuiKey(int(ImGuiKey_0) + (name[0] - '0'));
   static const std::pair<const char *, ImGuiKey> keys[] = {
       {"Space", ImGuiKey_Space}, {"Delete", ImGuiKey_Delete}, {"Enter", ImGuiKey_Enter}, {"Escape", ImGuiKey_Escape},
       {"Left", ImGuiKey_LeftArrow}, {"Right", ImGuiKey_RightArrow}, {"Backspace", ImGuiKey_Backspace},
-      {"Home", ImGuiKey_Home}, {"End", ImGuiKey_End}};
+      {"Home", ImGuiKey_Home}, {"End", ImGuiKey_End}, {"Up", ImGuiKey_UpArrow}, {"Down", ImGuiKey_DownArrow}, {"Tab", ImGuiKey_Tab},
+      {"F1", ImGuiKey_F1}, {"F2", ImGuiKey_F2}, {"Plus", ImGuiKey_Equal}, {"Minus", ImGuiKey_Minus}};
   for (const auto &[n, k] : keys)
     if (name == n)
       return k;
@@ -95,6 +98,16 @@ struct UiDriver::Impl {
     const Mark &m = it->second;
     // Bring it into view. It must sit inside the visible part of every window that holds it (a card inside the
     // Inspector, say); where it does not, scroll the nearest window that can scroll so the widget sits near its top.
+    for (ImGuiWindow *w = m.window; w; w = w->ParentWindow) { // sideways first: a clip far along the timeline
+      const float centre = m.rect.GetCenter().x;
+      if (w->ScrollMax.x > 0.0f && (centre > w->InnerClipRect.Max.x - 4.0f || centre < w->InnerClipRect.Min.x + 4.0f)) {
+        if (settle > 0)
+          return std::nullopt;
+        ImGui::SetScrollX(w, std::clamp(w->Scroll.x + (centre - w->InnerClipRect.GetCenter().x), 0.0f, w->ScrollMax.x));
+        settle = 3;
+        return std::nullopt;
+      }
+    }
     for (ImGuiWindow *w = m.window; w; w = w->ParentWindow) {
       if (m.rect.Min.y >= w->InnerClipRect.Min.y && m.rect.Max.y <= w->InnerClipRect.Max.y)
         continue;
@@ -134,10 +147,10 @@ struct UiDriver::Impl {
     settle = 3;
   }
 
-  void queue_click(ImVec2 p) {
+  void queue_click(ImVec2 p, int button = 0) {
     frames.push_back([=, this](ImGuiIO &) { mouse = p; });
-    frames.push_back([](ImGuiIO &io) { io.AddMouseButtonEvent(0, true); });
-    frames.push_back([](ImGuiIO &io) { io.AddMouseButtonEvent(0, false); });
+    frames.push_back([=](ImGuiIO &io) { io.AddMouseButtonEvent(button, true); });
+    frames.push_back([=](ImGuiIO &io) { io.AddMouseButtonEvent(button, false); });
     frames.push_back([](ImGuiIO &) {});
     frames.push_back([](ImGuiIO &) {}); // the edit a click starts runs after the panels are drawn
   }
@@ -239,6 +252,28 @@ void UiDriver::before_frame() {
           std::fprintf(stderr, "uitest:   in %s: clip y %.0f-%.0f, scroll %.0f/%.0f\n", w->Name, w->InnerClipRect.Min.y,
                        w->InnerClipRect.Max.y, w->Scroll.y, w->ScrollMax.y);
       }
+    } else if (op == "absent") { // fail when the widget was drawn in the last few frames: something that must not be there
+      const std::string id = arg(1).empty() ? std::string() : arg(1).substr(1);
+      const auto it = g_marks.find(id);
+      if (it != g_marks.end() && it->second.frame >= ImGui::GetFrameCount() - 3)
+        fail(c.line, arg(1) + " is on the screen, and should not be");
+    } else if (op == "high" || op == "inside" || op == "wide") { // checks on a widget as last drawn: tall enough, wide enough, not cut off by its panel
+      const std::string id = arg(1).empty() ? std::string() : arg(1).substr(1);
+      const auto it = g_marks.find(id);
+      if (it == g_marks.end()) {
+        fail(c.line, arg(1) + " was never drawn");
+      } else {
+        const Mark &m = it->second;
+        if (op == "high" && m.rect.GetHeight() < float(std::atof(arg(2).c_str())))
+          fail(c.line, arg(1) + " is " + std::to_string(int(m.rect.GetHeight())) + " high, less than " + arg(2));
+        else if (op == "wide" && m.rect.GetWidth() < float(std::atof(arg(2).c_str())))
+          fail(c.line, arg(1) + " is " + std::to_string(int(m.rect.GetWidth())) + " wide, less than " + arg(2));
+        else if (op == "inside" && m.window) {
+          const ImRect clip = m.window->InnerClipRect;
+          if (m.rect.Max.x > clip.Max.x + 0.5f || m.rect.Min.x < clip.Min.x - 0.5f)
+            fail(c.line, arg(1) + " is cut off by its panel (" + std::to_string(int(m.rect.Max.x)) + " past " + std::to_string(int(clip.Max.x)) + ")");
+        }
+      }
     } else if (op == "shot") {
       d.shot = arg(1);
     } else if (op == "type") {
@@ -275,7 +310,7 @@ void UiDriver::before_frame() {
       });
       d.frames.push_back([](ImGuiIO &) {});
       d.frames.push_back([](ImGuiIO &) {});
-    } else if (op == "expect" || op == "click" || op == "dblclick" || op == "drag" || op == "slide") {
+    } else if (op == "expect" || op == "click" || op == "rclick" || op == "dblclick" || op == "drag" || op == "slide") {
       const float slide = op == "slide" ? float(std::atof(arg(2).c_str())) : -1.0f;
       ImVec2 size(0.0f, 0.0f);
       const auto p = d.resolve(arg(1), error, slide, &size);
@@ -298,6 +333,8 @@ void UiDriver::before_frame() {
         }
         d.frames.push_back([](ImGuiIO &) {});
         d.frames.push_back([](ImGuiIO &) {});
+      } else if (op == "rclick") { // a right click: a context menu
+        d.queue_click(*p, 1);
       } else if (op == "click" || op == "slide") {
         const bool shift = std::find(c.words.begin() + 1, c.words.end(), "shift") != c.words.end(),
                    ctrl = std::find(c.words.begin() + 1, c.words.end(), "ctrl") != c.words.end();

@@ -113,6 +113,10 @@ Result<ModelDecl> parse_model(const json &d) {
   }
   if (const auto f = d.find("needs_files"); f != d.end() && f->is_boolean())
     m.needs_files = f->get<bool>();
+  m.note = d.value("note", std::string());
+  if (!strings("voices", m.voices))
+    return bad(m.id, "voices", "has \"voices\" that is not a list of names.", "Example: [\"am_michael\", \"af_heart\"].");
+  m.default_voice = d.value("default_voice", m.voices.empty() ? std::string() : m.voices.front());
   if (const auto all = d.find("settings"); all != d.end()) {
     if (!all->is_object())
       return bad(m.id, "settings", "has \"settings\" that is not an object.", "Write {\"<name>\": {\"type\": …}}.");

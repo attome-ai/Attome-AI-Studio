@@ -1,4 +1,4 @@
-# UI test: the padlock in a track header locks the track to the cut and releases it, the lock is saved in the project
+﻿# UI test: the padlock in a track header locks the track to the cut and releases it, the lock is saved in the project
 # (it is still there when the editor is started again, and one undo takes it back), and a Titles track made by the editor
 # starts locked. Virtual input only (uitest.psm1). Needs a build (build\win-msvc-release\bin). Exit code 0 = pass.
 #   .\tools\uitest\track_lock.ps1
@@ -52,13 +52,13 @@ try {
   }
   # 2. The padlock of V1 locks it; the lock is saved.
   if (-not $failed) {
-    $lock = Invoke-EditorScript -Project $proj -Endpoint $run.Endpoint -Script @('click @lock:V1', 'wait 400')
+    $lock = Invoke-EditorScript -Project $proj -Endpoint $run.Endpoint -Script @('click @follow:V1', 'wait 400')
     $failed = $lock.Errors
     if (-not $failed -and (Get-Lock $run 'V1') -ne $true) { $failed = 'the padlock did not lock V1' }
   }
   # 3. A new editor on the same project still sees it (and shows it: capture), and the padlock releases it again.
   if (-not $failed) {
-    $again = Invoke-EditorScript -Project $proj -Endpoint $run.Endpoint -Script @('wait 600', "shot $work\lock_saved.jpg", 'click @lock:V1', 'wait 400')
+    $again = Invoke-EditorScript -Project $proj -Endpoint $run.Endpoint -Script @('wait 600', "shot $work\lock_saved.jpg", 'click @follow:V1', 'wait 400')
     $failed = $again.Errors
     if (-not $failed -and (Get-Lock $run 'V1') -ne $false) { $failed = 'the padlock did not release V1 in a second editor' }
   }
@@ -73,3 +73,4 @@ try {
 if ($failed) { Write-Host "FAIL: $failed" -ForegroundColor Red; exit 1 }
 Write-Host "PASS: the padlock locks and releases a track, the lock is saved, undo takes it back, and the Titles track starts locked (captures in $work)" -ForegroundColor Green
 exit 0
+

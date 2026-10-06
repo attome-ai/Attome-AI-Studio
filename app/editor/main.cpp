@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <memory>
 #include <string>
@@ -94,8 +95,8 @@ void apply_theme() {
   style.FrameBorderSize = 0.0f;
   style.FramePadding = ImVec2(10.0f, 6.0f);
   style.ItemSpacing = ImVec2(8.0f, 7.0f);
-  style.ScrollbarSize = 10.0f;
-  style.DockingSeparatorSize = 3.0f;
+  style.ScrollbarSize = 12.0f;
+  style.DockingSeparatorSize = 4.0f;
   style.WindowMenuButtonPosition = ImGuiDir_Right; // the dock arrow sits at the far right of a panel tab bar
   ImVec4 *c = style.Colors;
   c[ImGuiCol_Text] = rgb(0xeceff6);
@@ -110,7 +111,7 @@ void apply_theme() {
   c[ImGuiCol_TitleBg] = c[ImGuiCol_TitleBgActive] = c[ImGuiCol_TitleBgCollapsed] = rgb(0x141821);
   c[ImGuiCol_MenuBarBg] = rgb(0x141821);
   c[ImGuiCol_ScrollbarBg] = rgb(0x0d0f15, 0.0f);
-  c[ImGuiCol_ScrollbarGrab] = rgb(0x333c50);
+  c[ImGuiCol_ScrollbarGrab] = rgb(0x465068);
   c[ImGuiCol_ScrollbarGrabHovered] = rgb(0x636d85);
   c[ImGuiCol_ScrollbarGrabActive] = rgb(0xff7a3d);
   c[ImGuiCol_CheckMark] = rgb(0xff7a3d);
@@ -167,8 +168,15 @@ int main(int argc, char **argv) {
   const float scale = 1.0f;
 
   char *pref = SDL_GetPrefPath("Attome", "Editor");
-  const std::string pref_dir = pref ? pref : "";
+  std::string pref_dir = pref ? pref : "";
   SDL_free(pref);
+  if (const char *own = std::getenv("ATTOME_PREF_DIR"); own && *own) { // a UI test keeps its own preferences: the user's are never touched
+    std::error_code ec;
+    std::filesystem::create_directories(std::filesystem::path(std::u8string(own, own + std::strlen(own))), ec);
+    pref_dir = own;
+    if (pref_dir.back() != '\\' && pref_dir.back() != '/')
+      pref_dir += '\\';
+  }
   const std::string ini = pref_dir + "layout_v6.ini";
 
   IMGUI_CHECKVERSION();

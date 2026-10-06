@@ -82,6 +82,7 @@ struct Project {
   storage::File lock;
   uint64_t revision = 0;
   bool dirty = false;
+  std::string save_error; // why the last automatic save failed ("" when it did not): the editor says so beside "Saved"
   Clock::time_point last_change{};
   size_t recovered = 0;   // journal records replayed on open (edits that were not yet in project.json)
   bool new_epoch = false; // project.json was changed outside Attome; the old history was dropped
@@ -792,7 +793,9 @@ struct Engine::Impl {
     const int head = pr->hist.head();
     return json{{"head", head < 0 ? json(nullptr) : json(nodes[size_t(head)].id)},
                 {"changesets", std::move(list)},
-                {"revision", pr->revision}};
+                {"revision", pr->revision},
+                {"unsaved", pr->dirty},
+                {"save_error", pr->save_error}};
   }
 
   Result<json> time_parse(const json &params) {
@@ -937,7 +940,11 @@ struct Engine::Impl {
          "with a note. add_transition with \"make_room\": true (and \"ripple\") does both in one step\n"
          "- add_track {kind (video | audio), name?, position? (top | bottom), below? / above? (track ID), sync_lock? (true: the track's clips follow make_room and ripple_delete)}\n"
          "- delete {clip} or {transition}; ripple_delete {clip} (closes the gap, on the tracks locked to the cut too); move {clip, to?, track?}; trim {clip, edge (in | out), to or delta}; "
-         "split {clip, at}; slip {clip, delta} (shows another part of its file, stays in place); roll {between: "
+         "add_captions {clip (a voice clip) or text + at + duration, style? (pop | plain | box), size? (0.07), y? (0.72), color?, emphasis? [words shown in emphasis_color], track?} - "
+         "one text clip for each sentence, shown one word at a time, each word popping in; the words are timed by their letters (a guess); goes on a Captions track on top; "
+         "split {clip, at}; duplicate {clips: [{clip, at, track?} or {snapshot, at, track}, ...]} (copies with their effects, keyframes and fades, each at a time and "
+         "optionally on another track of the same kind; clips that were linked stay linked; the copies are named \"$new:<op id>.c0\", \".c1\" ...; a generative "
+         "clip's copy has the same workflow and inputs and no Takes); slip {clip, delta} (shows another part of its file, stays in place); roll {between: "
          "[first, second], delta} (moves the cut between them); slide {clip, delta} (moves the clip between its "
          "neighbours, which give and take the time)\n"
          "- add_effect {target (clip), type? (gaussian_blur | color_grade | vignette | sharpen | film_grain | lut | chroma_key | luma_key), plus the effect's parameters: radius | brightness, contrast, saturation | strength, radius, softness | amount, radius | strength, size | file, strength | hue, similarity, smoothness, detail | level, tolerance, softness} changes only that clip (a blur softens its edges "
@@ -1957,7 +1964,8 @@ struct Engine::Impl {
       // The kind of clip the model makes (the Generate panel groups by it) and, within it, the model family
       // (SD 1.5, SDXL, ...). Video and speech models exist so far; image models will say theirs.
       list.push_back({{"id", id}, {"title", entry ? entry->title : decl->title.empty() ? id : decl->title}, {"clip_type", speaks ? "audio" : "video"}, {"family", ""},
-                      {"installed", installed}, {"engine", engine},
+                      {"installed", installed}, {"engine", engine}, {"note", entry ? entry->notes : decl->note},
+                      {"size", entry ? entry->size() : int64_t(0)}, {"voices", decl->voices.size()},
                       {"ready", installed && engine}, {"accepts", decl->accepts},
                       {"seconds", {{"min", decl->seconds_min}, {"max", decl->seconds_max}}}});
     }
@@ -2781,8 +2789,8 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
      "has every op's fields and a complete example. Times accept \"2.5s\", \"75@30\" or timecode.",
      R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},
        "ops":{"type":"array","items":{"type":"object","properties":{
-         "op":{"type":"string","enum":["add_track","add_clip","add_text","add_adjustment","add_transition","delete",
-                                       "ripple_delete","move","trim","split","slip","roll","slide","add_effect","remove_effect",
+         "op":{"type":"string","enum":["add_track","add_clip","add_text","add_captions","add_adjustment","add_transition","delete",
+                                       "ripple_delete","move","trim","split","duplicate","slip","roll","slide","add_effect","remove_effect",
                                        "set_effect_enabled","link","unlink","set_property"]},
          "id":{"type":"string","description":"$new:name for what this op creates"}},"required":["op"]}},
        "sequence":{"type":"string"},"label":{"type":"string"},"dry_run":{"type":"boolean"},
@@ -3068,8 +3076,10 @@ Result<json> Engine::call(std::string_view tool, const json &params) {
 void Engine::save_all(std::chrono::milliseconds quiet) {
   const auto now = Clock::now();
   for (auto &[key, pr] : impl_->projects)
-    if (pr->dirty && now - pr->last_change >= quiet)
-      (void)impl_->save(*pr);
+    if (pr->dirty && now - pr->last_change >= quiet) {
+      const auto saved = impl_->save(*pr);
+      pr->save_error = saved ? std::string() : saved.error().message;
+    }
 }
 
 bool Engine::shutdown_requested() const { return impl_->shutdown; }

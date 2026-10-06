@@ -42,8 +42,12 @@ bool speaks(std::string_view model) { return model == kSpeechModel || kokoro(mod
 gen::ModelDecl kokoro_declaration() {
   const nlohmann::json d = {{"id", kKokoroModel},
                             {"title", "Kokoro: speech from text, with a ready-made voice (am_michael, bm_george, af_heart, ...)"},
+                            {"note", "Clean English voices to choose from; fast. It cannot clone a voice or change its energy."},
                             {"kinds", {"generate_speech"}},
                             {"needs_files", false},
+                            {"voices", {"am_michael", "am_adam", "am_eric", "am_liam", "am_onyx", "am_fenrir", "am_puck", "bm_george", "bm_daniel",
+                                        "bm_lewis", "bm_fable", "af_heart", "af_bella", "af_nicole", "af_sarah", "af_sky", "bf_emma"}},
+                            {"default_voice", "am_michael"},
                             {"settings", {{"speed", {{"type", "number"}, {"min", 0.5}, {"max", 2.0}, {"default", 1.0}}}}}};
   return *gen::parse_model(d);
 }
@@ -52,6 +56,7 @@ gen::ModelDecl speech_declaration() {
   const nlohmann::json d = {
       {"id", kSpeechModel},
       {"title", "OmniVoice: speech from text, with a voice you describe"},
+      {"note", "Describe the voice in words (\"male, young adult, low pitch, british accent\"); 600+ languages. Slower and less steady than Kokoro."},
       {"kinds", {"generate_speech"}},
       {"needs_files", false},
       {"settings",

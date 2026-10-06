@@ -514,6 +514,11 @@ void check_track(const doc::Document &doc, const std::string &track_id, json &pr
     return;
   check_number(*ref->node, "volume_db", -96.0, 24.0, track_id, track_id, problems);
   check_number(*ref->node, "pan", -1.0, 1.0, track_id, track_id, problems);
+  for (const char *flag : {"muted", "hidden", "solo", "locked"})
+    if (const auto it = ref->node->find(flag); it != ref->node->end() && !it->is_boolean())
+      problems.push_back(problem("TRACK_TYPE_MISMATCH", track_id + "/" + flag, track_id,
+                                 std::string(flag) + " of track " + track_id + " must be true or false.",
+                                 "muted: no sound from the track; hidden: no picture; solo: only the solo tracks are heard; locked: the editor does not change its clips."));
   if (const auto lock = ref->node->find("sync_lock"); lock != ref->node->end() && !lock->is_boolean())
     problems.push_back(problem("TRACK_TYPE_MISMATCH", track_id + "/sync_lock", track_id,
                                "sync_lock of track " + track_id + " must be true or false.",

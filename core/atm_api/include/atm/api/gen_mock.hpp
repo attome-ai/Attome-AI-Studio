@@ -13,6 +13,8 @@ namespace atm::api {
 inline constexpr const char *kMockModel = "attome-mock";
 // The mock's voice: "speech" that is a tone as long as the words (0.4 s a word), a pitch from the text; for tests of the speech path.
 inline constexpr const char *kMockVoice = "attome-mock-voice";
+// The same with ready-made voices (a choice of "ada", "bo", "cy", like Kokoro), for tests of the Voice input as a list.
+inline constexpr const char *kMockChoir = "attome-mock-choir";
 
 class MockProvider final : public gen::Provider {
 public:

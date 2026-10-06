@@ -275,17 +275,22 @@ json voice_workflow(const ModelDecl &model) {
     if (!s.def.is_null())
       settings[s.name] = s.def;
   const char *say = "$new:say";
-  json node = {{"kind", "attome.generate_speech"}, {"model", model.id}};
+  json node = {{"kind", "attome.generate_speech"}, {"model", model.id}, {"ui", {{"x", 0}, {"y", 0}}}};
   if (!settings.empty())
     node["settings"] = std::move(settings);
   json inputs = json::object();
   inputs["text"] = exposed_input("text", "Text", 0, say, "text", true);
   inputs["voice"] = exposed_input("text", "Voice", 1, say, "instruct");
-  inputs["voice"]["default"] = "female, young adult, moderate pitch";
+  if (model.voices.empty()) { // a voice described in words
+    inputs["voice"]["default"] = "female, young adult, moderate pitch";
+  } else { // ready-made voices: a choice, not a text to type
+    inputs["voice"]["default"] = model.default_voice;
+    inputs["voice"]["range"] = {{"options", model.voices}};
+  }
   inputs["seed"] = exposed_input("integer", "Seed", 2, say, "seed");
   return {{"name", "Voice"},
           {"source", std::string(kVoicePrefix) + model.id},
-          {"nodes", {{say, std::move(node)}, {"$new:len", {{"kind", "attome.get_duration"}, {"ui", {{"x", 260}, {"y", 200}}}}}}},
+          {"nodes", {{say, std::move(node)}, {"$new:len", {{"kind", "attome.get_duration"}, {"ui", {{"x", 290}, {"y", 190}}}}}}},
           {"links", {{"$new:l_len", {{"from", json::array({say, "audio"})}, {"to", json::array({"$new:len", "audio"})}}}}},
           {"exposed",
            {{"inputs", std::move(inputs)},

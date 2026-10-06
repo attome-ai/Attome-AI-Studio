@@ -1,6 +1,7 @@
 #include "timeline.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <filesystem>
 #include <optional>
 #include <vector>
@@ -8,6 +9,7 @@
 #include "atm/base/id.hpp"
 #include "atm/base/time.hpp"
 #include "atm/eval/effects.hpp"
+#include "atm/gen/library.hpp"
 
 namespace atm::api::timeline {
 namespace {
@@ -70,6 +72,8 @@ public:
       return wrap(add_text());
     if (name == "add_adjustment")
       return wrap(add_adjustment());
+    if (name == "add_captions")
+      return wrap(add_captions());
     if (name == "add_transition")
       return wrap(add_transition());
     if (name == "make_room")
@@ -82,6 +86,8 @@ public:
       return wrap(trim());
     if (name == "split")
       return wrap(split());
+    if (name == "duplicate")
+      return wrap(duplicate());
     if (name == "set_property")
       return wrap(set_property());
     if (name == "add_effect")
@@ -99,8 +105,8 @@ public:
     if (name == "slide")
       return wrap(slide());
     return fail("E_OP", "\"" + name + "\" is not a timeline op.",
-                "Use add_track, add_clip, add_text, add_adjustment, add_transition, make_room, delete, ripple_delete, move, trim, "
-                "split, slip, roll, slide, add_effect, remove_effect, set_effect_enabled, link, unlink or "
+                "Use add_track, add_clip, add_text, add_captions, add_adjustment, add_transition, make_room, delete, ripple_delete, move, trim, "
+                "split, duplicate, slip, roll, slide, add_effect, remove_effect, set_effect_enabled, link, unlink or "
                 "set_property (guide.get topic \"timeline\").");
   }
 
@@ -485,6 +491,133 @@ private:
     if (!keys.is_null())
       value["transform"]["keyframes"]["opacity"] = std::move(keys);
     push({{"op", "add"}, {"path", track_id + "/clips/" + placeholder()}, {"value", std::move(value)}});
+    return {};
+  }
+
+  // add_captions: words said over a stretch of time, as captions: one text clip for each sentence, drawn one word at a time (content.words
+  // holds each word and when it starts, after the clip's start), every word popping in. The words are timed in proportion to their letters,
+  // with a pause after a comma, a colon and a full stop: a guess, as long as nothing knows when each word is really said. The text is "text"
+  // with "at" and "duration", or "clip": a voice clip (a generative clip with a "text" input), whose own time is used.
+  Result<void> add_captions() {
+    std::string text = op_.value("text", std::string());
+    std::optional<Rational> at, duration;
+    if (op_.contains("clip")) {
+      ATM_TRY(auto c, clip("clip"));
+      const json inputs = c.first->value("media_ref", json::object()).value("inputs", json::object());
+      if (text.empty() && inputs.contains("text") && inputs["text"].is_string())
+        text = inputs["text"].get<std::string>();
+      const Span s = span_of(*c.first);
+      at = s.in;
+      duration = s.duration;
+    }
+    ATM_TRY(auto at_given, time("at"));
+    ATM_TRY(auto duration_given, time("duration"));
+    if (at_given)
+      at = at_given;
+    if (duration_given)
+      duration = duration_given;
+    if (text.empty())
+      return fail("E_PARAM", "add_captions needs \"text\", or a \"clip\" with a \"text\" input.");
+    if (!at || !duration || duration->num() <= 0)
+      return fail("E_PARAM", "add_captions needs \"at\" and \"duration\", or a \"clip\" to take them from.");
+
+    // The words, in sentences. A sentence ends at . ! or ? (and a long one is cut at a comma, colon or semicolon).
+    struct Word {
+      std::string text;
+      double weight = 0.0;
+    };
+    std::vector<std::vector<Word>> sentences(1);
+    size_t pos = 0;
+    const auto is_space = [](char ch) { return ch == ' ' || ch == '\n' || ch == '\t' || ch == '\r'; };
+    while (pos < text.size()) {
+      while (pos < text.size() && is_space(text[pos]))
+        ++pos;
+      const size_t from = pos;
+      while (pos < text.size() && !is_space(text[pos]))
+        ++pos;
+      if (pos == from)
+        break;
+      Word w;
+      w.text = text.substr(from, pos - from);
+      size_t letters = 0;
+      for (const char ch : w.text)
+        letters += (static_cast<unsigned char>(ch) >= 0x80 || std::isalnum(static_cast<unsigned char>(ch))) ? 1 : 0;
+      w.weight = double(letters) + 1.0;
+      const char last = w.text.back();
+      const bool end_of_sentence = last == '.' || last == '!' || last == '?';
+      w.weight += end_of_sentence ? 3.5 : (last == ',' || last == ':' || last == ';') ? 2.0 : 0.0;
+      sentences.back().push_back(std::move(w));
+      if (end_of_sentence || (sentences.back().size() >= 6 && (last == ',' || last == ':' || last == ';')))
+        sentences.emplace_back();
+    }
+    if (sentences.back().empty())
+      sentences.pop_back();
+    double total = 0.0;
+    for (const auto &sentence : sentences)
+      for (const Word &w : sentence)
+        total += w.weight;
+    if (total <= 0.0)
+      return fail("E_PARAM", "add_captions: the text has no words.");
+
+    const std::string style = op_.value("style", std::string("pop"));
+    const double size = op_.value("size", 0.07), y = op_.value("y", 0.72);
+    const std::string color = op_.value("color", std::string("#ffffff")), emphasis_color = op_.value("emphasis_color", std::string("#FFE600"));
+    std::vector<std::string> emphasis;
+    if (op_.contains("emphasis") && op_["emphasis"].is_array())
+      for (const json &e : op_["emphasis"])
+        if (e.is_string()) {
+          std::string w = e.get<std::string>();
+          std::transform(w.begin(), w.end(), w.begin(), [](unsigned char ch) { return char(std::tolower(ch)); });
+          emphasis.push_back(std::move(w));
+        }
+    ATM_TRY(std::string track_id, track_for("video", [&]() -> Result<std::string> {
+      if (const std::string id = track_id_named("Captions"); !id.empty())
+        return id;
+      const std::string ph = placeholder(".track");
+      add_track_op(ph, "video", "Captions", nullptr, false); // on top of the pictures
+      return ph;
+    }));
+
+    const double seconds = duration->to_seconds_lossy();
+    const auto rational_of = [&](double s_) { return *Rational::make(int64_t(std::llround(s_ * 1000.0)), 1000); };
+    double elapsed = 0.0;
+    int index = 0;
+    for (const auto &sentence : sentences) {
+      double sentence_weight = 0.0;
+      for (const Word &w : sentence)
+        sentence_weight += w.weight;
+      const double begin = elapsed, length = seconds * sentence_weight / total;
+      json words = json::array();
+      std::string full;
+      double inside = 0.0;
+      for (const Word &w : sentence) {
+        std::string lower;
+        for (const char ch : w.text)
+          if (static_cast<unsigned char>(ch) >= 0x80 || std::isalnum(static_cast<unsigned char>(ch)) || ch == '-' || ch == '\'')
+            lower += char(std::tolower(static_cast<unsigned char>(ch)));
+        json word = {{"text", w.text}, {"at", rational_of(inside).to_string()}};
+        if (std::find(emphasis.begin(), emphasis.end(), lower) != emphasis.end())
+          word["color"] = emphasis_color;
+        words.push_back(std::move(word));
+        full += (full.empty() ? "" : " ") + w.text;
+        inside += seconds * w.weight / total;
+      }
+      json content = {{"text", full}, {"size", size}, {"color", color}, {"bold", true}, {"words", std::move(words)}, {"word_pop", 0.6}};
+      if (style == "pop") {
+        content["outline"] = {{"color", "#000000"}, {"width", 0.1}};
+        content["shadow"] = {{"color", "#000000"}, {"x", 0.06}, {"y", 0.07}, {"blur", 0.05}, {"opacity", 0.5}};
+      } else if (style == "box") {
+        content["background"] = {{"color", "#000000"}, {"opacity", 0.65}, {"padding", 0.3}, {"radius", 0.3}};
+      }
+      json value = {{"name", "Caption " + std::to_string(index + 1)},
+                    {"timing", {{"record_in", plus(*at, rational_of(begin)).to_string()}, {"duration", rational_of(length).to_string()}, {"source_in", "0"}}},
+                    {"media_ref", {{"type", "text"}}},
+                    {"content", std::move(content)},
+                    {"transform", {{"position", json::array({0.5, y})}, {"opacity", 1.0}}}};
+      push({{"op", "add"}, {"path", track_id + "/clips/" + placeholder(".c" + std::to_string(index))}, {"value", std::move(value)}});
+      elapsed += length;
+      ++index;
+    }
     return {};
   }
 
@@ -1095,6 +1228,90 @@ private:
       for (auto it = (*t)["transitions"].begin(); it != (*t)["transitions"].end(); ++it)
         if (it->value("from", "") == id)
           push({{"op", "replace"}, {"path", it.key() + "/from"}, {"value", right_ph}});
+  }
+
+  // Gives every collection member below `node` an ID of its own, named from `ph`: keyframes, effects (and their keyframes). A
+  // generative clip's workflow gets a fresh copy of its nodes and links, and no Takes: the copy makes its own, from the same inputs.
+  void fresh_children(json &node, const std::string &ph) {
+    int n = 0;
+    if (node.contains("transform") && node["transform"].contains("keyframes") && node["transform"]["keyframes"].is_object())
+      for (auto &[prop, keys] : node["transform"]["keyframes"].items()) {
+        json moved = json::object();
+        for (const auto &[kid, key] : keys.items())
+          moved[ph + ".k" + std::to_string(n++)] = key;
+        keys = std::move(moved);
+      }
+    if (node.contains("effects") && node["effects"].is_object()) {
+      json fx = json::object();
+      for (const auto &[fid, e] : node["effects"].items()) {
+        json one = e;
+        if (one.contains("keyframes") && one["keyframes"].is_object())
+          for (auto &[param, keys] : one["keyframes"].items()) {
+            json moved = json::object();
+            for (const auto &[kid, key] : keys.items())
+              moved[ph + ".k" + std::to_string(n++)] = key;
+            keys = std::move(moved);
+          }
+        fx[ph + ".fx" + std::to_string(n++)] = std::move(one);
+      }
+      node["effects"] = std::move(fx);
+      node.erase("effect_order");
+    }
+    if (node.contains("media_ref") && node["media_ref"].is_object() && node["media_ref"].value("type", std::string()) == "workflow") {
+      json &ref = node["media_ref"];
+      if (ref.contains("workflow") && ref["workflow"].is_object())
+        ref["workflow"] = gen::fresh_copy(ref["workflow"], ref["workflow"].value("source", std::string()));
+      for (const char *gone : {"takes", "take_order", "selected", "locked"})
+        ref.erase(gone);
+    }
+  }
+
+  // duplicate: copies of clips (with their effects, keyframes, fades, and a generative clip's own workflow), each at a time
+  // and, optionally, on another track of the same kind: {"clips": [{"clip": ID, "at": time, "track": ID?}, ...]}. An item may
+  // carry {"snapshot": <a clip's object>, "track": ID} instead of "clip": paste. Clips that
+  // were linked stay linked to each other in the copy. The copies are named "$new:<id>.c0", ".c1" ... in the order given.
+  Result<void> duplicate() {
+    const json list = op_.value("clips", json::array());
+    if (!list.is_array() || list.empty())
+      return fail("E_PARAM", "duplicate needs \"clips\": [{\"clip\": ID, \"at\": time}, ...].");
+    std::map<std::string, std::string> groups; // the old link group -> the group of the copies
+    int i = 0;
+    for (const json &item : list) {
+      // A clip of the sequence by its ID, or a snapshot of one (what a Copy took, which may be gone from the document by now)
+      // with the track it is put on.
+      const bool from_snapshot = item.is_object() && item.contains("snapshot") && item["snapshot"].is_object();
+      const std::string id = item.is_object() ? item.value("clip", std::string()) : std::string();
+      const doc::NodeRef *ref = from_snapshot || id.empty() ? nullptr : doc_.find(id);
+      if (!from_snapshot && (!ref || id_prefix(id) != "clp" || !track(ref->parent)))
+        return fail("E_UNKNOWN_CLIP", "clips[" + std::to_string(i) + "].clip must be the ID of a clip of this sequence, not \"" + id + "\".");
+      std::string track_id = from_snapshot ? std::string() : ref->parent;
+      if (item.contains("track") && item["track"].is_string())
+        track_id = item["track"].get<std::string>();
+      const json *target = track(track_id);
+      if (!target)
+        return fail("E_UNKNOWN_TRACK", "There is no track \"" + track_id + "\" in this sequence.",
+                    from_snapshot ? "A snapshot needs \"track\"." : "");
+      if (!from_snapshot && target->value("kind", "video") != track(ref->parent)->value("kind", "video"))
+        return fail("E_TRACK_KIND", "A copy of a clip stays on a track of its own kind.");
+      if (!item.contains("at"))
+        return fail("E_PARAM", "clips[" + std::to_string(i) + "] needs \"at\".");
+      auto at = parse_time(item["at"], TimeContext{ctx_.rate});
+      if (!at)
+        return fail("E_PARAM", "clips[" + std::to_string(i) + "].at is not a time: " + at.error().message);
+      json copy = from_snapshot ? item["snapshot"] : *ref->node;
+      copy["timing"]["record_in"] = at->to_string();
+      if (copy.contains("link_group") && copy["link_group"].is_string()) {
+        auto [found, fresh] = groups.emplace(copy["link_group"].get<std::string>(), std::string());
+        if (fresh)
+          found->second = new_id("lnk");
+        copy["link_group"] = found->second;
+      }
+      const std::string ph = placeholder(".c" + std::to_string(i));
+      fresh_children(copy, ph);
+      push({{"op", "add"}, {"path", track_id + "/clips/" + ph}, {"value", std::move(copy)}});
+      ++i;
+    }
+    return {};
   }
 
   Result<void> split() {

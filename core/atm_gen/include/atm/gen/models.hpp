@@ -35,12 +35,15 @@ struct SettingDecl {
 
 struct ModelDecl {
   std::string id, title;            // title: for menus, when the model is not in the catalog (an engine's own)
+  std::string note;                 // one line on what it is good for (cards and the Models panel), when it is not in the catalog
   std::vector<std::string> kinds;   // short kind ids
   std::vector<std::string> accepts; // optional inputs it takes: "start_image", "end_image", "references"
   double seconds_min = 0.0, seconds_max = 0.0; // 0 = no limit
   int size_multiple = 1;                       // width and height are multiples of this
   int64_t max_pixels = 0;                      // width x height; 0 = no limit
   bool needs_files = true;                     // false for a model that is part of the engine (the mock)
+  std::vector<std::string> voices;             // a speech model with ready-made voices: their names (the Voice input is then a choice)
+  std::string default_voice;
   std::vector<SettingDecl> settings;
 
   bool does(std::string_view kind) const;

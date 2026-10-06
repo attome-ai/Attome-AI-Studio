@@ -34,20 +34,23 @@ function Invoke-Attome {
 # Runs the editor on $Project with a UI script and waits for it to finish. -Endpoint reuses the daemon of an earlier
 # run, so several scripts can work on one project. Returns { Endpoint, Project, ExitCode, Errors }.
 function Invoke-EditorScript {
-  param([Parameter(Mandatory)][string]$Project, [Parameter(Mandatory)][string[]]$Script, [string[]]$Import = @(),
+  param([string]$Project = '', [Parameter(Mandatory)][string[]]$Script, [string[]]$Import = @(),
         [switch]$SelectFirstClip, [string]$Endpoint, [int]$TimeoutSeconds = 90)
   if (-not $Endpoint) { $Endpoint = "\\.\pipe\attome-uitest-$PID-$([guid]::NewGuid().ToString('N').Substring(0, 6))" }
   $tag = [guid]::NewGuid().ToString('N').Substring(0, 8)
   $file = Join-Path $env:TEMP "attome-uitest-$tag.txt"
   $errFile = Join-Path $env:TEMP "attome-uitest-$tag.err"
   [IO.File]::WriteAllLines($file, $Script, (New-Object Text.UTF8Encoding $false))
-  $saved = @{ ATTOME_ENDPOINT = $env:ATTOME_ENDPOINT; ATTOME_EDITOR_SCRIPT = $env:ATTOME_EDITOR_SCRIPT; ATTOME_EDITOR_SELECT = $env:ATTOME_EDITOR_SELECT }
+  $saved = @{ ATTOME_ENDPOINT = $env:ATTOME_ENDPOINT; ATTOME_EDITOR_SCRIPT = $env:ATTOME_EDITOR_SCRIPT; ATTOME_EDITOR_SELECT = $env:ATTOME_EDITOR_SELECT; ATTOME_PREF_DIR = $env:ATTOME_PREF_DIR }
+  if (-not $env:ATTOME_PREF_DIR) { $env:ATTOME_PREF_DIR = Join-Path $env:TEMP "attome-uitest-prefs-$tag" } # the user's own preferences are never used by a test
   $env:ATTOME_ENDPOINT = $Endpoint
   $env:ATTOME_EDITOR_SCRIPT = $file
   if ($SelectFirstClip) { $env:ATTOME_EDITOR_SELECT = '1' } else { $env:ATTOME_EDITOR_SELECT = $null }
-  $editorArgs = (@($Project) + $Import | ForEach-Object { "`"$_`"" }) -join ' ' # media files are imported on start
+  $editorArgs = (@($(if ($Project) { $Project })) + $Import | Where-Object { $_ } | ForEach-Object { "`"$_`"" }) -join ' ' # media files are imported on start
   try {
-    $p = Start-Process (Join-Path (Get-BinDir) 'attome-editor.exe') -ArgumentList $editorArgs -PassThru -RedirectStandardError $errFile
+    $start = @{ FilePath = (Join-Path (Get-BinDir) 'attome-editor.exe'); PassThru = $true; RedirectStandardError = $errFile }
+    if ($editorArgs) { $start.ArgumentList = $editorArgs } # no project: the welcome page
+    $p = Start-Process @start
     $null = $p.Handle # keeps the exit code readable
   } finally {
     foreach ($k in $saved.Keys) { Set-Item "Env:\$k" $saved[$k] -ErrorAction SilentlyContinue; if (-not $saved[$k]) { Remove-Item "Env:\$k" -ErrorAction SilentlyContinue } }

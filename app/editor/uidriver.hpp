@@ -10,10 +10,13 @@
 //
 //   wait <ms>                       let the editor run
 //   expect @<id>                    fail unless the widget appears within 15 s (it pages the scrolled panels to find it)
+//   absent @<id>                    fail if the widget is on the screen now (what must not be there)
+//   high @<id> <px>                 fail unless the widget is at least that tall (also: wide); inside @<id>: fail if its panel cuts it off
+//   rclick <target>                 press and release the right button
 //   click <target>                  press and release
 //   drag <target> <dx> <dy>         press, move by (dx, dy) in steps, release; points, or 25% of the target's size
 //   slide @<slider> <fraction>      set a slim slider to a position from 0 (left) to 1 (right)
-//   key <name> [ctrl] [shift]       press and release a key: A..Z, Space, Delete, Enter, Escape, Left, Right
+//   key <name> [ctrl] [shift]       press and release a key: A..Z, 0..9, Space, Delete, Enter, Escape, Left, Right, Up, Down, Home, End, Tab, F1, F2, Plus, Minus
 //   type <text>                     type the rest of the line into the field that has the keyboard (click it first;
 //                                   `key A ctrl` before it selects what is there, so the text replaces it)
 //   shot <file.jpg>                 save what the window shows

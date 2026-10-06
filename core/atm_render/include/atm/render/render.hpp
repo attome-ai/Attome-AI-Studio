@@ -77,6 +77,23 @@ struct Layer {
   std::string text;
   float text_size = 0.08f;
   uint32_t text_color = 0xFFFFFF;
+  // The look of a text (content.outline, content.shadow, content.background); every size is a fraction of the text's own size. Off
+  // when the width, the opacity or the box is 0.
+  float outline_width = 0.0f;
+  uint32_t outline_color = 0x000000;
+  float shadow_x = 0.0f, shadow_y = 0.0f, shadow_blur = 0.0f, shadow_opacity = 0.0f;
+  uint32_t shadow_color = 0x000000;
+  float box_opacity = 0.0f, box_padding = 0.3f, box_radius = 0.3f;
+  uint32_t box_color = 0x000000;
+  // Captions: a text with timed words (content.words) shows one word at a time, each from its start until the next one starts (the
+  // last until the end of the clip), and pops in: it grows from (1 - 0.35 * word_pop) of its size over 5 frames. A word may have a colour of its own.
+  struct Word {
+    int64_t start = 0, end = 0; // frames after the clip's start
+    std::string text;
+    int64_t color = -1;         // 0xRRGGBB, or -1 for the text's colour
+  };
+  std::vector<Word> words;
+  float word_pop = 0.0f;
   // Effects. On an adjustment layer (media_ref.type "adjustment", no picture of its own) they change everything below
   // it, and opacity mixes the changed picture with the unchanged one. On a clip they change only the clip: it is drawn
   // on its own, changed, and composited with its blurred coverage, so its edges soften into what is below.
@@ -156,7 +173,7 @@ private:
   std::unordered_map<std::string, bool> failed_;
   struct TextEntry {
     std::string key;
-    media::TextBitmap bitmap;
+    media::TextBitmap bitmap, outline, shadow, box; // the text, its grown copy, its soft copy, and the rounded box behind it
   };
   std::unordered_map<std::string, TextEntry> text_; // by clip ID
   std::unordered_map<std::string, media::Still> stills_; // picture clips, read once, by clip ID
