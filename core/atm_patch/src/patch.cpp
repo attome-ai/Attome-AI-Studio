@@ -121,6 +121,23 @@ struct Handles {
   std::optional<Rational> before, after;
 };
 
+// The length of a clip's file as the clip plays it: media_ref.duration divided by timing.speed (a file played twice as fast is half as
+// long). Rounded down to a millionth of a second, so the clip is never allowed past the file's end.
+std::optional<Rational> played_length(const json &clip) {
+  const json ref = clip.value("media_ref", json::object());
+  const auto total = Rational::parse(ref.value("duration", std::string()));
+  if (!total || total->num() <= 0)
+    return std::nullopt;
+  double speed = 1.0;
+  if (const auto timing = clip.find("timing"); timing != clip.end() && timing->is_object())
+    if (const auto sp = timing->find("speed"); sp != timing->end() && sp->is_number())
+      speed = std::clamp(sp->get<double>(), 0.1, 10.0);
+  if (speed == 1.0)
+    return *total;
+  const auto scaled = Rational::make(int64_t(std::floor(total->to_seconds_lossy() / speed * 1e6)), 1000000);
+  return scaled ? std::optional<Rational>(*scaled) : std::optional<Rational>(*total);
+}
+
 Handles handles_of(const json &clip, const Rational &duration) {
   Handles h;
   const json ref = clip.value("media_ref", json::object());
@@ -131,11 +148,10 @@ Handles handles_of(const json &clip, const Rational &duration) {
   if (!source_in)
     return h;
   h.before = *source_in;
-  if (const auto media = ref.find("duration"); media != ref.end() && media->is_string())
-    if (const auto total = Rational::parse(media->get_ref<const std::string &>()))
-      if (const auto used = add(*source_in, duration))
-        if (const auto rest = sub(*total, *used))
-          h.after = *rest;
+  if (const auto total = played_length(clip))
+    if (const auto used = add(*source_in, duration))
+      if (const auto rest = sub(*total, *used))
+        h.after = *rest;
   return h;
 }
 

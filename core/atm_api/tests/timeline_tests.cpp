@@ -299,6 +299,46 @@ TEST_CASE("timeline.edit + media.import: clips, dissolves, music and edits by na
   CHECK(f.get(cb)["transform"]["keyframes"]["opacity"].size() == 2);
   CHECK(e["notes"].size() >= 1); // the dissolve on a was dropped, and said so
 }
+TEST_CASE("timeline.edit: set_speed plays a clip and its sound faster or slower, moves its keys, and slides what it runs into",
+          "[timeline][media]") {
+  Fixture f;
+  const std::string file = (f.dir / "v.mp4").string();
+  write_video(file, 6);
+  const json r = f.ok(json::array({{{"op", "add_clip"}, {"id", "$new:a"}, {"path", file}, {"source_in", "1s"}, {"duration", "2s"}},
+                                   {{"op", "add_clip"}, {"id", "$new:b"}, {"path", file}, {"duration", "1s"}, {"with_audio", false}},
+                                   {{"op", "set_property"}, {"target", "$new:a"}, {"path", "transform.opacity"},
+                                    {"keyframes", {{{"t", "0s"}, {"v", 0}}, {{"t", "1s"}, {"v", 1}}}}}}));
+  const std::string a = r["id_map"]["$new:a"], sa = r["id_map"]["$new:a.audio"], b = r["id_map"]["$new:b"];
+  CHECK(f.get(b)["timing"]["record_in"] == "2");
+
+  // Twice as fast: half as long, the same part of the file (from 1 s in: 0.5 s in clip time), the key at 1 s now at 0.5 s; the sound too.
+  f.ok(json::array({{{"op", "set_speed"}, {"clip", a}, {"speed", 2}}}));
+  CHECK(f.get(a)["timing"]["speed"] == 2.0);
+  CHECK(f.get(a)["timing"]["duration"] == "1");
+  CHECK(f.get(a)["timing"]["source_in"] == "1/2");
+  CHECK(f.get(sa)["timing"]["speed"] == 2.0);
+  CHECK(f.get(sa)["timing"]["duration"] == "1");
+  bool moved = false;
+  const json keys = f.get(a)["transform"]["keyframes"]["opacity"];
+  for (auto it = keys.begin(); it != keys.end(); ++it)
+    moved = moved || it.value().value("t", std::string()) == "1/2";
+  CHECK(moved);
+  CHECK(f.get(b)["timing"]["record_in"] == "2"); // a gap it leaves is kept
+
+  // Half speed (from 2x): four times as long as now, so it runs into b, which slides right.
+  f.ok(json::array({{{"op", "set_speed"}, {"clip", a}, {"speed", 0.5}}}));
+  CHECK(f.get(a)["timing"]["duration"] == "4");
+  CHECK(f.get(a)["timing"]["source_in"] == "2");
+  CHECK(f.get(b)["timing"]["record_in"] == "4");
+
+  // Back to 1: the field goes away. A speed out of range is refused (the same part of the file is played, so the file always covers it).
+  f.ok(json::array({{{"op", "set_speed"}, {"clip", a}, {"speed", 1}}}));
+  CHECK_FALSE(f.get(a)["timing"].contains("speed"));
+  CHECK(f.get(a)["timing"]["duration"] == "2");
+  CHECK(f.fail_rule(json::array({{{"op", "set_speed"}, {"clip", a}, {"speed", 20}}})) == "E_PARAM");
+  CHECK(f.engine.call("project.validate", {{"project", f.project}})->at("ok") == true);
+}
+
 TEST_CASE("timeline.edit: slip, roll and slide change timing the way editors expect", "[timeline][media]") {
   Fixture f;
   const std::string file = (f.dir / "a.mp4").string();

@@ -274,6 +274,13 @@ void UiDriver::before_frame() {
             fail(c.line, arg(1) + " is cut off by its panel (" + std::to_string(int(m.rect.Max.x)) + " past " + std::to_string(int(clip.Max.x)) + ")");
         }
       }
+    } else if (op == "above") { // "above @a @b": a was last drawn wholly above b (rows of the timeline, cards of a panel)
+      const auto a = g_marks.find(arg(1).empty() ? std::string() : arg(1).substr(1)), b = g_marks.find(arg(2).empty() ? std::string() : arg(2).substr(1));
+      if (a == g_marks.end() || b == g_marks.end())
+        fail(c.line, (a == g_marks.end() ? arg(1) : arg(2)) + " was never drawn");
+      else if (a->second.rect.Max.y > b->second.rect.Min.y + 1.0f)
+        fail(c.line, arg(1) + " (ends at " + std::to_string(int(a->second.rect.Max.y)) + ") is not above " + arg(2) + " (starts at " +
+                         std::to_string(int(b->second.rect.Min.y)) + ")");
     } else if (op == "shot") {
       d.shot = arg(1);
     } else if (op == "type") {

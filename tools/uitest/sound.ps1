@@ -31,12 +31,14 @@ try {
   if (-not $failed) {
     $tracks = @(Get-Tracks $run)
     $video = $tracks | Where-Object { $_.kind -eq 'video' }
-    $audio = $tracks | Where-Object { $_.kind -eq 'audio' }
+    $audios = @($tracks | Where-Object { $_.kind -eq 'audio' })
+    $audio = $audios | Where-Object { @($_.clip_list | Where-Object { $_.name -eq 'a' }).Count -gt 0 } | Select-Object -First 1    # the track of the video's own sound
     "tracks: $(($tracks | ForEach-Object { "$($_.name)/$($_.kind)/$($_.clips)" }) -join ', ')"
-    # The video's own sound is a linked clip on the audio track; the music follows it there.
-    $music = if ($audio) { $audio.clip_list | Where-Object { $_.name -eq 'music' } } else { $null }
-    if (-not $video -or -not $audio -or $video.clips -ne 1 -or $audio.clips -ne 2 -or -not $music) {
-      $failed = 'expected the picture on a video track, and its sound plus the music on an audio track'
+    # The video's own sound is a linked clip on a sound track; the music is under it, on a sound track of its own.
+    $music = $audios | ForEach-Object { $_.clip_list } | Where-Object { $_.name -eq 'music' } | Select-Object -First 1
+    $own = $music -and $audio -and -not @($audio.clip_list | Where-Object { $_.name -eq 'music' }).Count
+    if (-not $video -or -not $audio -or $video.clips -ne 1 -or -not $music -or -not $own) {
+      $failed = 'expected the picture on a video track, its sound on a sound track, and the music on a sound track of its own'
     } else {
       $picture = Get-Object $run $video.clip_list[0].id
       $sound = Get-Object $run ($audio.clip_list | Where-Object { $_.name -eq 'a' }).id
@@ -53,5 +55,5 @@ try {
 } finally { Stop-Daemon $run }
 
 if ($failed) { Write-Host "FAIL: $failed" -ForegroundColor Red; exit 1 }
-Write-Host "PASS: a video's picture and linked sound, music on the audio track; gain and fade set from the Audio card (captures in $work)" -ForegroundColor Green
+Write-Host "PASS: a video's picture and linked sound, music on a sound track of its own; gain and fade set from the Audio card (captures in $work)" -ForegroundColor Green
 exit 0

@@ -64,8 +64,30 @@ try {
       }
     }
   }
+  if (-not $failed) { # the number is typed into: an exact length, longer than a drag would hit
+    $typed = Invoke-EditorScript -Project $proj -SelectFirstClip -Endpoint $run.Endpoint -Script @('expect @number:fadein', 'click @number:fadein', 'wait 300', 'type 1.5', 'key Enter', 'wait 700', "shot $work\fade_typed.jpg")
+    $failed = $typed.Errors
+    if (-not $failed) {
+      $l = Get-OpacityKeys (Get-Clips $run)[0]
+      "after typing 1.5: $($l | ConvertTo-Json -Compress)"
+      if ($l.Count -ne 2 -or [math]::Abs((ConvertFrom-Rational $l[1].t) - 1.5) -gt 0.02) { $failed = 'typing 1.5 into the fade-in number did not make a 1.5 s fade' }
+    }
+  }
+  if (-not $failed) { # a double click on the slider sets it back: no fade in
+    $reset = Invoke-EditorScript -Project $proj -SelectFirstClip -Endpoint $run.Endpoint -Script @('dblclick @slider:fadein', 'wait 800')
+    $failed = $reset.Errors
+    if (-not $failed -and (Get-OpacityKeys (Get-Clips $run)[0]).Count -ne 0) { $failed = 'a double click on the fade-in slider did not take the fade away' }
+  }
+  if (-not $failed) { # Remove fade takes the fades off and the card away; the clip offers Fade again
+    $gone = Invoke-EditorScript -Project $proj -SelectFirstClip -Endpoint $run.Endpoint -Script @(
+      'click @button:add_card_fade', 'wait 300', 'click @number:fadeout', 'wait 300', 'type 1', 'key Enter', 'wait 700'
+      'expect @button:remove_fade', 'click @button:remove_fade', 'wait 800'
+      'absent @slider:fadein', 'expect @button:add_card_fade')
+    $failed = $gone.Errors
+    if (-not $failed -and (Get-OpacityKeys (Get-Clips $run)[0]).Count -ne 0) { $failed = 'Remove fade left opacity keys on the clip' }
+  }
 } finally { Stop-Daemon $run }
 
 if ($failed) { Write-Host "FAIL: $failed" -ForegroundColor Red; exit 1 }
-Write-Host "PASS: fades from the Inspector, kept through a split (captures in $work)" -ForegroundColor Green
+Write-Host "PASS: fades from the Inspector, kept through a split, typed as a number, set back by a double click and removed (captures in $work)" -ForegroundColor Green
 exit 0

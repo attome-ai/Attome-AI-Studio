@@ -55,7 +55,10 @@ struct Layer {
   bool video = true;          // false for clips on audio tracks
   int64_t start_frame = 0;    // on the sequence
   int64_t frames = 0;
-  int64_t source_in_hns = 0;  // where in the file the clip starts
+  int64_t source_in_hns = 0;  // where in the file the clip starts, in the clip's own time: the file's time is this times `speed`
+  // timing.speed: how fast the file plays (2 = twice as fast, 0.5 = slow motion). The clip's times (source_in, duration) are measured as the
+  // clip plays, so the frame shown at clip time t is the file's frame at (source_in + t) * speed; the sound is played at the same speed.
+  double speed = 1.0;
   float opacity = 1.0f;
   float volume = 1.0f;
   // media_ref.stream: a linked pair shares one file, the picture clip with "video" (silent here) and the sound clip

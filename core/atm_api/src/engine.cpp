@@ -1010,7 +1010,7 @@ struct Engine::Impl {
          "get shorter, one that starts inside the trimmed part loses its head, and a clip with media that spans it is left alone "
          "with a note. add_transition with \"make_room\": true (and \"ripple\") does both in one step\n"
          "- add_track {kind (video | audio), name?, position? (top | bottom), below? / above? (track ID), sync_lock? (true: the track's clips follow make_room and ripple_delete)}\n"
-         "- delete {clip} or {transition}; ripple_delete {clip} (closes the gap, on the tracks locked to the cut too); move {clip, to?, track?}; trim {clip, edge (in | out), to or delta}; "
+         "- delete {clip} or {transition}; ripple_delete {clip} (closes the gap, on the tracks locked to the cut too); move {clip, to?, track?}; trim {clip, edge (in | out), to or delta}; set_speed {clip, speed (0.1..10, 2 = twice as fast)} - the clip and its linked sound play faster or slower, and get shorter or longer; "
          "add_captions {clip (a voice clip) or text + at + duration, style? (pop | plain | box), size? (0.07), y? (0.72), color?, emphasis? [words shown in emphasis_color], track?} - "
          "one text clip for each sentence, shown one word at a time, each word popping in; with clip, the words are timed from what the voice model reported (Kokoro does) and otherwise by their letters (a guess); goes on a Captions track on top; "
          "sync_captions {clip (the voice)} - after the voice was made anew, the captions made from it get their times from its words again; "
@@ -2905,7 +2905,7 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
      R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},
        "ops":{"type":"array","items":{"type":"object","properties":{
          "op":{"type":"string","enum":["add_track","add_clip","add_text","add_captions","sync_captions","add_adjustment","add_transition","delete",
-                                       "ripple_delete","move","trim","split","duplicate","slip","roll","slide","add_effect","remove_effect",
+                                       "ripple_delete","move","trim","split","duplicate","slip","roll","slide","set_speed","add_effect","remove_effect",
                                        "set_effect_enabled","link","unlink","set_property"]},
          "id":{"type":"string","description":"$new:name for what this op creates"}},"required":["op"]}},
        "sequence":{"type":"string"},"label":{"type":"string"},"dry_run":{"type":"boolean"},

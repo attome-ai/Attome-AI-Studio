@@ -367,6 +367,75 @@ TEST_CASE("render: rotation, anchor and crop turn, pin and cut a clip", "[media]
   fs::remove_all(dir, ec);
 }
 
+TEST_CASE("render: a clip with a speed shows the file's frames that many times as fast, and its sound fits its length", "[media]") {
+  const fs::path dir = fs::temp_directory_path() / atm::new_id("attome-speed");
+  fs::create_directories(dir);
+  const std::string path = (dir / "ramp.mp4").string();
+  { // frame f of the file is grey level 20 + 2 f: the picture says which frame of the file is shown
+    auto encoder = media::Encoder::create({path, 160, 120, 30, 1, 2'000'000, true});
+    REQUIRE(encoder);
+    std::vector<uint8_t> picture(160 * 120 * 4), nv12(media::nv12_size(160, 120));
+    std::vector<float> tone(1600 * 2, 0.25f);
+    for (int f = 0; f < 90; ++f) {
+      const uint8_t v = uint8_t(20 + 2 * f);
+      for (size_t i = 0; i < picture.size(); i += 4)
+        picture[i] = picture[i + 1] = picture[i + 2] = v, picture[i + 3] = 255;
+      media::bgrx_to_nv12(picture.data(), 160, 120, nv12.data());
+      REQUIRE((*encoder)->video(nv12.data(), f));
+      REQUIRE((*encoder)->audio(tone.data(), 1600));
+    }
+    REQUIRE((*encoder)->finish());
+  }
+  const auto grey_at = [&](double speed, double source_in_s, int64_t frame) {
+    atm::render::Composition comp;
+    comp.width = 160;
+    comp.height = 120;
+    comp.frames = 60;
+    atm::render::Layer l;
+    l.clip_id = "clp_speed";
+    l.path = path;
+    l.frames = 60;
+    l.clip_end_frame = 60;
+    l.speed = speed;
+    l.source_in_hns = int64_t(source_in_s * double(media::kHnsPerSecond));
+    comp.layers.push_back(l);
+    atm::render::Renderer renderer(comp, 160, 120);
+    std::vector<uint8_t> nv12(media::nv12_size(160, 120)), rgb(160 * 120 * 4);
+    REQUIRE(renderer.render(frame, nv12.data()));
+    media::nv12_to_bgrx(nv12.data(), 160, 120, rgb.data());
+    return int(rgb[(60 * 160 + 80) * 4 + 1]);
+  };
+  const auto file_frame = [](int grey) { return (grey - 20) / 2.0; };
+  CHECK(file_frame(grey_at(1.0, 0.0, 10)) == Catch::Approx(10).margin(1.0)); // as recorded
+  CHECK(file_frame(grey_at(2.0, 0.0, 10)) == Catch::Approx(20).margin(1.0)); // twice as fast: frame 10 of the clip is frame 20 of the file
+  CHECK(file_frame(grey_at(0.5, 0.0, 30)) == Catch::Approx(15).margin(1.0)); // half speed
+  CHECK(file_frame(grey_at(2.0, 0.5, 0)) == Catch::Approx(30).margin(1.0));  // source_in is in clip time: 0.5 s at 2x is 1 s into the file
+
+  // The sound: a 2 s clip at 2x reads 4 s of the file and fits it into its 2 s; at 0.5x it reads 1 s and stretches it.
+  for (const double speed : {2.0, 0.5}) {
+    atm::render::Composition comp;
+    comp.width = 160;
+    comp.height = 120;
+    comp.frames = 60;
+    atm::render::Layer l;
+    l.clip_id = "clp_speed";
+    l.path = path;
+    l.frames = 60;
+    l.clip_end_frame = 60;
+    l.speed = speed;
+    comp.layers.push_back(l);
+    auto mix = atm::render::mix_audio(comp);
+    REQUIRE(mix);
+    const size_t half = mix->size() / 2;
+    double heard = 0.0;
+    for (size_t i = half - 2000; i < half + 2000; ++i)
+      heard += std::fabs((*mix)[i]);
+    CHECK(heard / 4000.0 > 0.2); // the middle of the clip still has its sound: it was fitted to the clip, not cut short
+  }
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}
+
 TEST_CASE("render: text clips draw in a colour, move and scale, and shape Arabic", "[media]") {
   const auto render_text_layer = [&](const std::string &text, float px, float py, float size, uint32_t color) {
     atm::render::Composition comp;

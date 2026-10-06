@@ -49,7 +49,8 @@ struct ClipUi {
   int64_t start_floor = 0;       // the exact start rounded down: the last frame at which another clip may end before it
   int64_t end_ceil = 0;          // the exact end rounded up: the first frame at which another clip may start without overlapping
   int64_t source_frames = 0;     // frames of the file before the clip's first frame
-  int64_t media_frames = 0;      // length of the file; 0 when unknown
+  int64_t media_frames = 0;      // length of the file as the clip plays it (the file's length divided by the speed); 0 when unknown
+  float speed = 1.0f;            // timing.speed: 2 plays the file twice as fast
   float opacity = 1.0f, volume = 1.0f;
   float pos_x = 0.5f, pos_y = 0.5f, scale_x = 1.0f, scale_y = 1.0f; // transform, canvas fractions
   float rotation = 0.0f, anchor_x = 0.5f, anchor_y = 0.5f;            // degrees clockwise; picture fractions
@@ -64,6 +65,7 @@ struct ClipUi {
   bool fades_only = true;                   // false when the opacity keys are something other than fades
   bool animated = false;                    // any transform keyframes: the static values are not what plays
   json keyframes;                           // the clip's transform.keyframes, for split
+  eval::Curve position_keys, scale_keys, rotation_keys; // transform.keyframes.position / scale / rotation, clip-local
   float gain_db = 0.0f, pan = 0.0f;         // the clip's "audio" object
   bool is_adjustment = false;               // an adjustment layer: its effects change the tracks below it
   bool is_generative = false;               // its picture is made by a Clip Workflow (media_ref.type "workflow")
@@ -146,7 +148,7 @@ private:
   // actions
   // `track` and `at` (frames) place a single file where a card was dropped; without them the engine picks the place.
   void import_files(const std::vector<std::string> &paths, const std::string &track = {}, int64_t at = -1);
-  void add_track();
+  void add_track(bool audio = false); // a new picture track on top, or a new sound track
   void add_title(int preset, const std::string &track = {}, int64_t at = -1); // without a place: the Titles track, at the playhead
   void add_generative_clip(const std::string &model, const std::string &track = {}, int64_t at = -1);
   // Without a place: the Effects track, at the playhead.
@@ -324,6 +326,10 @@ private:
 
   // ui
   std::string selected_clip_, selected_track_;
+  std::string rename_track_;       // the track whose name is being typed in its header
+  char rename_buf_[96] = {};
+  bool rename_focus_ = false;
+  void delete_track(const std::string &track_id);
   std::set<std::string> picked_;      // every selected clip when there are several (it includes selected_clip_); empty for one or none
   struct Snap { // a clip as Copy took it
     json clip;
@@ -353,7 +359,16 @@ private:
   int64_t mark_in_ = -1, mark_out_ = -1; // the In and Out marks (I and O), in frames: playing, looping and exporting can use just that part; -1 = not set. Out is where it ends, not drawn.
   float mon_zoom_ = 0.0f;                // the Monitor's zoom: 0 fits the stage, 1 shows one picture pixel for each screen pixel (100 %), 2 is 200 %
   ImVec2 mon_pan_{};                     // where a zoomed picture is moved to, from the middle of the stage
-  void set_mark(bool in);
+  void set_mark(bool in, int64_t at = -1); // at the playhead, or at a frame (the ruler's menu)
+  bool snap_on_ = true;   // clips being dragged catch on the playhead and on other clips' edges (N, the Snap button); Alt held does the opposite
+  int64_t ruler_frame_ = 0; // where the ruler's menu was opened
+  struct MarkerUi {
+    std::string id, name;
+    int64_t frame = 0;
+  };
+  std::vector<MarkerUi> markers_;               // the sequence's markers: places to remember (a beat, a line), drawn on the ruler
+  void toggle_marker(int64_t frame);            // a marker there: made, or taken away when one is there already
+  const MarkerUi *marker_at(int64_t frame, int64_t reach = 0) const;
   void clear_marks();
   int64_t play_start() const { return mark_in_ >= 0 ? mark_in_ : 0; }
   int64_t play_end() const { return mark_out_ > 0 ? std::min(mark_out_, total_frames_) : total_frames_; }
@@ -456,6 +471,8 @@ private:
 
   // moving a clip by dragging the picture in the Monitor
   bool mon_drag_ = false;
+  bool mon_scaling_ = false;                 // a corner handle of the selected clip is being dragged in the Monitor
+  float mon_sx0_ = 1.0f, mon_sy0_ = 1.0f, mon_sx_ = 1.0f, mon_sy_ = 1.0f, mon_d0_ = 1.0f; // its scale at the press and now, and how far the pointer was from its anchor
   std::string pick_key_fx_;
   ImVec2 mon_start_{};
   float mon_x0_ = 0.5f, mon_y0_ = 0.5f, mon_x_ = 0.5f, mon_y_ = 0.5f;
@@ -483,6 +500,14 @@ private:
   bool text_bold_ = false;
   float dissolve_s_ = 1.0f; // length of a new dissolve, seconds
   float fade_in_s_ = 0.0f, fade_out_s_ = 0.0f;
+  float speed_ = 1.0f;
+  int64_t insp_play_ = -1; // the playhead the Inspector's values were read at (an animated clip's values change with it)
+  // Position, scale and rotation: a plain value, or keys over time. These give the ops that set the value at the playhead (the key there,
+  // made when missing, when the property is animated), turn a key on or off there, and the clip's transform at the playhead.
+  json transform_ops(const ClipUi &c, const std::string &prop, const json &value) const;
+  void toggle_transform_key(const ClipUi &c, const std::string &prop);
+  std::string transform_key_at(const ClipUi &c, const std::string &prop, int64_t rel) const;
+  render::Transform transform_now(const ClipUi &c) const;
   float gain_db_ = 0.0f, pan_ = 0.0f, audio_fade_in_s_ = 0.0f, audio_fade_out_s_ = 0.0f;
   float amount_ = 1.0f;                    // an adjustment layer's opacity: how much of its effect shows
   std::map<std::string, float> fx_edit_;   // effect sliders being dragged, by "<effect id>/<param>"

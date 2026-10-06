@@ -641,6 +641,8 @@ Result<Composition> compile(const json &project, std::string_view sequence_id, c
           }
         }
         l.source_in_hns = int64_t(source_in.to_seconds_lossy() * double(media::kHnsPerSecond) + 0.5);
+        if (const auto sp = timing->find("speed"); sp != timing->end() && sp->is_number())
+          l.speed = std::clamp(sp->get<double>(), 0.1, 10.0);
         if (const auto tr = clip.find("transform"); tr != clip.end() && tr->is_object()) {
           if (const auto op = tr->find("opacity"); op != tr->end() && op->is_number())
             l.opacity = std::clamp(op->get<float>(), 0.0f, 1.0f);
@@ -1776,7 +1778,9 @@ void Renderer::draw(const Layer &l, int64_t frame, uint8_t *out, bool &cleared, 
       it = readers_.emplace(l.clip_id, std::move(*reader)).first;
     }
     used.push_back(&l.clip_id);
-    const int64_t source_time = l.source_in_hns + comp_.frame_hns(frame - l.start_frame);
+    int64_t source_time = l.source_in_hns + comp_.frame_hns(frame - l.start_frame);
+    if (l.speed != 1.0)
+      source_time = int64_t(double(source_time) * l.speed);
     auto decoded = it->second->frame_at(std::max<int64_t>(0, source_time));
     if (!decoded) {
       if (warning_.empty() && decoded.error().rule != "M_NO_FRAME")
@@ -1939,9 +1943,25 @@ Result<std::vector<float>> mix_audio(const Composition &c) {
   for (const Layer &l : c.layers) {
     if (l.volume <= 0.0f || l.gain <= 0.0f || l.is_text || l.is_adjustment || l.silent)
       continue;
-    auto pcm = media::read_audio(l.path, l.source_in_hns, c.frame_hns(l.frames));
+    auto pcm = media::read_audio(l.path, int64_t(double(l.source_in_hns) * l.speed), int64_t(double(c.frame_hns(l.frames)) * l.speed));
     if (!pcm)
       continue; // a clip without readable audio is silent
+    if (l.speed != 1.0) { // played faster or slower: the stretch of the file is fitted to the clip's length (the pitch moves with it)
+      const size_t in_frames = pcm->size() / 2;
+      const size_t out_frames = size_t(c.frame_hns(l.frames) * media::kAudioRate / media::kHnsPerSecond);
+      std::vector<float> fitted(out_frames * 2, 0.0f);
+      for (size_t i = 0; i < out_frames; ++i) {
+        const double pos = double(i) * l.speed;
+        const size_t k = size_t(pos);
+        if (k >= in_frames)
+          break;
+        const float f = float(pos - double(k));
+        const size_t k2 = std::min(k + 1, in_frames - 1);
+        fitted[i * 2] = (*pcm)[k * 2] * (1.0f - f) + (*pcm)[k2 * 2] * f;
+        fitted[i * 2 + 1] = (*pcm)[k * 2 + 1] * (1.0f - f) + (*pcm)[k2 * 2 + 1] * f;
+      }
+      *pcm = std::move(fitted);
+    }
     const size_t offset = size_t(c.frame_hns(l.start_frame) * media::kAudioRate / media::kHnsPerSecond) * 2;
     const size_t n = offset < mix.size() ? std::min(pcm->size(), mix.size() - offset) : 0;
     // Under a dissolve the two clips cross-fade with equal power: cos and sin of the progress keep the loudness level.

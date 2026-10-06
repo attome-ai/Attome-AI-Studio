@@ -45,6 +45,23 @@ json transition_value(const std::string &kind, const std::string &from, const st
 
 Rational plus(Rational a, Rational b) { return add(a, b).value_or(a); }
 Rational minus(Rational a, Rational b) { return sub(a, b).value_or(a); }
+
+// The length of a clip's file as the clip plays it: media_ref.duration divided by timing.speed (a file played twice as fast is half as
+// long). Rounded down to a millionth of a second, so the clip is never allowed past the file's end.
+std::optional<Rational> played_length(const json &clip) {
+  const json ref = clip.value("media_ref", json::object());
+  const auto total = Rational::parse(ref.value("duration", std::string()));
+  if (!total || total->num() <= 0)
+    return std::nullopt;
+  double speed = 1.0;
+  if (const auto timing = clip.find("timing"); timing != clip.end() && timing->is_object())
+    if (const auto sp = timing->find("speed"); sp != timing->end() && sp->is_number())
+      speed = std::clamp(sp->get<double>(), 0.1, 10.0);
+  if (speed == 1.0)
+    return *total;
+  const auto scaled = Rational::make(int64_t(std::floor(total->to_seconds_lossy() / speed * 1e6)), 1000000);
+  return scaled ? std::optional<Rational>(*scaled) : std::optional<Rational>(*total);
+}
 Rational at_most_zero(Rational a) { return a.num() < 0 ? Rational() : a; }
 
 // Clip timing in rationals.
@@ -90,6 +107,8 @@ public:
       return wrap(move());
     if (name == "trim")
       return wrap(trim());
+    if (name == "set_speed")
+      return wrap(set_speed());
     if (name == "split")
       return wrap(split());
     if (name == "duplicate")
@@ -807,7 +826,7 @@ private:
     if (const std::string type = ref.value("type", ""); type == "text" || type == "image")
       return r;
     r.before = s.source_in;
-    if (const auto total = Rational::parse(ref.value("duration", std::string())); total && total->num() > 0)
+    if (const auto total = played_length(clip))
       r.after = minus(*total, plus(s.source_in, s.duration));
     return r;
   }
@@ -1139,8 +1158,7 @@ private:
       return fail("E_MEDIA_RANGE", "Clip " + id + " would start " + seconds_text(minus(Rational(), s.source_in)) +
                                        " s before the beginning of its file.",
                   "Move by less; source_in cannot go below 0.");
-    if (const auto total = Rational::parse(ref.value("duration", std::string()));
-        total && total->num() > 0 && compare(plus(s.source_in, s.duration), *total) > 0)
+    if (const auto total = played_length(clip); total && compare(plus(s.source_in, s.duration), *total) > 0)
       return fail("E_MEDIA_RANGE", "Clip " + id + " would run " + seconds_text(minus(plus(s.source_in, s.duration), *total)) +
                                        " s past the end of its file.",
                   "Move by less; the file is " + seconds_text(*total) + " s long.");
@@ -1263,6 +1281,89 @@ private:
     ATM_CHECK(trim_one(id, c.second, in_edge, d));
     for (const Member &m : linked(id)) // the same edge of the linked clips moves the same way
       ATM_CHECK(trim_one(m.id, m.track, in_edge, d));
+    return {};
+  }
+
+  // set_speed {clip, speed}: the clip plays its file `speed` times as fast (0.1 .. 10; 1 = as recorded). It keeps its start and plays the same
+  // part of the file, so it gets shorter when faster and longer when slower; its keys (fades, animation) are moved with it. Its linked sound
+  // changes with it. Clips after it on its track that it would now run into slide right; a gap it leaves is kept.
+  Result<void> set_speed() {
+    ATM_TRY(auto c, clip("clip"));
+    const std::string id = op_.value("clip", std::string());
+    if (!op_.contains("speed") || !op_["speed"].is_number())
+      return fail("E_PARAM", "set_speed needs \"speed\": a number, 2 for twice as fast, 0.5 for half speed.");
+    const double speed = op_["speed"].get<double>();
+    if (!(speed >= 0.1 && speed <= 10.0))
+      return fail("E_PARAM", "\"speed\" must be between 0.1 and 10.", "1 plays the file as it was recorded.");
+    const Rational to = *Rational::make(std::llround(speed * 1000.0), 1000);
+    std::vector<std::pair<std::string, std::string>> members = {{id, c.second}};
+    for (const Member &m : linked(id))
+      members.emplace_back(m.id, m.track);
+    for (const auto &[mid, tid] : members) {
+      const json &node = node_of(mid);
+      const json timing = node.value("timing", json::object());
+      const double was_d = std::clamp(timing.value("speed", 1.0), 0.1, 10.0);
+      const Rational was = *Rational::make(std::llround(was_d * 1000.0), 1000);
+      if (compare(was, to) == 0)
+        continue;
+      const Rational factor = div(was, to).value_or(*Rational::make(1, 1)); // clip times grow by this
+      const auto scaled = [&](const Rational &t) { // to a millionth of a second, so the numbers stay small
+        const double v = mul(t, factor).value_or(t).to_seconds_lossy();
+        return *Rational::make(std::llround(v * 1e6), 1000000);
+      };
+      const Span s = span_of(node);
+      const Span after = {s.in, scaled(s.duration), scaled(s.source_in)};
+      if (after.duration.num() <= 0)
+        return fail("E_PARAM", "Clip " + mid + " would be empty at that speed.");
+      // The file must still cover it: its length as played at the new speed.
+      const json ref = node.value("media_ref", json::object());
+      if (ref.value("type", "") == "file")
+        if (const auto total = Rational::parse(ref.value("duration", std::string())); total && total->num() > 0) {
+          const Rational played = *Rational::make(std::llround(std::floor(total->to_seconds_lossy() / speed * 1e6)), 1000000);
+          if (compare(plus(after.source_in, after.duration), played) > 0)
+            return fail("E_MEDIA_RANGE", "At that speed clip " + mid + " would run past the end of its file.", "Trim it first, or use a higher speed.");
+        }
+      if (std::fabs(speed - 1.0) < 1e-9)
+        push({{"op", "remove"}, {"path", mid + "/timing/speed"}});
+      else
+        push({{"op", timing.contains("speed") ? "replace" : "add"}, {"path", mid + "/timing/speed"}, {"value", std::round(speed * 1000.0) / 1000.0}});
+      put_span(mid, s, after);
+      done_.push_back(mid);
+      drop_transitions(mid, tid);
+      // Keys count from the clip's start: they move with the new speed.
+      const auto move_keys = [&](const json &keys, const std::string &base) {
+        if (!keys.is_object())
+          return;
+        for (const auto &[prop, set] : keys.items())
+          if (set.is_object())
+            for (const auto &[kid, key] : set.items())
+              if (const auto t = Rational::parse(key.value("t", std::string("0"))))
+                push({{"op", "replace"}, {"path", kid + "/t"}, {"value", scaled(*t).to_string()}});
+        (void)base;
+      };
+      if (node.contains("transform"))
+        move_keys(node["transform"].value("keyframes", json::object()), mid);
+      if (node.contains("effects") && node["effects"].is_object())
+        for (const auto &[fid, e] : node["effects"].items())
+          move_keys(e.value("keyframes", json::object()), fid);
+      // What it now runs into on its track slides right, in order.
+      if (compare(after.duration, s.duration) > 0)
+        if (const json *t = track(tid); t && t->contains("clips")) {
+          std::vector<std::pair<Span, std::string>> later;
+          for (auto it = (*t)["clips"].begin(); it != (*t)["clips"].end(); ++it)
+            if (it.key() != mid && !seen(it.key()) && compare(span_of(*it).in, s.in) > 0)
+              later.emplace_back(span_of(*it), it.key());
+          std::sort(later.begin(), later.end(), [](const auto &a, const auto &b) { return compare(a.first.in, b.first.in) < 0; });
+          Rational cursor = after.end();
+          for (const auto &[sp, kid] : later) {
+            if (compare(sp.in, cursor) >= 0)
+              break;
+            ATM_CHECK(change(kid, {cursor, sp.duration, sp.source_in}));
+            drop_transitions(kid, tid);
+            cursor = plus(cursor, sp.duration);
+          }
+        }
+    }
     return {};
   }
 

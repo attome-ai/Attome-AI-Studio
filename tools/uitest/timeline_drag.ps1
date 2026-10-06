@@ -137,11 +137,11 @@ try {
     if (-not $failed -and (Moves $run) -ne 0) { $failed = "4. clicking clips made $(Moves $run) move edits" }
   }
 
-  # 5. To another track: First dragged one row down lands on V2, after the clip its pointer is on the right half of.
+  # 5. To another track: First dragged one row up lands on V2 (the track over V1 is the row above it), after the clip its pointer is on the right half of.
   if (-not $failed) {
     $proj = New-Project 'Track'
     $run = Invoke-EditorScript -Project $proj -Script @(
-      'drag @clip:First 0 44 hold'
+      'drag @clip:First 0 -44 hold'
       'wait 200'
       "shot $work\drag_track_held.jpg"
       'release'
@@ -149,7 +149,7 @@ try {
     )
     $daemons += $run
     $failed = $run.Errors
-    if (-not $failed) { $r = Check $run '5. one row down' 'Other=V2@0 First=V2@2 Second=V1@3 Third=V1@6'; $r[0]; $failed = $r[1] }
+    if (-not $failed) { $r = Check $run '5. one row up' 'Other=V2@0 First=V2@2 Second=V1@3 Third=V1@6'; $r[0]; $failed = $r[1] }
   }
 
   # 6. A clip that begins and ends between frames (10.005 s long): a clip dropped after it must not be refused.
