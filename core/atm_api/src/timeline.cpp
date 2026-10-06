@@ -14,6 +14,10 @@
 namespace atm::api::timeline {
 namespace {
 
+// A caption shows this many seconds before its word is heard: the model reports a word a little after its sound starts, and the eye is
+// quicker than the ear to call a word late.
+constexpr double kCaptionLead = 0.03;
+
 using doc::Document;
 
 // An effect object for the document from `src`: each parameter of the definition by name, its default when missing.
@@ -603,7 +607,7 @@ private:
           times.push_back(usable ? w["start"].get<double>() : 0.0);
         if (usable) {
           for (size_t i = 0; i < times.size(); ++i)
-            word_start[i] = std::min(times[i], seconds);
+            word_start[i] = std::max(0.0, std::min(times[i], seconds) - kCaptionLead);
           exact = true;
         }
       }
@@ -686,12 +690,13 @@ private:
     size_t flat = 0;
     for (size_t k = 0; k < found.size(); ++k) {
       json words = found[k].node->value("content", json::object()).value("words", json::array());
-      const double begin = std::min(known[flat].value("start", 0.0), seconds);
+      const auto start_of = [&](size_t n) { return std::max(0.0, std::min(known[n].value("start", 0.0), seconds) - kCaptionLead); };
+      const double begin = start_of(flat);
       for (json &w : words) {
-        w["at"] = rational_of(std::max(0.0, std::min(known[flat].value("start", 0.0), seconds) - begin)).to_string();
+        w["at"] = rational_of(std::max(0.0, start_of(flat) - begin)).to_string();
         ++flat;
       }
-      const double end = k + 1 < found.size() ? std::min(known[flat].value("start", seconds), seconds) : seconds;
+      const double end = k + 1 < found.size() ? start_of(flat) : seconds;
       push({{"op", "replace"}, {"path", found[k].id + "/timing/record_in"}, {"value", plus(vs.in, rational_of(begin)).to_string()}});
       push({{"op", "replace"}, {"path", found[k].id + "/timing/duration"}, {"value", minus(rational_of(std::max(end, begin + 0.05)), rational_of(begin)).to_string()}});
       push({{"op", "replace"}, {"path", found[k].id + "/content/words"}, {"value", std::move(words)}});

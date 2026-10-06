@@ -894,11 +894,11 @@ TEST_CASE("generate: speech: captions take their word times from what the voice 
   const auto made = edit(json::array({{{"op", "add_captions"}, {"id", "$new:c"}, {"clip", clip}}}));
   REQUIRE(made);
   const std::string c0 = (*made)["id_map"]["$new:c.c0"], c1 = (*made)["id_map"]["$new:c.c1"];
-  // The mock says a word in 0.4 s: four words in the first sentence (0 to 1.6 s), three in the second (1.6 s on).
+  // The mock says a word in 0.4 s: four words in the first sentence, three in the second (from 1.6 s); each caption shows 30 ms before its word.
   CHECK(seconds(get(c0)["timing"]["record_in"]) == Catch::Approx(0.0).margin(0.002));
-  CHECK(seconds(get(c0)["timing"]["duration"]) == Catch::Approx(1.6).margin(0.002));
-  CHECK(seconds(get(c1)["timing"]["record_in"]) == Catch::Approx(1.6).margin(0.002));
-  CHECK(seconds(get(c0)["content"]["words"][2]["at"]) == Catch::Approx(0.8).margin(0.002)); // the third word, exactly
+  CHECK(seconds(get(c0)["timing"]["duration"]) == Catch::Approx(1.57).margin(0.002));
+  CHECK(seconds(get(c1)["timing"]["record_in"]) == Catch::Approx(1.57).margin(0.002));
+  CHECK(seconds(get(c0)["content"]["words"][2]["at"]) == Catch::Approx(0.77).margin(0.002)); // the third word, 30 ms early
   CHECK(get(c0)["caption_of"] == clip);
   CHECK(made->value("notes", json::array()).dump().find("reported") != std::string::npos);
 
@@ -912,9 +912,9 @@ TEST_CASE("generate: speech: captions take their word times from what the voice 
   REQUIRE(wait(ok(engine, "gen.run", {{"project", project}, {"clips", json::array({clip})}}))["state"] == "done");
   const auto synced = edit(json::array({{{"op", "sync_captions"}, {"clip", clip}}}));
   REQUIRE(synced);
-  CHECK(seconds(get(c0)["timing"]["duration"]) == Catch::Approx(0.8).margin(0.002));
-  CHECK(seconds(get(c1)["timing"]["record_in"]) == Catch::Approx(0.8).margin(0.002));
-  CHECK(seconds(get(c0)["content"]["words"][2]["at"]) == Catch::Approx(0.4).margin(0.002));
+  CHECK(seconds(get(c0)["timing"]["duration"]) == Catch::Approx(0.77).margin(0.002));
+  CHECK(seconds(get(c1)["timing"]["record_in"]) == Catch::Approx(0.77).margin(0.002));
+  CHECK(seconds(get(c0)["content"]["words"][2]["at"]) == Catch::Approx(0.37).margin(0.002));
   CHECK(get(c0)["content"].contains("outline")); // the look is untouched
 
   // The text changed: the words no longer match, and it says so instead of guessing.
