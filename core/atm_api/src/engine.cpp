@@ -1011,6 +1011,9 @@ struct Engine::Impl {
          "with a note. add_transition with \"make_room\": true (and \"ripple\") does both in one step\n"
          "- add_track {kind (video | audio), name?, position? (top | bottom), below? / above? (track ID), sync_lock? (true: the track's clips follow make_room and ripple_delete)}\n"
          "- delete {clip} or {transition}; ripple_delete {clip} (closes the gap, on the tracks locked to the cut too); move {clip, to?, track?}; trim {clip, edge (in | out), to or delta}; set_speed {clip, speed (0.1..10, 2 = twice as fast)} - the clip and its linked sound play faster or slower, and get shorter or longer; "
+         "set_reverse {clip, reverse (true | false)} - the clip and its linked sound play backwards, or forwards again; "
+         "freeze_frame {clip, at, duration? (2s)} - the picture at that time holds for the duration: the clip is cut there, a still of the frame "
+         "goes in between, and what follows on its tracks (its sound too) moves later by the duration; "
          "add_captions {clip (a voice clip) or text + at + duration, style? (pop | plain | box), size? (0.07), y? (0.72), color?, emphasis? [words shown in emphasis_color], track?} - "
          "one text clip for each sentence, shown one word at a time, each word popping in; with clip, the words are timed from what the voice model reported (Kokoro does) and otherwise by their letters (a guess); goes on a Captions track on top; "
          "sync_captions {clip (the voice)} - after the voice was made anew, the captions made from it get their times from its words again; "
@@ -1468,6 +1471,37 @@ struct Engine::Impl {
     ATM_TRY(Rational rate, Rational::parse(root["sequences"][ctx.sequence].value("rate", std::string("30"))));
     ctx.rate = rate;
     ctx.probe = [this](const std::string &path) { return media_probe({{"path", path}}); };
+    ctx.still = [pr, seq = ctx.sequence](const std::string &clip_id, double at) -> Result<json> {
+      ATM_TRY(render::Composition comp, render::compile(pr->doc.root(), seq, to_utf8(pr->dir)));
+      const auto it = std::find_if(comp.layers.begin(), comp.layers.end(), [&](const render::Layer &l) { return l.clip_id == clip_id; });
+      if (it == comp.layers.end() || it->path.empty())
+        return fail(ErrorCode::InvalidArgument, "E_PARAM", "Clip " + clip_id + " has no picture to freeze.");
+      render::Layer l = *it; // its own picture only: the frozen frame takes the clip's place and the clip's transform
+      l.xf = render::Transform{};
+      l.effects.clear();
+      l.opacity = 1.0f;
+      l.opacity_keys = l.position_keys = l.scale_keys = l.rotation_keys = l.anchor_keys = eval::Curve{};
+      l.mix_with = l.mixed_by = -1;
+      l.mix_frames = 0;
+      const json &node = *pr->doc.find(clip_id)->node;
+      const json ref = node.value("media_ref", json::object());
+      const int w = std::max(16, ref.value("width", comp.width)) & ~1, h = std::max(16, ref.value("height", comp.height)) & ~1;
+      comp.width = w;
+      comp.height = h;
+      comp.layers = {l};
+      const int64_t frame = std::clamp<int64_t>(int64_t(std::floor(at * double(comp.rate_num) / double(comp.rate_den) + 1e-6)), l.start_frame,
+                                                l.start_frame + std::max<int64_t>(1, l.frames) - 1);
+      render::Renderer renderer(std::move(comp), w, h);
+      std::vector<uint8_t> nv12(media::nv12_size(renderer.width(), renderer.height()));
+      ATM_CHECK(renderer.render(frame, nv12.data()));
+      std::vector<uint8_t> bgrx(size_t(renderer.width()) * size_t(renderer.height()) * 4);
+      media::nv12_to_bgrx(nv12.data(), renderer.width(), renderer.height(), bgrx.data());
+      const fs::path dir = pr->dir / ".attome" / "freeze";
+      ATM_CHECK(storage::make_dirs(dir));
+      const fs::path file = dir / (clip_id + "_" + std::to_string(frame) + ".jpg");
+      ATM_CHECK(media::write_jpeg(to_utf8(file), bgrx.data(), renderer.width() & ~1, renderer.height() & ~1, 0.95f));
+      return json{{"path", to_utf8(file)}, {"width", renderer.width() & ~1}, {"height", renderer.height() & ~1}};
+    };
     ctx.words_of = [pr](const std::string &clip_id) -> json {
       const doc::NodeRef *ref = pr->doc.find(clip_id);
       if (!ref)
@@ -2905,7 +2939,7 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
      R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},
        "ops":{"type":"array","items":{"type":"object","properties":{
          "op":{"type":"string","enum":["add_track","add_clip","add_text","add_captions","sync_captions","add_adjustment","add_transition","delete",
-                                       "ripple_delete","move","trim","split","duplicate","slip","roll","slide","set_speed","add_effect","remove_effect",
+                                       "ripple_delete","move","trim","split","duplicate","slip","roll","slide","set_speed","freeze_frame","set_reverse","add_effect","remove_effect",
                                        "set_effect_enabled","link","unlink","set_property"]},
          "id":{"type":"string","description":"$new:name for what this op creates"}},"required":["op"]}},
        "sequence":{"type":"string"},"label":{"type":"string"},"dry_run":{"type":"boolean"},

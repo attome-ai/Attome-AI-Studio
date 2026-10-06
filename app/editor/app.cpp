@@ -386,6 +386,7 @@ void App::refresh() {
             c.start_floor = std::min(c.start, to_frames(*in, rate_, Round::floor).value_or(c.start));
           c.source_frames = frames_of(timing, "source_in", rate_);
           c.speed = std::clamp(timing.value("speed", 1.0f), 0.1f, 10.0f);
+          c.reverse = timing.value("reverse", false);
           c.media_frames = frames_of(ref, "duration", rate_);
           if (c.speed != 1.0f && c.media_frames > 0) // trims and handles count the file as the clip plays it
             c.media_frames = int64_t(std::floor(double(c.media_frames) / double(c.speed)));
@@ -729,6 +730,24 @@ void App::add_track(bool audio) {
                           {"value", {{"kind", audio ? "audio" : "video"}, {"name", name}}}}}),
             audio ? "Add sound track" : "Add track", &ids))
     selected_track_ = ids.value("$new:t", "");
+}
+
+void App::freeze_frame() {
+  const TrackUi *t = nullptr;
+  const ClipUi *c = selected(&t);
+  if (c && t && t->kind == "audio") // the sound of a video: its picture is what freezes
+    for (const ClipUi *m : linked_of(*c))
+      if (m->stream == "video")
+        c = m;
+  if (!c || c->path.empty() || c->stream == "audio" || audio_only_.count(c->path)) {
+    say("Select a video clip to freeze a frame of it.", true);
+    return;
+  }
+  if (playhead_ <= c->start || playhead_ >= c->start + c->frames) {
+    say("Put the playhead inside the clip, on the frame to hold.", true);
+    return;
+  }
+  timeline_edit(json::array({{{"op", "freeze_frame"}, {"clip", c->id}, {"at", frames_text(playhead_)}, {"duration", "2"}}}), "Freeze frame");
 }
 
 // Takes a track away with everything on it, as one edit (Undo brings it back). The sound of a picture on another track stays.
@@ -1101,6 +1120,13 @@ void App::draw_clip_menu(const ClipUi &c) {
   }
   if (menu_item("Go to its start"))
     pending_ = [this, at = c.start] { seek(at); };
+  if (!c.path.empty() && !c.is_generative && !audio_only_.count(c.path) &&
+      menu_item("Freeze frame (2 s)", nullptr, false, !locked && playhead_ > c.start && playhead_ < c.start + c.frames))
+    pending_ = [this] { freeze_frame(); };
+  if (!c.path.empty() && !c.is_generative && count == 1 && menu_item(c.reverse ? "Play forwards" : "Reverse", nullptr, false, !locked))
+    pending_ = [this, id = c.id, on = !c.reverse] {
+      timeline_edit(json::array({{{"op", "set_reverse"}, {"clip", id}, {"reverse", on}}}), on ? "Reverse" : "Play forwards");
+    };
   if (count == 1) { // what is otherwise only in the Inspector
     const std::string id = c.id;
     const bool sound = home && home->kind == "audio";
@@ -1503,9 +1529,9 @@ App::DropPlan App::plan_drop(const std::string &payload, int row, int64_t frame)
   p.start = snap_frame(frame, p.frames, {});
   if (track && (p.kind == "title" || p.kind == "fx")) {
     // A title or an adjustment layer belongs over the picture at that moment, not after it: when the place is taken it
-    // goes on the next track above that is free there, or on a new one.
-    while (p.row < rows && (tracks_[size_t(p.row)].kind == "audio" || free_start(tracks_[size_t(p.row)], p.start, p.frames, {}) != p.start))
-      ++p.row;
+    // goes on the next track above that is free there (the rows run from the top layer down), or on a new one on top (row -1).
+    while (p.row >= 0 && (tracks_[size_t(p.row)].kind == "audio" || free_start(tracks_[size_t(p.row)], p.start, p.frames, {}) != p.start))
+      --p.row;
   } else if (track) {
     const int64_t asked = p.start;
     const TrackLanding l = landing(*track, asked, asked, p.frames, {}); // a card is held by its start: the pointer is there
@@ -1593,16 +1619,21 @@ void App::commit_drop(const DropPlan &p) {
   const eval::EffectDef *def = p.kind == "fx" ? eval::find_effect(p.id) : nullptr;
   if (def && !p.clip.empty())
     return add_clip_effect(p.clip, *def);
-  std::string track = size_t(p.row) < tracks_.size() ? tracks_[size_t(p.row)].id : std::string();
-  if (track.empty()) { // below the last track: a new one
-    size_t same = 0;
-    for (const TrackUi &t : tracks_)
-      same += (t.kind == "audio") == p.sound ? 1 : 0;
+  std::string track = p.row >= 0 && size_t(p.row) < tracks_.size() ? tracks_[size_t(p.row)].id : std::string();
+  if (track.empty()) {
+    // A new track where it was dropped: row -1 is over all the others (a title that found no room); the lane below the last row
+    // makes the bottom picture layer (it shows just above the sound tracks, where it was dropped) or the last sound track.
+    std::string name;
+    for (int n = 1; n < 1000; ++n) {
+      name = (p.sound ? "A" : "V") + std::to_string(n);
+      if (std::none_of(tracks_.begin(), tracks_.end(), [&](const TrackUi &t) { return t.name == name; }))
+        break;
+    }
+    json op = {{"op", "add"}, {"path", seq_id_ + "/tracks/$new:t"}, {"value", {{"kind", p.sound ? "audio" : "video"}, {"name", name}}}};
+    if (!p.sound && p.row >= 0 && !tracks_.empty())
+      op["anchor"] = {{"first", true}};
     json ids;
-    if (!patch(json::array({{{"op", "add"},
-                             {"path", seq_id_ + "/tracks/$new:t"},
-                             {"value", {{"kind", p.sound ? "audio" : "video"}, {"name", (p.sound ? "A" : "V") + std::to_string(same + 1)}}}}}),
-               "Add track", &ids))
+    if (!patch(json::array({std::move(op)}), "Add track", &ids))
       return;
     track = ids.value("$new:t", "");
   }
@@ -3032,6 +3063,8 @@ void App::draw_menu() {
       ImGui::Separator();
       if (ImGui::MenuItem("Split at playhead", "S", false, open))
         split_at_playhead();
+      if (ImGui::MenuItem("Freeze frame (2 s)", nullptr, false, open && !selected_clip_.empty()))
+        pending_ = [this] { freeze_frame(); };
       if (ImGui::MenuItem("Delete", "Del", false, !selected_clip_.empty()))
         delete_selected();
       ImGui::Separator();
@@ -5831,6 +5864,12 @@ void App::draw_viewer() {
         xf.scale_x = mon_sx_;
         xf.scale_y = mon_sy_;
       }
+      if (mon_crop_side_ >= 0 && c.id == mon_clip_) { // while a side is cropped: the crop it has now
+        xf.crop_left = mon_crop_[0];
+        xf.crop_top = mon_crop_[1];
+        xf.crop_right = mon_crop_[2];
+        xf.crop_bottom = mon_crop_[3];
+      }
       return Footprint(xf, w, h, float(canvas_w_), float(canvas_h_));
     };
     const auto active_at_playhead = [&](const ClipUi &c) { return playhead_ >= c.start && playhead_ < c.start + c.frames; };
@@ -5851,7 +5890,10 @@ void App::draw_viewer() {
       const TrackUi *hit_track = nullptr;
       const TrackUi *sel_track = nullptr;
       const ClipUi *sel = selected(&sel_track);
-      const auto inside = [&](const ClipUi &c) { return footprint_of(c, c.pos_x, c.pos_y).contains(mx, my); };
+      const auto inside = [&](const ClipUi &c) { // where it is now: an animated clip is not where its plain position says
+        const render::Transform at = transform_now(c);
+        return footprint_of(c, at.pos_x, at.pos_y).contains(mx, my);
+      };
       if (sel && sel_track->kind != "audio" && active_at_playhead(*sel) && inside(*sel)) {
         hit = sel;
         hit_track = sel_track;
@@ -5864,7 +5906,14 @@ void App::draw_viewer() {
                 hit_track = &*t;
               }
       }
-      if (hit) {
+      if (hit && hit->is_text && !hit_track->locked && ImGui::IsMouseDoubleClicked(0)) { // a double click on a text: its words are typed right there
+        selected_clip_ = hit->id;
+        selected_track_ = hit_track->id;
+        mon_edit_ = hit->id;
+        mon_edit_focus_ = true;
+        copy_to(mon_edit_buf_, sizeof mon_edit_buf_, hit->text);
+        mon_drag_ = false;
+      } else if (hit) {
         selected_clip_ = hit->id;
         selected_track_ = hit_track->id;
         mon_drag_ = true;
@@ -5916,7 +5965,103 @@ void App::draw_viewer() {
       // A handle at each corner: drag it to make the clip larger or smaller about its anchor, keeping its shape.
       const ImVec2 centre = to_monitor(f.at(f.ax, f.ay));
       const std::string oid = oc->id;
-      for (int corner = 0; corner < 4 && !ot->locked && pick_key_fx_.empty(); ++corner) {
+      if (mon_edit_ == oid) { // the text is being typed on the picture: a box over it, kept until a click elsewhere (Esc leaves it as it was)
+        float minx = corners[0].x, maxx = corners[0].x, miny = corners[0].y, maxy = corners[0].y;
+        for (const ImVec2 &q : corners) {
+          minx = std::min(minx, q.x), maxx = std::max(maxx, q.x), miny = std::min(miny, q.y), maxy = std::max(maxy, q.y);
+        }
+        const float bw2 = std::clamp(maxx - minx + 40.0f, 260.0f, std::max(260.0f, s1.x - s0.x - 24.0f)), bh2 = std::clamp(maxy - miny + 24.0f, 74.0f, 220.0f);
+        const ImVec2 at(std::clamp((minx + maxx - bw2) * 0.5f, s0.x + 8.0f, std::max(s0.x + 8.0f, s1.x - bw2 - 8.0f)),
+                        std::clamp((miny + maxy - bh2) * 0.5f, s0.y + 8.0f, std::max(s0.y + 8.0f, s1.y - bh2 - 8.0f)));
+        ImGui::SetCursorScreenPos(at);
+        ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.05f, 0.06f, 0.09f, 0.94f));
+        ImGui::PushStyleColor(ImGuiCol_Border, hexv(look::accent));
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.5f);
+        if (mon_edit_focus_)
+          ImGui::SetKeyboardFocusHere();
+        ImGui::InputTextMultiline("##mon_text", mon_edit_buf_, sizeof mon_edit_buf_, ImVec2(bw2, bh2), ImGuiInputTextFlags_AutoSelectAll);
+        ui_mark("field:monitor_text");
+        const bool left = !mon_edit_focus_ && ImGui::IsItemDeactivated();
+        const bool changed = ImGui::IsItemDeactivatedAfterEdit();
+        mon_edit_focus_ = false;
+        ImGui::PopStyleVar();
+        ImGui::PopStyleColor(2);
+        if (left) {
+          const std::string value = mon_edit_buf_;
+          if (changed && !value.empty() && value != oc->text) {
+            const bool timed = clip_json(oid) && clip_json(oid)->value("content", json::object()).contains("words");
+            pending_ = [this, oid, value, timed] {
+              json ops = json::array({{{"op", "replace"}, {"path", oid + "/content/text"}, {"value", value}}});
+              if (timed) // the words were timed for the old text: the clip is a plain text now
+                ops.push_back({{"op", "remove"}, {"path", oid + "/content/words"}});
+              patch(std::move(ops), timed ? "Edit text (no longer word by word)" : "Edit text");
+              insp_rev_ = 0;
+            };
+          }
+          mon_edit_.clear();
+        }
+      }
+      // A bar on each side: drag it in to crop that side of the picture, out to give it back.
+      for (int side = 0; side < 4 && !ot->locked && !oc->is_text && pick_key_fx_.empty() && mon_edit_.empty(); ++side) {
+        const float um = (f.u0 + f.u1) * 0.5f, vm = (f.v0 + f.v1) * 0.5f;
+        const ImVec2 at = to_monitor(side == 0 ? f.at(f.u0, vm) : side == 1 ? f.at(um, f.v0) : side == 2 ? f.at(f.u1, vm) : f.at(um, f.v1));
+        const bool across = side == 0 || side == 2; // the bar stands up on the left and right sides
+        ImGui::SetCursorScreenPos(ImVec2(at.x - (across ? 6.0f : 12.0f), at.y - (across ? 12.0f : 6.0f)));
+        ImGui::PushID(10 + side);
+        ImGui::InvisibleButton("##crop", across ? ImVec2(12.0f, 24.0f) : ImVec2(24.0f, 12.0f));
+        ImGui::PopID();
+        static const char *kSides[] = {"left", "top", "right", "bottom"};
+        ui_mark(std::string("cropbar:") + kSides[side]); // (the Inspector's crop fields are "crop:")
+        const bool hot = ImGui::IsItemHovered() || (mon_crop_side_ == side && ImGui::IsItemActive());
+        const ImVec2 half = across ? ImVec2(2.5f, 9.0f) : ImVec2(9.0f, 2.5f);
+        dl->AddRectFilled(ImVec2(at.x - half.x, at.y - half.y), ImVec2(at.x + half.x, at.y + half.y), hex(hot ? look::accent : look::fg), 2.0f);
+        if (hot)
+          ImGui::SetMouseCursor(across ? ImGuiMouseCursor_ResizeEW : ImGuiMouseCursor_ResizeNS);
+        if (ImGui::IsItemHovered())
+          ImGui::SetTooltip("Drag to crop this side");
+        if (ImGui::IsItemActivated()) {
+          mon_crop_side_ = side;
+          mon_clip_ = oid;
+          for (int i = 0; i < 4; ++i)
+            mon_crop_[i] = oc->crop[i];
+        }
+        if (mon_crop_side_ == side && mon_clip_ == oid && ImGui::IsItemActive()) {
+          // Where the pointer is on the uncropped picture, in its own axes (so a turned clip crops along its own sides).
+          const float cx = (mouse.x - p0.x) / k - f.px, cy = (mouse.y - p0.y) / k - f.py;
+          const float u = (cx * f.cos_r + cy * f.sin_r) / std::max(1e-4f, f.sx) + f.ax, v = (cy * f.cos_r - cx * f.sin_r) / std::max(1e-4f, f.sy) + f.ay;
+          // f.u1 is (1 - right crop) of the picture's width, with the crop as it is during the drag
+          const float full_w = f.u1 / std::max(1e-4f, 1.0f - mon_crop_[2]), full_h = f.v1 / std::max(1e-4f, 1.0f - mon_crop_[3]);
+          const float fu = std::clamp(u / std::max(1.0f, full_w), 0.0f, 1.0f), fv = std::clamp(v / std::max(1.0f, full_h), 0.0f, 1.0f);
+          if (side == 0)
+            mon_crop_[0] = std::clamp(fu, 0.0f, 0.95f - mon_crop_[2]);
+          else if (side == 2)
+            mon_crop_[2] = std::clamp(1.0f - fu, 0.0f, 0.95f - mon_crop_[0]);
+          else if (side == 1)
+            mon_crop_[1] = std::clamp(fv, 0.0f, 0.95f - mon_crop_[3]);
+          else
+            mon_crop_[3] = std::clamp(1.0f - fv, 0.0f, 0.95f - mon_crop_[1]);
+          render::Transform xf = transform_now(*oc);
+          xf.crop_left = mon_crop_[0];
+          xf.crop_top = mon_crop_[1];
+          xf.crop_right = mon_crop_[2];
+          xf.crop_bottom = mon_crop_[3];
+          preview_.set_transform(oid, xf);
+        }
+        if (mon_crop_side_ == side && mon_clip_ == oid && ImGui::IsItemDeactivated()) {
+          mon_crop_side_ = -1;
+          const auto r = [](float v) { return std::round(double(v) * 1000.0) / 1000.0; };
+          const json crop = {{"left", r(mon_crop_[0])}, {"top", r(mon_crop_[1])}, {"right", r(mon_crop_[2])}, {"bottom", r(mon_crop_[3])}};
+          bool moved = false;
+          for (int i = 0; i < 4; ++i)
+            moved = moved || std::fabs(mon_crop_[i] - oc->crop[i]) > 0.0005f;
+          if (moved)
+            pending_ = [this, oid, crop] {
+              patch(json::array({{{"op", "replace"}, {"path", oid + "/transform/crop"}, {"value", crop}}}), "Crop clip");
+              insp_rev_ = 0;
+            };
+        }
+      }
+      for (int corner = 0; corner < 4 && !ot->locked && pick_key_fx_.empty() && mon_edit_.empty(); ++corner) {
         const ImVec2 at = corners[corner];
         ImGui::SetCursorScreenPos(ImVec2(at.x - 8.0f, at.y - 8.0f));
         ImGui::PushID(corner);
@@ -5972,6 +6117,8 @@ void App::draw_viewer() {
         pending_ = [this, at = sc->start] { seek(at); };
     }
   }
+  if (!mon_edit_.empty() && mon_edit_ != selected_clip_)
+    mon_edit_.clear(); // something else was selected
   ImGui::PopClipRect();
 
   // Transport: timecode on the left, the controls centred.
@@ -6476,6 +6623,8 @@ void App::draw_timeline() {
         std::snprintf(sp, sizeof sp, "  %gx", double(std::round(c.speed * 100.0f) / 100.0f));
         label += sp;
       }
+      if (c.reverse)
+        label += "  reversed";
       if (picture_under_label) { // a dark pill under the name, so it reads over frames and waveforms
         const ImVec2 ts = text_size(label.c_str());
         dl->AddRectFilled(ImVec2(label_x - 4.0f, cy + (ch - ts.y) * 0.5f - 2.0f), ImVec2(label_x + ts.x + 5.0f, cy + (ch + ts.y) * 0.5f + 2.0f), IM_COL32(8, 10, 16, 150), 5.0f);
@@ -6733,8 +6882,16 @@ void App::draw_timeline() {
                                     std::llround((mouse.x - origin.x - header_w) / pps_ * rate));
     if (const ImGuiPayload *got = ImGui::AcceptDragDropPayload("ATM_CARD", ImGuiDragDropFlags_AcceptBeforeDelivery | ImGuiDragDropFlags_AcceptNoDrawDefaultRect)) {
       // In an empty project a sound is shown on the audio lane, the second of the two that are drawn.
-      const float y = origin.y + ruler_h + float(plan.row + (rows == 0 && plan.sound ? 1 : 0)) * row_h;
-      if (plan.row >= rows) { // the band of the track that will be made
+      // The row it lands on. A new picture track from the lane below shows where it will be: under the picture rows, over the sound.
+      int shown_row = plan.row + (rows == 0 && plan.sound ? 1 : 0);
+      if (plan.row >= rows && rows > 0 && !plan.sound)
+        shown_row = int(std::count_if(tracks_.begin(), tracks_.end(), [](const TrackUi &t) { return t.kind != "audio"; }));
+      const float y = origin.y + ruler_h + float(std::max(0, shown_row)) * row_h;
+      const bool inserted = plan.row < 0 || (plan.row >= rows && rows > 0 && !plan.sound); // a new row goes in between the others
+      if (inserted) { // where it goes in: a line between the rows (the clip's ghost is drawn just under it)
+        dl->AddLine(ImVec2(win.x, y), ImVec2(win.x + view_w, y), hex(look::accent, 230), 3.0f);
+        dl->AddCircleFilled(ImVec2(win.x + header_w, y), 4.5f, hex(look::accent));
+      } else if (plan.row >= rows) { // the band of the track that will be made, below the last
         dl->AddRectFilled(ImVec2(win.x, y), ImVec2(win.x + view_w, y + row_h), hex(look::accent, 18));
         dl->AddLine(ImVec2(win.x, y + row_h), ImVec2(win.x + view_w, y + row_h), hex(look::accent, 120));
       }

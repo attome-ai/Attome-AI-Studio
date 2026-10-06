@@ -339,6 +339,61 @@ TEST_CASE("timeline.edit: set_speed plays a clip and its sound faster or slower,
   CHECK(f.engine.call("project.validate", {{"project", f.project}})->at("ok") == true);
 }
 
+TEST_CASE("timeline.edit: freeze_frame holds a frame: the clip and its sound are cut, a still goes between, what follows moves later",
+          "[timeline][media]") {
+  Fixture f;
+  const std::string file = (f.dir / "v.mp4").string();
+  write_video(file, 4);
+  const json r = f.ok(json::array({{{"op", "add_clip"}, {"id", "$new:a"}, {"path", file}, {"duration", "3s"}},
+                                   {{"op", "add_clip"}, {"id", "$new:b"}, {"path", file}, {"duration", "1s"}, {"with_audio", false}}}));
+  const std::string a = r["id_map"]["$new:a"], sa = r["id_map"]["$new:a.audio"], b = r["id_map"]["$new:b"];
+  const json e = f.ok(json::array({{{"op", "freeze_frame"}, {"id", "$new:fz"}, {"clip", a}, {"at", "1s"}, {"duration", "2s"}}}));
+  // a: 0..1 s; the still: 1..3 s; the rest of a: 3..5 s (from 1 s into the file); b: 5..6 s; the sound: 0..1, a gap, 3..5.
+  CHECK(f.get(a)["timing"]["duration"] == "1");
+  const std::string still = e["id_map"]["$new:fz.freeze"], rest = e["id_map"]["$new:fz"];
+  CHECK(f.get(still)["media_ref"]["type"] == "image");
+  CHECK(f.get(still)["timing"]["record_in"] == "1");
+  CHECK(f.get(still)["timing"]["duration"] == "2");
+  CHECK(fs::exists(fs::path(f.get(still)["media_ref"]["path"].get<std::string>())));
+  CHECK(f.get(rest)["timing"]["record_in"] == "3");
+  CHECK(f.get(rest)["timing"]["source_in"] == "1");
+  CHECK(f.get(b)["timing"]["record_in"] == "5");
+  CHECK(f.get(sa)["timing"]["duration"] == "1");
+  const json t = f.tracks();
+  REQUIRE(t.size() == 2);
+  CHECK(t[1]["clips"] == 2); // the sound: its first part and its rest
+  CHECK(f.engine.call("project.validate", {{"project", f.project}})->at("ok") == true);
+  CHECK(f.fail_rule(json::array({{{"op", "freeze_frame"}, {"clip", a}, {"at", "4s"}}})) == "E_PARAM"); // not inside the clip
+  // Backwards, with its sound; and forwards again.
+  f.ok(json::array({{{"op", "set_reverse"}, {"clip", rest}, {"reverse", true}}}));
+  CHECK(f.get(rest)["timing"]["reverse"] == true);
+  CHECK(f.fail_rule(json::array({{{"op", "set_reverse"}, {"clip", still}, {"reverse", true}}})) == "E_PARAM"); // a still has no time to turn round
+  f.ok(json::array({{{"op", "set_reverse"}, {"clip", rest}, {"reverse", false}}}));
+  CHECK_FALSE(f.get(rest)["timing"].contains("reverse"));
+  CHECK(f.engine.call("project.validate", {{"project", f.project}})->at("ok") == true);
+}
+
+TEST_CASE("timeline.edit: new tracks take the first free name of their kind, also within one edit", "[timeline][media]") {
+  Fixture f;
+  const std::string file = (f.dir / "v.mp4").string();
+  write_video(file, 2);
+  // A title first makes "Titles"; the first picture track after it is still V1, its sound A1.
+  f.ok(json::array({{{"op", "add_text"}, {"text", "Hi"}, {"duration", "1s"}}, {{"op", "add_clip"}, {"path", file}}}));
+  json names = json::array();
+  for (const json &t : f.tracks())
+    names.push_back(t["name"]);
+  CHECK(names.dump().find("\"V1\"") != std::string::npos);
+  CHECK(names.dump().find("\"A1\"") != std::string::npos);
+  CHECK(names.dump().find("\"V2\"") == std::string::npos);
+  // Two new sound tracks in one edit: A2 and A3, not A2 twice.
+  f.ok(json::array({{{"op", "add_track"}, {"kind", "audio"}}, {{"op", "add_track"}, {"kind", "audio"}}}));
+  names = json::array();
+  for (const json &t : f.tracks())
+    names.push_back(t["name"]);
+  CHECK(names.dump().find("\"A2\"") != std::string::npos);
+  CHECK(names.dump().find("\"A3\"") != std::string::npos);
+}
+
 TEST_CASE("timeline.edit: slip, roll and slide change timing the way editors expect", "[timeline][media]") {
   Fixture f;
   const std::string file = (f.dir / "a.mp4").string();

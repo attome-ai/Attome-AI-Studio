@@ -20,6 +20,9 @@ struct Context {
   std::function<Result<json>(const std::string &)> probe; // media.probe for clips added by path
   // When each word of a generative clip's speech is said, as the selected Take has it ([{"text","start","end"}], seconds): null when it has none.
   std::function<json(const std::string &)> words_of;
+  // A picture of one frame of a clip's own file (no transform, no effects), at `at` seconds on the sequence, as a JPEG in the project:
+  // {"path" (absolute), "width", "height"}. For freeze_frame.
+  std::function<Result<json>(const std::string &clip, double at)> still;
 };
 
 struct Built {

@@ -1,8 +1,9 @@
 # UI test: what a clip offers (UX review 2: B2, B7, C2, D2).
 #  - a wide video in a tall project: Fill covers the canvas, Fit shows it all again (Transform card)
 #  - a clip selected away from the playhead: the Monitor says so and "Go to it" moves the playhead there
-#  - a corner handle in the Monitor resizes the selected clip
+#  - a corner handle in the Monitor resizes the selected clip, a bar on a side crops it
 #  - with the picture of a video selected, the Audio card of its linked sound is shown and works
+#  - a double click on a text in the Monitor edits its words there
 #  - the clip's menu has Go to its start, Fade, and for a sound clip Mute and Unlink
 # Virtual input only (uitest.psm1). Needs a build. Exit code 0 = pass.
 #   .\tools\uitest\ux_clip_tools.ps1
@@ -74,6 +75,36 @@ try {
       if (-not $failed -and [math]::Abs((Picture $run).transform.scale[0] - 1.0) -gt 0.005) { $failed = 'Undo did not take the handle drag back' }
     }
   }
+  if (-not $failed) { # the bar on the left side crops it: dragged across to the right bar, the most it may cut (95 %); Undo gives it back
+    $probe = Invoke-EditorScript -Project $proj -SelectFirstClip -Endpoint $run.Endpoint -Script @('expect @cropbar:left', 'expect @cropbar:right')
+    $failed = $probe.Errors
+    if (-not $failed) {
+      # Dragged all the way to the right bar: the left side is cut to the most it may be (95 % less what the right side has).
+      $cr = Invoke-EditorScript -Project $proj -SelectFirstClip -Endpoint $run.Endpoint -Script @('drag @cropbar:left @cropbar:right', 'wait 50', "shot $work\tools_cropping.jpg", 'wait 800')
+      $failed = $cr.Errors
+    }
+    if (-not $failed) {
+      $crop = (Picture $run).transform.crop
+      "crop after dragging the left bar across: $($crop | ConvertTo-Json -Compress)"
+      if (-not $crop -or $crop.left -lt 0.85 -or $crop.left -gt 0.951 -or $crop.right -ne 0 -or $crop.top -ne 0) { $failed = "the left bar left a crop of $($crop | ConvertTo-Json -Compress)" }
+    }
+    if (-not $failed) {
+      $u = Invoke-EditorScript -Project $proj -Endpoint $run.Endpoint -Script @('key Z ctrl', 'wait 700')
+      $failed = $u.Errors
+      $crop = (Picture $run).transform.crop
+      if (-not $failed -and $crop -and $crop.left -gt 0) { $failed = 'Undo did not take the crop back' }
+    }
+    if (-not $failed) { # the right bar dragged in by a quarter of the picture's width in the Monitor (the picture fills the 9:16 frame's width): a quarter is cut
+      $q = Invoke-EditorScript -Project $proj -SelectFirstClip -Endpoint $run.Endpoint -Script @('drag @cropbar:right -54 0', 'wait 800')
+      $failed = $q.Errors
+      if (-not $failed) {
+        $crop = (Picture $run).transform.crop
+        "crop after dragging the right bar 54 px in (the picture is 216 px wide there): $($crop | ConvertTo-Json -Compress)"
+        if ([math]::Abs($crop.right - 0.25) -gt 0.04 -or $crop.left -ne 0) { $failed = "the right bar left a crop of $($crop | ConvertTo-Json -Compress)" }
+      }
+      if (-not $failed) { $u = Invoke-EditorScript -Project $proj -Endpoint $run.Endpoint -Script @('key Z ctrl', 'wait 700'); $failed = $u.Errors }
+    }
+  }
   if (-not $failed) { # a clip that starts at 2 s is selected while the playhead is before it: the Monitor offers the way there
     $go = Invoke-EditorScript -Project $proj -Endpoint $run.Endpoint -Script @(
       'key Home', 'wait 300'
@@ -87,6 +118,22 @@ try {
       'dblclick @clip:Later', 'wait 600', 'absent @button:goto_clip'      # a double click on a clip goes to it too
     )
     $failed = $go.Errors
+  }
+  if (-not $failed) { # a double click on a text in the Monitor: its words are typed there, and kept by a click elsewhere
+    $txt = Invoke-EditorScript -Project $proj -Endpoint $run.Endpoint -Script @(
+      'click @clip:Later', 'wait 300', 'dblclick @clip:Later', 'wait 500'      # the playhead goes to it
+      'dblclick @monitor', 'wait 500', 'expect @field:monitor_text'
+      'key A ctrl', 'type Sooner', 'wait 300'
+      "shot $work\tools_text_on_picture.jpg"
+      'click @track:V1', 'wait 800'
+      'absent @field:monitor_text')
+    $failed = $txt.Errors
+    if (-not $failed) {
+      $t = @(Get-Tracks $run) | Where-Object { $_.name -eq 'Titles' }
+      $said = (Get-Object $run @($t.clip_list)[0].id).content.text
+      "the title after typing on the picture: '$said'"
+      if ($said -ne 'Sooner') { $failed = "the text is '$said', not 'Sooner'" }
+    }
   }
   if (-not $failed) { # the menu of the text clip: Fade opens the Fade card
     $menu = Invoke-EditorScript -Project $proj -Endpoint $run.Endpoint -Script @(

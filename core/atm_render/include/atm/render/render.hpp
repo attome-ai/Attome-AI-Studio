@@ -59,6 +59,8 @@ struct Layer {
   // timing.speed: how fast the file plays (2 = twice as fast, 0.5 = slow motion). The clip's times (source_in, duration) are measured as the
   // clip plays, so the frame shown at clip time t is the file's frame at (source_in + t) * speed; the sound is played at the same speed.
   double speed = 1.0;
+  // timing.reverse: the clip plays its part of the file backwards (the last frame first), its sound too.
+  bool reverse = false;
   float opacity = 1.0f;
   float volume = 1.0f;
   // media_ref.stream: a linked pair shares one file, the picture clip with "video" (silent here) and the sound clip
@@ -176,6 +178,14 @@ private:
   Composition comp_;
   int width_, height_;
   std::unordered_map<std::string, std::unique_ptr<media::VideoReader>> readers_; // by clip ID
+  // A clip played backwards: a decoder reads forwards, so a run of frames is decoded in one go (one seek, then forwards) and kept, and
+  // the frames are shown from the cache in the other order. By clip ID.
+  struct BackCache {
+    int64_t first = -1;                    // the clip-relative frame of frames[0]
+    std::vector<std::vector<uint8_t>> frames; // packed NV12
+    int width = 0, height = 0;
+  };
+  std::unordered_map<std::string, BackCache> back_;
   std::unordered_map<std::string, bool> failed_;
   struct TextEntry {
     std::string key;

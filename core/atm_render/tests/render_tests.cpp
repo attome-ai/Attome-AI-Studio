@@ -410,6 +410,29 @@ TEST_CASE("render: a clip with a speed shows the file's frames that many times a
   CHECK(file_frame(grey_at(2.0, 0.0, 10)) == Catch::Approx(20).margin(1.0)); // twice as fast: frame 10 of the clip is frame 20 of the file
   CHECK(file_frame(grey_at(0.5, 0.0, 30)) == Catch::Approx(15).margin(1.0)); // half speed
   CHECK(file_frame(grey_at(2.0, 0.5, 0)) == Catch::Approx(30).margin(1.0));  // source_in is in clip time: 0.5 s at 2x is 1 s into the file
+  { // reversed: the clip's first frame is the last of its part of the file, its last frame the first
+    atm::render::Composition comp;
+    comp.width = 160;
+    comp.height = 120;
+    comp.frames = 60;
+    atm::render::Layer l;
+    l.clip_id = "clp_back";
+    l.path = path;
+    l.frames = 60;
+    l.clip_end_frame = 60;
+    l.reverse = true;
+    comp.layers.push_back(l);
+    atm::render::Renderer renderer(comp, 160, 120);
+    std::vector<uint8_t> nv12(media::nv12_size(160, 120)), rgb(160 * 120 * 4);
+    const auto shown = [&](int64_t frame) {
+      REQUIRE(renderer.render(frame, nv12.data()));
+      media::nv12_to_bgrx(nv12.data(), 160, 120, rgb.data());
+      return file_frame(int(rgb[(60 * 160 + 80) * 4 + 1]));
+    };
+    CHECK(shown(0) == Catch::Approx(59).margin(1.0));
+    CHECK(shown(30) == Catch::Approx(29).margin(1.0));
+    CHECK(shown(59) == Catch::Approx(0).margin(1.0));
+  }
 
   // The sound: a 2 s clip at 2x reads 4 s of the file and fits it into its 2 s; at 0.5x it reads 1 s and stretches it.
   for (const double speed : {2.0, 0.5}) {

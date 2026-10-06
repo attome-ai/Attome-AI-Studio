@@ -1,6 +1,7 @@
 #include "timeline.hpp"
 
 #include <algorithm>
+#include <set>
 #include <cctype>
 #include <filesystem>
 #include <optional>
@@ -109,6 +110,10 @@ public:
       return wrap(trim());
     if (name == "set_speed")
       return wrap(set_speed());
+    if (name == "freeze_frame")
+      return wrap(freeze_frame());
+    if (name == "set_reverse")
+      return wrap(set_reverse());
     if (name == "split")
       return wrap(split());
     if (name == "duplicate")
@@ -251,12 +256,20 @@ private:
     push(std::move(op));
   }
 
+  // The first free name of its kind (V1, V2 ... or A1, A2 ...), among the tracks there and those this edit has already added. A track with
+  // another name ("Titles") does not use one up.
   std::string next_track_name(const std::string &kind) const {
-    int n = 1;
+    std::set<std::string> taken;
     for (const std::string &id : track_order())
-      if (const json *t = track(id); t && (t->value("kind", "video") == "audio") == (kind == "audio"))
-        ++n;
-    return (kind == "audio" ? "A" : "V") + std::to_string(n);
+      if (const json *t = track(id))
+        taken.insert(t->value("name", std::string()));
+    for (const json &op : out_.ops)
+      if (op.value("op", "") == "add" && op.value("path", "").find("/tracks/") != std::string::npos && op.contains("value") && op["value"].is_object() &&
+          op["value"].contains("kind"))
+        taken.insert(op["value"].value("name", std::string()));
+    for (int n = 1;; ++n)
+      if (const std::string name = (kind == "audio" ? "A" : "V") + std::to_string(n); !taken.count(name))
+        return name;
   }
 
   // The track a new clip goes on: "track" when given ("new" makes one), else a default chosen by `fallback`.
@@ -1364,6 +1377,93 @@ private:
           }
         }
     }
+    return {};
+  }
+
+  // set_reverse {clip, reverse}: the clip (and its linked sound) plays its part of the file backwards, or forwards again.
+  Result<void> set_reverse() {
+    ATM_TRY(auto c, clip("clip"));
+    const std::string id = op_.value("clip", std::string());
+    if (!op_.contains("reverse") || !op_["reverse"].is_boolean())
+      return fail("E_PARAM", "set_reverse needs \"reverse\": true to play the clip backwards, false to play it forwards.");
+    if (c.first->value("media_ref", json::object()).value("type", "") != "file")
+      return fail("E_PARAM", "Only a clip of a video or sound file can be played backwards.");
+    const bool on = op_["reverse"].get<bool>();
+    std::vector<std::string> ids = {id};
+    for (const Member &m : linked(id))
+      ids.push_back(m.id);
+    for (const std::string &mid : ids) {
+      const json timing = node_of(mid).value("timing", json::object());
+      if (timing.value("reverse", false) == on)
+        continue;
+      if (on)
+        push({{"op", timing.contains("reverse") ? "replace" : "add"}, {"path", mid + "/timing/reverse"}, {"value", true}});
+      else
+        push({{"op", "remove"}, {"path", mid + "/timing/reverse"}});
+    }
+    return {};
+  }
+
+  // freeze_frame {clip, at, duration?}: the picture of the clip at `at` holds for `duration` (2 s). The clip and the clips linked to it
+  // (its sound) are cut at `at`; a still of the frame goes in the gap on the picture's track, with the clip's transform; everything on
+  // those tracks from `at` on moves later by the duration, so the sound waits too.
+  Result<void> freeze_frame() {
+    ATM_TRY(auto c, clip("clip"));
+    const std::string id = op_.value("clip", std::string());
+    const json ref = c.first->value("media_ref", json::object());
+    if (ref.value("type", "") != "file" || ref.value("stream", "") == "audio")
+      return fail("E_PARAM", "freeze_frame needs a video clip; " + id + " has no moving picture.");
+    if (!ctx_.still)
+      return fail("E_PARAM", "Freezing a frame is not available here.");
+    ATM_TRY(auto at_opt, time("at"));
+    const Span s = span_of(*c.first);
+    if (!at_opt || compare(*at_opt, s.in) <= 0 || compare(*at_opt, s.end()) >= 0)
+      return fail("E_PARAM", "\"at\" must be a time inside the clip, between " + seconds_text(s.in) + " and " + seconds_text(s.end()) + " s.");
+    const Rational at = *at_opt;
+    ATM_TRY(Rational dur, time_or("duration", *Rational::make(2, 1)));
+    if (dur.num() <= 0)
+      return fail("E_PARAM", "\"duration\" must be more than 0.");
+    ATM_TRY(json still, ctx_.still(id, at.to_seconds_lossy()));
+
+    // Everything from `at` on, on the tracks of the clip and of what is linked to it, moves later by `dur`.
+    std::vector<std::string> tracks = {c.second};
+    std::vector<Member> cut;
+    for (const Member &m : linked(id)) {
+      if (std::find(tracks.begin(), tracks.end(), m.track) == tracks.end())
+        tracks.push_back(m.track);
+      const Span ms = span_of(node_of(m.id));
+      if (compare(at, ms.in) > 0 && compare(at, ms.end()) < 0)
+        cut.push_back(m);
+    }
+    for (const std::string &tid : tracks)
+      if (const json *t = track(tid); t && t->contains("clips"))
+        for (auto it = (*t)["clips"].begin(); it != (*t)["clips"].end(); ++it)
+          if (const Span sp = span_of(*it); compare(sp.in, at) >= 0 && !seen(it.key())) {
+            ATM_CHECK(change(it.key(), {plus(sp.in, dur), sp.duration, sp.source_in}));
+            drop_transitions(it.key(), tid);
+          }
+    // The cut: the right halves start after the still.
+    const std::string group = cut.empty() ? std::string() : new_id("lnk");
+    const auto split_later = [&](const std::string &cid, const std::string &tid, const std::string &ph) {
+      const size_t before = out_.ops.size();
+      split_one(cid, tid, at, ph, group);
+      for (size_t i = before; i < out_.ops.size(); ++i)
+        if (json &op = out_.ops[i]; op.value("op", "") == "add" && op.value("path", "") == tid + "/clips/" + ph)
+          op["value"]["timing"]["record_in"] = plus(at, dur).to_string();
+      drop_transitions(cid, tid);
+    };
+    split_later(id, c.second, placeholder());
+    for (size_t i = 0; i < cut.size(); ++i)
+      split_later(cut[i].id, cut[i].track, placeholder(".linked" + std::to_string(i)));
+    // The still, with the clip's own transform (not its keys: the frame holds still).
+    json transform = c.first->value("transform", json::object());
+    transform.erase("keyframes");
+    json value = {{"name", c.first->value("name", std::string("Clip")) + " (freeze)"},
+                  {"timing", {{"record_in", at.to_string()}, {"duration", dur.to_string()}, {"source_in", "0"}}},
+                  {"media_ref", {{"type", "image"}, {"path", still["path"]}, {"width", still["width"]}, {"height", still["height"]}}},
+                  {"transform", std::move(transform)}};
+    push({{"op", "add"}, {"path", c.second + "/clips/" + placeholder(".freeze")}, {"anchor", {{"after", id}}}, {"value", std::move(value)}});
+    done_.push_back(id);
     return {};
   }
 

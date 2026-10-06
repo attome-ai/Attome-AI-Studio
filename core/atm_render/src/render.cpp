@@ -643,6 +643,7 @@ Result<Composition> compile(const json &project, std::string_view sequence_id, c
         l.source_in_hns = int64_t(source_in.to_seconds_lossy() * double(media::kHnsPerSecond) + 0.5);
         if (const auto sp = timing->find("speed"); sp != timing->end() && sp->is_number())
           l.speed = std::clamp(sp->get<double>(), 0.1, 10.0);
+        l.reverse = timing->value("reverse", false);
         if (const auto tr = clip.find("transform"); tr != clip.end() && tr->is_object()) {
           if (const auto op = tr->find("opacity"); op != tr->end() && op->is_number())
             l.opacity = std::clamp(op->get<float>(), 0.0f, 1.0f);
@@ -1778,16 +1779,55 @@ void Renderer::draw(const Layer &l, int64_t frame, uint8_t *out, bool &cleared, 
       it = readers_.emplace(l.clip_id, std::move(*reader)).first;
     }
     used.push_back(&l.clip_id);
-    int64_t source_time = l.source_in_hns + comp_.frame_hns(frame - l.start_frame);
-    if (l.speed != 1.0)
-      source_time = int64_t(double(source_time) * l.speed);
-    auto decoded = it->second->frame_at(std::max<int64_t>(0, source_time));
-    if (!decoded) {
-      if (warning_.empty() && decoded.error().rule != "M_NO_FRAME")
-        warning_ = decoded.error().message;
-      return;
+    const int64_t rel = l.reverse ? std::max<int64_t>(0, l.frames - 1 - (frame - l.start_frame)) : frame - l.start_frame;
+    const auto source_time_of = [&](int64_t r) {
+      int64_t t = l.source_in_hns + comp_.frame_hns(r);
+      if (l.speed != 1.0)
+        t = int64_t(double(t) * l.speed);
+      return std::max<int64_t>(0, t);
+    };
+    if (l.reverse) {
+      BackCache &cache = back_[l.clip_id];
+      if (cache.first < 0 || rel < cache.first || rel >= cache.first + int64_t(cache.frames.size())) {
+        constexpr int64_t kRun = 24; // the run read in one go: the frame needed is its last, the next ones needed come before it
+        cache.first = std::max<int64_t>(0, rel - kRun + 1);
+        cache.frames.clear();
+        for (int64_t r = cache.first; r <= rel; ++r) {
+          auto got = it->second->frame_at(source_time_of(r));
+          if (!got) {
+            if (warning_.empty() && got.error().rule != "M_NO_FRAME")
+              warning_ = got.error().message;
+            cache.first = -1;
+            return;
+          }
+          cache.width = got->width;
+          cache.height = got->height;
+          std::vector<uint8_t> &packed = cache.frames.emplace_back(media::nv12_size(got->width, got->height));
+          for (int y = 0; y < got->height; ++y)
+            std::memcpy(packed.data() + size_t(y) * size_t(got->width), got->y + std::ptrdiff_t(got->y_pitch) * y, size_t(got->width));
+          for (int y = 0; y < got->height / 2; ++y)
+            std::memcpy(packed.data() + size_t(got->width) * size_t(got->height + y), got->uv + std::ptrdiff_t(got->uv_pitch) * y,
+                        size_t(got->width));
+        }
+      }
+      const std::vector<uint8_t> &packed = cache.frames[size_t(rel - cache.first)];
+      media::FrameView v;
+      v.width = cache.width;
+      v.height = cache.height;
+      v.y = packed.data();
+      v.y_pitch = cache.width;
+      v.uv = packed.data() + size_t(cache.width) * size_t(cache.height);
+      v.uv_pitch = cache.width;
+      view = v;
+    } else {
+      auto decoded = it->second->frame_at(source_time_of(rel));
+      if (!decoded) {
+        if (warning_.empty() && decoded.error().rule != "M_NO_FRAME")
+          warning_ = decoded.error().message;
+        return;
+      }
+      view = *decoded;
     }
-    view = *decoded;
   }
   const int w = std::min(view->width, width_), h = std::min(view->height, height_);
   const int alpha = int(p.opacity * 256.0f + 0.5f);
@@ -1933,6 +1973,9 @@ Result<void> Renderer::render(int64_t frame, uint8_t *out) {
     std::erase_if(readers_, [&](const auto &entry) {
       return std::none_of(used.begin(), used.end(), [&](const std::string *id) { return *id == entry.first; });
     });
+  std::erase_if(back_, [&](const auto &entry) { // the frames kept for a clip played backwards: only while it is on screen
+    return std::none_of(used.begin(), used.end(), [&](const std::string *id) { return *id == entry.first; });
+  });
   return {};
 }
 
@@ -1962,6 +2005,11 @@ Result<std::vector<float>> mix_audio(const Composition &c) {
       }
       *pcm = std::move(fitted);
     }
+    if (l.reverse) // backwards: the stereo frames in the other order
+      for (size_t i = 0, j = pcm->size() / 2; i + 1 < j; ++i, --j) {
+        std::swap((*pcm)[i * 2], (*pcm)[(j - 1) * 2]);
+        std::swap((*pcm)[i * 2 + 1], (*pcm)[(j - 1) * 2 + 1]);
+      }
     const size_t offset = size_t(c.frame_hns(l.start_frame) * media::kAudioRate / media::kHnsPerSecond) * 2;
     const size_t n = offset < mix.size() ? std::min(pcm->size(), mix.size() - offset) : 0;
     // Under a dissolve the two clips cross-fade with equal power: cos and sin of the progress keep the loudness level.

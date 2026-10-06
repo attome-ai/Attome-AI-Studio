@@ -51,6 +51,7 @@ struct ClipUi {
   int64_t source_frames = 0;     // frames of the file before the clip's first frame
   int64_t media_frames = 0;      // length of the file as the clip plays it (the file's length divided by the speed); 0 when unknown
   float speed = 1.0f;            // timing.speed: 2 plays the file twice as fast
+  bool reverse = false;          // timing.reverse: played backwards
   float opacity = 1.0f, volume = 1.0f;
   float pos_x = 0.5f, pos_y = 0.5f, scale_x = 1.0f, scale_y = 1.0f; // transform, canvas fractions
   float rotation = 0.0f, anchor_x = 0.5f, anchor_y = 0.5f;            // degrees clockwise; picture fractions
@@ -330,6 +331,7 @@ private:
   char rename_buf_[96] = {};
   bool rename_focus_ = false;
   void delete_track(const std::string &track_id);
+  void freeze_frame(); // the selected video (or the picture of the selected sound) holds the frame at the playhead for 2 s
   std::set<std::string> picked_;      // every selected clip when there are several (it includes selected_clip_); empty for one or none
   struct Snap { // a clip as Copy took it
     json clip;
@@ -471,6 +473,11 @@ private:
 
   // moving a clip by dragging the picture in the Monitor
   bool mon_drag_ = false;
+  std::string mon_edit_;                     // the text clip whose words are being typed on the picture (a double click on it)
+  char mon_edit_buf_[1024] = {};
+  bool mon_edit_focus_ = false;
+  int mon_crop_side_ = -1;                   // a side of the selected clip being cropped in the Monitor: 0 left, 1 top, 2 right, 3 bottom
+  float mon_crop_[4] = {};                   // its crop while the side is dragged (left, top, right, bottom)
   bool mon_scaling_ = false;                 // a corner handle of the selected clip is being dragged in the Monitor
   float mon_sx0_ = 1.0f, mon_sy0_ = 1.0f, mon_sx_ = 1.0f, mon_sy_ = 1.0f, mon_d0_ = 1.0f; // its scale at the press and now, and how far the pointer was from its anchor
   std::string pick_key_fx_;

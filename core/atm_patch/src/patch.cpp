@@ -60,7 +60,7 @@ std::string join(const Path &p, size_t from, size_t to) {
 
 bool ends_with_order(string_view key) { return key.size() > 6 && key.substr(key.size() - 6) == "_order"; }
 
-bool is_time_key(string_view k) {
+bool is_time_key(string_view k) { // (timing.speed and timing.reverse are a number and a flag, not times)
   return k == "record_in" || k == "duration" || k == "source_in" || k == "t" || k == "start" || k == "in_offset" ||
          k == "out_offset" || k == "fade_in" || k == "fade_out";
 }
