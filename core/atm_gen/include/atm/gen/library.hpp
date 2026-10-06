@@ -47,6 +47,11 @@ const ModelDecl *main_model(const json &workflow);
 // takes, the seed; the video and the audio.
 json shot_workflow(const ModelDecl &model);
 
+// The Voice of a model that speaks (generate_speech): one "generate speech" node and a "get duration" node on what it says,
+// with the text, the voice (how to speak, as words) and the seed as Exposed Inputs, the speech as the Primary Output and its length
+// as a number Output, which the clip takes its own length from. "voice:<model id>".
+json voice_workflow(const ModelDecl &model);
+
 // Makes a workflow start on the last frame of another clip: adds a Clip Reference node (`reference`: "previous", "next" or
 // a clip ID) and a Get Frame node for its last frame, links them to the "start_image" of the generate video node, and
 // leaves the "start_image" Exposed Input unlinked (its value is kept). Node IDs are "$new:" placeholders when the

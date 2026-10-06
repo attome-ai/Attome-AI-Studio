@@ -21,6 +21,7 @@
 #include "atm/base/time.hpp"
 #include "atm/doc/document.hpp"
 #include "atm/gen/library.hpp"
+#include "atm/skills/skills.hpp"
 #include "atm/gen/models.hpp"
 #include "atm/gen/plan.hpp"
 #include "atm/models/models.hpp"
@@ -805,6 +806,103 @@ struct Engine::Impl {
     }
     ATM_TRY(RationalTime t, parse_time(*value, ctx));
     return to_json(format_time(t, ctx.rate));
+  }
+
+  // Skills: how-to guides for agents. The built-in ones ship with Attome; a project keeps its own under "skills" (skl_ IDs), and those
+  // can be added, changed and removed like any item of the project. Both are listed together; a project skill with the id of a built-in
+  // one hides it.
+  static const json &skills_of(const Project &pr) {
+    static const json none = json::object();
+    const auto it = pr.doc.root().find("skills");
+    return it != pr.doc.root().end() && it->is_object() ? *it : none;
+  }
+
+  Result<json> skill_list(const json &params) {
+    json list = json::array();
+    const Project *pr = nullptr;
+    if (params.contains("project")) {
+      ATM_TRY(Project *found, project(params));
+      pr = found;
+    }
+    if (pr)
+      for (auto it = skills_of(*pr).begin(); it != skills_of(*pr).end(); ++it)
+        list.push_back({{"id", it.key()}, {"title", it->value("name", it.key())}, {"description", it->value("description", std::string())},
+                        {"source", "project"}, {"files", json::array()}});
+    for (const skills::Skill &s : skills::builtin()) {
+      bool hidden = false;
+      for (const json &entry : list)
+        hidden = hidden || entry.value("id", std::string()) == s.id;
+      if (!hidden)
+        list.push_back({{"id", s.id}, {"title", s.id}, {"description", s.description}, {"source", "builtin"}, {"files", s.files}});
+    }
+    return json{{"skills", std::move(list)}};
+  }
+
+  Result<json> skill_get(const json &params) {
+    ATM_TRY(const std::string *id, string_param(params, "id"));
+    const std::string file = params.value("file", std::string());
+    const Project *pr = nullptr;
+    if (params.contains("project")) {
+      ATM_TRY(Project *found, project(params));
+      pr = found;
+    }
+    if (pr && file.empty()) {
+      const json &mine = skills_of(*pr);
+      if (const auto it = mine.find(*id); it != mine.end() && it->is_object())
+        return json{{"id", *id}, {"title", it->value("name", *id)}, {"description", it->value("description", std::string())},
+                    {"source", "project"}, {"body", it->value("body", std::string())}, {"files", json::array()}};
+    }
+    const skills::Skill *built = skills::find_builtin(*id);
+    if (!built)
+      return fail(ErrorCode::NotFound, "S_SKILL", "There is no skill \"" + *id + "\".", {}, "List them with skill.list.");
+    if (!file.empty()) {
+      const std::string_view *data = skills::builtin_file(*id, file);
+      if (!data)
+        return fail(ErrorCode::NotFound, "S_SKILL_FILE", "Skill \"" + *id + "\" has no file \"" + file + "\".", {},
+                    "Its files are listed by skill.list and skill.get.");
+      std::string text(*data);
+      if (text.starts_with("\xEF\xBB\xBF"))
+        text.erase(0, 3);
+      return json{{"id", *id}, {"file", file}, {"text", std::move(text)}};
+    }
+    return json{{"id", *id}, {"title", *id}, {"description", built->description}, {"source", "builtin"}, {"body", built->body}, {"files", built->files}};
+  }
+
+  // Keeps a skill in the project: a new one (its skl_ ID is returned), or the fields given of an existing one. One undoable edit.
+  Result<json> skill_save(const json &params) {
+    ATM_TRY(Project *pr, project(params));
+    const std::string id = params.value("id", std::string());
+    const json &mine = skills_of(*pr);
+    const bool exists = !id.empty() && mine.contains(id);
+    if (!id.empty() && !exists && !id.starts_with("skl_"))
+      return fail(ErrorCode::UnknownId, "S_SKILL", "The project has no skill \"" + id + "\".", {}, "Leave out id to make a new skill.");
+    json ops = json::array();
+    const std::string root = pr->doc.root().value("id", std::string());
+    if (!exists) {
+      ATM_TRY(const std::string *title, string_param(params, "title"));
+      ATM_TRY(const std::string *body, string_param(params, "body"));
+      if (title->empty() || body->empty())
+        return bad_param("title", "and body must not be empty");
+      ops.push_back({{"op", "add"}, {"path", root + "/skills/$new:s"},
+                     {"value", {{"name", *title}, {"description", params.value("description", std::string())}, {"body", *body}}}});
+    } else {
+      for (const auto &[param, field] : {std::pair<const char *, const char *>{"title", "name"}, {"description", "description"}, {"body", "body"}})
+        if (params.contains(param) && params[param].is_string())
+          ops.push_back({{"op", mine[id].contains(field) ? "replace" : "add"}, {"path", id + "/" + field}, {"value", params[param]}});
+      if (ops.empty())
+        return bad_param("title", "or description or body is required");
+    }
+    ATM_TRY(json applied, project_patch({{"project", to_utf8(pr->dir)}, {"patch", {{"ops", std::move(ops)}, {"label", "Save skill"}}}}));
+    return json{{"skill", exists ? id : applied["id_map"].value("$new:s", std::string())}, {"revision", applied["revision"]}};
+  }
+
+  Result<json> skill_delete(const json &params) {
+    ATM_TRY(Project *pr, project(params));
+    ATM_TRY(const std::string *id, string_param(params, "id"));
+    if (!skills_of(*pr).contains(*id))
+      return fail(ErrorCode::UnknownId, "S_SKILL", "The project has no skill \"" + *id + "\".", {}, "Built-in skills cannot be deleted; list the project's with skill.list.");
+    ATM_TRY(json applied, project_patch({{"project", to_utf8(pr->dir)}, {"patch", {{"ops", json::array({{{"op", "remove"}, {"path", *id}}})}, {"label", "Delete skill"}}}}));
+    return json{{"deleted", *id}, {"revision", applied["revision"]}};
   }
 
   // Recipes for agents. Tool descriptions are short because MCP clients cut long ones; the details live here.
@@ -1850,14 +1948,15 @@ struct Engine::Impl {
     json list = json::array();
     for (const std::string &id : gen::model_ids()) {
       const gen::ModelDecl *decl = gen::find_model(id);
-      if (!decl || !decl->does("generate_video"))
+      const bool speaks = decl && decl->does("generate_speech");
+      if (!decl || !(decl->does("generate_video") || speaks))
         continue;
       const models::CatalogEntry *entry = models::find_entry(models::builtin_catalog(), id);
       const bool installed = !decl->needs_files || model_installed(id);
-      const bool engine = provider_for(providers, id, "generate_video") != nullptr;
+      const bool engine = provider_for(providers, id, speaks ? "generate_speech" : "generate_video") != nullptr;
       // The kind of clip the model makes (the Generate panel groups by it) and, within it, the model family
-      // (SD 1.5, SDXL, ...). Only video models exist so far; image models will say theirs.
-      list.push_back({{"id", id}, {"title", entry ? entry->title : id}, {"clip_type", "video"}, {"family", ""},
+      // (SD 1.5, SDXL, ...). Video and speech models exist so far; image models will say theirs.
+      list.push_back({{"id", id}, {"title", entry ? entry->title : decl->title.empty() ? id : decl->title}, {"clip_type", speaks ? "audio" : "video"}, {"family", ""},
                       {"installed", installed}, {"engine", engine},
                       {"ready", installed && engine}, {"accepts", decl->accepts},
                       {"seconds", {{"min", decl->seconds_min}, {"max", decl->seconds_max}}}});
@@ -1888,11 +1987,12 @@ struct Engine::Impl {
     } else {
       ATM_TRY(const std::string *model, string_param(params, "model"));
       decl = gen::find_model(*model);
-      if (!decl || !decl->does("generate_video"))
-        return fail(ErrorCode::NotFound, "G_MODEL", "\"" + *model + "\" is not a model that generates video here.", {},
+      if (!decl || !(decl->does("generate_video") || decl->does("generate_speech")))
+        return fail(ErrorCode::NotFound, "G_MODEL", "\"" + *model + "\" is not a model that generates video or speech here.", {},
                     "List the models with gen.models.");
-      instance = gen::instantiate("shot:" + *model);
+      instance = gen::instantiate((decl->does("generate_speech") ? "voice:" : "shot:") + *model);
     }
+    const bool voice = decl && decl->does("generate_speech"); // a clip of speech: on an audio track, as long as what is said
     const json &face = instance.value("exposed", json::object()).value("inputs", json::object());
     const std::string project_ref = to_utf8(pr->dir);
     std::string seq = params.value("sequence", std::string());
@@ -1911,7 +2011,17 @@ struct Engine::Impl {
     const auto [made_w, made_h] = decl ? gen::fit_size(*decl, scaled.first, scaled.second) : scaled;
     const int width = int(made_w), height = int(made_h);
     double seconds = std::max(params.value("seconds", 5.0), 0.1);
-    if (decl) {
+    if (voice && !params.contains("seconds")) { // a guess until it is spoken: about 2.6 words a second
+      int words = 0;
+      bool in_word = false;
+      for (const char letter : *prompt) {
+        const bool space = letter == ' ' || letter == '\n' || letter == '\t';
+        words += (!space && !in_word) ? 1 : 0;
+        in_word = !space;
+      }
+      seconds = std::max(1.0, std::round(double(words) / 2.6 * 10.0) / 10.0);
+    }
+    if (decl && !voice) {
       seconds = std::max(seconds, decl->seconds_min);
       if (decl->seconds_max > 0.0)
         seconds = std::min(seconds, decl->seconds_max);
@@ -1926,8 +2036,25 @@ struct Engine::Impl {
     if (track.empty())
       for (const json &id : sequence.value("track_order", json::array())) {
         const auto t = tracks.find(id.get<std::string>());
-        if (t != tracks.end() && t->value("kind", std::string("video")) != "audio" && t->value("name", std::string()) != "Titles" &&
+        if (t != tracks.end() && (t->value("kind", std::string("video")) == "audio") == voice && t->value("name", std::string()) != "Titles" &&
             t->value("name", std::string()) != "Effects") {
+          if (voice && params.contains("at")) { // a voice goes on the first audio track that is free where it is asked to start
+            const auto wanted = parse_time(params["at"]);
+            const auto span = Rational::make(std::llround(seconds * 1000.0), 1000);
+            bool free_there = true;
+            if (wanted && span && t->contains("clips"))
+              for (const auto &other : (*t)["clips"]) {
+                const json timing = other.value("timing", json::object());
+                const auto in = Rational::parse(timing.value("record_in", std::string("0")));
+                const auto dur = Rational::parse(timing.value("duration", std::string("0")));
+                const auto out = in && dur ? add(*in, *dur) : Result<Rational>(Rational::from_int(0));
+                const auto wanted_end = add(*wanted, *span);
+                if (in && out && wanted_end && compare(*wanted, *out) < 0 && compare(*in, *wanted_end) < 0)
+                  free_there = false;
+              }
+            if (!free_there)
+              continue;
+          }
           track = id.get<std::string>();
           break;
         }
@@ -1935,8 +2062,8 @@ struct Engine::Impl {
     const json *track_node = nullptr;
     if (track.empty()) {
       track = "$new:track";
-      json add = {{"op", "add"}, {"path", seq + "/tracks/$new:track"}, {"value", {{"kind", "video"}, {"name", "V1"}}}};
-      if (const json order = sequence.value("track_order", json::array()); !order.empty())
+      json add = {{"op", "add"}, {"path", seq + "/tracks/$new:track"}, {"value", {{"kind", voice ? "audio" : "video"}, {"name", voice ? "Voice" : "V1"}}}};
+      if (const json order = sequence.value("track_order", json::array()); !order.empty() && !voice)
         add["anchor"] = {{"before", order[0]}};
       ops.push_back(std::move(add));
     } else if (const auto t = tracks.find(track); t != tracks.end()) {
@@ -1962,6 +2089,8 @@ struct Engine::Impl {
     json inputs = json::object(); // what the workflow exposes: not every workflow has a prompt or a seed
     if (face.contains("prompt"))
       inputs["prompt"] = *prompt;
+    if (face.contains("text"))
+      inputs["text"] = *prompt; // a Voice: the words to say
     if (face.contains("seed"))
       inputs["seed"] = seed;
     std::string start_reference;
@@ -1990,6 +2119,13 @@ struct Engine::Impl {
         if (c.name.size() > 5 && c.name.rfind("Shot ", 0) == 0 && c.name.find_first_not_of("0123456789", 5) == std::string::npos)
           next = std::max(next, std::atoi(c.name.c_str() + 5) + 1);
       name = "Shot " + std::to_string(next);
+      if (voice) { // "Voice N", counted among the voices
+        next = 1;
+        for (const gen::ClipIn &c : gen_clips(*pr))
+          if (c.name.size() > 6 && c.name.rfind("Voice ", 0) == 0 && c.name.find_first_not_of("0123456789", 6) == std::string::npos)
+            next = std::max(next, std::atoi(c.name.c_str() + 6) + 1);
+        name = "Voice " + std::to_string(next);
+      }
     }
     char length[32];
     std::snprintf(length, sizeof length, "%.3fs", seconds);
@@ -2023,13 +2159,17 @@ struct Engine::Impl {
     }
     const double across = cw / double(width), down = ch / double(height);
     const double fill = std::round(std::max(across, down) / std::min(across, down) * 10000.0) / 10000.0;
-    ops.push_back({{"op", "add"},
-                   {"path", track + "/clips/$new:clip"},
-                   {"value",
-                    {{"name", name},
-                     {"timing", {{"record_in", record_in}, {"duration", length}, {"source_in", "0"}}},
-                     {"media_ref", {{"type", "workflow"}, {"workflow", std::move(instance)}, {"inputs", std::move(inputs)}, {"width", width}, {"height", height}}},
-                     {"transform", {{"position", {0.5, 0.5}}, {"scale", {fill, fill}}, {"opacity", 1}}}}}});
+    json clip_value = {{"name", name},
+                       {"timing", {{"record_in", record_in}, {"duration", length}, {"source_in", "0"}}},
+                       {"media_ref", {{"type", "workflow"}, {"workflow", std::move(instance)}, {"inputs", std::move(inputs)}}}};
+    if (voice) { // as long as what is said: the length comes from the speech after each run
+      clip_value["media_ref"]["length_from"] = "length";
+    } else {
+      clip_value["media_ref"]["width"] = width;
+      clip_value["media_ref"]["height"] = height;
+      clip_value["transform"] = {{"position", {0.5, 0.5}}, {"scale", {fill, fill}}, {"opacity", 1}};
+    }
+    ops.push_back({{"op", "add"}, {"path", track + "/clips/$new:clip"}, {"value", std::move(clip_value)}});
     ATM_TRY(json applied, project_patch({{"project", project_ref}, {"patch", {{"ops", std::move(ops)}, {"label", "Add generative clip"}}}}));
     const json &ids = applied["id_map"];
     return json{{"clip", ids.value("$new:clip", std::string())},
@@ -2657,6 +2797,25 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
        "task_id":{"type":"string"}},
        "required":["project","paths"]})",
      &Impl::media_import},
+    {"skill.list", "skill", false,
+     "START HERE for a kind of video you have not made before (a Short, ...): the skills available, built in and the project's own, each "
+     "with what it is for. Read one with skill.get; it says which Tools to call in which order and what to ask the user.",
+     R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID: adds the project's own skills"}}})",
+     &Impl::skill_list},
+    {"skill.get", "skill", false,
+     "Read a skill: its instructions (body) and the files that come with it. With file: the text of one file (a recipe script).",
+     R"({"type":"object","properties":{"id":{"type":"string"},"file":{"type":"string","description":"A path from the skill's files, e.g. scripts/sync_captions_to_voice.ps1"},
+       "project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID: its own skills are found first"}},"required":["id"]})",
+     &Impl::skill_get},
+    {"skill.save", "skill", true,
+     "Keep a skill in the project (name it with title, say when it is for in description, write the steps in body, markdown). With id of one the project "
+     "has: change the fields given. One undoable edit. A project skill with the id of a built-in skill replaces it for this project.",
+     R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},
+       "id":{"type":"string"},"title":{"type":"string"},"description":{"type":"string"},"body":{"type":"string"}},"required":["project"]})",
+     &Impl::skill_save},
+    {"skill.delete", "skill", true, "Remove a skill the project keeps (built-in skills stay).",
+     R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},"id":{"type":"string"}},"required":["project","id"]})",
+     &Impl::skill_delete},
     {"guide.get", "core", false,
      "How to write the project: the shapes of tracks and clips, text, dissolves, keyframe animation, effects, sound "
      "and times, with examples ready to adapt. Read it before the first project.patch.",

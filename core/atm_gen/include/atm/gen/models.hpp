@@ -34,7 +34,7 @@ struct SettingDecl {
 };
 
 struct ModelDecl {
-  std::string id;
+  std::string id, title;            // title: for menus, when the model is not in the catalog (an engine's own)
   std::vector<std::string> kinds;   // short kind ids
   std::vector<std::string> accepts; // optional inputs it takes: "start_image", "end_image", "references"
   double seconds_min = 0.0, seconds_max = 0.0; // 0 = no limit

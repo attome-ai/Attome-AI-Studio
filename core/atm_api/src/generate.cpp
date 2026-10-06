@@ -207,7 +207,7 @@ std::vector<GenOutcome> run_generation(const GenRun &run, const GenProgress &pro
         progress.on_node(running_node, 0, 0);
       Result<gen::StepResult> result = gen::StepResult{};
       if (builtin && kind == "get_duration") { // Get Duration: the length of the video or the sound, as text
-        const std::string media_file = request.inputs.value("media", std::string());
+        const std::string media_file = request.inputs.value("media", request.inputs.value("audio", std::string()));
         if (!write_duration(media_file, request.outputs["seconds"]))
           result = tl::unexpected(engine_error("E_INTERNAL", "The length of " + media_file + " could not be read.", "The clip it comes from may have no Take yet."));
       } else if (builtin) { // Get Frame: the first or the last picture of the video, or the one at a time

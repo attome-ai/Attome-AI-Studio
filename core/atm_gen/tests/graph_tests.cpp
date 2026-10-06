@@ -101,7 +101,7 @@ TEST_CASE("gen: the kind table, and the ports a workflow exposes", "[gen]") {
   CHECK(atm::gen::find_kind("sample") == atm::gen::find_kind("attome.sample"));
   CHECK_FALSE(atm::gen::find_kind("blur"));
   CHECK(atm::gen::is_workflow_kind("attome.workflow"));
-  CHECK(atm::gen::kind_ids() == "generate_video, encode_prompt, sample, decode, get_frame, get_duration, project, variable, clip, clip_reference, workflow");
+  CHECK(atm::gen::kind_ids() == "generate_video, encode_prompt, sample, decode, generate_speech, get_frame, get_duration, project, variable, clip, clip_reference, workflow");
 
   CHECK(check(shot()).empty());
   const atm::gen::Ports face = atm::gen::workflow_ports(json::object(), shot());
@@ -459,7 +459,7 @@ TEST_CASE("gen: the Input nodes: a Variable, the Clip's Duration, a frame of a v
     CHECK(def->inputs.empty());
   }
   CHECK_FALSE(atm::gen::find_kind("get_frame")->is_input); // it runs here, with no model
-  CHECK(kinds.size() == 10);
+  CHECK(kinds.size() == 11);
 
   // The ports of the Input nodes: the Project node's size is whole numbers, the Variable node has the type it says.
   const atm::gen::Ports project = atm::gen::node_ports(json::object(), {{"kind", "attome.project"}});

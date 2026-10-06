@@ -4,6 +4,8 @@
 #include <chrono>
 #include <cmath>
 #include <filesystem>
+#include <functional>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -117,15 +119,24 @@ MockProvider::MockProvider() {
       {"settings", {{"steps", {{"type", "integer"}, {"min", 1}, {"max", 50}, {"default", 8}}}}}};
   if (auto model = gen::parse_model(declaration))
     gen::register_model(std::move(*model));
+  const json voice = {{"id", kMockVoice},
+                      {"title", "Mock voice (a tone as long as the words)"},
+                      {"kinds", {"generate_speech"}},
+                      {"needs_files", false},
+                      {"settings", {{"speed", {{"type", "number"}, {"min", 0.5}, {"max", 2.0}, {"default", 1.0}}}}}};
+  if (auto model = gen::parse_model(voice))
+    gen::register_model(std::move(*model));
 }
 
 bool MockProvider::offers(std::string_view model, std::string_view kind) const {
+  if (model == kMockVoice)
+    return kind == "generate_speech";
   if (model != kMockModel)
     return false;
   return closed ? kind == "generate_video" : gen::find_kind(kind) != nullptr;
 }
 
-std::string MockProvider::fingerprint(std::string_view model) const { return model == kMockModel ? version : std::string(); }
+std::string MockProvider::fingerprint(std::string_view model) const { return model == kMockModel || model == kMockVoice ? version : std::string(); }
 
 Result<gen::StepResult> MockProvider::run(const gen::StepRequest &r) {
   ATM_PROFILE_SCOPE("gen.mock.step");
@@ -153,6 +164,43 @@ Result<gen::StepResult> MockProvider::run(const gen::StepRequest &r) {
     return {};
   };
   const char *phase = "sampling";
+  if (r.kind == "generate_speech") {
+    ++speeches;
+    int words = 0;
+    bool in_word = false;
+    const std::string text = r.inputs.value("text", std::string());
+    for (const char c : text) {
+      const bool space = c == ' ' || c == '\n' || c == '\t';
+      words += (!space && !in_word) ? 1 : 0;
+      in_word = !space;
+    }
+    const double speed = std::max(0.25, r.settings.value("speed", 1.0));
+    const double seconds = std::max(0.4, double(words) * 0.4 / speed);
+    const double tone = 180.0 + double(std::hash<std::string>{}(text) % 200);
+    const size_t frames = size_t(seconds * 48000.0);
+    std::string wav;
+    const auto u32 = [&](uint32_t v) { wav.append(reinterpret_cast<const char *>(&v), 4); };
+    const auto u16 = [&](uint16_t v) { wav.append(reinterpret_cast<const char *>(&v), 2); };
+    wav += "RIFF";
+    u32(uint32_t(36 + frames * 4));
+    wav += "WAVEfmt ";
+    u32(16), u16(1), u16(2), u32(48000), u32(48000 * 4), u16(4), u16(16);
+    wav += "data";
+    u32(uint32_t(frames * 4));
+    for (size_t i = 0; i < frames; ++i) { // a tone with a syllable-like pulse
+      const double t = double(i) / 48000.0;
+      const double v = 0.3 * std::sin(6.283185307179586 * tone * t) * (0.5 + 0.5 * std::sin(6.283185307179586 * 4.0 * t));
+      const int16_t s = int16_t(std::lround(v * 32767.0));
+      u16(uint16_t(s)), u16(uint16_t(s));
+    }
+    if (const std::string *out = out_path(r, "audio"))
+      ATM_CHECK(storage::atomic_write(to_path(*out), wav));
+    if (r.progress)
+      r.progress("speaking", 1, 1);
+    gen::StepResult done;
+    done.seconds["speaking"] = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+    return done;
+  }
   if (r.kind == "encode_prompt") {
     ++encodes;
     phase = "encoding";

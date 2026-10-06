@@ -10,6 +10,7 @@ namespace atm::gen {
 namespace {
 
 constexpr std::string_view kShotPrefix = "shot:";
+constexpr std::string_view kVoicePrefix = "voice:";
 
 json exposed_input(const char *type, const char *label, int order, const char *node, const char *port, bool required = false) {
   json e = {{"type", type}, {"label", label}, {"order", order}, {"to", json::array({json::array({node, port})})}};
@@ -25,6 +26,10 @@ std::vector<std::string> builtin_workflow_ids() {
   for (const std::string &id : model_ids())
     if (const ModelDecl *m = find_model(id); m && m->does("generate_video"))
       out.push_back(std::string(kShotPrefix) + id);
+  for (const std::string &id : model_ids())
+    if (const ModelDecl *m = find_model(id); m && m->does("generate_speech"))
+      out.push_back(std::string(kVoicePrefix) + id);
+  std::sort(out.begin(), out.end());
   return out;
 }
 
@@ -258,13 +263,40 @@ const ModelDecl *main_model(const json &workflow) {
     for (auto it = workflow["nodes"].begin(); it != workflow["nodes"].end(); ++it) {
       const std::string kind = it->value("kind", std::string()), model = it->value("model", std::string());
       if (const ModelDecl *m = model.empty() ? nullptr : find_model(model))
-        if (m->does("generate_video") || m->does("sample"))
+        if (m->does("generate_video") || m->does("sample") || m->does("generate_speech"))
           found = found ? found : m;
     }
   return found;
 }
 
+json voice_workflow(const ModelDecl &model) {
+  json settings = json::object();
+  for (const SettingDecl &s : model.settings)
+    if (!s.def.is_null())
+      settings[s.name] = s.def;
+  const char *say = "$new:say";
+  json node = {{"kind", "attome.generate_speech"}, {"model", model.id}};
+  if (!settings.empty())
+    node["settings"] = std::move(settings);
+  json inputs = json::object();
+  inputs["text"] = exposed_input("text", "Text", 0, say, "text", true);
+  inputs["voice"] = exposed_input("text", "Voice", 1, say, "instruct");
+  inputs["voice"]["default"] = "female, young adult, moderate pitch";
+  inputs["seed"] = exposed_input("integer", "Seed", 2, say, "seed");
+  return {{"name", "Voice"},
+          {"source", std::string(kVoicePrefix) + model.id},
+          {"nodes", {{say, std::move(node)}, {"$new:len", {{"kind", "attome.get_duration"}, {"ui", {{"x", 260}, {"y", 200}}}}}}},
+          {"links", {{"$new:l_len", {{"from", json::array({say, "audio"})}, {"to", json::array({"$new:len", "audio"})}}}}},
+          {"exposed",
+           {{"inputs", std::move(inputs)},
+            {"outputs", {{"audio", {{"from", {say, "audio"}}}}, {"length", {{"from", {"$new:len", "seconds"}}}}}},
+            {"primary", "audio"}}}};
+}
+
 json instantiate(std::string_view source_id) {
+  if (source_id.substr(0, kVoicePrefix.size()) == kVoicePrefix)
+    if (const ModelDecl *m = find_model(source_id.substr(kVoicePrefix.size())); m && m->does("generate_speech"))
+      return voice_workflow(*m);
   if (source_id.substr(0, kShotPrefix.size()) == kShotPrefix)
     if (const ModelDecl *m = find_model(source_id.substr(kShotPrefix.size())); m && m->does("generate_video"))
       return shot_workflow(*m);

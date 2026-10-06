@@ -888,7 +888,10 @@ App::DropPlan App::plan_drop(const std::string &payload, int row, int64_t frame)
     p.label = names[std::clamp(std::atoi(p.id.c_str()), 0, 2)];
     p.frames = three_seconds;
   } else if (p.kind == "gen") {
-    p.label = "Shot";
+    for (const json &m : gen_models_)
+      if (m.value("id", std::string()) == p.id && m.value("clip_type", std::string()) == "audio")
+        p.sound = true; // speech goes on an audio track
+    p.label = p.sound ? "Voice" : "Shot";
     if (p.id.rfind("cwf_", 0) == 0 && doc_.contains("workflows") && doc_["workflows"].is_object() && doc_["workflows"].contains(p.id))
       p.label = doc_["workflows"][p.id].value("name", std::string("Shot")); // a card of the library
     p.frames = std::max<int64_t>(1, std::llround(double(std::round(gen_seconds_ * 2.0f) / 2.0f) * fps()));
@@ -2574,7 +2577,12 @@ void draw_link(ImDrawList *dl, ImVec2 a, ImVec2 b, ImU32 colour, float width) {
 // Makes a generative clip with `model`: at `at` frames on `track` when given (a card dropped on the timeline), else at the
 // end of the picture track. Its prompt is written afterwards, in the Inspector.
 void App::add_generative_clip(const std::string &model, const std::string &track, int64_t at) {
-  json params = {{"project", project_path_}, {"prompt", std::string()}, {"seconds", std::round(gen_seconds_ * 2.0f) / 2.0f}};
+  bool speech = false; // a model that speaks: its clip is as long as what it says, so no length is asked for
+  for (const json &m : gen_models_)
+    speech = speech || (m.value("id", std::string()) == model && m.value("clip_type", std::string()) == "audio");
+  json params = {{"project", project_path_}, {"prompt", std::string()}};
+  if (!speech)
+    params["seconds"] = std::round(gen_seconds_ * 2.0f) / 2.0f;
   params[model.rfind("cwf_", 0) == 0 ? "workflow" : "model"] = model; // a card of the library, or a model's own
   if (!track.empty())
     params["track"] = track;
@@ -2657,6 +2665,11 @@ void App::draw_generate_panel() {
         dl->AddRect(ImVec2(c.x - 26.0f, c.y - 18.0f), ImVec2(c.x + 26.0f, c.y + 18.0f), hex(look::gen), 6.0f, 0, 2.2f);
         if (type == "video") { // a frame with a play triangle
           dl->AddTriangleFilled(ImVec2(c.x - 6.0f, c.y - 9.0f), ImVec2(c.x - 6.0f, c.y + 9.0f), ImVec2(c.x + 10.0f, c.y), hex(look::gen));
+        } else if (type == "audio") { // a voice: the bars of a waveform
+          for (int i = 0; i < 9; ++i) {
+            const float h = 4.0f + 12.0f * std::fabs(std::sin(float(i) * 1.3f + 0.6f));
+            dl->AddLine(ImVec2(c.x - 20.0f + float(i) * 5.0f, c.y - h), ImVec2(c.x - 20.0f + float(i) * 5.0f, c.y + h), hex(look::gen), 2.6f);
+          }
         } else { // a picture: sun and hills
           dl->AddCircleFilled(ImVec2(c.x + 12.0f, c.y - 7.0f), 4.5f, hex(look::gen));
           dl->AddTriangleFilled(ImVec2(c.x - 21.0f, c.y + 14.0f), ImVec2(c.x - 7.0f, c.y - 3.0f), ImVec2(c.x + 5.0f, c.y + 14.0f), hex(look::gen));

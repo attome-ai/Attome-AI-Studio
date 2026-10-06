@@ -856,3 +856,83 @@ TEST_CASE("generate: a clip whose workflow decides its length gets it from the r
   (void)made;
   (void)smp;
 }
+
+TEST_CASE("generate: speech: a Voice clip goes on an audio track, is as long as what it says, and its text is the clip's own", "[gen][generate][speech]") {
+  auto mock = std::make_shared<MockProvider>();
+  const fs::path dir = fs::temp_directory_path() / atm::new_id("attome-voice");
+  fs::create_directories(dir);
+  const std::string project = (dir / "Voice.attome").string();
+  atm::api::EngineConfig cfg;
+  cfg.models_dir = (dir / "models").string();
+  cfg.providers = {mock};
+  Engine engine(cfg);
+  const json created = ok(engine, "project.create", {{"path", project}, {"rate", "30"}, {"canvas", "320x176"}});
+  const std::string root = created["project"];
+  const auto wait = [&](const json &started) {
+    for (int i = 0; i < 3000; ++i) {
+      const json state = ok(engine, "jobs.get", {{"job_id", started["job_id"]}});
+      if (state["state"] != "running") {
+        (void)ok(engine, "gen.status", {{"project", project}});
+        return state;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return json{{"state", "timeout"}};
+  };
+  const auto get = [&](const std::string &id) { return ok(engine, "project.get", {{"project", project}, {"id", id}})["object"]; };
+
+  // The model is listed under the audio tab, with its title.
+  bool listed = false;
+  const json models = ok(engine, "gen.models", json::object());
+  for (const json &m : models["models"])
+    if (m["id"] == atm::api::kMockVoice) {
+      listed = true;
+      CHECK(m["clip_type"] == "audio");
+      CHECK(m["ready"] == true);
+    }
+  CHECK(listed);
+
+  // A video clip first, so there are tracks of both kinds; the voice does not go on the picture track.
+  const json shot = ok(engine, "gen.create_clip", {{"project", project}, {"prompt", "A robot"}, {"model", atm::api::kMockModel}, {"seconds", 3}});
+  const json first = ok(engine, "gen.create_clip", {{"project", project}, {"prompt", "What if you were invisible for a day?"}, {"model", atm::api::kMockVoice}});
+  CHECK(first["track"] != shot["track"]);
+  const json track = get(first["track"]);
+  CHECK(track["kind"] == "audio");
+  const json clip = get(first["clip"]);
+  CHECK(clip["name"] == "Voice 1");
+  CHECK(clip["media_ref"]["inputs"]["text"] == "What if you were invisible for a day?");
+  CHECK(clip["media_ref"]["length_from"] == "length");
+  CHECK_FALSE(clip.contains("transform")); // sound has no picture to place
+  const json workflow = clip["media_ref"]["workflow"];
+  CHECK(workflow["source"] == std::string("voice:") + atm::api::kMockVoice);
+  CHECK(workflow["exposed"]["primary"] == "audio");
+  CHECK(workflow["exposed"]["outputs"].contains("length"));
+  CHECK(workflow["exposed"]["inputs"].contains("voice"));
+  CHECK(ok(engine, "project.validate", {{"project", project}})["ok"] == true);
+
+  // A second voice at the same time goes on another audio track; one after it goes on the first.
+  const json second = ok(engine, "gen.create_clip", {{"project", project}, {"prompt", "Hour one: you vanish!"}, {"model", atm::api::kMockVoice}, {"at", "0@30"}});
+  CHECK(second["track"] != first["track"]);
+  CHECK(get(second["track"])["kind"] == "audio");
+  const json third = ok(engine, "gen.create_clip", {{"project", project}, {"prompt", "Free popcorn."}, {"model", atm::api::kMockVoice}, {"at", "20@1"}});
+  CHECK(third["track"] == first["track"]);
+
+  // Run: the mock says a word in 0.4 s, so "What if you were invisible for a day?" (8 words) is 3.2 s; the clip becomes that long.
+  const json started = ok(engine, "gen.run", {{"project", project}, {"clips", json::array({first["clip"]})}});
+  const json done = wait(started);
+  REQUIRE(done["state"] == "done");
+  CHECK(mock->speeches == 1);
+  const json after = get(first["clip"]);
+  CHECK(after["timing"]["duration"] == "16/5");
+  const json take = after["media_ref"]["takes"].begin()->at("outputs");
+  REQUIRE(take.contains("audio"));
+  CHECK(fs::file_size(fs::path(project) / take["audio"]["path"].get<std::string>()) > 100000);
+  // A new voice (the "voice" input) is another result; the same words and voice are not run twice.
+  ok(engine, "project.patch", {{"project", project}, {"patch", {{"ops", json::array({{{"op", "add"}, {"path", first["clip"].get<std::string>() + "/media_ref/inputs/voice"}, {"value", "deep, slow"}}})}}}});
+  REQUIRE(wait(ok(engine, "gen.run", {{"project", project}, {"clips", json::array({first["clip"]})}}))["state"] == "done");
+  CHECK(mock->speeches == 2);
+  CHECK(ok(engine, "gen.run", {{"project", project}, {"clips", json::array({first["clip"]})}, {"dry_run", true}})["steps_cached"] == 2);
+  CHECK(ok(engine, "project.validate", {{"project", project}})["ok"] == true);
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}

@@ -77,6 +77,8 @@ Result<ModelDecl> parse_model(const json &d) {
   if (!d.is_object() || !d.contains("id") || !d["id"].is_string() || d["id"].get_ref<const std::string &>().empty())
     return bad("?", "id", "has no \"id\".", "Give it the model's catalog ID.");
   m.id = d["id"].get<std::string>();
+  if (d.contains("title") && d["title"].is_string())
+    m.title = d["title"].get<std::string>();
   const auto strings = [&](const char *key, std::vector<std::string> &out) -> bool {
     const auto it = d.find(key);
     if (it == d.end())

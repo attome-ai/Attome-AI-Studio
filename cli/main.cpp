@@ -311,6 +311,7 @@ int main(int argc, char **argv) {
 
   std::string output;
   int height = 0;
+  double bitrate_mbps = 0.0;
   double seconds = 5.0;
 
   auto *cmd_probe = app.add_subcommand("probe", "Size, frame rate and duration of a media file");
@@ -321,10 +322,13 @@ int main(int argc, char **argv) {
   cmd_render->add_option("project", project)->required();
   cmd_render->add_option("-o,--output", output, "The .mp4 file to write")->required();
   cmd_render->add_option("--height", height, "Output height in pixels (default: the canvas height)");
+  cmd_render->add_option("--bitrate", bitrate_mbps, "Video bitrate in Mbit/s (default: 6 bits per pixel a second, 12.4 for a 1080x1920 Short; 6-8 is plenty for one)");
   cmd_render->callback([&] {
     json params = {{"project", abs_path(project)}, {"output", abs_path(output)}};
     if (height > 0)
       params["height"] = height;
+    if (bitrate_mbps > 0.0)
+      params["bitrate"] = int(bitrate_mbps * 1'000'000.0);
     // The job must outlive the call that starts it, so without a daemon one Engine serves the whole command.
     const bool remote = opt.daemon != "never" && bool(atm::api::connect(opt.endpoint));
     std::unique_ptr<atm::api::Engine> local = remote ? nullptr : std::make_unique<atm::api::Engine>(atm::api::EngineConfig{.user_settings = true});

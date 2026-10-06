@@ -11,6 +11,8 @@
 namespace atm::api {
 
 inline constexpr const char *kMockModel = "attome-mock";
+// The mock's voice: "speech" that is a tone as long as the words (0.4 s a word), a pitch from the text; for tests of the speech path.
+inline constexpr const char *kMockVoice = "attome-mock-voice";
 
 class MockProvider final : public gen::Provider {
 public:
@@ -22,7 +24,7 @@ public:
   Result<gen::StepResult> run(const gen::StepRequest &request) override;
 
   // For tests. How often each kind ran:
-  std::atomic<int> encodes{0}, samples{0}, decodes{0}, generates{0};
+  std::atomic<int> encodes{0}, samples{0}, decodes{0}, generates{0}, speeches{0};
   int step_delay_ms = 0;  // a pause per sampling step, to look like work (ATTOME_MOCK_DELAY_MS)
   std::string fail_kind;  // a step of this kind fails with E_INTERNAL
   bool closed = false;    // true: it offers generate_video only, like a cloud service or a ComfyUI graph

@@ -17,6 +17,8 @@ constexpr const char *kProtocols[] = {"2025-06-18", "2025-03-26", "2024-11-05"};
 
 constexpr const char *kInstructions =
     "Attome edits video projects (.attome folders) and renders them to MP4.\n"
+    "For a kind of video you have not made before (a YouTube Short, ...) call skill_list first and read the skill with skill_get: it "
+    "says which Tools to call in which order. A project can keep its own skills (skill_save).\n"
     "Workflow: guide_get (topic \"timeline\" first) -> project_create (or use an existing .attome folder) -> "
     "media_import the files -> timeline_edit to build the cut in one call (clips, text, dissolves, blur, music) -> "
     "project_inspect with level "
