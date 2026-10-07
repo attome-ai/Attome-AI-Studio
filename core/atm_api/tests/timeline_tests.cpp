@@ -1145,3 +1145,51 @@ TEST_CASE("text.pop makes sound words that bounce in and fade out, with a shadow
   CHECK_FALSE(f.engine.call("text.pop", {{"project", f.project}}));
   CHECK_FALSE(f.engine.call("text.pop", {{"project", f.project}, {"words", json::array({{{"say", "no time"}}})}}));
 }
+
+TEST_CASE("sequence.create: a second sequence, and the Tools that are given a clip work in the clip's own sequence", "[timeline][parity]") {
+  Fixture f; // the first sequence is 320x240
+  const auto made = f.engine.call("sequence.create", {{"project", f.project}, {"name", "Vertical"}, {"canvas", {{"width", 216}, {"height", 384}}}});
+  INFO((made ? "" : made.error().message + " | " + made.error().hint));
+  REQUIRE(made);
+  const std::string second = made->at("sequence");
+  CHECK(f.engine.call("project.validate", {{"project", f.project}})->at("ok") == true);
+
+  // A clip in each sequence.
+  const json one = f.ok(json::array({{{"op", "add_text"}, {"id", "$new:a"}, {"text", "First"}, {"duration", "2s"}}}));
+  const auto two = f.engine.call("timeline.edit", {{"project", f.project}, {"sequence", second},
+                                                   {"ops", json::array({{{"op", "add_text"}, {"id", "$new:b"}, {"text", "Second"}, {"duration", "2s"}},
+                                                                        {{"op", "add_text"}, {"id", "$new:c"}, {"text", "Third"}, {"duration", "2s"}, {"at", "2s"}}})}});
+  REQUIRE(two);
+  const std::string a = one["id_map"]["$new:a"], b = (*two)["id_map"]["$new:b"], c = (*two)["id_map"]["$new:c"];
+
+  // Given only a clip of the second sequence, each Tool edits that sequence (without "sequence" beside it).
+  const auto moved = f.engine.call("clip.motion", {{"project", f.project}, {"clips", json::array({b})}, {"keys", json::array({{{"property", "scale"}, {"at", 0}, {"value", 1.2}, {"relative", true}}})}});
+  INFO((moved ? "" : moved.error().message + " | " + moved.error().hint));
+  CHECK(moved);
+  const auto flashed = f.engine.call("flash.cuts", {{"project", f.project}, {"clips", json::array({c})}});
+  INFO((flashed ? "" : flashed.error().message + " | " + flashed.error().hint));
+  CHECK(flashed);
+  const auto popped = f.engine.call("text.pop", {{"project", f.project}, {"sequence", second}, {"words", json::array({{{"at", 0.5}, {"say", "POOF!"}}})}});
+  INFO((popped ? "" : popped.error().message + " | " + popped.error().hint));
+  CHECK(popped);
+  CHECK(f.engine.call("project.validate", {{"project", f.project}})->at("ok") == true);
+
+  // The first sequence is untouched: one clip, no flash, no pop.
+  const json listed = *f.engine.call("project.inspect", {{"project", f.project}, {"level", "tracks"}});
+  const json &seqs = listed["data"]["sequences"];
+  REQUIRE(seqs.size() == 2);
+  CHECK(seqs[0].dump().find("Flash") == std::string::npos);
+  CHECK(seqs[0].dump().find("Pop words") == std::string::npos);
+  CHECK(seqs[1].dump().find("Flash") != std::string::npos);
+  CHECK(seqs[1].dump().find("Pop words") != std::string::npos);
+  CHECK(f.get(a)["transform"].contains("keyframes") == false); // the motion went to the second sequence's clip only
+
+  // Each sequence renders at its own canvas: a picture of the second is 216x384.
+  const auto seen = f.engine.call("see.frames", {{"project", f.project}, {"sequence", second}, {"times", json::array({"1s"})}, {"height", 384}});
+  INFO((seen ? "" : seen.error().message + " | " + seen.error().hint));
+  CHECK(seen);
+
+  // Undo takes the sequence's last edit back, and the sequence itself can be undone with the rest.
+  CHECK_FALSE(f.engine.call("sequence.create", {{"project", f.project}, {"canvas", {{"width", 4}, {"height", 4}}}}));
+  CHECK_FALSE(f.engine.call("sequence.create", {{"project", f.project}, {"rate", "0"}}));
+}
