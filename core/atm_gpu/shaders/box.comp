@@ -1,0 +1,85 @@
+#version 450
+// One box-blur pass of a packed picture plane, in integer arithmetic so it gives the same bytes as the CPU's box_line /
+// box_vertical: each output is (sum of the 2r + 1 samples around it + w / 2) / w, edges clamped.
+//
+// The buffers are read and written as 32-bit words (4 bytes of the picture each); rows are padded to whole words, and
+// every invocation owns whole words of the output, so no two invocations write into the same word.
+//   horizontal (vertical == 0): an invocation takes a stretch of `seg` samples of one row, all its interleaved channels
+//     (U and V together), slides one running sum per channel along it and writes each word once it is full.
+//   vertical (vertical == 1): an invocation takes one word column (4 byte columns) over a stretch of `seg` rows;
+//     neighbouring invocations read neighbouring words of a row, together.
+// The window is summed once per stretch, then slides: the cost per sample does not grow with the radius.
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer Src { uint src[]; };
+layout(std430, set = 0, binding = 1) writeonly buffer Dst { uint dst[]; };
+
+layout(push_constant) uniform Pass {
+  uint offset;   // the plane's first byte (a multiple of 4)
+  uint rows;     // rows of the plane
+  uint stride;   // bytes from one row to the next (a multiple of 4)
+  uint n;        // horizontal: samples per channel along a row; vertical: words across a row
+  uint channels; // horizontal: interleaved channels (1 luma, 2 chroma)
+  int r;         // box radius
+  uint seg;      // samples (horizontal, a multiple of 4) or rows (vertical) per invocation
+  uint vertical;
+} pc;
+
+int byte_at(uint i) { return int(bitfieldExtract(src[i >> 2], int((i & 3u) * 8u), 8)); }
+ivec4 unpack(uint word) { return ivec4(word & 0xFFu, (word >> 8) & 0xFFu, (word >> 16) & 0xFFu, word >> 24); }
+
+void main() {
+  const int r = pc.r, w = 2 * r + 1;
+  const int s0 = int(gl_GlobalInvocationID.y * pc.seg);
+  if (pc.vertical == 0u) {
+    const uint row = gl_GlobalInvocationID.x;
+    const int n = int(pc.n);
+    if (row >= pc.rows || s0 >= n)
+      return;
+    const int s1 = min(n, s0 + int(pc.seg));
+    const uint base = pc.offset + row * pc.stride, ch = pc.channels;
+    int sum0 = 0, sum1 = 0;
+    for (int k = s0 - r; k <= s0 + r; ++k) {
+      const uint at = base + uint(clamp(k, 0, n - 1)) * ch;
+      sum0 += byte_at(at);
+      if (ch == 2u)
+        sum1 += byte_at(at + 1u);
+    }
+    // One output word per step: 4 samples of the luma, or 2 samples of U and V; the stretch starts on a word.
+    // (Kept this shape on purpose: a word store inside a branch of the sliding loop gave wrong sums on NVIDIA 591.74.)
+    const int end = s1 * int(ch);
+    for (int rb = s0 * int(ch); rb < end; rb += 4) {
+      uint word = 0u;
+      for (int q = 0; q < 4; ++q) {
+        const int bb = rb + q;
+        if (bb >= end) // the row ends inside this word: its other bytes are padding
+          break;
+        const int i = bb / int(ch), c = bb - i * int(ch);
+        const int sum = c == 0 ? sum0 : sum1;
+        word |= uint((sum + w / 2) / w) << (uint(q) * 8u);
+        const int d = byte_at(base + uint(clamp(i + r + 1, 0, n - 1)) * ch + uint(c)) - byte_at(base + uint(clamp(i - r, 0, n - 1)) * ch + uint(c));
+        if (c == 0)
+          sum0 += d;
+        else
+          sum1 += d;
+      }
+      dst[(base + uint(rb)) >> 2] = word;
+    }
+  } else {
+    const uint col = gl_GlobalInvocationID.x;
+    const int rows = int(pc.rows);
+    if (col >= pc.n || s0 >= rows)
+      return;
+    const int s1 = min(rows, s0 + int(pc.seg));
+    const uint first = (pc.offset >> 2) + col, words = pc.stride >> 2;
+    ivec4 sum = ivec4(0);
+    for (int k = s0 - r; k <= s0 + r; ++k)
+      sum += unpack(src[first + uint(clamp(k, 0, rows - 1)) * words]);
+    for (int y = s0; y < s1; ++y) {
+      const uvec4 v = uvec4((sum + w / 2) / w);
+      dst[first + uint(y) * words] = v.x | (v.y << 8) | (v.z << 16) | (v.w << 24);
+      sum += unpack(src[first + uint(min(y + r + 1, rows - 1)) * words]) - unpack(src[first + uint(max(y - r, 0)) * words]);
+    }
+  }
+}

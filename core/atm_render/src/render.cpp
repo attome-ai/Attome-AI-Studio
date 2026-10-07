@@ -1979,6 +1979,11 @@ void Renderer::draw_isolated(const Layer &l, int64_t frame, uint8_t *out, bool &
 
 void set_always_measure_coverage(bool on) { g_always_measure_coverage.store(on); }
 
+void blur_picture(uint8_t *nv12, int width, int height, float sigma) {
+  std::vector<uint8_t> tmp;
+  blur_nv12(nv12, width, height, sigma, tmp);
+}
+
 Result<void> Renderer::render(int64_t frame, uint8_t *out) {
   ATM_PROFILE_SCOPE("render.frame");
   bool cleared = false;

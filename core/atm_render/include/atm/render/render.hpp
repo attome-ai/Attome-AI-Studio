@@ -136,6 +136,10 @@ struct Layer {
 // For the test that compares the two ways a clip with effects is drawn: true makes every such clip take the full way (drawn over black and over white).
 void set_always_measure_coverage(bool on);
 
+// The renderer's blur of a packed NV12 picture, in place (three box passes each way; the chroma at half the sigma): the CPU
+// reference the GPU path (atm_gpu) is checked against.
+void blur_picture(uint8_t *nv12, int width, int height, float sigma);
+
 // The parameters of an effect of a layer at one frame, keyframes applied, in the order of the effect's table entry.
 struct Composition;
 std::array<float, eval::kMaxEffectParams> effect_values(const Layer &layer, const Effect &effect, const Composition &comp, int64_t frame);
