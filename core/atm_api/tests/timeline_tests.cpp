@@ -1124,3 +1124,24 @@ TEST_CASE("timeline.edit: a field the op did nothing with is told in notes, and 
   CHECK(note.find("sizee") != std::string::npos);
   CHECK(note.find("duration") == std::string::npos); // used fields are not named
 }
+
+TEST_CASE("text.pop makes sound words that bounce in and fade out, with a shadow under each", "[timeline][parity]") {
+  Fixture f;
+  const auto popped = f.engine.call("text.pop", {{"project", f.project}, {"words", json::array({{{"at", 1.9}, {"say", "POOF!"}, {"color", "#00E5FF"}, {"y", 0.5}},
+                                                                                             {{"at", 4.3}, {"say", "SNEAKY!"}}})}});
+  INFO((popped ? "" : popped.error().message + " | " + popped.error().hint));
+  REQUIRE(popped);
+  CHECK(popped->at("words").get<int>() == 2);
+  REQUIRE(popped->at("clips").size() == 4); // each word and its shadow
+  CHECK(f.engine.call("project.validate", {{"project", f.project}})->at("ok") == true);
+  const json word = f.get(popped->at("clips")[1].get<std::string>());
+  CHECK(word["transform"]["keyframes"]["scale"].size() == 4);
+  CHECK(word["transform"]["keyframes"]["rotation"].size() == 4);
+  CHECK(word["transform"]["keyframes"]["opacity"].size() == 2);
+  CHECK(word["content"]["text"] == "POOF!");
+  const std::string tracks = f.engine.call("project.inspect", {{"project", f.project}, {"level", "tracks"}})->dump();
+  CHECK(tracks.find("Pop words") != std::string::npos);
+  CHECK(tracks.find("Pop shadow") != std::string::npos);
+  CHECK_FALSE(f.engine.call("text.pop", {{"project", f.project}}));
+  CHECK_FALSE(f.engine.call("text.pop", {{"project", f.project}, {"words", json::array({{{"say", "no time"}}})}}));
+}

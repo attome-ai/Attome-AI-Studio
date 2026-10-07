@@ -1472,6 +1472,60 @@ struct Engine::Impl {
     return done;
   }
 
+  // text.pop {project, words, seconds?, size?, keys?, shadow?}: sound words that burst out at a moment ("POOF!", "BOING!"): words is [{at, say, color?, y?}]. Each is a text clip
+  // (with a shadow clip under it on a track of its own) popped by clip.motion: it bounces in from small, wobbles, settles and fades out over `seconds` (default 0.87).
+  // `keys` replaces the pop with your own clip.motion keys; shadow {color, offset} (default black, 0.005). Made of add_text and clip.motion: two edits, Undo takes each back.
+  Result<json> text_pop(const json &params) {
+    ATM_PROFILE_SCOPE("api.text_pop");
+    if (!params.contains("words") || !params["words"].is_array() || params["words"].empty())
+      return bad_param("words", "is required: [{at, say, color?, y?}]");
+    const double seconds = params.value("seconds", 0.87), size = params.value("size", 0.09);
+    if (!(seconds >= 0.2 && seconds <= 10.0))
+      return bad_param("seconds", "must be from 0.2 to 10");
+    const json shadow = params.value("shadow", json::object());
+    const double offset = shadow.value("offset", 0.005);
+    const std::string shadow_color = shadow.value("color", std::string("#010101"));
+    const auto sec = [](double v) { return std::to_string(int64_t(std::llround(v * 1000000.0))) + "/1000000"; };
+    json ops = json::array({{{"op", "add_track"}, {"id", "$new:popshadow"}, {"kind", "video"}, {"name", "Pop shadow"}},
+                            {{"op", "add_track"}, {"id", "$new:popwords"}, {"kind", "video"}, {"name", "Pop words"}}});
+    int n = 0;
+    for (const json &w : params["words"]) {
+      if (!w.is_object() || !w.contains("at") || !w["at"].is_number() || !w.contains("say") || !w["say"].is_string())
+        return bad_param("words", "must be objects with at (seconds) and say (the word)");
+      const double y = w.value("y", 0.32);
+      for (const char *layer : {"shadow", "text"}) {
+        const bool under = std::string(layer) == "shadow";
+        const double d = under ? offset : 0.0;
+        ops.push_back({{"op", "add_text"}, {"id", std::string("$new:") + layer + std::to_string(n)}, {"text", w["say"]}, {"name", std::string(layer) + " " + w["say"].get<std::string>()},
+                       {"at", sec(w["at"].get<double>())}, {"duration", sec(seconds)}, {"size", size}, {"bold", true},
+                       {"color", under ? shadow_color : w.value("color", std::string("#FFE600"))}, {"position", json::array({0.5 + d, y + d})},
+                       {"track", under ? "$new:popshadow" : "$new:popwords"}});
+      }
+      ++n;
+    }
+    ATM_TRY(json made, timeline_edit({{"project", params["project"]}, {"ops", std::move(ops)}, {"label", "Sound words"}}));
+    json clips = json::array();
+    for (int i = 0; i < n; ++i)
+      for (const char *layer : {"shadow", "text"})
+        clips.push_back(made["id_map"][std::string("$new:") + layer + std::to_string(i)]);
+    // The pop, in seconds of the clip: in from small with a bounce, a wobble, settle, a last swell, out.
+    const json pop = params.contains("keys") ? params["keys"]
+                                              : json::array({{{"property", "scale"}, {"at", 0.0}, {"value", 0.3}, {"ease", "ease_out_back"}},
+                                                             {{"property", "scale"}, {"at", 0.233}, {"value", 1.3}, {"ease", "ease_in_out_quad"}},
+                                                             {{"property", "scale"}, {"at", 0.4}, {"value", 1.0}},
+                                                             {{"property", "scale"}, {"at_end", 0.0}, {"value", 1.08}},
+                                                             {{"property", "rotation"}, {"at", 0.0}, {"value", -10.0}, {"ease", "ease_out_back"}},
+                                                             {{"property", "rotation"}, {"at", 0.2}, {"value", 6.0}, {"ease", "ease_in_out_quad"}},
+                                                             {{"property", "rotation"}, {"at", 0.4}, {"value", -3.0}, {"ease", "ease_in_out_quad"}},
+                                                             {{"property", "rotation"}, {"at_end", 0.0}, {"value", 2.0}},
+                                                             {{"property", "opacity"}, {"at_end", 0.2}, {"value", 1.0}},
+                                                             {{"property", "opacity"}, {"at_end", 0.0}, {"value", 0.0}}});
+    ATM_TRY(json moved, clip_motion({{"project", params["project"]}, {"clips", clips}, {"keys", pop}}));
+    made["words"] = n;
+    made["clips"] = std::move(clips);
+    return made;
+  }
+
   // flash.cuts {project, track | clips, seconds?, brightness?, saturation?, ease?}: a flash on every cut: an adjustment layer of `seconds` (default 0.23) at the start of each clip
   // of the track (or of `clips`) but the first, whose brightness starts at `brightness` (default 0.65) and falls to nothing. One edit.
   Result<json> flash_cuts(const json &params) {
@@ -4655,6 +4709,14 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
        "keys":{"type":"array","items":{"type":"object","properties":{"property":{"type":"string","enum":["scale","position","rotation","opacity"]},"at":{"type":"number"},"at_end":{"type":"number"},
        "value":{},"relative":{"type":"boolean"},"ease":{"type":"string"},"hold":{"type":"boolean"}},"required":["property","value"]}}},"required":["project","clips","keys"]})",
      &Impl::clip_motion},
+    {"text.pop", "core", true,
+     "Sound words that burst out at a moment (POOF!, BOING!): `words` is [{at (seconds), say, color?, y?}]. Each is a bold text clip of `seconds` (default 0.87) with a dark "
+     "shadow under it, on the tracks Pop words and Pop shadow, and bounces in from small, wobbles, settles and fades out. `keys` replaces that pop with your own clip.motion "
+     "keys; `shadow` {color, offset} changes the shadow. Two edits (the words, then their motion); Undo twice takes them back.",
+     R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},
+       "words":{"type":"array","items":{"type":"object","properties":{"at":{"type":"number"},"say":{"type":"string"},"color":{"type":"string"},"y":{"type":"number"}},"required":["at","say"]}},
+       "seconds":{"type":"number"},"size":{"type":"number"},"keys":{"type":"array"},"shadow":{"type":"object"}},"required":["project","words"]})",
+     &Impl::text_pop},
     {"flash.cuts", "core", true,
      "Flash on every cut: an adjustment layer (default 0.23 s) at the start of each clip of `track` but the first (or at each clip of `clips`), whose brightness starts at "
      "`brightness` (default 0.65) and falls to nothing, shaped by `ease`. Adjustment layers on the Effects track: remove one with delete. One edit; Undo takes them all back.",
