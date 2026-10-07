@@ -1322,8 +1322,9 @@ struct Engine::Impl {
         file = pr->dir / file;
       path = to_utf8(file);
       const json timing = ref->node->value("timing", json::object());
-      const double source_in = Rational::parse(timing.value("source_in", std::string("0"))).value_or(Rational()).to_seconds_lossy();
-      const double length = Rational::parse(timing.value("duration", std::string("0"))).value_or(Rational()).to_seconds_lossy();
+      const double speed = std::clamp(timing.value("speed", 1.0), 0.1, 10.0); // the clip's times are film time: the file is read `speed` times as fast
+      const double source_in = Rational::parse(timing.value("source_in", std::string("0"))).value_or(Rational()).to_seconds_lossy() * speed;
+      const double length = Rational::parse(timing.value("duration", std::string("0"))).value_or(Rational()).to_seconds_lossy() * speed;
       from = source_in + from;
       to = to > 0.0 ? source_in + to : source_in + length;
     }
@@ -1357,6 +1358,64 @@ struct Engine::Impl {
       out["beats"] = std::move(beats);
     }
     return out;
+  }
+
+  // music.fit {project, clip, bpm?, at?, until?, from?}: a music clip made to fit the film. Its tempo is found (audio.analyze); with bpm the clip's speed is set so that
+  // tempo becomes `bpm` (between half and double speed); its start is cut to the first beat at or after `from` (a second of the file), and that beat is put at `at`
+  // (a second of the film; default where the clip starts now); with until the clip ends there. Done with set_speed, trim and move: one edit, Undo takes it back.
+  Result<json> music_fit(const json &params) {
+    ATM_PROFILE_SCOPE("api.music_fit");
+    ATM_TRY(Project *pr, project(params));
+    const std::string id = params.value("clip", std::string());
+    const doc::NodeRef *ref = id.empty() ? nullptr : pr->doc.find(id);
+    if (!ref || !ref->node || id.rfind("clp_", 0) != 0)
+      return fail(ErrorCode::NotFound, "E_UNKNOWN_CLIP", "\"clip\" must be the ID of a clip of the project, not \"" + id + "\".");
+    const json timing = ref->node->value("timing", json::object());
+    const auto seconds_of = [&](const char *key) { return Rational::parse(timing.value(key, std::string("0"))).value_or(Rational()).to_seconds_lossy(); };
+    const double speed_now = std::clamp(timing.value("speed", 1.0), 0.1, 10.0), record_in = seconds_of("record_in");
+    const double file_start = seconds_of("source_in") * speed_now; // where in the file the clip starts now
+    ATM_TRY(json found, audio_analyze({{"project", params["project"]}, {"clip", id}, {"from", 0.0}}));
+    if (!found.value("has_beat", false) || !found.contains("beats"))
+      return fail(ErrorCode::InvalidArgument, "E_NO_BEAT", "No clear beat was found in the music (confidence " + std::to_string(found.value("confidence", 0.0)).substr(0, 4) + ").",
+                  "audio.analyze says more. A song with drums works best; for other sound, set the speed and the start by hand.");
+    // audio_analyze counts from the start of what the clip plays: its times are seconds of the file.
+    const double from = std::max(params.value("from", 0.0), file_start);
+    double beat = -1.0;
+    for (const json &b : found["beats"])
+      if (b.get<double>() >= from - 1e-6) {
+        beat = b.get<double>();
+        break;
+      }
+    if (beat < 0.0)
+      return fail(ErrorCode::InvalidArgument, "E_NO_BEAT", "There is no beat at or after " + std::to_string(from).substr(0, 5) + " s of the file.");
+    const double tempo = found.value("bpm", 0.0);
+    double speed = speed_now;
+    if (params.contains("bpm") && params["bpm"].is_number()) {
+      speed = params["bpm"].get<double>() / tempo; // the file's own tempo, so the speed is relative to the file, not to the clip's speed now
+      if (!(speed >= 0.5 && speed <= 2.0))
+        return fail(ErrorCode::InvalidArgument, "E_PARAM", "To make " + std::to_string(tempo).substr(0, 6) + " bpm into " + std::to_string(params["bpm"].get<double>()).substr(0, 6) +
+                                                            " bpm the music would play at " + std::to_string(speed).substr(0, 5) + "x: too far from its own speed.",
+                    "Pick a tempo within half and double of the music's own.");
+    }
+    const auto sec = [](double v) { return std::to_string(int64_t(std::llround(v * 1000000.0))) + "/1000000"; };
+    const double cut = (beat - file_start) / speed; // film seconds from where the clip starts to the beat, at the new speed (the part before the old start stays cut)
+    const double at = params.contains("at") && params["at"].is_number() ? params["at"].get<double>() : record_in;
+    json ops = json::array();
+    if (std::fabs(speed - speed_now) > 1e-6)
+      ops.push_back({{"op", "set_speed"}, {"clip", id}, {"speed", std::round(speed * 1000.0) / 1000.0}});
+    // After the new speed the clip starts at the same part of the file, record_in unchanged; its in-edge goes later by `cut`, then the clip is put at `at`.
+    if (cut > 1e-6)
+      ops.push_back({{"op", "trim"}, {"clip", id}, {"edge", "in"}, {"delta", sec(cut)}});
+    ops.push_back({{"op", "move"}, {"clip", id}, {"to", sec(at)}});
+    if (params.contains("until") && params["until"].is_number())
+      ops.push_back({{"op", "trim"}, {"clip", id}, {"edge", "out"}, {"to", sec(params["until"].get<double>())}});
+    ATM_TRY(json done, timeline_edit({{"project", params["project"]}, {"ops", std::move(ops)}, {"label", "Fit the music"}}));
+    done["source_bpm"] = tempo;
+    done["speed"] = std::round(speed * 1000.0) / 1000.0;
+    done["beat_in_file"] = beat;
+    done["at"] = at;
+    done["confidence"] = found.value("confidence", 0.0);
+    return done;
   }
 
   // sfx.make {kind, output? | project?, seed?, seconds?}: a synthesised effect as a WAV file. With a project it goes in the project's
@@ -1580,6 +1639,70 @@ struct Engine::Impl {
 
   // script.plan {scenes: [...], ...}: the script of a Short made exact; no project is read or changed.
   Result<json> script_plan(const json &params) { return script::plan(params); }
+
+  // script.scenes {project, plan, model | workflow, transitions?: {types?, seconds? (0.5)}}: the picture clips of a planned script. The Variables the prompts use
+  // ({character}, {style}) are made first (those the plan has a value for, and that the project does not have yet); then one generative clip for each scene that has a
+  // prompt, from the scene's start, as long as the scene, named by its label. With transitions, each cut between two of them gets one (the types in turn). Nothing is
+  // generated yet: gen.run makes the pictures.
+  Result<json> script_scenes(const json &params) {
+    ATM_PROFILE_SCOPE("api.script_scenes");
+    ATM_TRY(Project *pr, project(params));
+    const json &plan = params.contains("plan") ? params["plan"] : json();
+    if (!plan.is_object() || !plan.value("ok", false) || !plan.contains("scenes") || !plan["scenes"].is_array())
+      return bad_param("plan", "is required: the answer of script.plan");
+    if (!params.contains("model") && !params.contains("workflow"))
+      return bad_param("model", "is required: a video model from gen.models (or workflow: a Clip Workflow of the project)");
+    // Variables first, so the prompts that read them are ready.
+    json var_ops = json::array();
+    json made_vars = json::array();
+    std::set<std::string> have;
+    for (const auto &[id, v] : pr->doc.root().value("variables", json::object()).items())
+      have.insert(v.value("name", std::string()));
+    for (const json &v : plan.value("variables", json::array()))
+      if (v.value("value", json()).is_string() && !have.count(v.value("name", std::string()))) {
+        var_ops.push_back({{"op", "add"}, {"path", pr->doc.root().value("id", std::string()) + "/variables/$new:v" + std::to_string(var_ops.size())},
+                           {"value", {{"name", v["name"]}, {"type", "text"}, {"value", v["value"]}}}});
+        made_vars.push_back(v["name"]);
+      }
+    if (!var_ops.empty())
+      ATM_CHECK(project_patch({{"project", params["project"]}, {"patch", {{"ops", std::move(var_ops)}, {"label", "Script variables"}}}}).map([](const json &) {}));
+    json clips = json::array(), skipped = json::array();
+    for (const json &scene : plan["scenes"]) {
+      if (!scene.contains("prompt") || !scene["prompt"].is_string() || scene["prompt"].get<std::string>().empty()) {
+        skipped.push_back(scene.value("n", 0));
+        continue;
+      }
+      json create = {{"project", params["project"]}, {"prompt", scene["prompt"]},
+                     {"at", std::to_string(int64_t(std::llround(scene.value("start", 0.0) * 1000.0))) + "@1000"}, {"seconds", scene.value("seconds", 4.0)}};
+      create[params.contains("workflow") ? "workflow" : "model"] = params.contains("workflow") ? params["workflow"] : params["model"];
+      if (scene.contains("label") && scene["label"].is_string() && !scene["label"].get<std::string>().empty())
+        create["name"] = scene["label"];
+      if (params.contains("sequence"))
+        create["sequence"] = params["sequence"];
+      ATM_TRY(json made, gen_create_clip(create));
+      clips.push_back({{"scene", scene.value("n", 0)}, {"clip", made.value("clip", std::string())}});
+    }
+    json out = {{"clips", clips}, {"variables", made_vars}, {"scenes_without_prompt", skipped}, {"next", "gen.run to make the pictures"}};
+    if (params.contains("transitions") && params["transitions"].is_object() && clips.size() > 1) {
+      const json t = params["transitions"];
+      std::vector<std::string> types;
+      if (t.contains("types") && t["types"].is_array())
+        for (const json &x : t["types"])
+          if (x.is_string())
+            types.push_back(x.get<std::string>());
+      if (types.empty())
+        types = {"dissolve"};
+      json ops = json::array();
+      for (size_t i = 1; i < clips.size(); ++i)
+        ops.push_back({{"op", "add_transition"}, {"between", json::array({clips[i - 1]["clip"], clips[i]["clip"]})}, {"type", types[(i - 1) % types.size()]},
+                       {"duration", std::to_string(int64_t(std::llround(t.value("seconds", 0.5) * 1000.0))) + "@1000"}, {"make_room", true}});
+      const auto done = timeline_edit({{"project", params["project"]}, {"ops", std::move(ops)}, {"label", "Transitions"}});
+      out["transitions"] = done ? json(clips.size() - 1) : json(0);
+      if (!done)
+        out["transitions_error"] = done.error().message + " " + done.error().hint;
+    }
+    return out;
+  }
 
   // script.apply {project, plan, look?, dry_run?}: the on-screen text of a planned script (captions for each scene, labels, an opening title, a closing line) in one
   // timeline edit that Undo takes out. dry_run returns the ops without changing the project.
@@ -4251,6 +4374,15 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
        "target_words":{"type":"array","items":{"type":"integer"}},"target_seconds":{"type":"array","items":{"type":"number"}},"hook_max_seconds":{"type":"number"},"words_per_second":{"type":"number"},"voice_lead":{"type":"number"},"tail":{"type":"number"}},
        "required":["scenes"]})",
      &Impl::script_plan},
+    {"script.scenes", "script", true,
+     "Make the picture clips of a planned script: the Variables its prompts use ({character}, {style}: those the plan has a value for) become project Variables, then one "
+     "generative clip for each scene with a prompt, from the scene's start and as long as the scene, named by its label, made with `model` (gen.models) or a project's "
+     "`workflow`. transitions {types, seconds} adds a transition on each cut, the types in turn. Nothing is generated yet: run gen.run.",
+     R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},
+       "plan":{"type":"object","description":"The answer of script.plan"},"model":{"type":"string"},"workflow":{"type":"string"},
+       "transitions":{"type":"object","properties":{"types":{"type":"array","items":{"type":"string"}},"seconds":{"type":"number"}}},"sequence":{"type":"string"}},
+       "required":["project","plan"]})",
+     &Impl::script_scenes},
     {"script.apply", "script", true,
      "Put the on-screen text of a planned script on the timeline in one edit (Undo takes it out): a caption clip for each scene (one word at a time, key words in "
      "colour; timed from the scene's voice_clip when it has one), a label at each scene's start, an opening title (hook) and a closing line (cta). Pass plan "
@@ -4290,6 +4422,13 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
        "from":{"type":"number","description":"Seconds"},"to":{"type":"number","description":"Seconds"},
        "min_bpm":{"type":"number","description":"Default 80"},"max_bpm":{"type":"number","description":"Default 180"}}})",
      &Impl::audio_analyze},
+    {"music.fit", "core", true,
+     "Fit a music clip to the film: find its tempo and beat (audio.analyze), set its speed so the tempo becomes bpm (within half and double), cut its start to the "
+     "first beat at or after `from` (seconds of the file), put that beat at `at` (seconds of the film; default where the clip is now), and with `until` end the clip "
+     "there. One edit; Undo takes it back. Fails with E_NO_BEAT when the music has no clear beat.",
+     R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},"clip":{"type":"string"},
+       "bpm":{"type":"number"},"at":{"type":"number"},"until":{"type":"number"},"from":{"type":"number"}},"required":["project","clip"]})",
+     &Impl::music_fit},
     {"sfx.make", "core", true,
      "Make a sound effect: whoosh (builds and lands on a cut), click, pop, riser (builds up to its end; seconds sets the length), impact. "
      "Writes a 48 kHz stereo WAV: pass output (a file), or project to put it in the project and import it (asset_id comes back for "

@@ -1131,3 +1131,50 @@ TEST_CASE("generate: detach_audio makes the sound of a generated clip a clip of 
   std::error_code ec;
   fs::remove_all(dir, ec);
 }
+
+TEST_CASE("script.scenes makes the Variables and the picture clips of a planned script, with transitions, and gen.run makes them", "[gen][generate][script][parity]") {
+  auto mock = std::make_shared<MockProvider>();
+  const fs::path dir = fs::temp_directory_path() / atm::new_id("attome-script-scenes");
+  fs::create_directories(dir);
+  const std::string project = (dir / "Scenes.attome").string();
+  atm::api::EngineConfig cfg;
+  cfg.models_dir = (dir / "models").string();
+  cfg.providers = {mock};
+  Engine engine(cfg);
+  ok(engine, "project.create", {{"path", project}, {"rate", "30"}, {"canvas", "320x176"}});
+  const json plan = ok(engine, "script.plan", {{"character", "a boy in a red hoodie"},
+                                               {"scenes", {{{"say", "Scene one is here."}, {"seconds", 3}, {"label", "ONE"}, {"prompt", "A park. {character} waves."}},
+                                                           {{"say", "Scene two is here."}, {"seconds", 3}, {"label", "TWO"}, {"prompt", "A beach. {character} runs."}},
+                                                           {{"say", "No picture for this one."}, {"seconds", 3}}}}});
+  const json made = ok(engine, "script.scenes", {{"project", project}, {"plan", plan}, {"model", "attome-mock"}, {"transitions", {{"types", {"dissolve"}}, {"seconds", 0.5}}}});
+  REQUIRE(made["clips"].size() == 2);
+  CHECK(made["variables"] == json::array({"character"}));
+  INFO(made.value("transitions_error", std::string()));
+  CHECK(made["transitions"] == 1); // one cut between the two scenes
+  CHECK_FALSE(made.contains("transitions_error"));
+  CHECK(made["scenes_without_prompt"] == json::array({3}));
+  const json info = ok(engine, "project.inspect", {{"project", project}, {"level", "tracks"}})["data"]["sequences"][0]["tracks"];
+  size_t clips = 0;
+  for (const json &t : info)
+    clips += t["clips"].get<size_t>();
+  CHECK(clips == 2);
+  const json root = ok(engine, "project.get", {{"project", project}, {"id", ok(engine, "project.inspect", {{"project", project}})["data"]["id"]}})["object"];
+  bool var = false;
+  for (const auto &[id, v] : root["variables"].items())
+    var = var || (v["name"] == "character" && v["value"] == "a boy in a red hoodie");
+  CHECK(var);
+  // Named by their labels, the second starting at the third second.
+  const json second = ok(engine, "project.get", {{"project", project}, {"id", made["clips"][1]["clip"]}})["object"];
+  CHECK(second["name"] == "TWO");
+  CHECK(second["timing"]["record_in"] == "3");
+  // The pictures are made by the run, with the Variable read into the prompt.
+  const json started = ok(engine, "gen.run", {{"project", project}});
+  for (int i = 0; i < 3000 && ok(engine, "jobs.get", {{"job_id", started["job_id"]}})["state"] == "running"; ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  CHECK(ok(engine, "jobs.get", {{"job_id", started["job_id"]}})["state"] == "done");
+  CHECK(ok(engine, "project.validate", {{"project", project}})["ok"] == true);
+  // Without a model there is nothing to make.
+  CHECK_FALSE(engine.call("script.scenes", {{"project", project}, {"plan", plan}}));
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}

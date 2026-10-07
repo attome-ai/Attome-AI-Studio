@@ -140,3 +140,56 @@ TEST_CASE("audio.analyze and sfx.make are Tools: an effect is made in a project 
   (void)engine.call("project.close", {{"project", project}});
   fs::remove_all(dir);
 }
+
+TEST_CASE("music.fit sets a music clip's speed to a tempo and puts a beat where it is asked", "[audio][engine][parity]") {
+  const fs::path dir = fs::temp_directory_path() / "attome-music-fit";
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+  fs::create_directories(dir);
+  Engine engine({.fsync = false});
+  const std::string project = (dir / "M.attome").string();
+  REQUIRE(engine.call("project.create", {{"path", project}}));
+  const std::string song = (dir / "song.wav").string(), quiet = (dir / "quiet.wav").string();
+  REQUIRE(audio::write_wav(song, click_track(120.0, 0.3, 20.0))); // 120 bpm, the first beat at 0.3 s
+  REQUIRE(audio::write_wav(quiet, std::vector<float>(48000 * 2 * 6, 0.0f)));
+  const auto seconds = [](const json &t) {
+    const std::string r = t.get<std::string>();
+    const size_t slash = r.find('/');
+    return slash == std::string::npos ? std::stod(r) : std::stod(r.substr(0, slash)) / std::stod(r.substr(slash + 1));
+  };
+  const json added = *engine.call("timeline.edit", {{"project", project}, {"ops", json::array({{{"op", "add_clip"}, {"id", "$new:m"}, {"path", song}, {"at", "1s"}},
+                                                                                                {{"op", "add_clip"}, {"id", "$new:q"}, {"path", quiet}, {"at", "30s"}}})}});
+  const std::string music = added["id_map"]["$new:m"], silence = added["id_map"]["$new:q"];
+
+  // 120 bpm to 150 bpm: 1.25x. The first beat (0.3 s into the file, 0.24 s at the new speed) is put at 2 s of the film, and the clip ends at 8 s.
+  const auto fit = engine.call("music.fit", {{"project", project}, {"clip", music}, {"bpm", 150}, {"at", 2.0}, {"until", 8.0}});
+  INFO((fit ? "" : fit.error().message + " | " + fit.error().hint));
+  REQUIRE(fit);
+  CHECK(fit->at("source_bpm").get<double>() == Catch::Approx(120.0).margin(0.3));
+  CHECK(fit->at("speed").get<double>() == Catch::Approx(1.25).margin(0.005));
+  const json clip = engine.call("project.get", {{"project", project}, {"id", music}})->at("object");
+  CHECK(clip["timing"]["speed"].get<double>() == Catch::Approx(1.25).margin(0.005));
+  CHECK(seconds(clip["timing"]["record_in"]) == Catch::Approx(2.0).margin(0.01));
+  const double in_file = seconds(clip["timing"]["source_in"]) * clip["timing"]["speed"].get<double>(); // where the clip now starts in the file
+  CHECK(in_file == Catch::Approx(0.3).margin(0.02));                                                    // on the first beat
+  CHECK(seconds(clip["timing"]["record_in"]) + seconds(clip["timing"]["duration"]) == Catch::Approx(8.0).margin(0.02));
+  CHECK(engine.call("project.validate", {{"project", project}})->at("ok") == true);
+  // audio.analyze on the sped-up clip reads the part of the file it plays: 6 s of film at 1.25x is 7.5 s of the file, and the beats are still 0.5 s apart.
+  const auto again = engine.call("audio.analyze", {{"project", project}, {"clip", music}});
+  REQUIRE(again);
+  CHECK(again->at("seconds").get<double>() == Catch::Approx(7.5).margin(0.05));
+  CHECK(again->at("bpm").get<double>() == Catch::Approx(120.0).margin(0.3)); // the file's own tempo, whatever the clip's speed
+
+  // Undo takes the whole fit back; a tempo too far from the music's own, silence and a wrong clip are said plainly.
+  REQUIRE(engine.call("project.undo", {{"project", project}}));
+  CHECK(engine.call("project.get", {{"project", project}, {"id", music}})->at("object")["timing"]["record_in"] == "1");
+  const auto far = engine.call("music.fit", {{"project", project}, {"clip", music}, {"bpm", 300}});
+  REQUIRE_FALSE(far);
+  CHECK(far.error().rule == "E_PARAM");
+  const auto none = engine.call("music.fit", {{"project", project}, {"clip", silence}, {"bpm", 120}});
+  REQUIRE_FALSE(none);
+  CHECK(none.error().rule == "E_NO_BEAT");
+  CHECK_FALSE(engine.call("music.fit", {{"project", project}, {"clip", "clp_nope"}}));
+  (void)engine.call("project.close", {{"project", project}});
+  fs::remove_all(dir, ec);
+}
