@@ -262,6 +262,12 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
        "words":{"type":"array","items":{"type":"object","properties":{"at":{"type":"number"},"say":{"type":"string"},"color":{"type":"string"},"y":{"type":"number"}},"required":["at","say"]}},
        "seconds":{"type":"number"},"size":{"type":"number"},"keys":{"type":"array"},"shadow":{"type":"object"}},"required":["project","words"]})",
      &Impl::text_pop},
+    {"media.codecs", "core", false,
+     "The formats this machine can write: mp4 (H.264, the operating system's encoder), wav, jpeg, png_sequence, and prores and dnxhr, which are written by an FFmpeg program of your own "
+     "(Attome ships none: it looks on the PATH, in ATTOME_FFMPEG and at the saved ffmpeg_path). With ffmpeg_path that program is remembered (\"\" forgets it). The answer says which "
+     "FFmpeg was found, its version and its license (lgpl, gpl or nonfree: only the build's own; Attome uses its prores_ks and dnxhd encoders and no GPL library) and the formats it allows. "
+     "Then render.sequence format prores (profile proxy | lt | standard | hq | 4444 | 4444xq) or dnxhr (profile lb | sq | hq | hqx | 444).",
+     R"({"type":"object","properties":{"ffmpeg_path":{"type":"string"}}})", &Impl::media_codecs},
     {"flash.cuts", "core", true,
      "Flash on every cut: an adjustment layer (default 0.23 s) at the start of each clip of `track` but the first (or at each clip of `clips`), whose brightness starts at "
      "`brightness` (default 0.65) and falls to nothing, shaped by `ease`. Adjustment layers on the Effects track: remove one with delete. One edit; Undo takes them all back.",
@@ -328,12 +334,13 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
        "required":["project"]})",
      &Impl::see_contact_sheet},
     {"render.sequence", "core", false,
-     "Export a sequence to an H.264 + AAC .mp4 as a background job (with format wav its sound only, with jpeg one frame as a picture, with png_sequence a numbered PNG for each frame in the folder `output`: lossless 8-bit pictures for a colour or effects pipeline, to be paired with a wav of the sound); from and to export only a part. Returns job_id at once; follow it with jobs.get.",
+     "Export a sequence to an H.264 + AAC .mp4 as a background job (with format prores or dnxhr a .mov made by your own FFmpeg, see media.codecs, `profile` picks the flavour: ProRes proxy | lt | standard | hq | 4444 | 4444xq, DNxHR lb | sq | hq | hqx | 444; with format wav its sound only, with jpeg one frame as a picture, with png_sequence a numbered PNG for each frame in the folder `output`: lossless 8-bit pictures for a colour or effects pipeline, to be paired with a wav of the sound); from and to export only a part. Returns job_id at once; follow it with jobs.get.",
      R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},
        "output":{"type":"string","description":"Absolute path of the .mp4 to write; for png_sequence the folder"},
        "height":{"type":"integer","description":"Output height, default the canvas height"},
        "bitrate":{"type":"integer"},"audio":{"type":"boolean"},
-       "format":{"type":"string","enum":["mp4","wav","jpeg","png_sequence"],"description":"mp4 video (the default), wav the sound only, jpeg one frame: the one at from, png_sequence a PNG for each frame in the folder output name_000000.png, numbered by frame"},
+       "profile":{"type":"string","description":"For prores and dnxhr: the profile, default hq"},
+       "format":{"type":"string","enum":["mp4","prores","dnxhr","wav","jpeg","png_sequence"],"description":"mp4 video (the default), prores or dnxhr a .mov through your own FFmpeg (media.codecs says if there is one), wav the sound only, jpeg one frame: the one at from, png_sequence a PNG for each frame in the folder output name_000000.png, numbered by frame"},
        "from":{"type":"string","description":"Where the export starts, such as 2.5s or 00:00:02:15; default the start"},
        "to":{"type":"string","description":"Where the export ends, the frame there not included; default the end"},
        "overwrite":{"type":"boolean","description":"Default true"},"sequence":{"type":"string"}},

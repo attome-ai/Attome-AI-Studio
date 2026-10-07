@@ -33,6 +33,11 @@ Factories *factories() {
   thread_local const HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
   (void)com;
   static Factories *f = [] {
+    // The factories live as long as the process, so the multithreaded apartment they were made in must too. Without this it lasts only while some
+    // thread has it initialised: when the thread that made them ended (a finished export's) and no other thread used COM, it was torn down and the
+    // next text render touched dead objects.
+    static CO_MTA_USAGE_COOKIE keep_apartment = nullptr;
+    CoIncrementMTAUsage(&keep_apartment);
     auto *out = new Factories;
     D2D1CreateFactory(D2D1_FACTORY_TYPE_MULTI_THREADED, out->d2d.GetAddressOf());
     DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),

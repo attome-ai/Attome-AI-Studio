@@ -198,6 +198,30 @@ void run_png_sequence(const std::shared_ptr<Job> &job, render::Composition comp,
 // The export runs as a pipeline: this thread renders frames into a few slots while "atm-encode" converts and
 // encodes the previous ones, so the two never wait for each other. The encoder starts (hardware set-up, about half a
 // second) and the audio is mixed while the first frames render.
+namespace {
+// Where the finished frames and sound go: the operating system's H.264 encoder, or the user's FFmpeg for ProRes and DNxHR.
+struct Sink {
+  std::unique_ptr<media::Encoder> os;
+  std::unique_ptr<media::PipeEncoder> pipe;
+  Sink *operator->() { return this; }
+  Result<void> video(const uint8_t *nv12, int64_t frame) { return pipe ? pipe->video(nv12, frame) : os->video(nv12, frame); }
+  Result<void> audio(const float *stereo, size_t frames) { return pipe ? pipe->audio(stereo, frames) : os->audio(stereo, frames); }
+  Result<void> finish() { return pipe ? pipe->finish() : os->finish(); }
+  const std::string &name() const { return pipe ? pipe->name() : os->name(); }
+};
+Result<Sink> make_sink(const media::EncodeSettings &settings) {
+  Sink sink;
+  if (settings.codec != "h264") {
+    ATM_TRY(auto pipe, media::PipeEncoder::create(settings));
+    sink.pipe = std::move(pipe);
+  } else {
+    ATM_TRY(auto os, media::Encoder::create(settings));
+    sink.os = std::move(os);
+  }
+  return sink;
+}
+} // namespace
+
 void run_export(const std::shared_ptr<Job> &job, render::Composition comp, media::EncodeSettings settings, int64_t first, int64_t last) {
   prof::set_thread_name("atm-render-0");
   const auto finish = [&](Job::State state, const Error *error = nullptr) {
@@ -242,7 +266,7 @@ void run_export(const std::shared_ptr<Job> &job, render::Composition comp, media
         if (auto mixed = render::mix_audio(comp))
           audio = std::move(*mixed);
       });
-    auto encoder = media::Encoder::create(settings);
+    auto encoder = make_sink(settings);
     if (mixer.joinable())
       mixer.join();
     if (!encoder)

@@ -86,6 +86,34 @@ struct EncodeSettings {
   int bitrate = 12'000'000;
   bool audio = true;
   int quality_vs_speed = 0; // 0 = fastest … 100 = best quality per bit
+  // What PipeEncoder writes (the OS encoder always makes H.264): "prores" or "dnxhr", its profile ("" = hq) and the FFmpeg program to use ("" = look for one).
+  std::string codec = "h264", profile, ffmpeg;
+};
+
+// An FFmpeg program found on this machine, the user's own: Attome links none and ships none. `license` is that build's: lgpl, gpl, nonfree or unknown;
+// `encoders` are the ones Attome uses that it has (prores_ks, dnxhd). Looked for in `configured`, then ATTOME_FFMPEG, then the PATH.
+struct FfmpegInfo {
+  std::string path, version, license;
+  std::vector<std::string> encoders;
+};
+Result<FfmpegInfo> find_ffmpeg(const std::string &configured);
+
+// ProRes and DNxHR (.mov) through that FFmpeg, run as a separate process the frames are piped into. The same four calls as Encoder; the sound is kept in a
+// temporary file and joined to the video at finish().
+class PipeEncoder {
+public:
+  static Result<std::unique_ptr<PipeEncoder>> create(const EncodeSettings &settings);
+  ~PipeEncoder();
+  Result<void> video(const uint8_t *nv12, int64_t frame);
+  Result<void> audio(const float *stereo, size_t frames);
+  Result<void> finish();
+  const std::string &name() const;
+
+  struct Impl;
+
+private:
+  PipeEncoder() = default;
+  std::unique_ptr<Impl> impl_;
 };
 
 class Encoder {

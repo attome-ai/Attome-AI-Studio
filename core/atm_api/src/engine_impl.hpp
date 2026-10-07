@@ -334,6 +334,8 @@ struct Engine::Impl {
   void apply_finished();
   fs::path settings_path() const;
   json settings() const;
+  std::string saved_ffmpeg; // the FFmpeg path chosen this run (when there is no settings file to keep it in)
+  Result<json> media_codecs(const json &params);
   void set_comfyui(const std::string &address);
   Result<json> gen_engines(const json &);
   Result<json> gen_set_comfyui(const json &params);

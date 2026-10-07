@@ -33,8 +33,8 @@ Result<json> Engine::Impl::render_sequence(const json &params) {
     return fail(ErrorCode::InvalidArgument, "R_EMPTY", "The sequence has no media clips to render.", {},
                 "Add a clip whose media_ref is {\"type\": \"file\", \"path\": …} first.");
   const std::string format = params.value("format", std::string("mp4"));
-  if (format != "mp4" && format != "wav" && format != "jpeg" && format != "png_sequence")
-    return bad_param("format", "is \"mp4\" (video, the default), \"wav\" (the sound only), \"jpeg\" (a picture of the frame at \"from\") or \"png_sequence\" (a numbered PNG for each frame, in the folder \"output\")");
+  if (format != "mp4" && format != "prores" && format != "dnxhr" && format != "wav" && format != "jpeg" && format != "png_sequence")
+    return bad_param("format", "is \"mp4\" (video, the default), \"prores\" or \"dnxhr\" (a .mov made by your own FFmpeg: see media.codecs), \"wav\" (the sound only), \"jpeg\" (a picture of the frame at \"from\") or \"png_sequence\" (a numbered PNG for each frame, in the folder \"output\")");
   // The part to export: "from" (the first frame, default the start) and "to" (where it ends, that frame not drawn, default the end).
   const Rational frame_rate = *Rational::make(comp.rate_num, comp.rate_den);
   int64_t first = 0, last = comp.frames;
@@ -73,7 +73,8 @@ Result<json> Engine::Impl::render_sequence(const json &params) {
     return json{{"job_id", job->id}, {"output", job->output}, {"frames", last - first}, {"format", format}, {"first_frame", first},
                 {"pattern", name + "_%06d.png"}, {"width", w & ~1}, {"height", h & ~1}};
   }
-  const char *extension = format == "mp4" ? ".mp4" : format == "wav" ? ".wav" : ".jpg";
+  const bool piped = format == "prores" || format == "dnxhr"; // written by the user's FFmpeg, as .mov
+  const char *extension = format == "mp4" ? ".mp4" : piped ? ".mov" : format == "wav" ? ".wav" : ".jpg";
   fs::path out_path = fs::absolute(to_path(*output));
   if (format == "jpeg" && out_path.extension() == ".jpeg")
     out_path.replace_extension(".jpg");
@@ -95,15 +96,24 @@ Result<json> Engine::Impl::render_sequence(const json &params) {
   settings.audio = params.value("audio", true);
   // About 12 Mbit/s at 1080p30, scaled with the picture size.
   settings.bitrate = params.value("bitrate", std::max(1'000'000, settings.width * settings.height * 6));
-  if (settings.width < 16 || settings.height < 16 || settings.width > 4096 || settings.height > 2304)
+  if (piped) {
+    settings.codec = format;
+    settings.profile = params.value("profile", std::string());
+    settings.ffmpeg = this->settings().value("ffmpeg_path", std::string());
+    ATM_TRY(media::FfmpegInfo found, media::find_ffmpeg(settings.ffmpeg)); // fails now, not later in the job, when there is none
+    (void)found;
+    if (settings.width < 16 || settings.height < 16 || settings.width > 8192 || settings.height > 4608)
+      return bad_param("height", "gives a size outside 16 x 16 … 8192 x 4608");
+  } else if (settings.width < 16 || settings.height < 16 || settings.width > 4096 || settings.height > 2304) {
     return bad_param("height", "gives a size outside 16 x 16 … 4096 x 2304 (the H.264 encoder's range)");
+  }
 
   auto job = std::make_shared<Job>();
   job->id = new_id("job");
   job->kind = "render.sequence";
   job->output = settings.path;
   jobs[job->id] = job;
-  if (format != "mp4") {
+  if (format != "mp4" && !piped) {
     job->units_total.store(1);
     job->thread = std::thread(run_extract, job, std::move(comp), settings.path, format == "wav", first, last, settings.width, settings.height);
     return json{{"job_id", job->id}, {"output", job->output}, {"frames", last - first}, {"format", format}};
@@ -112,6 +122,38 @@ Result<json> Engine::Impl::render_sequence(const json &params) {
   job->thread = std::thread(run_export, job, std::move(comp), settings, first, last);
   return json{{"job_id", job->id}, {"output", job->output}, {"frames", job->units_total.load()},
               {"width", settings.width & ~1}, {"height", settings.height & ~1}};
+}
+
+// media.codecs {ffmpeg_path?}: the formats this machine can write. mp4 (H.264) uses the operating system's encoder; prores and dnxhr need an FFmpeg program
+// of the user's own (found on the PATH, in ATTOME_FFMPEG or at the saved ffmpeg_path). With ffmpeg_path that program is remembered ("" forgets it).
+Result<json> Engine::Impl::media_codecs(const json &params) {
+  ATM_PROFILE_SCOPE("api.media_codecs");
+  if (params.contains("ffmpeg_path") && params["ffmpeg_path"].is_string()) {
+    const std::string chosen = params["ffmpeg_path"].get<std::string>();
+    if (!chosen.empty() && !fs::exists(to_path(chosen)))
+      return bad_param("ffmpeg_path", "is not a file");
+    if (const fs::path path = settings_path(); !path.empty()) {
+      json all = settings();
+      if (chosen.empty())
+        all.erase("ffmpeg_path");
+      else
+        all["ffmpeg_path"] = chosen;
+      ATM_CHECK(storage::make_dirs(path.parent_path()));
+      ATM_CHECK(storage::atomic_write(path, all.dump(2) + "\n"));
+    }
+    saved_ffmpeg = chosen;
+  }
+  const std::string configured = params.contains("ffmpeg_path") ? saved_ffmpeg : settings().value("ffmpeg_path", saved_ffmpeg);
+  json out = {{"formats", {{"mp4", true}, {"wav", true}, {"jpeg", true}, {"png_sequence", true}, {"prores", false}, {"dnxhr", false}}}};
+  const auto found = media::find_ffmpeg(configured);
+  if (!found) {
+    out["ffmpeg"] = {{"found", false}, {"hint", found.error().hint}};
+    return out;
+  }
+  out["ffmpeg"] = {{"found", true}, {"path", found->path}, {"version", found->version}, {"license", found->license}, {"encoders", found->encoders}};
+  for (const std::string &e : found->encoders)
+    out["formats"][e == "prores_ks" ? "prores" : "dnxhr"] = true;
+  return out;
 }
 
   // Renders `frames` at width x height as packed BGRX pictures.
