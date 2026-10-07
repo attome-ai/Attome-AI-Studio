@@ -260,10 +260,49 @@ TEST_CASE("audio.duck lowers the music under the voice and brings it back, as ke
   CHECK(node.dump().find("gain_db") != std::string::npos);
   CHECK(engine.call("project.validate", {{"project", project}})->at("ok") == true);
 
+  // The keys follow the clip: cut in the middle of the voice, the mix sounds the same, as the right half counts its keys from its own start.
+  const double under = rms("c.wav", 4.2, 5.8), after_voice = rms("c.wav", 6.4, 8.0);
+  REQUIRE(engine.call("timeline.edit", {{"project", project}, {"ops", json::array({{{"op", "split"}, {"clip", music}, {"at", "5s"}}})}}));
+  CHECK(engine.call("project.validate", {{"project", project}})->at("ok") == true);
+  CHECK(rms("d.wav", 4.2, 5.8) == Catch::Approx(under).margin(0.003));
+  CHECK(rms("d.wav", 6.4, 8.0) == Catch::Approx(after_voice).margin(0.003));
   // Errors: no "over", a nonsense amount, an unknown clip.
   CHECK_FALSE(engine.call("audio.duck", {{"project", project}, {"clip", music}}));
   CHECK_FALSE(engine.call("audio.duck", {{"project", project}, {"clip", music}, {"over", json::array({speech})}, {"db", -3}}));
   CHECK_FALSE(engine.call("audio.duck", {{"project", project}, {"clip", "clp_nope"}, {"over", json::array({speech})}}));
+  (void)engine.call("project.close", {{"project", project}});
+  fs::remove_all(dir, ec);
+}
+
+TEST_CASE("music.cuts cuts a clip on the beats of the music, where the music plays", "[audio][engine][parity]") {
+  const fs::path dir = fs::temp_directory_path() / "attome-music-cuts";
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+  fs::create_directories(dir);
+  Engine engine({.fsync = false});
+  const std::string project = (dir / "C.attome").string();
+  REQUIRE(engine.call("project.create", {{"path", project}}));
+  const std::string song = (dir / "song.wav").string(), bed = (dir / "bed.wav").string();
+  REQUIRE(audio::write_wav(song, click_track(120.0, 0.3, 20.0))); // beats at 0.3, 0.8, 1.3 ... seconds
+  REQUIRE(audio::write_wav(bed, std::vector<float>(48000 * 2 * 10, 0.0f)));
+  const auto added = engine.call("timeline.edit", {{"project", project}, {"ops", json::array({{{"op", "add_clip"}, {"id", "$new:m"}, {"path", song}, {"at", "1s"}, {"track", "new"}},
+                                                                                                {{"op", "add_clip"}, {"id", "$new:b"}, {"path", bed}, {"at", "0s"}, {"track", "new"}}})}});
+  REQUIRE(added);
+  const std::string music = (*added)["id_map"]["$new:m"], target = (*added)["id_map"]["$new:b"];
+  // The music starts at 1 s: its beats play at 1.3, 1.8, 2.3 ... Every second beat inside 0-5 s: 1.3, 2.3, 3.3, 4.3.
+  const auto cut = engine.call("music.cuts", {{"project", project}, {"music", music}, {"clip", target}, {"every", 2}, {"until", 5.0}});
+  REQUIRE(cut);
+  REQUIRE(cut->at("cuts").size() == 4);
+  CHECK(cut->at("cuts")[0].get<double>() == Catch::Approx(1.3).margin(0.03));
+  CHECK(cut->at("cuts")[3].get<double>() == Catch::Approx(4.3).margin(0.03));
+  CHECK(engine.call("project.validate", {{"project", project}})->at("ok") == true);
+  const json listed = *engine.call("project.inspect", {{"project", project}, {"level", "tracks"}});
+  size_t pieces = 0; // the bed track now holds the 10 s clip as 5 pieces
+  for (size_t at = listed.dump().find("\"duration\""); at != std::string::npos; at = listed.dump().find("\"duration\"", at + 1))
+    ++pieces;
+  CHECK(pieces == 6); // 5 pieces of the bed and the music clip
+  CHECK_FALSE(engine.call("music.cuts", {{"project", project}, {"music", music}, {"clip", target}, {"every", 0}}));
+  CHECK_FALSE(engine.call("music.cuts", {{"project", project}, {"music", "clp_nope"}, {"clip", target}}));
   (void)engine.call("project.close", {{"project", project}});
   fs::remove_all(dir, ec);
 }

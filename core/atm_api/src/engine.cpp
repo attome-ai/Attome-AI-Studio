@@ -1418,6 +1418,54 @@ struct Engine::Impl {
     return done;
   }
 
+  // music.cuts {project, music, clip, every?, from?, until?}: `clip` is cut on the beats of the music clip (every `every`-th beat, default 1), inside from..until (seconds of
+  // the film; default the whole clip). The beats come from audio.analyze, placed where the music plays (its speed and start), so it composes with music.fit. Uses split.
+  Result<json> music_cuts(const json &params) {
+    ATM_PROFILE_SCOPE("api.music_cuts");
+    ATM_TRY(Project *pr, project(params));
+    const auto find_clip = [&](const char *key) -> const doc::NodeRef * {
+      const std::string id = params.value(key, std::string());
+      const doc::NodeRef *ref = id.empty() ? nullptr : pr->doc.find(id);
+      return ref && ref->node && id.rfind("clp_", 0) == 0 ? ref : nullptr;
+    };
+    const doc::NodeRef *music = find_clip("music"), *target = find_clip("clip");
+    if (!music || !target)
+      return fail(ErrorCode::NotFound, "E_UNKNOWN_CLIP", "\"music\" and \"clip\" must be IDs of clips of the project.");
+    const int every = params.value("every", 1);
+    if (every < 1 || every > 64)
+      return bad_param("every", "must be from 1 to 64: cut on every n-th beat");
+    const auto seconds_of = [](const json &timing, const char *key) {
+      return Rational::parse(timing.value(key, std::string("0"))).value_or(Rational()).to_seconds_lossy();
+    };
+    const json mt = music->node->value("timing", json::object()), tt = target->node->value("timing", json::object());
+    const double speed = std::clamp(mt.value("speed", 1.0), 0.1, 10.0), file_start = seconds_of(mt, "source_in") * speed, music_at = seconds_of(mt, "record_in");
+    const double lo = std::max(seconds_of(tt, "record_in"), params.value("from", 0.0)), hi = std::min(seconds_of(tt, "record_in") + seconds_of(tt, "duration"), params.value("until", 1e9));
+    ATM_TRY(json found, audio_analyze({{"project", params["project"]}, {"clip", params["music"]}, {"from", 0.0}}));
+    if (!found.value("has_beat", false) || !found.contains("beats"))
+      return fail(ErrorCode::InvalidArgument, "E_NO_BEAT", "No clear beat was found in the music.", "audio.analyze says more.");
+    std::vector<double> cuts;
+    int n = 0;
+    for (const json &b : found["beats"]) {
+      const double t = music_at + (b.get<double>() - file_start) / speed; // where the beat plays in the film
+      if (t <= lo + 0.05 || t >= hi - 0.05)
+        continue;
+      if (n++ % every == 0)
+        cuts.push_back(t);
+    }
+    if (cuts.empty())
+      return fail(ErrorCode::InvalidArgument, "E_NO_BEAT", "No beat of the music falls inside the clip.", "Check where the music plays against the clip, or move `from` and `until`.");
+    const auto sec = [](double v) { return std::to_string(int64_t(std::llround(v * 1000000.0))) + "/1000000"; };
+    json ops = json::array();
+    for (auto t = cuts.rbegin(); t != cuts.rend(); ++t) // latest first: the clip's ID keeps the left part, so each cut finds it again
+      ops.push_back({{"op", "split"}, {"clip", params["clip"]}, {"at", sec(*t)}});
+    ATM_TRY(json done, timeline_edit({{"project", params["project"]}, {"ops", std::move(ops)}, {"label", "Cut on the beat"}}));
+    json at = json::array();
+    for (double t : cuts)
+      at.push_back(std::round(t * 1000.0) / 1000.0);
+    done["cuts"] = std::move(at);
+    return done;
+  }
+
   // audio.duck {project, clip, over, db?, ramp?}: the clip's level goes down by `db` (default 12) under the clips in `over` (clip IDs, or a track ID for all its clips) and
   // comes back after them, over `ramp` seconds (default 0.12). It is the clip's audio.keyframes.gain_db around its own gain_db; the keys it had are replaced. One edit.
   Result<json> audio_duck(const json &params) {
@@ -4502,6 +4550,13 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
      R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},"clip":{"type":"string"},
        "bpm":{"type":"number"},"at":{"type":"number"},"until":{"type":"number"},"from":{"type":"number"}},"required":["project","clip"]})",
      &Impl::music_fit},
+    {"music.cuts", "core", true,
+     "Cut a clip on the beats of a music clip: every `every`-th beat (default 1) that falls inside the clip (and inside from..until, seconds of the film). Beats are found with "
+     "audio.analyze and placed where the music plays (its speed and start), so it works after music.fit. Linked sound is cut with the picture. One edit; Undo takes it back. "
+     "Fails with E_NO_BEAT when the music has no clear beat or none falls inside the clip.",
+     R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},"music":{"type":"string"},"clip":{"type":"string"},
+       "every":{"type":"integer"},"from":{"type":"number"},"until":{"type":"number"}},"required":["project","music","clip"]})",
+     &Impl::music_cuts},
     {"audio.duck", "core", true,
      "Lower a music clip's level under other clips (the voice) and bring it back after them: `over` lists clip IDs, or a track ID for all its clips; `db` is how far "
      "it goes down (default 12), `ramp` the seconds it takes each way (default 0.12). Writes audio.keyframes.gain_db on the music clip (replacing its keys), so the "
