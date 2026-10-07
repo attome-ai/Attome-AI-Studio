@@ -1,6 +1,7 @@
 #include "atm/api/engine.hpp"
 #include "atm/api/audio_tools.hpp"
 #include "atm/api/script_plan.hpp"
+#include "atm/api/subtitles.hpp"
 #include <functional>
 #include "atm/api/gen_comfy.hpp"
 #include "atm/api/gen_mock.hpp"
@@ -1499,6 +1500,155 @@ struct Engine::Impl {
 
   // script.plan {scenes: [...], ...}: the script of a Short made exact; no project is read or changed.
   Result<json> script_plan(const json &params) { return script::plan(params); }
+
+  // The text tracks of a sequence: {track id, name, clips}, for subtitles.export to choose from.
+  static std::vector<std::pair<std::string, std::string>> text_tracks_of(const json &sequence) {
+    std::vector<std::pair<std::string, std::string>> found;
+    if (!sequence.contains("tracks") || !sequence["tracks"].is_object())
+      return found;
+    for (const json &tid : sequence.value("track_order", json::array())) {
+      const auto t = sequence["tracks"].find(tid.get<std::string>());
+      if (t == sequence["tracks"].end() || !t->is_object() || !t->contains("clips"))
+        continue;
+      bool text = false;
+      for (const json &c : (*t)["clips"])
+        text = text || c.value("media_ref", json::object()).value("type", std::string()) == "text";
+      if (text)
+        found.emplace_back(tid.get<std::string>(), t->value("name", std::string()));
+    }
+    return found;
+  }
+
+  // subtitles.export {project, output, format? (srt | vtt, from the file's extension), track? (a name or ID), sequence?, offset?}: the text clips of a
+  // track as a subtitle file, one cue for each clip, in time order. Without track it takes the one named Subtitles, else Captions.
+  Result<json> subtitles_export(const json &params) {
+    ATM_PROFILE_SCOPE("api.subtitles_export");
+    ATM_TRY(Project *pr, project(params));
+    const std::string output = params.value("output", std::string());
+    if (output.empty())
+      return bad_param("output", "is required: the .srt or .vtt file to write");
+    std::string format = params.value("format", std::string());
+    if (format.empty()) {
+      std::string ext = to_utf8(to_path(output).extension());
+      std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+      format = ext == ".vtt" ? "vtt" : "srt";
+    }
+    if (format != "srt" && format != "vtt")
+      return bad_param("format", "must be srt or vtt");
+    const json &root = pr->doc.root();
+    std::string seq = params.value("sequence", std::string());
+    if (seq.empty() && root.contains("sequence_order") && !root["sequence_order"].empty())
+      seq = root["sequence_order"][0].get<std::string>();
+    if (!root.contains("sequences") || !root["sequences"].contains(seq))
+      return fail(ErrorCode::NotFound, "R_NO_SEQUENCE", "The project has no sequence \"" + seq + "\".");
+    const json &sequence = root["sequences"][seq];
+    const auto tracks = text_tracks_of(sequence);
+    std::string track = params.value("track", std::string());
+    std::string chosen;
+    for (const auto &[id, name] : tracks)
+      if (!track.empty() ? (id == track || name == track) : false)
+        chosen = id;
+    if (track.empty())
+      for (const char *wanted : {"Subtitles", "Captions"})
+        for (const auto &[id, name] : tracks)
+          if (chosen.empty() && name == wanted)
+            chosen = id;
+    if (chosen.empty()) {
+      std::string list;
+      for (const auto &[id, name] : tracks)
+        list += (list.empty() ? "" : ", ") + name + " (" + id + ")";
+      return fail(ErrorCode::NotFound, "E_NO_SUBTITLE_TRACK", track.empty() ? "There is no track named Subtitles or Captions." : "There is no text track \"" + track + "\".",
+                  list.empty() ? "The project has no text clips." : "Text tracks: " + list + ". Pass one as \"track\".");
+    }
+    const double offset_s = params.contains("offset") && params["offset"].is_number() ? params["offset"].get<double>() : 0.0;
+    std::vector<subtitles::Cue> cues;
+    for (const json &c : sequence["tracks"][chosen].value("clips", json::object())) {
+      if (c.value("media_ref", json::object()).value("type", std::string()) != "text")
+        continue;
+      const json timing = c.value("timing", json::object());
+      const double in = Rational::parse(timing.value("record_in", std::string("0"))).value_or(Rational()).to_seconds_lossy();
+      const double dur = Rational::parse(timing.value("duration", std::string("0"))).value_or(Rational()).to_seconds_lossy();
+      const std::string text = c.value("content", json::object()).value("text", std::string());
+      if (text.empty())
+        continue;
+      cues.push_back({int64_t(std::llround((in + offset_s) * 1000.0)), int64_t(std::llround((in + dur + offset_s) * 1000.0)), text});
+    }
+    if (cues.empty())
+      return fail(ErrorCode::NotFound, "E_NO_SUBTITLES", "The track has no text to write.");
+    std::sort(cues.begin(), cues.end(), [](const subtitles::Cue &a, const subtitles::Cue &b) { return a.start_ms < b.start_ms; });
+    fs::path out_path = to_path(output);
+    std::error_code ec;
+    if (out_path.has_parent_path())
+      fs::create_directories(out_path.parent_path(), ec);
+    ATM_CHECK(storage::atomic_write(out_path, subtitles::format(cues, format)));
+    return json{{"output", output}, {"format", format}, {"cues", cues.size()}, {"seconds", double(cues.back().end_ms) / 1000.0}};
+  }
+
+  // subtitles.import {project, path, track? ("Subtitles"), format?, offset?, placement? (bottom), size?, color?, sequence?}: the cues of an SRT or WebVTT
+  // file become text clips on a track of their own, one in one edit (Undo takes them all out). A cue that overlaps the next is cut short, and the
+  // answer says how many.
+  Result<json> subtitles_import(const json &params) {
+    ATM_PROFILE_SCOPE("api.subtitles_import");
+    ATM_TRY(Project *pr, project(params));
+    const std::string path = params.value("path", std::string());
+    if (path.empty())
+      return bad_param("path", "is required: the .srt or .vtt file to read");
+    const auto text = storage::read_file(to_path(path));
+    if (!text)
+      return fail(ErrorCode::NotFound, "E_NO_FILE", "Could not read \"" + path + "\".", "Check that the file exists.");
+    ATM_TRY(subtitles::Parsed parsed, subtitles::parse(*text, params.value("format", std::string())));
+    std::sort(parsed.cues.begin(), parsed.cues.end(), [](const subtitles::Cue &a, const subtitles::Cue &b) { return a.start_ms < b.start_ms; });
+    const double offset_ms = (params.contains("offset") && params["offset"].is_number() ? params["offset"].get<double>() : 0.0) * 1000.0;
+    const std::string track_name = params.value("track", std::string("Subtitles"));
+    json ops = json::array();
+    const json &root = pr->doc.root();
+    std::string seq = params.value("sequence", std::string());
+    if (seq.empty() && root.contains("sequence_order") && !root["sequence_order"].empty())
+      seq = root["sequence_order"][0].get<std::string>();
+    std::string track;
+    if (root.contains("sequences") && root["sequences"].contains(seq) && root["sequences"][seq].contains("tracks"))
+      for (const auto &[id, t] : root["sequences"][seq]["tracks"].items())
+        if (t.value("name", std::string()) == track_name && t.value("kind", std::string()) == "video")
+          track = id;
+    if (track.empty()) {
+      track = "$new:subs";
+      ops.push_back({{"op", "add_track"}, {"id", track}, {"kind", "video"}, {"name", track_name}});
+    }
+    int cut_short = 0, dropped = 0;
+    const auto rational = [](int64_t ms) { return Rational::make(ms, 1000).value_or(Rational()).to_string(); };
+    for (size_t i = 0; i < parsed.cues.size(); ++i) {
+      int64_t start = int64_t(std::llround(double(parsed.cues[i].start_ms) + offset_ms)), end = int64_t(std::llround(double(parsed.cues[i].end_ms) + offset_ms));
+      if (i + 1 < parsed.cues.size()) {
+        const int64_t next = int64_t(std::llround(double(parsed.cues[i + 1].start_ms) + offset_ms));
+        if (end > next) {
+          end = next;
+          ++cut_short;
+        }
+      }
+      if (start < 0)
+        start = 0;
+      if (end <= start) {
+        ++dropped;
+        continue;
+      }
+      json op = {{"op", "add_text"}, {"track", track}, {"text", parsed.cues[i].text}, {"at", rational(start)}, {"duration", rational(end - start)},
+                 {"name", "Subtitle " + std::to_string(i + 1)}, {"placement", params.value("placement", std::string("bottom"))},
+                 {"size", params.value("size", 0.05)}, {"color", params.value("color", std::string("#ffffff"))}, {"bold", false},
+                 {"outline", json{{"color", "#000000"}, {"width", 0.1}}}};
+      ops.push_back(std::move(op));
+    }
+    if (ops.empty() || (ops.size() == 1 && ops[0].value("op", std::string()) == "add_track"))
+      return fail(ErrorCode::InvalidArgument, "E_SUBTITLES", "None of the cues has a length.");
+    json edit = {{"project", params["project"]}, {"ops", std::move(ops)}, {"label", "Import subtitles"}};
+    if (params.contains("sequence"))
+      edit["sequence"] = params["sequence"];
+    ATM_TRY(json done, timeline_edit(edit));
+    done["cues"] = parsed.cues.size() - size_t(dropped);
+    done["format"] = parsed.format;
+    done["cut_short"] = cut_short;
+    done["skipped"] = parsed.skipped;
+    return done;
+  }
 
   // library.list: the items, the newest first, without their clips.
   Result<json> library_list(const json &) {
@@ -3699,6 +3849,22 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
     {"time.parse", "project", false, "Convert any accepted time spelling to its canonical forms.",
      R"({"type":"object","properties":{"value":{"type":["string","object"],"description":"\"12.5s\", \"375@30\" (frames@rate), SMPTE \"00:00:12:15\" or {num,den} seconds"},"rate":{"type":"string"}},"required":["value"]})",
      &Impl::time_parse},
+    {"subtitles.export", "subtitles", true,
+     "Write the text clips of a track as a subtitle file (SRT or WebVTT, by the extension or format): one cue for each clip, from its start to its end. "
+     "Without track it takes the one named Subtitles, else Captions. offset (seconds) shifts every cue.",
+     R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},
+       "output":{"type":"string","description":"The .srt or .vtt file to write"},"format":{"type":"string","enum":["srt","vtt"]},
+       "track":{"type":"string","description":"A track's name or ID"},"offset":{"type":"number"},"sequence":{"type":"string"}},"required":["project","output"]})",
+     &Impl::subtitles_export},
+    {"subtitles.import", "subtitles", true,
+     "Read an SRT or WebVTT file into the project: each cue becomes a text clip (white with a dark outline, at the bottom) on a track named "
+     "Subtitles (or `track`), in one edit that Undo takes out. A cue that runs into the next is cut short; the answer counts them. offset (seconds) "
+     "shifts every cue; placement, size and color change the look (timeline.edit's add_text values).",
+     R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},
+       "path":{"type":"string","description":"The .srt or .vtt file"},"format":{"type":"string","enum":["srt","vtt"]},"track":{"type":"string"},
+       "offset":{"type":"number"},"placement":{"type":"string","enum":["center","lower_third","top","bottom"]},"size":{"type":"number"},
+       "color":{"type":"string"},"sequence":{"type":"string"}},"required":["project","path"]})",
+     &Impl::subtitles_import},
     {"script.plan", "script", false,
      "Check and time the script of a Short before anything is made; no project is touched. Give scenes: [{say (the narration), label?, seconds?, "
      "start?, prompt? (the picture prompt, with {character} and {style})}], key_words?, character?, style?, target_words? [lo, hi]. Returns each scene "
