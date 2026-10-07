@@ -452,6 +452,17 @@ private:
       for (const char *k : {"position", "scale", "rotation", "anchor", "crop"})
         if (op_.contains(k))
           value["transform"][k] = op_[k];
+      if (op_.contains("fit")) { // "fit" shows the whole picture, "fill" covers the canvas: the same as fit_clip, in one op
+        const std::string mode = op_["fit"].is_string() ? op_["fit"].get<std::string>() : std::string();
+        if (mode != "fit" && mode != "fill")
+          return fail("E_PARAM", "\"fit\" must be \"fit\" (the whole picture) or \"fill\" (covers the canvas).");
+        const json &shown = value["media_ref"];
+        if (!op_.contains("scale") && shown.value("width", 0.0) > 0 && shown.value("height", 0.0) > 0) {
+          const double r = fit_scale(shown.value("width", 0.0), shown.value("height", 0.0), mode);
+          value["transform"]["scale"] = json::array({r, r});
+          value["transform"]["position"] = op_.value("position", json::array({0.5, 0.5}));
+        }
+      }
       ATM_TRY(json keys, fade_keys(duration, op_.value("opacity", 1.0)));
       if (!keys.is_null())
         value["transform"]["keyframes"]["opacity"] = std::move(keys);
@@ -1609,6 +1620,14 @@ private:
     return {};
   }
 
+  // The scale that makes a picture of mw x mh show whole on the canvas ("fit": 1, the picture is already scaled to fit) or cover it ("fill").
+  double fit_scale(double mw, double mh, const std::string &mode) const {
+    const json canvas = node_of(ctx_.sequence).value("canvas", json::object());
+    const double rw = canvas.value("width", 1920.0) / mw, rh = canvas.value("height", 1080.0) / mh;
+    const double scale = mode == "fit" ? 1.0 : std::max(rw, rh) / std::max(1e-6, std::min(rw, rh));
+    return std::round(scale * 1000.0) / 1000.0;
+  }
+
   // fit_clip {clip, mode (fit | fill)}: fit shows the whole picture, centred (bars where it is not the canvas's shape); fill covers the canvas
   // (two sides cut off). The clip's picture size comes from its media.
   Result<void> fit_clip() {
@@ -1627,11 +1646,7 @@ private:
     if (mw <= 0 || mh <= 0)
       return fail("E_PARAM", "The size of the clip's picture is not known, so it cannot be fitted.",
                   "Only a clip of an imported picture or video has one; set transform.scale yourself for other clips.");
-    const json canvas = node_of(ctx_.sequence).value("canvas", json::object());
-    const double cw = canvas.value("width", 1920.0), ch = canvas.value("height", 1080.0);
-    const double rw = cw / mw, rh = ch / mh;
-    const double scale = mode == "fit" ? 1.0 : std::max(rw, rh) / std::max(1e-6, std::min(rw, rh));
-    const double r = std::round(scale * 1000.0) / 1000.0;
+    const double r = fit_scale(mw, mh, mode);
     const json tr = c.first->value("transform", json::object());
     if (!c.first->contains("transform")) {
       push({{"op", "add"}, {"path", id + "/transform"}, {"value", json{{"scale", json::array({r, r})}, {"position", json::array({0.5, 0.5})}}}});

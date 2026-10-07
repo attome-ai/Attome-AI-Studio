@@ -1100,3 +1100,15 @@ TEST_CASE("flash.cuts puts a rising and falling flash on the cuts", "[timeline][
   CHECK_FALSE(f.engine.call("flash.cuts", {{"project", f.project}, {"clips", json::array({b})}, {"brightness", 3}}));
   CHECK_FALSE(f.engine.call("flash.cuts", {{"project", f.project}, {"clips", json::array({"clp_nope"})}}));
 }
+
+TEST_CASE("timeline.edit: add_clip with fit fill covers the canvas, as fit_clip does", "[timeline][media][parity]") {
+  Fixture f; // a 320x240 canvas
+  const std::string file = (f.dir / "wide.mp4").string();
+  write_video(file, 1); // a picture of another shape than the canvas
+  const json made = f.ok(json::array({{{"op", "add_clip"}, {"id", "$new:a"}, {"path", file}, {"at", "0s"}, {"fit", "fill"}},
+                                      {{"op", "add_clip"}, {"id", "$new:b"}, {"path", file}, {"at", "3s"}, {"track", "new"}}}));
+  const std::string a = made["id_map"]["$new:a"], b = made["id_map"]["$new:b"];
+  f.ok(json::array({{{"op", "fit_clip"}, {"clip", b}, {"mode", "fill"}}}));
+  CHECK(f.get(a)["transform"]["scale"] == f.get(b)["transform"]["scale"]); // one way or the other: the same
+  CHECK(f.fail_rule(json::array({{{"op", "add_clip"}, {"path", file}, {"at", "9s"}, {"fit", "stretch"}}})) == "E_PARAM");
+}
