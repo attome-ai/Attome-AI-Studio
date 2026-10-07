@@ -65,6 +65,24 @@ TEST_CASE("audio: levels are measured in dB", "[audio][parity]") {
   CHECK(audio::measure({}).peak_db == -120.0);
 }
 
+TEST_CASE("audio: loudness in LUFS follows BS.1770: a -23 dBFS stereo sine is -23 LUFS, gating ignores silence", "[audio][parity]") {
+  const auto sine = [](double db, double seconds, double silence_seconds) {
+    std::vector<float> pcm(size_t((seconds + silence_seconds) * 48000) * 2, 0.0f);
+    const double amp = std::pow(10.0, db / 20.0);
+    for (size_t i = 0; i < size_t(seconds * 48000); ++i)
+      pcm[2 * i] = pcm[2 * i + 1] = float(amp * std::sin(2.0 * 3.14159265358979 * 997.0 * double(i) / 48000.0));
+    return pcm;
+  };
+  CHECK(audio::loudness_lufs(sine(-23.0, 5.0, 0.0)) == Catch::Approx(-23.0).margin(0.1));
+  CHECK(audio::loudness_lufs(sine(-14.0, 5.0, 0.0)) == Catch::Approx(-14.0).margin(0.1));
+  // Ten seconds of silence after the sound do not make it quieter: the gate ignores them. (The blocks that straddle the cut are partly
+  // quiet but above the gate, so the standard counts them: a few hundredths of a LU, not the 10 s of silence.)
+  CHECK(audio::loudness_lufs(sine(-23.0, 5.0, 10.0)) == Catch::Approx(-23.0).margin(0.3));
+  CHECK(audio::loudness_lufs(std::vector<float>(48000 * 2 * 5, 0.0f)) == -120.0);
+  CHECK(audio::loudness_lufs(sine(-23.0, 0.2, 0.0)) == -120.0); // under 400 ms: no block
+  CHECK(audio::measure(sine(-23.0, 3.0, 0.0)).lufs == Catch::Approx(-23.0).margin(0.1));
+}
+
 TEST_CASE("audio: every effect kind makes sound that is not too loud, and a WAV file comes out", "[audio][parity]") {
   const fs::path dir = fs::temp_directory_path() / "attome-audio-tools";
   fs::create_directories(dir);

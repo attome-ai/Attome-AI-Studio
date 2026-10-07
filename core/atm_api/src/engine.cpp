@@ -1,5 +1,6 @@
 #include "atm/api/engine.hpp"
 #include "atm/api/audio_tools.hpp"
+#include "atm/api/script_plan.hpp"
 #include <functional>
 #include "atm/api/gen_comfy.hpp"
 #include "atm/api/gen_mock.hpp"
@@ -1254,7 +1255,8 @@ struct Engine::Impl {
     const audio::Level level = audio::measure(pcm);
     const audio::Tempo tempo = audio::find_tempo(pcm, params.value("min_bpm", 80.0), params.value("max_bpm", 180.0));
     json out = {{"path", path}, {"from", from}, {"to", to}, {"seconds", double(pcm.size() / 2) / double(media::kAudioRate)},
-                {"peak", level.peak}, {"peak_db", level.peak_db}, {"rms", level.rms}, {"rms_db", level.rms_db}};
+                {"peak", level.peak}, {"peak_db", level.peak_db}, {"rms", level.rms}, {"rms_db", level.rms_db},
+                {"lufs", level.lufs}};
     const bool beat = tempo.bpm > 0.0 && tempo.confidence >= 1.5;
     out["has_beat"] = beat;
     if (tempo.bpm > 0.0) {
@@ -1304,6 +1306,199 @@ struct Engine::Impl {
       out["asset_id"] = *imported;
     return out;
   }
+
+  // The speech node of a voice clip (the one that makes the words), or "" when the clip is not a voice.
+  static std::string speech_node_of(const json &clip) {
+    const json ref = clip.value("media_ref", json::object());
+    const json nodes = ref.value("workflow", json::object()).value("nodes", json::object());
+    for (auto n = nodes.begin(); n != nodes.end(); ++n)
+      if (n->is_object() && n->value("kind", std::string()) == "attome.generate_speech")
+        return n.key();
+    return {};
+  }
+
+  // voice.make {project, model, lines: [{text, at, voice?}], voice?, speed?}: one voice clip for each line of the script, starting at `at`
+  // (seconds or a time) on the first audio track that is free there. Nothing is spoken yet: run gen.run, then voice.fit.
+  Result<json> voice_make(const json &params) {
+    ATM_TRY(Project *pr, project(params));
+    const auto lines = params.find("lines");
+    if (lines == params.end() || !lines->is_array() || lines->empty())
+      return bad_param("lines", "is required: a list of {text, at} (the words to say and when they start)");
+    if (!params.contains("model") || !params["model"].is_string())
+      return bad_param("model", "is required: a speech model from gen.models (clip_type audio)");
+    const std::string model = params["model"].get<std::string>();
+    // Check every line before anything is made, so a mistake in the ninth line does not leave eight clips behind.
+    for (size_t i = 0; i < lines->size(); ++i) {
+      const json &l = (*lines)[i];
+      if (!l.is_object() || !l.contains("text") || !l["text"].is_string() || l["text"].get<std::string>().find_first_not_of(' ') == std::string::npos)
+        return bad_param("lines", ("line " + std::to_string(i + 1) + " needs \"text\": the words to say").c_str());
+      if (!l.contains("at") || !(l["at"].is_number() || l["at"].is_string()))
+        return bad_param("lines", ("line " + std::to_string(i + 1) + " needs \"at\": when it starts (seconds, or a time like 3.1s)").c_str());
+    }
+    json made = json::array(), ops = json::array();
+    for (const json &l : *lines) {
+      json at = l["at"];
+      if (at.is_number())
+        at = std::to_string(int64_t(std::llround(at.get<double>() * 1000.0))) + "@1000";
+      json create = {{"project", params["project"]}, {"model", model}, {"prompt", l["text"]}, {"at", at}};
+      if (params.contains("sequence"))
+        create["sequence"] = params["sequence"];
+      ATM_TRY(json clip, gen_create_clip(create));
+      const std::string id = clip.value("clip", std::string());
+      made.push_back({{"clip", id}, {"at", l["at"]}});
+      const doc::NodeRef *ref = pr->doc.find(id);
+      if (!ref || !ref->node)
+        continue;
+      const json &media = (*ref->node)["media_ref"];
+      const std::string voice = l.value("voice", params.value("voice", std::string()));
+      const json exposed = media.value("workflow", json::object()).value("exposed", json::object()).value("inputs", json::object());
+      if (!voice.empty() && exposed.contains("voice"))
+        ops.push_back({{"op", media.value("inputs", json::object()).contains("voice") ? "replace" : "add"}, {"path", id + "/media_ref/inputs/voice"}, {"value", voice}});
+      if (params.contains("speed") && params["speed"].is_number())
+        if (const std::string node = speech_node_of(*ref->node); !node.empty() &&
+            media["workflow"]["nodes"][node].value("settings", json::object()).contains("speed"))
+          ops.push_back({{"op", "replace"}, {"path", node + "/settings/speed"}, {"value", params["speed"]}});
+    }
+    if (!ops.empty())
+      ATM_CHECK(project_patch({{"project", params["project"]}, {"patch", {{"ops", std::move(ops)}, {"label", "The narrator"}}}}).map([](const json &) {}));
+    return json{{"clips", std::move(made)}, {"next", "gen.run for these clips, then voice.fit"}};
+  }
+
+  // voice.fit {project, clips?, speed_min? (1.0), speed_max? (1.4), gap? (0.1 s), last_budget? (3.75 s), budgets?, target_peak? (0.9)}:
+  // after the voices are spoken, in as many rounds as it takes. Each voice is fitted to the time it has (up to the next voice's start,
+  // less the gap) by its speed; a voice whose speed changed must be spoken again ("rerun": gen.run, then call this again). Voices that are
+  // settled are pushed later when they overlap the one before, and given the gain that brings their loudest sample to target_peak.
+  Result<json> voice_fit(const json &params) {
+    ATM_PROFILE_SCOPE("api.voice_fit");
+    ATM_TRY(Project *pr, project(params));
+    const double speed_min = params.value("speed_min", 1.0), speed_max = params.value("speed_max", 1.4);
+    const double gap = params.value("gap", 0.1), last_budget = params.value("last_budget", 3.75), target = params.value("target_peak", 0.9);
+    if (speed_min <= 0.0 || speed_max < speed_min)
+      return bad_param("speed_max", "must be at least speed_min, and speed_min above 0");
+    struct Voice {
+      std::string id, name, node;
+      double start = 0.0, duration = 0.0, speed = 1.0, natural = 0.0, budget = 0.0;
+      bool has_speed = false, spoken = false;
+      std::string state;
+      double gain_db = 0.0;
+      bool has_gain = false;
+    };
+    const auto seconds_of = [](const json &timing, const char *key) {
+      return Rational::parse(timing.value(key, std::string("0"))).value_or(Rational()).to_seconds_lossy();
+    };
+    std::vector<std::string> wanted;
+    if (params.contains("clips") && params["clips"].is_array())
+      for (const json &c : params["clips"])
+        if (c.is_string())
+          wanted.push_back(c.get<std::string>());
+    std::vector<Voice> voices;
+    const json &root = pr->doc.root();
+    if (const auto seqs = root.find("sequences"); seqs != root.end() && seqs->is_object())
+      for (auto sq = seqs->begin(); sq != seqs->end(); ++sq)
+        if (const auto tracks = sq->find("tracks"); sq->is_object() && tracks != sq->end() && tracks->is_object())
+          for (auto t = tracks->begin(); t != tracks->end(); ++t)
+            if (const auto cl = t->find("clips"); t->is_object() && cl != t->end() && cl->is_object())
+              for (auto c = cl->begin(); c != cl->end(); ++c) {
+                if (!c->is_object() || (!wanted.empty() && std::find(wanted.begin(), wanted.end(), c.key()) == wanted.end()))
+                  continue;
+                const std::string node = speech_node_of(*c);
+                if (node.empty())
+                  continue;
+                Voice v;
+                v.id = c.key();
+                v.name = c->value("name", std::string());
+                v.node = node;
+                const json timing = c->value("timing", json::object());
+                v.start = seconds_of(timing, "record_in");
+                v.duration = seconds_of(timing, "duration");
+                const json media = c->value("media_ref", json::object());
+                const json settings = media["workflow"]["nodes"][node].value("settings", json::object());
+                v.has_speed = settings.contains("speed") && settings["speed"].is_number();
+                v.speed = v.has_speed ? settings["speed"].get<double>() : 1.0;
+                const std::string sel = media.value("selected", std::string());
+                v.spoken = !sel.empty() && media.contains("takes") && media["takes"].contains(sel);
+                if (v.spoken) {
+                  const json audio = media["takes"][sel].value("outputs", json::object()).value("audio", json::object());
+                  if (audio.contains("path") && audio["path"].is_string()) {
+                    fs::path file = pr->dir / to_path(audio["path"].get<std::string>());
+                    if (auto pcm = media::read_audio(to_utf8(file), 0, int64_t(600.0 * double(media::kHnsPerSecond))); pcm && !pcm->empty()) {
+                      const double peak = audio::measure(*pcm).peak;
+                      if (peak > 1e-4) {
+                        v.gain_db = std::clamp(std::round(20.0 * std::log10(target / peak) * 10.0) / 10.0, -24.0, 10.0);
+                        v.has_gain = true;
+                      }
+                    }
+                  }
+                }
+                voices.push_back(std::move(v));
+              }
+    if (voices.empty())
+      return fail(ErrorCode::NotFound, "E_NO_VOICES", "There are no voice clips to fit.", "voice.make makes them; gen.run speaks them.");
+    std::sort(voices.begin(), voices.end(), [](const Voice &a, const Voice &b) { return a.start < b.start; });
+    std::vector<double> given;
+    if (params.contains("budgets") && params["budgets"].is_array())
+      for (const json &b : params["budgets"])
+        given.push_back(b.is_number() ? b.get<double>() : 0.0);
+    json ops = json::array(), report = json::array(), rerun = json::array();
+    for (size_t i = 0; i < voices.size(); ++i) {
+      Voice &v = voices[i];
+      v.budget = i < given.size() && given[i] > 0.0 ? given[i] : i + 1 < voices.size() ? std::max(0.5, voices[i + 1].start - v.start - gap) : last_budget;
+      if (!v.spoken) {
+        v.state = "not_spoken";
+        continue;
+      }
+      v.natural = v.duration * v.speed; // how long it is at speed 1
+      if (v.has_speed) {
+        const double wanted_speed = std::clamp(std::ceil(v.natural / v.budget * 100.0 - 1e-9) / 100.0, speed_min, speed_max);
+        if (std::fabs(wanted_speed - v.speed) > 0.011) {
+          ops.push_back({{"op", "replace"}, {"path", v.node + "/settings/speed"}, {"value", wanted_speed}});
+          v.state = "rerun";
+          v.speed = wanted_speed;
+          rerun.push_back(v.id);
+          continue;
+        }
+      }
+      v.state = "ok";
+    }
+    // The settled voices: none starts before the one before has ended (and the gap), and each has its gain.
+    double previous_end = -1e9;
+    int pushed = 0;
+    for (Voice &v : voices) {
+      if (v.state != "ok") {
+        if (v.state == "rerun")
+          previous_end = std::max(previous_end, v.start + v.natural / v.speed);
+        continue;
+      }
+      if (v.start < previous_end + gap) {
+        v.start = previous_end + gap;
+        const auto t = Rational::make(int64_t(std::llround(v.start * 1000.0)), 1000);
+        ops.push_back({{"op", "replace"}, {"path", v.id + "/timing/record_in"}, {"value", t ? t->to_string() : std::string("0")}});
+        ++pushed;
+      }
+      previous_end = v.start + v.duration;
+      if (v.has_gain) {
+        const doc::NodeRef *ref = pr->doc.find(v.id);
+        const json audio_now = ref && ref->node ? ref->node->value("audio", json::object()) : json::object();
+        if (!audio_now.contains("gain_db") || std::fabs(audio_now["gain_db"].get<double>() - v.gain_db) > 0.05)
+          ops.push_back(audio_now.is_object() && ref && ref->node->contains("audio")
+                            ? json{{"op", "replace"}, {"path", v.id + "/audio/gain_db"}, {"value", v.gain_db}}
+                            : json{{"op", "add"}, {"path", v.id + "/audio"}, {"value", json{{"gain_db", v.gain_db}}}});
+      }
+    }
+    for (const Voice &v : voices)
+      report.push_back({{"clip", v.id}, {"name", v.name}, {"state", v.state}, {"start", v.start}, {"end", v.start + v.duration}, {"duration", v.duration},
+                        {"speed", v.speed}, {"natural", v.natural}, {"budget", v.budget}, {"gain_db", v.has_gain ? json(v.gain_db) : json(nullptr)}});
+    if (!ops.empty())
+      ATM_CHECK(project_patch({{"project", params["project"]}, {"patch", {{"ops", std::move(ops)}, {"label", "Fit the voices"}}}}).map([](const json &) {}));
+    json out = {{"voices", std::move(report)}, {"pushed", pushed}, {"rerun", rerun}};
+    out["next"] = !rerun.empty() ? "gen.run for the clips in rerun (their speed changed), then call voice.fit again"
+                  : std::any_of(voices.begin(), voices.end(), [](const Voice &v) { return !v.spoken; }) ? "gen.run for the clips that are not spoken, then call voice.fit again"
+                                                                                                          : "done: the voices fit their scenes";
+    return out;
+  }
+
+  // script.plan {scenes: [...], ...}: the script of a Short made exact; no project is read or changed.
+  Result<json> script_plan(const json &params) { return script::plan(params); }
 
   // library.list: the items, the newest first, without their clips.
   Result<json> library_list(const json &) {
@@ -3504,9 +3699,40 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
     {"time.parse", "project", false, "Convert any accepted time spelling to its canonical forms.",
      R"({"type":"object","properties":{"value":{"type":["string","object"],"description":"\"12.5s\", \"375@30\" (frames@rate), SMPTE \"00:00:12:15\" or {num,den} seconds"},"rate":{"type":"string"}},"required":["value"]})",
      &Impl::time_parse},
+    {"script.plan", "script", false,
+     "Check and time the script of a Short before anything is made; no project is touched. Give scenes: [{say (the narration), label?, seconds?, "
+     "start?, prompt? (the picture prompt, with {character} and {style})}], key_words?, character?, style?, target_words? [lo, hi]. Returns each scene "
+     "with its start, end, word count, narration pace and the time the voice starts (voice_at, for voice.make), the cuts, the Variables the prompts "
+     "need, and warnings (a line too fast or too slow for its scene, no closing . ! ?, a key word that is never said, a length outside target_seconds).",
+     R"({"type":"object","properties":{"scenes":{"type":"array","items":{"type":"object","properties":{"say":{"type":"string"},"label":{"type":"string"},
+       "seconds":{"type":"number"},"start":{"type":"number"},"prompt":{"type":"string"}},"required":["say"]}},
+       "key_words":{"type":"array","items":{"type":"string"}},"character":{"type":"string"},"style":{"type":"string"},
+       "target_words":{"type":"array","items":{"type":"integer"}},"target_seconds":{"type":"array","items":{"type":"number"}},"hook_max_seconds":{"type":"number"},"words_per_second":{"type":"number"},"voice_lead":{"type":"number"},"tail":{"type":"number"}},
+       "required":["scenes"]})",
+     &Impl::script_plan},
+    {"voice.make", "voice", true,
+     "Make the voice clips of a script: one clip for each line {text, at}, starting at `at` (seconds, or a time like 3.1s) on the first audio track "
+     "that is free there, made with `model` (a speech model from gen.models) and, when given, `voice` and `speed`. Nothing is spoken yet: "
+     "run gen.run, then call voice.fit.",
+     R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},
+       "model":{"type":"string"},"lines":{"type":"array","items":{"type":"object","properties":{"text":{"type":"string"},
+       "at":{"description":"Seconds, or a time like 3.1s","type":["number","string"]},"voice":{"type":"string"}},"required":["text","at"]}},
+       "voice":{"type":"string"},"speed":{"type":"number"},"sequence":{"type":"string"}},"required":["project","model","lines"]})",
+     &Impl::voice_make},
+    {"voice.fit", "voice", true,
+     "After the voices are spoken: fit each to the time it has (up to the next voice, less `gap`) by its speed, push voices that overlap the one "
+     "before, and set each one's gain so its loudest sample reaches target_peak. A voice whose speed changed has to be spoken again: the answer "
+     "lists it in `rerun`; run gen.run and call this again. Safe to call any number of times: it changes nothing once the voices fit.",
+     R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},
+       "clips":{"type":"array","items":{"type":"string"},"description":"Default: every voice clip"},
+       "speed_min":{"type":"number","description":"Default 1.0"},"speed_max":{"type":"number","description":"Default 1.4"},
+       "gap":{"type":"number","description":"Seconds between voices, default 0.1"},"last_budget":{"type":"number","description":"Seconds for the last voice, default 3.75"},
+       "budgets":{"type":"array","items":{"type":"number"},"description":"Seconds each voice may take, in order; default: up to the next voice"},
+       "target_peak":{"type":"number","description":"0..1, default 0.9"}},"required":["project"]})",
+     &Impl::voice_fit},
     {"audio.analyze", "core", false,
      "Where the beat is and how loud a sound is: bpm, the beat grid (first_beat and beats, in seconds of the file), confidence (3 and more is "
-     "clear; has_beat says whether there is one), and peak and RMS in dB. Pass path (the first two minutes, or from..to in seconds) or project "
+     "clear; has_beat says whether there is one), peak and RMS in dB, and the integrated loudness in LUFS (-23 for EBU R128 broadcast, about -14 for streaming). Pass path (the first two minutes, or from..to in seconds) or project "
      "and clip (the part the clip plays). Use it to cut to the beat, to set a clip's speed to a song, and to check a mix's levels.",
      R"({"type":"object","properties":{"path":{"type":"string","description":"A sound or video file"},
        "project":{"type":"string","description":"With clip: path of the .attome project folder, or its prj_ ID"},"clip":{"type":"string"},

@@ -6,10 +6,12 @@ description: Add a voiceover to a Short with Attome Generate speech - Kokoro (cl
 > An Attome skill: built into Attome, and a project can keep its own (`skill.save`). Find them with `skill.list`, read one with
 > `skill.get {id}`, and its files with `skill.get {id, file: "scripts/x.ps1"}`. The scripts are recipes (PowerShell or Python):
 > fetch one, adapt the block at the top, run it from the repository root. They are being replaced by Tools
-> (`short.plan`, `short.build`, `short.voice`, ... see docs/plan/SHORT_TOOLS.md); use a Tool when the list has it.
+> (`script.plan`, `short.build`, `voice.make`, ... see docs/plan/SHORT_TOOLS.md); use a Tool when the list has it.
 
 
 # Voiceover
+
+**Tools first.** `voice.make {project, model, lines: [{text, at}], voice?, speed?}` makes one voice clip for each line of the script at its scene start, on the first free audio track. Run `gen.run`, then `voice.fit {project}`: it fits each voice to the time it has (up to the next voice) by its speed, listing in `rerun` any voice whose speed changed; run `gen.run` again and call it again until `next` says done. It also keeps voices from overlapping and sets each one's gain from its loudest sample. The scripts below do the same by hand, for other recipes.
 
 Speech is a Clip Workflow (`voice:<model>`): clip on an **audio** track, Exposed Inputs `text` (required), `voice` (Kokoro: a voice name like `am_michael`; OmniVoice: a description), `seed`; Output `audio` + `length` (the clip becomes exactly as long as the speech).
 

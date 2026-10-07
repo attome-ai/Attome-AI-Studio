@@ -6,7 +6,7 @@ description: Make a 30-40 s vertical (9:16) YouTube Short with Attome from a top
 > An Attome skill: built into Attome, and a project can keep its own (`skill.save`). Find them with `skill.list`, read one with
 > `skill.get {id}`, and its files with `skill.get {id, file: "scripts/x.ps1"}`. The scripts are recipes (PowerShell or Python):
 > fetch one, adapt the block at the top, run it from the repository root. They are being replaced by Tools
-> (`short.plan`, `short.build`, `short.voice`, ... see docs/plan/SHORT_TOOLS.md); use a Tool when the list has it.
+> (`script.plan`, `short.build`, `voice.make`, ... see docs/plan/SHORT_TOOLS.md); use a Tool when the list has it.
 
 
 # Short video with Attome (the "What If You...?" format and its relatives)

@@ -1017,3 +1017,84 @@ TEST_CASE("generate: speech: a Voice clip goes on an audio track, is as long as 
   std::error_code ec;
   fs::remove_all(dir, ec);
 }
+
+TEST_CASE("voice.make and voice.fit make the voices of a script and fit them to their scenes", "[gen][generate][speech][parity]") {
+  auto mock = std::make_shared<MockProvider>();
+  const fs::path dir = fs::temp_directory_path() / atm::new_id("attome-short-voice");
+  fs::create_directories(dir);
+  const std::string project = (dir / "Voice.attome").string();
+  atm::api::EngineConfig cfg;
+  cfg.models_dir = (dir / "models").string();
+  cfg.providers = {mock};
+  Engine engine(cfg);
+  ok(engine, "project.create", {{"path", project}, {"rate", "30"}, {"canvas", "320x176"}});
+  const auto wait = [&](const json &started) {
+    for (int i = 0; i < 3000; ++i) {
+      const json state = ok(engine, "jobs.get", {{"job_id", started["job_id"]}});
+      if (state["state"] != "running") {
+        (void)ok(engine, "gen.status", {{"project", project}});
+        return state;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return json{{"state", "timeout"}};
+  };
+  const auto get = [&](const std::string &id) { return ok(engine, "project.get", {{"project", project}, {"id", id}})["object"]; };
+  const auto seconds = [](const std::string &r) {
+    const size_t slash = r.find('/');
+    return slash == std::string::npos ? std::stod(r) : std::stod(r.substr(0, slash)) / std::stod(r.substr(slash + 1));
+  };
+
+  // Three lines. The mock says a word in 0.4 s: 8 words are 3.2 s (3 s to the next voice: too long), 6 words 2.4 s (fits), 12 words 4.8 s (3.75 s left).
+  const json lines = json::array({{{"text", "one two three four five six seven eight"}, {"at", 0.0}},
+                                  {{"text", "one two three four five six"}, {"at", 3.0}},
+                                  {{"text", "one two three four five six seven eight nine ten eleven twelve"}, {"at", "6.5s"}}});
+  CHECK_FALSE(engine.call("voice.make", {{"project", project}, {"model", atm::api::kMockVoice}, {"lines", json::array({{{"text", "ok"}}})}})); // no "at"
+  CHECK_FALSE(engine.call("voice.make", {{"project", project}, {"model", atm::api::kMockVoice}, {"lines", json::array({{{"text", " "}, {"at", 1}}})}}));
+  const json made = ok(engine, "voice.make", {{"project", project}, {"model", atm::api::kMockVoice}, {"lines", lines}});
+  REQUIRE(made["clips"].size() == 3);
+  const std::string a = made["clips"][0]["clip"], b = made["clips"][1]["clip"], c = made["clips"][2]["clip"];
+  CHECK(seconds(get(c)["timing"]["record_in"]) == Catch::Approx(6.5).margin(0.002));
+
+  // Before anything is spoken, the fit has nothing to fit.
+  const json before = ok(engine, "voice.fit", {{"project", project}});
+  CHECK(before["rerun"].empty());
+  CHECK(before["voices"][0]["state"] == "not_spoken");
+  REQUIRE(wait(ok(engine, "gen.run", {{"project", project}}))["state"] == "done");
+
+  // Round one: the first and the last are too long for their scenes, so their speed goes up and they have to be spoken again.
+  const json one = ok(engine, "voice.fit", {{"project", project}});
+  CHECK(one["rerun"].size() == 2);
+  CHECK(one["voices"][0]["state"] == "rerun");
+  CHECK(one["voices"][1]["state"] == "ok");
+  CHECK(one["voices"][0]["speed"].get<double>() == Catch::Approx(1.11).margin(0.001)); // 3.2 s into 2.9 s
+  CHECK(one["voices"][2]["speed"].get<double>() == Catch::Approx(1.28).margin(0.001)); // 4.8 s into 3.75 s
+  CHECK(one["next"].get<std::string>().find("gen.run") != std::string::npos);
+  REQUIRE(wait(ok(engine, "gen.run", {{"project", project}}))["state"] == "done");
+
+  // Round two: everything fits; nobody overlaps, and the gains are set.
+  const json two = ok(engine, "voice.fit", {{"project", project}});
+  CHECK(two["rerun"].empty());
+  CHECK(two["next"] == "done: the voices fit their scenes");
+  double previous_end = -1.0;
+  for (const std::string &id : {a, b, c}) {
+    const json clip = get(id);
+    const double start = seconds(clip["timing"]["record_in"]), end = start + seconds(clip["timing"]["duration"]);
+    INFO(id << " " << start << " - " << end);
+    CHECK(start >= previous_end + 0.1 - 1e-6);
+    previous_end = end;
+    CHECK(clip.contains("audio"));
+    CHECK(clip["audio"].contains("gain_db"));
+  }
+  CHECK(seconds(get(a)["timing"]["duration"]) <= 2.9 + 1e-6);
+
+  // A third round changes nothing.
+  const std::string head_before = ok(engine, "history.list", {{"project", project}, {"limit", 1}})["head"];
+  const json three = ok(engine, "voice.fit", {{"project", project}});
+  CHECK(three["rerun"].empty());
+  CHECK(three["pushed"] == 0);
+  CHECK(ok(engine, "history.list", {{"project", project}, {"limit", 1}})["head"] == head_before);
+  CHECK(ok(engine, "project.validate", {{"project", project}})["ok"] == true);
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}

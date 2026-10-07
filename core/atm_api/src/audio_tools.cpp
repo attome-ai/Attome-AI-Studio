@@ -106,7 +106,66 @@ Level measure(const std::vector<float> &stereo) {
   l.rms = std::sqrt(sum / double(stereo.size()));
   l.peak_db = peak > 1e-6 ? 20.0 * std::log10(peak) : -120.0;
   l.rms_db = l.rms > 1e-6 ? 20.0 * std::log10(l.rms) : -120.0;
+  l.lufs = loudness_lufs(stereo);
   return l;
+}
+
+namespace {
+
+struct Biquad {
+  double b0, b1, b2, a1, a2, z1 = 0.0, z2 = 0.0;
+  double run(double x) { // transposed direct form II
+    const double y = b0 * x + z1;
+    z1 = b1 * x - a1 * y + z2;
+    z2 = b2 * x - a2 * y;
+    return y;
+  }
+};
+
+} // namespace
+
+double loudness_lufs(const std::vector<float> &stereo) {
+  ATM_PROFILE_SCOPE("audio.loudness");
+  const size_t frames = stereo.size() / 2;
+  constexpr size_t kBlock = 19200, kStep = 4800; // 400 ms blocks every 100 ms (75 % overlap) at 48 kHz
+  if (frames < kBlock)
+    return -120.0;
+  // K-weighting (BS.1770-4, 48 kHz): a high shelf that models the head, then a high-pass at 38 Hz.
+  std::vector<double> energy[2];
+  for (int ch = 0; ch < 2; ++ch) {
+    Biquad shelf{1.53512485958697, -2.69169618940638, 1.19839281085285, -1.69065929318241, 0.73248077421585};
+    Biquad high{1.0, -2.0, 1.0, -1.99004745483398, 0.99007225036621};
+    energy[ch].resize(frames);
+    for (size_t i = 0; i < frames; ++i) {
+      const double y = high.run(shelf.run(double(stereo[2 * i + size_t(ch)])));
+      energy[ch][i] = y * y;
+    }
+  }
+  std::vector<double> blocks; // the mean square of each block, both channels added
+  for (size_t at = 0; at + kBlock <= frames; at += kStep) {
+    double sum[2] = {0.0, 0.0};
+    for (size_t i = at; i < at + kBlock; ++i) {
+      sum[0] += energy[0][i];
+      sum[1] += energy[1][i];
+    }
+    blocks.push_back((sum[0] + sum[1]) / double(kBlock));
+  }
+  const auto lufs_of = [](double mean_square) { return mean_square > 0.0 ? -0.691 + 10.0 * std::log10(mean_square) : -1000.0; };
+  const auto gated_mean = [&](double above) { // the mean of the blocks louder than `above` LUFS, and how many there are
+    double sum = 0.0;
+    size_t n = 0;
+    for (double b : blocks)
+      if (lufs_of(b) > above) {
+        sum += b;
+        ++n;
+      }
+    return std::pair<double, size_t>{n ? sum / double(n) : 0.0, n};
+  };
+  const auto [first, n_first] = gated_mean(-70.0); // the absolute gate
+  if (n_first == 0)
+    return -120.0;
+  const auto [second, n_second] = gated_mean(lufs_of(first) - 10.0); // the relative gate
+  return n_second ? lufs_of(second) : -120.0;
 }
 
 namespace {

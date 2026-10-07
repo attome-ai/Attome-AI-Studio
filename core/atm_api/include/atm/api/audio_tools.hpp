@@ -24,8 +24,12 @@ struct Level {
   double rms = 0.0;      // root mean square over the whole buffer
   double peak_db = -120; // dB full scale
   double rms_db = -120;
+  double lufs = -120;    // integrated loudness, ITU-R BS.1770-4 (K-weighted, gated); -120 when the sound is silent or under 400 ms
 };
 Level measure(const std::vector<float> &stereo);
+
+// The integrated loudness in LUFS, as broadcast and festival deliverables are measured (-23 for EBU R128, about -14 for streaming).
+double loudness_lufs(const std::vector<float> &stereo);
 
 // A synthesised effect: whoosh (builds and lands), click, pop, riser (builds to its end, `seconds` long), impact. seed makes the noise differ.
 // Unknown kinds give an empty buffer; names() lists the kinds.
