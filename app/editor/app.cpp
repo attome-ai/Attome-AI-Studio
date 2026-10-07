@@ -747,7 +747,7 @@ void App::add_track(bool audio) {
     selected_track_ = ids.value("$new:t", "");
 }
 
-void App::freeze_frame() {
+void App::freeze_frame(int seconds) {
   const TrackUi *t = nullptr;
   const ClipUi *c = selected(&t);
   if (c && t && t->kind == "audio") // the sound of a video: its picture is what freezes
@@ -762,7 +762,7 @@ void App::freeze_frame() {
     say("Put the playhead inside the clip, on the frame to hold.", true);
     return;
   }
-  timeline_edit(json::array({{{"op", "freeze_frame"}, {"clip", c->id}, {"at", frames_text(playhead_)}, {"duration", "2"}}}), "Freeze frame");
+  timeline_edit(json::array({{{"op", "freeze_frame"}, {"clip", c->id}, {"at", frames_text(playhead_)}, {"duration", std::to_string(seconds)}}}), "Freeze frame");
 }
 
 // Takes a track away with everything on it, as one edit (Undo brings it back). The sound of a picture on another track stays.
@@ -1140,6 +1140,10 @@ void App::draw_clip_menu(const ClipUi &c) {
   if (!c.path.empty() && !c.is_generative && !audio_only_.count(c.path) &&
       menu_item("Freeze frame (2 s)", nullptr, false, !locked && playhead_ > c.start && playhead_ < c.start + c.frames))
     pending_ = [this] { freeze_frame(); };
+  if (!c.path.empty() && !c.is_generative && !audio_only_.count(c.path)) // longer holds
+    for (const int secs : {5, 10})
+      if (menu_item(("Freeze frame (" + std::to_string(secs) + " s)").c_str(), nullptr, false, !locked && playhead_ > c.start && playhead_ < c.start + c.frames))
+        pending_ = [this, secs] { freeze_frame(secs); };
   if (!c.path.empty() && !c.is_generative && count == 1 && menu_item(c.reverse ? "Play forwards" : "Reverse", nullptr, false, !locked))
     pending_ = [this, id = c.id, on = !c.reverse] {
       timeline_edit(json::array({{{"op", "set_reverse"}, {"clip", id}, {"reverse", on}}}), on ? "Reverse" : "Play forwards");
@@ -2792,11 +2796,20 @@ json App::transform_ops(const ClipUi &c, const std::string &prop, const json &va
   return json::array({{{"op", "add"}, {"path", c.id + "/transform/keyframes/" + prop + "/$new:k"}, {"value", {{"t", frames_text(rel)}, {"v", value}}}}});
 }
 
+// The opacity at the playhead: from its keys when it has them, else the plain value.
+float App::opacity_now(const ClipUi &c) const {
+  if (c.opacity_keys.empty())
+    return c.opacity;
+  const int64_t rel = std::clamp<int64_t>(playhead_ - c.start, 0, std::max<int64_t>(0, c.frames - 1));
+  return float(c.opacity_keys.at(Rational::make(rel * rate_.den(), rate_.num()).value_or(Rational()))[0]);
+}
+
 void App::toggle_transform_key(const ClipUi &c, const std::string &prop) {
   const int64_t rel = std::clamp<int64_t>(playhead_ - c.start, 0, std::max<int64_t>(0, c.frames - 1));
   const render::Transform now = transform_now(c);
   const json value = prop == "position" ? json::array({now.pos_x, now.pos_y})
                      : prop == "scale"  ? json::array({now.scale_x, now.scale_y})
+                     : prop == "opacity" ? json(std::round(double(opacity_now(c)) * 100.0) / 100.0)
                                         : json(now.rotation);
   const std::string at = transform_key_at(c, prop, rel);
   if (at.empty()) {
@@ -8038,7 +8051,7 @@ void App::draw_inspector() {
   // is held, so a field that is being typed in is not written over.
   if (insp_for_ != c->id && live_commit_) // a field was being typed in for the clip that was selected: its edit is made
     pending_ = std::exchange(live_commit_, nullptr);
-  const bool keyed = !c->position_keys.empty() || !c->scale_keys.empty() || !c->rotation_keys.empty();
+  const bool keyed = !c->position_keys.empty() || !c->scale_keys.empty() || !c->rotation_keys.empty() || (!c->opacity_keys.empty() && !c->fades_only);
   if (insp_for_ != c->id || (insp_rev_ != revision_ && !ImGui::IsAnyItemActive()) || (keyed && insp_play_ != playhead_ && !ImGui::IsAnyItemActive())) {
     insp_for_ = c->id;
     insp_rev_ = revision_;
@@ -8048,6 +8061,8 @@ void App::draw_inspector() {
     copy_to(in_buf_, sizeof in_buf_, timecode(c->start));
     copy_to(dur_buf_, sizeof dur_buf_, timecode(c->frames));
     opacity_ = c->opacity;
+    if (!c->opacity_keys.empty() && !c->fades_only) // keyed by hand: the value at the playhead
+      opacity_ = float(c->opacity_keys.at(Rational::make(std::clamp<int64_t>(playhead_ - c->start, 0, std::max<int64_t>(0, c->frames - 1)) * rate_.den(), rate_.num()).value_or(Rational()))[0]);
     fade_in_s_ = float(double(c->fade_in) / fps());
     const ClipUi *snd = c; // the clip that holds the sound: this one, or the linked sound of a picture
     if (c->stream == "video")
@@ -8180,7 +8195,7 @@ void App::draw_inspector() {
       }
     }
     ImGui::PushTextWrapPos(0.0f);
-    ImGui::TextColored(hexv(look::fg3), "Times: 00:00:12:15, 12.5s or 375@30");
+    ImGui::TextColored(hexv(look::fg3), "Type a time as 12.5s, 375@30 or 00:00:12:15");
     ImGui::PopTextWrapPos();
   }
   end_card();
@@ -8495,14 +8510,25 @@ void App::draw_inspector() {
       }
     }
     ImGui::TextColored(hexv(look::fg2), "Opacity");
+    const bool hand_keyed = !c->opacity_keys.empty() && !c->fades_only; // keys of its own, not the two ends of a fade
+    if (hand_keyed || c->opacity_keys.empty())
+      diamond("opacity", c->opacity_keys);
     ImGui::SameLine(88.0f);
     const float avail = ImGui::GetContentRegionAvail().x - 52.0f;
-    if (slim_slider("opacity", &opacity_, 0.0f, 1.0f, avail, "", 1.0f))
+    if (slim_slider("opacity", &opacity_, 0.0f, 1.0f, avail, "", 1.0f)) {
       preview_.set_opacity(id, opacity_);
+      if (hand_keyed)
+        preview_ops(transform_ops(*c, "opacity", json(opacity_)));
+    }
     if (slider_done()) {
       const float v = std::round(opacity_ * 100.0f) / 100.0f;
       const ClipUi clip = *c;
       pending_ = [this, clip, v] {
+        if (!clip.opacity_keys.empty() && !clip.fades_only) // keyed by hand: the key at the playhead takes it
+        {
+          patch(transform_ops(clip, "opacity", json(std::round(double(v) * 100.0) / 100.0)), "Change opacity");
+          return;
+        }
         json ops = json::array({{{"op", "replace"}, {"path", clip.id + "/transform/opacity"}, {"value", v}}});
         if (!clip.opacity_keys.empty() && clip.fades_only) // the fades rise to the new level
           for (json &op : fade_ops(clip, clip.fade_in, clip.fade_out, clip.frames, v))

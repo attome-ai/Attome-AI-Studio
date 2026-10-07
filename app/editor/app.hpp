@@ -331,7 +331,7 @@ private:
   char rename_buf_[96] = {};
   bool rename_focus_ = false;
   void delete_track(const std::string &track_id);
-  void freeze_frame(); // the selected video (or the picture of the selected sound) holds the frame at the playhead for 2 s
+  void freeze_frame(int seconds = 2); // the selected video (or the picture of the selected sound) holds the frame at the playhead
   void select_nothing(); // a click on empty space: no clip, no media card
   // While a value is dragged: the edit it would make, shown in the Monitor at once (the project is not changed until the value is let go).
   // `ops` are the patch ops the release will send.
@@ -536,7 +536,8 @@ private:
   // Position, scale and rotation: a plain value, or keys over time. These give the ops that set the value at the playhead (the key there,
   // made when missing, when the property is animated), turn a key on or off there, and the clip's transform at the playhead.
   json transform_ops(const ClipUi &c, const std::string &prop, const json &value) const;
-  void toggle_transform_key(const ClipUi &c, const std::string &prop);
+  float opacity_now(const ClipUi &c) const;
+    void toggle_transform_key(const ClipUi &c, const std::string &prop);
   std::string transform_key_at(const ClipUi &c, const std::string &prop, int64_t rel) const;
   render::Transform transform_now(const ClipUi &c) const;
   float gain_db_ = 0.0f, pan_ = 0.0f, audio_fade_in_s_ = 0.0f, audio_fade_out_s_ = 0.0f;

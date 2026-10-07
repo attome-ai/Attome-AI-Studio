@@ -471,6 +471,29 @@ TEST_CASE("library: clips kept from one project, with copies of their files, are
   _putenv_s("ATTOME_LIBRARY_DIR", "");
 }
 
+TEST_CASE("library: the colour table of an effect is kept with the item", "[timeline][library]") {
+  Fixture f;
+  _putenv_s("ATTOME_LIBRARY_DIR", (f.dir / "library").string().c_str());
+  const std::string file = (f.dir / "v.mp4").string(), cube = (f.dir / "look.cube").string();
+  write_video(file, 2);
+  { std::ofstream(cube) << "LUT_1D_SIZE 2" << char(10) << "0 0 0" << char(10) << "1 1 1" << char(10); }
+  const json r = f.ok(json::array({{{"op", "add_clip"}, {"id", "$new:v"}, {"path", file}}}));
+  const std::string v = r["id_map"]["$new:v"];
+  f.ok(json::array({{{"op", "add_effect"}, {"target", v}, {"type", "lut"}, {"file", cube}, {"strength", 0.5}}}));
+  REQUIRE(f.engine.call("library.add", {{"project", f.project}, {"clips", {v}}, {"name", "Graded"}}));
+  const std::string id = (*f.engine.call("library.list", json::object()))["items"][0]["id"];
+  const json item = *f.engine.call("library.get", {{"id", id}});
+  std::string kept;
+  for (const json &c : item["clips"])
+    for (const auto &fx : c["clip"].value("effects", json::object()))
+      kept = fx["params"].value("file", std::string());
+  INFO(item.dump());
+  CHECK(!kept.empty());
+  CHECK(kept != cube);
+  fs::remove(cube);
+  CHECK(fs::exists(fs::path(kept)));
+}
+
 TEST_CASE("timeline.edit: slip, roll and slide change timing the way editors expect", "[timeline][media]") {
   Fixture f;
   const std::string file = (f.dir / "a.mp4").string();

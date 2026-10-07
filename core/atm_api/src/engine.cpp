@@ -1,4 +1,5 @@
 #include "atm/api/engine.hpp"
+#include <functional>
 #include "atm/api/gen_comfy.hpp"
 #include "atm/api/gen_mock.hpp"
 
@@ -1016,6 +1017,25 @@ struct Engine::Impl {
                 if (kept)
                   (*out)["path"] = *kept;
               }
+      // The colour tables (.cube) of its effects go along, so the item grades the same in any project.
+      const std::function<void(json &)> keep_tables = [&](json &node) {
+        if (node.is_object()) {
+          if (const auto file = node.find("file"); file != node.end() && file->is_string()) {
+            std::string ext = to_utf8(to_path(file->get<std::string>()).extension());
+            std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char ch) { return char(std::tolower(ch)); });
+            if (ext == ".cube")
+              if (const auto kept = keep_file(file->get<std::string>()))
+                *file = *kept;
+          }
+          for (auto &v : node)
+            keep_tables(v);
+        } else if (node.is_array()) {
+          for (auto &v : node)
+            keep_tables(v);
+        }
+      };
+      if (f.clip.contains("effects"))
+        keep_tables(f.clip["effects"]);
       const Rational offset = sub(f.in, first).value_or(Rational());
       const Rational duration = Rational::parse(f.clip.value("timing", json::object()).value("duration", std::string("0"))).value_or(Rational());
       seconds = std::max(seconds, add(offset, duration).value_or(offset).to_seconds_lossy());
