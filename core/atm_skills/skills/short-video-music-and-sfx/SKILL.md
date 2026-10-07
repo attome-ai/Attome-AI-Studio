@@ -11,6 +11,8 @@ description: Music for a Short - cut a user-chosen song so its beat lands on the
 
 # Music and sound effects
 
+**Tools first.** `audio.analyze {path | project + clip}` finds the tempo and where the beats fall (`bpm`, `first_beat`, `beats`, `has_beat`, in seconds of the file) and measures peak and RMS in dB, so you can lock cuts or a clip's speed to a song and check levels without a script. `sfx.make {kind (whoosh | click | pop | riser | impact), project}` writes the effect, imports it, and returns an `asset_id` for `timeline.edit add_clip`. The scripts below remain for the stretch-to-a-round-BPM and ducking recipe, which has no Tool yet.
+
 Needs: `%TEMP%\voices.json` from `short-video-voice` (voice start/end seconds) and the ComfyUI python (`python_embeded\python.exe` has numpy, av, soundfile).
 
 ## Music on the beat

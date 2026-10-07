@@ -1,4 +1,5 @@
 #include "atm/api/engine.hpp"
+#include "atm/api/audio_tools.hpp"
 #include <functional>
 #include "atm/api/gen_comfy.hpp"
 #include "atm/api/gen_mock.hpp"
@@ -1212,6 +1213,96 @@ struct Engine::Impl {
     ATM_TRY(json done, project_patch(patch));
     done["removed_clips"] = matched.size();
     return done;
+  }
+
+  // audio.analyze {path | project + clip, from?, to?, min_bpm?, max_bpm?}: where the beat is and how loud the sound is. For a clip of a project the
+  // part of the file the clip plays is analysed; with a path, the first two minutes (or from..to, in seconds of the file).
+  Result<json> audio_analyze(const json &params) {
+    ATM_PROFILE_SCOPE("api.audio_analyze");
+    std::string path = params.value("path", std::string());
+    double from = params.value("from", 0.0), to = params.value("to", 0.0);
+    if (params.contains("clip")) {
+      ATM_TRY(Project *pr, project(params));
+      const std::string id = params.value("clip", std::string());
+      const doc::NodeRef *ref = id.empty() ? nullptr : pr->doc.find(id);
+      if (!ref || !ref->node || id.rfind("clp_", 0) != 0)
+        return fail(ErrorCode::NotFound, "E_UNKNOWN_CLIP", "\"clip\" must be the ID of a clip of the project, not \"" + id + "\".");
+      const json media = ref->node->value("media_ref", json::object());
+      if (media.value("type", std::string()) != "file" || !media.contains("path"))
+        return fail(ErrorCode::InvalidArgument, "E_PARAM", "The clip is not made from a sound or video file, so there is nothing to analyse.");
+      fs::path file = to_path(media.value("path", std::string()));
+      if (file.is_relative())
+        file = pr->dir / file;
+      path = to_utf8(file);
+      const json timing = ref->node->value("timing", json::object());
+      const double source_in = Rational::parse(timing.value("source_in", std::string("0"))).value_or(Rational()).to_seconds_lossy();
+      const double length = Rational::parse(timing.value("duration", std::string("0"))).value_or(Rational()).to_seconds_lossy();
+      from = source_in + from;
+      to = to > 0.0 ? source_in + to : source_in + length;
+    }
+    if (path.empty())
+      return bad_param("path", "is required: the sound or video file to analyse (or project and clip)");
+    ATM_TRY(json info, media_probe({{"path", path}}));
+    if (!info.value("has_audio", false))
+      return fail(ErrorCode::InvalidArgument, "E_PARAM", "\"" + path + "\" has no sound.");
+    const double file_seconds = info.value("seconds", 0.0);
+    from = std::clamp(from, 0.0, std::max(0.0, file_seconds));
+    if (to <= from)
+      to = std::min(file_seconds, from + 120.0);
+    to = std::min(to, file_seconds);
+    ATM_TRY(std::vector<float> pcm, media::read_audio(path, int64_t(from * double(media::kHnsPerSecond)), int64_t((to - from) * double(media::kHnsPerSecond))));
+    const audio::Level level = audio::measure(pcm);
+    const audio::Tempo tempo = audio::find_tempo(pcm, params.value("min_bpm", 80.0), params.value("max_bpm", 180.0));
+    json out = {{"path", path}, {"from", from}, {"to", to}, {"seconds", double(pcm.size() / 2) / double(media::kAudioRate)},
+                {"peak", level.peak}, {"peak_db", level.peak_db}, {"rms", level.rms}, {"rms_db", level.rms_db}};
+    const bool beat = tempo.bpm > 0.0 && tempo.confidence >= 1.5;
+    out["has_beat"] = beat;
+    if (tempo.bpm > 0.0) {
+      const double period = 60.0 / tempo.bpm;
+      out["bpm"] = tempo.bpm;
+      out["beat_period"] = period;
+      out["confidence"] = tempo.confidence;
+      out["first_beat"] = from + tempo.first_beat; // in seconds of the file
+      json beats = json::array();
+      for (double t = tempo.first_beat; t < to - from && beats.size() < 600; t += period)
+        beats.push_back(std::round((from + t) * 1000.0) / 1000.0);
+      out["beats"] = std::move(beats);
+    }
+    return out;
+  }
+
+  // sfx.make {kind, output? | project?, seed?, seconds?}: a synthesised effect as a WAV file. With a project it goes in the project's
+  // .attome/sfx folder and is imported as an asset (asset_id comes back), ready for timeline.edit add_clip.
+  Result<json> sfx_make(const json &params) {
+    ATM_PROFILE_SCOPE("api.sfx_make");
+    const std::string kind = params.value("kind", std::string());
+    const auto &known = audio::kinds();
+    if (std::find(known.begin(), known.end(), kind) == known.end()) {
+      std::string list;
+      for (const std::string &k : known)
+        list += (list.empty() ? "" : ", ") + k;
+      return bad_param("kind", ("must be one of " + list).c_str());
+    }
+    const unsigned seed = unsigned(params.value("seed", 1));
+    const std::vector<float> pcm = audio::synth(kind, seed, params.value("seconds", 0.0));
+    std::string output = params.value("output", std::string());
+    std::optional<std::string> imported;
+    if (output.empty()) {
+      if (!params.contains("project"))
+        return bad_param("output", "is required (a file to write) unless project is given");
+      ATM_TRY(Project *pr, project(params));
+      output = to_utf8(pr->dir / ".attome" / "sfx" / (kind + "_" + std::to_string(seed) + ".wav"));
+      ATM_CHECK(audio::write_wav(output, pcm));
+      ATM_TRY(json added, media_import({{"project", params["project"]}, {"paths", json::array({output})}}));
+      if (added.contains("assets") && added["assets"].is_array() && !added["assets"].empty())
+        imported = added["assets"][0].value("id", std::string());
+    } else {
+      ATM_CHECK(audio::write_wav(output, pcm));
+    }
+    json out = {{"path", output}, {"kind", kind}, {"seconds", double(pcm.size() / 2) / double(media::kAudioRate)}};
+    if (imported)
+      out["asset_id"] = *imported;
+    return out;
   }
 
   // library.list: the items, the newest first, without their clips.
@@ -3413,6 +3504,23 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
     {"time.parse", "project", false, "Convert any accepted time spelling to its canonical forms.",
      R"({"type":"object","properties":{"value":{"type":["string","object"],"description":"\"12.5s\", \"375@30\" (frames@rate), SMPTE \"00:00:12:15\" or {num,den} seconds"},"rate":{"type":"string"}},"required":["value"]})",
      &Impl::time_parse},
+    {"audio.analyze", "core", false,
+     "Where the beat is and how loud a sound is: bpm, the beat grid (first_beat and beats, in seconds of the file), confidence (3 and more is "
+     "clear; has_beat says whether there is one), and peak and RMS in dB. Pass path (the first two minutes, or from..to in seconds) or project "
+     "and clip (the part the clip plays). Use it to cut to the beat, to set a clip's speed to a song, and to check a mix's levels.",
+     R"({"type":"object","properties":{"path":{"type":"string","description":"A sound or video file"},
+       "project":{"type":"string","description":"With clip: path of the .attome project folder, or its prj_ ID"},"clip":{"type":"string"},
+       "from":{"type":"number","description":"Seconds"},"to":{"type":"number","description":"Seconds"},
+       "min_bpm":{"type":"number","description":"Default 80"},"max_bpm":{"type":"number","description":"Default 180"}}})",
+     &Impl::audio_analyze},
+    {"sfx.make", "core", true,
+     "Make a sound effect: whoosh (builds and lands on a cut), click, pop, riser (builds up to its end; seconds sets the length), impact. "
+     "Writes a 48 kHz stereo WAV: pass output (a file), or project to put it in the project and import it (asset_id comes back for "
+     "timeline.edit add_clip). seed makes the noise differ.",
+     R"({"type":"object","properties":{"kind":{"type":"string","enum":["whoosh","click","pop","riser","impact"]},"output":{"type":"string"},
+       "project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},"seed":{"type":"integer"},"seconds":{"type":"number"}},
+       "required":["kind"]})",
+     &Impl::sfx_make},
     {"media.remove", "core", true,
      "Take a file out of the project: every clip made from it (and the clips linked to them) is deleted, then the asset itself. "
      "Pass asset (its ast_ ID) or the file's path. A clip on a locked track stops it. Undo takes two steps: the clips, then the asset.",
