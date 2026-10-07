@@ -1784,8 +1784,17 @@ struct Engine::Impl {
       for (json &n : built.notes)
         notes.push_back(std::move(n));
     }
+    // The History says what was done: the first edit by name ("Add clip"), and how many more came with it.
+    std::string made_label = "Timeline edit";
+    if (!ops->empty() && ops->front().is_object() && ops->front().value("op", std::string()).size() > 0) {
+      made_label = ops->front().value("op", std::string());
+      std::replace(made_label.begin(), made_label.end(), '_', ' ');
+      made_label[0] = char(std::toupper(static_cast<unsigned char>(made_label[0])));
+      if (ops->size() > 1)
+        made_label += " and " + std::to_string(ops->size() - 1) + " more";
+    }
     json p = {{"project", params["project"]},
-              {"patch", {{"ops", std::move(all)}, {"label", params.value("label", "Timeline: " + std::to_string(ops->size()) + " op(s)")}}},
+              {"patch", {{"ops", std::move(all)}, {"label", params.value("label", made_label)}}},
               {"dry_run", params.value("dry_run", false)}};
     if (params.contains("task_id"))
       p["task_id"] = params["task_id"];

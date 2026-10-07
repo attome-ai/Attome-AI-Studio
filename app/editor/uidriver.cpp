@@ -57,6 +57,15 @@ void ui_mark(const std::string &id) {
   g_marks[id] = {ImRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax()), ImGui::GetCurrentWindow(), ImGui::GetFrameCount()};
 }
 
+void ui_mark_tab(const char *name) {
+  ImGuiWindow *w = ImGui::GetCurrentWindow();
+  if (!g_enabled || !w->DockIsActive && !w->DockNode) // not docked
+    return;
+  const ImRect tab = w->DC.DockTabItemRect;
+  if (tab.GetWidth() > 0.0f)
+    g_marks[std::string("dock:") + name] = {tab, nullptr, ImGui::GetFrameCount()};
+}
+
 struct UiDriver::Impl {
   struct Command {
     int line = 0;

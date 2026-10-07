@@ -6880,6 +6880,7 @@ void App::draw_timeline() {
   ImGui::PushStyleColor(ImGuiCol_WindowBg, hexv(look::panel));
   ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
   ImGui::Begin("Timeline", nullptr, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+  ui_mark_tab("Timeline");
   ImGui::PopStyleVar();
   ImGui::SetScrollY(0.0f); // the tool row stays in view; only the track area below it scrolls
   const float y0 = ImGui::GetCursorPosY(); // where the content starts, below the panel's tab bar
@@ -8776,6 +8777,7 @@ void App::draw_history() {
   // History and Profiler share the Timeline's dock. Appearing must not bring them to the front: a click in the first
   // frames, before they first appear, used to leave the Profiler in front of the Timeline.
   ImGui::Begin("History", nullptr, ImGuiWindowFlags_NoFocusOnAppearing);
+  ui_mark_tab("History");
   const std::string head = history_.contains("head") && history_["head"].is_string() ? history_["head"].get<std::string>() : "";
   if (!history_.contains("changesets") || history_["changesets"].empty()) {
     ImGui::TextDisabled("No edits yet.");
@@ -8814,6 +8816,7 @@ void App::draw_profiler() {
     local_profile_ = prof::snapshot();
   }
   ImGui::Begin("Profiler", &show_profiler_, ImGuiWindowFlags_NoFocusOnAppearing);
+  ui_mark_tab("Profiler");
   ImGui::TextColored(kAccent, "UI %.2f ms of work per frame", frame_ms_);
   ImGui::SameLine();
   ImGui::TextDisabled("| last daemon call %.3f ms", client_.last_call_ms());

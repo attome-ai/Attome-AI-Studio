@@ -49,7 +49,8 @@ json shot_workflow(const ModelDecl &model) {
     }
   inputs["seed"] = exposed_input("integer", "Seed", order++, gen, "seed");
 
-  json node = {{"kind", "attome.generate_video"}, {"model", model.id}};
+  // Where they sit: the model next to what feeds it, so the whole graph is no wider than a view at a size the text can be read.
+  json node = {{"kind", "attome.generate_video"}, {"model", model.id}, {"ui", {{"x", 0}, {"y", 40}}}};
   if (!settings.empty())
     node["settings"] = std::move(settings);
   // The size comes from the project (about 0.9 megapixels in the canvas's shape, as a model makes best), the length from
@@ -58,8 +59,8 @@ json shot_workflow(const ModelDecl &model) {
     return json{{"from", json::array({from, from_port})}, {"to", json::array({to, to_port})}};
   };
   json nodes = {{gen, std::move(node)},
-                {"$new:wf_project", {{"kind", "attome.project"}, {"settings", {{"pixels", kGenerationPixels}}}, {"ui", {{"x", -260}, {"y", 260}}}}},
-                {"$new:wf_clip", {{"kind", "attome.clip"}, {"ui", {{"x", -260}, {"y", 420}}}}}};
+                {"$new:wf_project", {{"kind", "attome.project"}, {"settings", {{"pixels", kGenerationPixels}}}, {"ui", {{"x", -400}, {"y", 60}}}}},
+                {"$new:wf_clip", {{"kind", "attome.clip"}, {"ui", {{"x", -400}, {"y", 200}}}}}};
   json links = {{"$new:l_width", link("$new:wf_project", "width", gen, "width")},
                 {"$new:l_height", link("$new:wf_project", "height", gen, "height")},
                 {"$new:l_seconds", link("$new:wf_clip", "duration", gen, "seconds")}};

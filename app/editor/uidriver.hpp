@@ -37,6 +37,8 @@ namespace atm::editor {
 
 // Records the last ImGui item under `id` for this frame. Cheap; does nothing unless a script runs.
 void ui_mark(const std::string &id);
+// The tab of the window being drawn, when it is docked with others: marked as "dock:<name>" so a script can click it.
+void ui_mark_tab(const char *name);
 
 class UiDriver {
 public:
