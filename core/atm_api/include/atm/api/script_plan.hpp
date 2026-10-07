@@ -18,4 +18,13 @@ using json = nlohmann::json;
 //          cuts, variables: [{name, value}], warnings: [{where, message}]} or {ok: false, error}.
 json plan(const json &spec);
 
+// script.apply: the on-screen text of a planned script, as timeline.edit ops. `plan` is the answer of plan(); `look` is data, all of it optional:
+//   captions: {style (pop | plain | box), size (0.07), y (0.72), color, emphasis_color, track, lead (0.12 s after the scene starts), tail (0.12 s before it ends)}
+//   labels:   {size (0.055), y (0.14), color ("#FFE600"), seconds (1.5), offset (0.1), extra: {anything add_text takes: font, shadow, outline, background, ...}}
+//   hook:     {text, seconds (3), size (0.075), y (0.27), color, extra}      an opening title over the first seconds
+//   cta:      {text, at (the end less seconds), seconds (2), size (0.075), y (0.4), color, extra}   a closing line
+// A scene with "voice_clip" (the ID of its voice clip) has its captions timed from what the voice reported; the others by their letters.
+// Returns {ok, ops, captions, labels} or {ok: false, error}.
+json text_ops(const json &plan, const json &look);
+
 } // namespace atm::api::script

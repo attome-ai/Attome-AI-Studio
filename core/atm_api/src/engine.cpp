@@ -1581,6 +1581,26 @@ struct Engine::Impl {
   // script.plan {scenes: [...], ...}: the script of a Short made exact; no project is read or changed.
   Result<json> script_plan(const json &params) { return script::plan(params); }
 
+  // script.apply {project, plan, look?, dry_run?}: the on-screen text of a planned script (captions for each scene, labels, an opening title, a closing line) in one
+  // timeline edit that Undo takes out. dry_run returns the ops without changing the project.
+  Result<json> script_apply(const json &params) {
+    ATM_PROFILE_SCOPE("api.script_apply");
+    if (!params.contains("plan"))
+      return bad_param("plan", "is required: the answer of script.plan");
+    json built = script::text_ops(params["plan"], params.value("look", json::object()));
+    if (!built.value("ok", false))
+      return bad_param("plan", built.value("error", std::string("is not a script plan")).c_str());
+    if (params.value("dry_run", false))
+      return built;
+    json edit = {{"project", params["project"]}, {"ops", built["ops"]}, {"label", "Script text"}};
+    if (params.contains("sequence"))
+      edit["sequence"] = params["sequence"];
+    ATM_TRY(json done, timeline_edit(edit));
+    done["captions"] = built["captions"];
+    done["labels"] = built["labels"];
+    return done;
+  }
+
   // The text tracks of a sequence: {track id, name, clips}, for subtitles.export to choose from.
   static std::vector<std::pair<std::string, std::string>> text_tracks_of(const json &sequence) {
     std::vector<std::pair<std::string, std::string>> found;
@@ -4231,6 +4251,16 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
        "target_words":{"type":"array","items":{"type":"integer"}},"target_seconds":{"type":"array","items":{"type":"number"}},"hook_max_seconds":{"type":"number"},"words_per_second":{"type":"number"},"voice_lead":{"type":"number"},"tail":{"type":"number"}},
        "required":["scenes"]})",
      &Impl::script_plan},
+    {"script.apply", "script", true,
+     "Put the on-screen text of a planned script on the timeline in one edit (Undo takes it out): a caption clip for each scene (one word at a time, key words in "
+     "colour; timed from the scene's voice_clip when it has one), a label at each scene's start, an opening title (hook) and a closing line (cta). Pass plan "
+     "(the answer of script.plan) and look: data for how it is drawn, all optional (captions {style, size, y, color, emphasis_color}, labels {size, y, color, "
+     "seconds, extra}, hook {text, seconds, size, y, color, extra}, cta {text, at, seconds, size, y, color, extra}; extra takes what add_text takes: font, shadow, "
+     "outline, background). dry_run returns the ops without changing the project.",
+     R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},
+       "plan":{"type":"object","description":"The answer of script.plan"},"look":{"type":"object"},"dry_run":{"type":"boolean"},"sequence":{"type":"string"}},
+       "required":["project","plan"]})",
+     &Impl::script_apply},
     {"voice.make", "voice", true,
      "Make the voice clips of a script: one clip for each line {text, at}, starting at `at` (seconds, or a time like 3.1s) on the first audio track "
      "that is free there, made with `model` (a speech model from gen.models) and, when given, `voice` and `speed`. Nothing is spoken yet: "

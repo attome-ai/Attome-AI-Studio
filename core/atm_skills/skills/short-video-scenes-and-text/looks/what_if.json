@@ -1,0 +1,7 @@
+{
+  "look": "The 'What If' Short: big bold white captions low on the picture with the key words in yellow, a yellow label at each scene start, a two-line hook over the first seconds and a yellow call to follow at the end. Pass it as `look` to script.apply and change what you like; it is only data.",
+  "captions": { "style": "pop", "size": 0.07, "y": 0.70, "emphasis_color": "#FFE600" },
+  "labels": { "size": 0.055, "y": 0.14, "color": "#FFE600", "seconds": 1.5, "extra": { "shadow": { "color": "#000000", "x": 0.0035, "y": 0.0035, "blur": 0.0, "opacity": 1.0 } } },
+  "hook": { "text": "WHAT IF YOU WERE\nINVISIBLE FOR\n24 HOURS?", "seconds": 3, "size": 0.075, "y": 0.27, "color": "#FFFFFF", "extra": { "shadow": { "color": "#000000", "x": 0.0035, "y": 0.0035, "blur": 0.0, "opacity": 1.0 } } },
+  "cta": { "text": "FOLLOW FOR MORE\nWHAT IFS!", "seconds": 2, "size": 0.075, "y": 0.40, "color": "#FFE600", "extra": { "shadow": { "color": "#000000", "x": 0.0035, "y": 0.0035, "blur": 0.0, "opacity": 1.0 } } }
+}

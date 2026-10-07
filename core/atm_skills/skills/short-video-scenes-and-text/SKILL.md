@@ -11,6 +11,8 @@ description: Build the Attome project for a Short - create the AI scene clips fr
 
 # Scenes and on-screen text
 
+**Tools first.** `script.plan` times the script; `script.apply {project, plan, look}` then puts the on-screen text on the timeline in one edit: captions for each scene (key words in colour, timed from the voice when a scene has `voice_clip`), a label at each scene start, an opening title (`hook`) and a closing line (`cta`). The look is data: `skill.get {id: "short-video-scenes-and-text", file: "looks/what_if.json"}` is the "What If" look; copy it and change the colours, sizes and positions. `dry_run: true` shows the ops without changing the project. The scripts below remain for the scene clips, motion, flashes, moods and transitions, which have no Tool yet.
+
 Prerequisites: `short-video-concept` done; ComfyUI up (`attome gen engines`); the repo built (`build\win-msvc-release\bin\attome.exe`).
 
 ```

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdio>
 #include <sstream>
 
 #include "atm/base/profiler.hpp"
@@ -146,6 +147,77 @@ json plan(const json &spec) {
   out["variables"] = std::move(variables);
   out["warnings"] = std::move(warnings);
   return out;
+}
+
+json text_ops(const json &plan, const json &look) {
+  ATM_PROFILE_SCOPE("script.text_ops");
+  if (!plan.is_object() || !plan.value("ok", false) || !plan.contains("scenes") || !plan["scenes"].is_array() || plan["scenes"].empty())
+    return {{"ok", false}, {"error", "plan must be the answer of script.plan (with its scenes)"}};
+  const json cap = look.value("captions", json::object()), lab = look.value("labels", json::object()), hook = look.value("hook", json::object()),
+             cta = look.value("cta", json::object());
+  const double lead = cap.value("lead", 0.12), tail = cap.value("tail", 0.12);
+  json ops = json::array();
+  int captions = 0, labels = 0;
+  const auto add_style = [](json &op, const json &extra) {
+    if (extra.is_object())
+      for (auto it = extra.begin(); it != extra.end(); ++it)
+        op[it.key()] = it.value();
+  };
+  const auto seconds_text = [](double s) {
+    char buf[32];
+    std::snprintf(buf, sizeof buf, "%.3fs", s);
+    return std::string(buf);
+  };
+  const bool has_hook = hook.contains("text") && hook["text"].is_string() && !hook["text"].get<std::string>().empty();
+  const bool has_cta = cta.contains("text") && cta["text"].is_string() && !cta["text"].get<std::string>().empty();
+  if (has_hook || has_cta) // over the captions and labels, on a track of their own: they may share a moment with a label
+    ops.push_back({{"op", "add_track"}, {"id", "$new:hooktrack"}, {"kind", "video"}, {"name", look.value("hook_track", std::string("Hook"))}});
+  double total = 0.0;
+  for (const json &scene : plan["scenes"]) {
+    total = std::max(total, scene.value("end", 0.0));
+    const double start = scene.value("start", 0.0), end = scene.value("end", start);
+    if (scene.contains("say") && scene["say"].is_string()) {
+      json op = {{"op", "add_captions"}, {"id", "$new:cap" + std::to_string(captions)}, {"style", cap.value("style", std::string("pop"))}};
+      if (scene.contains("voice_clip") && scene["voice_clip"].is_string()) {
+        op["clip"] = scene["voice_clip"];
+      } else {
+        op["text"] = scene["say"];
+        op["at"] = seconds_text(start + lead);
+        op["duration"] = seconds_text(std::max(0.2, end - start - lead - tail));
+      }
+      for (const char *k : {"size", "y", "color", "emphasis_color", "track"})
+        if (cap.contains(k))
+          op[k] = cap[k];
+      if (scene.contains("key_words") && scene["key_words"].is_array() && !scene["key_words"].empty())
+        op["emphasis"] = scene["key_words"];
+      ops.push_back(std::move(op));
+      ++captions;
+    }
+    if (scene.contains("label") && scene["label"].is_string() && !scene["label"].get<std::string>().empty()) {
+      json op = {{"op", "add_text"}, {"text", scene["label"]}, {"name", "Label"}, {"at", seconds_text(start + lab.value("offset", 0.1))},
+                 {"duration", seconds_text(lab.value("seconds", 1.5))}, {"size", lab.value("size", 0.055)},
+                 {"position", json::array({0.5, lab.value("y", 0.14)})}, {"color", lab.value("color", std::string("#FFE600"))}};
+      add_style(op, lab.value("extra", json::object()));
+      ops.push_back(std::move(op));
+      ++labels;
+    }
+  }
+  if (has_hook) {
+    json op = {{"op", "add_text"}, {"text", hook["text"]}, {"name", "Hook"}, {"at", "0s"}, {"duration", seconds_text(hook.value("seconds", 3.0))},
+               {"size", hook.value("size", 0.075)}, {"position", json::array({0.5, hook.value("y", 0.27)})}, {"color", hook.value("color", std::string("#FFFFFF"))},
+               {"track", "$new:hooktrack"}};
+    add_style(op, hook.value("extra", json::object()));
+    ops.push_back(std::move(op));
+  }
+  if (has_cta) {
+    const double secs = cta.value("seconds", 2.0);
+    json op = {{"op", "add_text"}, {"text", cta["text"]}, {"name", "Call to action"}, {"at", seconds_text(cta.value("at", std::max(0.0, total - secs)))},
+               {"duration", seconds_text(secs)}, {"size", cta.value("size", 0.075)}, {"position", json::array({0.5, cta.value("y", 0.4)})},
+               {"color", cta.value("color", std::string("#FFE600"))}, {"track", "$new:hooktrack"}};
+    add_style(op, cta.value("extra", json::object()));
+    ops.push_back(std::move(op));
+  }
+  return {{"ok", true}, {"ops", std::move(ops)}, {"captions", captions}, {"labels", labels}};
 }
 
 } // namespace atm::api::script
