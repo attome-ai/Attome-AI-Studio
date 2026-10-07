@@ -512,7 +512,12 @@ private:
   std::vector<std::string> media_paths_;
   std::set<std::string> opened_cards_; // "<clip id>:fade" and "<clip id>:transition": cards the user added before anything is set
   bool menu_seen_ = false; // a menu or popup was open when the shortcuts were last looked at
-  bool focus_prompt_ = false; // a generative clip was just added: its prompt box takes the keyboard
+  // Edits that a field makes when it loses the keyboard. They run before the frame's one action, so a click on another button in
+  // the same frame (Generate, say) does not take the place of the edit and lose what was typed.
+  std::function<void()> edit_pending_;
+  void commit_edit(std::function<void()> f);
+  void run_pending();
+  std::string focus_prompt_; // a generative clip was just added: its prompt (or a voice's words) box takes the keyboard
   bool assets_listed_ = false; // the project's own imported files are put in the media list once, when it is opened
   std::set<std::string> audio_only_; // media files without a picture
   char media_filter_[128] = {};

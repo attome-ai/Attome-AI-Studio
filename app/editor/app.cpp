@@ -731,6 +731,21 @@ const ClipUi *App::selected(const TrackUi **track) const {
 
 // ---- actions -------------------------------------------------------------------------------------------------
 
+void App::commit_edit(std::function<void()> f) {
+  edit_pending_ = [prev = std::move(edit_pending_), f = std::move(f)] {
+    if (prev)
+      prev();
+    f();
+  };
+}
+
+void App::run_pending() {
+  if (edit_pending_)
+    std::exchange(edit_pending_, nullptr)();
+  if (pending_)
+    std::exchange(pending_, nullptr)();
+}
+
 void App::add_track(bool audio) {
   json ids;
   // The next free name of its kind: V1, V2, ... for pictures, A1, A2, ... for sound.
@@ -2909,8 +2924,7 @@ void App::frame(double dt) {
     draw_workflows();
     draw_export();
     draw_toasts();
-    if (pending_)
-      std::exchange(pending_, nullptr)();
+    run_pending();
     frame_ms_ = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - frame_start).count();
     return;
   }
@@ -2944,9 +2958,7 @@ void App::frame(double dt) {
   static int frames_open = 0; // the bottom panel opens on the Timeline tab, once its windows exist
   if (++frames_open == 3)
     ImGui::SetWindowFocus("Timeline");
-  if (pending_) {
-    std::exchange(pending_, nullptr)();
-  }
+  run_pending();
   frame_ms_ = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - frame_start).count();
 }
 
@@ -4463,17 +4475,32 @@ void App::add_generative_clip(const std::string &model, const std::string &track
   if (!speech)
     params["seconds"] = std::round(gen_seconds_ * 2.0f) / 2.0f;
   params[model.rfind("cwf_", 0) == 0 ? "workflow" : "model"] = model; // a card of the library, or a model's own
-  if (!track.empty())
-    params["track"] = track;
-  if (at >= 0)
-    params["at"] = frames_text(at); // a place a clip already holds is moved right by the engine
+  std::string home = track;
+  int64_t start = at;
+  if (speech && track.empty() && at < 0) {
+    // A voice added from the panel goes under the picture, at the playhead: on a sound track that is free there, else on a new one
+    // (at the end of a track that holds the video's own sound it would speak after the film).
+    start = std::clamp<int64_t>(playhead_, 0, std::max<int64_t>(0, total_frames_));
+    const int64_t room = std::max<int64_t>(1, std::llround(2.0 * fps())); // how long it will be is not known before it is made
+    for (const TrackUi &t : tracks_)
+      if (home.empty() && t.kind == "audio" && !t.locked && free_start(t, start, room, {}) == start)
+        home = t.id;
+    if (home.empty()) {
+      add_track(true);
+      home = selected_track_;
+    }
+  }
+  if (!home.empty())
+    params["track"] = home;
+  if (start >= 0)
+    params["at"] = frames_text(start); // a place a clip already holds is moved right by the engine
   json made;
   if (!rpc("gen.create_clip", params, made))
     return;
   say("Add generative clip");
   refresh();
   selected_clip_ = made.value("clip", "");
-  focus_prompt_ = true; // the next thing to do is to write what it should make
+  focus_prompt_ = selected_clip_; // the next thing to do is to write what it should make
   insp_rev_ = 0;
 }
 
@@ -4993,10 +5020,10 @@ void App::draw_workflow_card(const ClipUi &c) {
   // The one edit of a value: add or replace, and a failed edit shows the stored value again.
   const auto put = [this, id, base, &have](const std::string &name, json value, const char *label) {
     const bool had = have.contains(name);
-    pending_ = [this, base, name, value, had, label] {
+    commit_edit([this, base, name, value, had, label] {
       if (!patch(json::array({{{"op", had ? "replace" : "add"}, {"path", base + name}, {"value", value}}}), label))
         insp_rev_ = 0;
-    };
+    });
   };
   bool starts_row = false;
   for (const gen::ExposedInput &e : rows)
@@ -5153,9 +5180,9 @@ void App::draw_workflow_card(const ClipUi &c) {
       }
     } else if (e.name == "prompt" && multi) { // the prompt: a box of its own, as before
       const float box_h = std::clamp(ImGui::CalcTextSize(prompt_buf_, nullptr, false, ImGui::GetContentRegionAvail().x - 18.0f).y + 20.0f, 76.0f, 300.0f);
-      if (focus_prompt_) {
+      if (!focus_prompt_.empty() && focus_prompt_ == id) {
         ImGui::SetKeyboardFocusHere();
-        focus_prompt_ = false;
+        focus_prompt_.clear();
       }
       ImGui::InputTextMultiline("##prompt", prompt_buf_, sizeof prompt_buf_, ImVec2(-1.0f, box_h), ImGuiInputTextFlags_WordWrap);
       ui_mark("field:prompt");
@@ -5167,10 +5194,10 @@ void App::draw_workflow_card(const ClipUi &c) {
         live_commit_ = nullptr;
       if (ImGui::IsItemDeactivatedAfterEdit() && c.prompt != prompt_buf_) {
         const std::string value = prompt_buf_;
-        pending_ = [this, id, value, has = have.contains("prompt")] {
+        commit_edit([this, id, value, has = have.contains("prompt")] {
           if (!patch(json::array({{{"op", has ? "replace" : "add"}, {"path", id + "/media_ref/inputs/prompt"}, {"value", value}}}), "Edit prompt"))
             insp_rev_ = 0;
-        };
+        });
       }
       draw_variable_hints(std::string(prompt_buf_), [&](const std::string &name) { // a chip adds {name} to the prompt
         pending_ = [this, id, name, text = std::string(prompt_buf_), has = have.contains("prompt")] {
@@ -5184,6 +5211,10 @@ void App::draw_workflow_card(const ClipUi &c) {
       if (wf_editing_ != "in:" + key)
         copy_to(buf.data(), buf.size(), now.is_string() ? now.get<std::string>() : std::string());
       const float text_h = std::clamp(ImGui::CalcTextSize(buf.data(), nullptr, false, ImGui::GetContentRegionAvail().x - 18.0f).y + 20.0f, 56.0f, 240.0f);
+      if (!focus_prompt_.empty() && focus_prompt_ == id && e.name == "text") { // a voice: what it says
+        ImGui::SetKeyboardFocusHere();
+        focus_prompt_.clear();
+      }
       ImGui::InputTextMultiline("##t", buf.data(), buf.size(), ImVec2(-1.0f, text_h), ImGuiInputTextFlags_WordWrap);
       ui_mark("field:input_" + e.name);
       if (ImGui::IsItemActive()) {
@@ -8130,10 +8161,10 @@ void App::draw_inspector() {
       live_commit_ = nullptr;
       const std::string value = buffer;
       const std::string p = path;
-      pending_ = [this, id, p, value, what] {
+      commit_edit([this, id, p, value, what] {
         if (!patch(json::array({{{"op", "replace"}, {"path", id + p}, {"value", value}}}), what))
           insp_rev_ = 0; // show the stored value again
-      };
+      });
     }
   };
   if (begin_card("##clip", "Clip", track->name.c_str())) {
@@ -8287,9 +8318,16 @@ void App::draw_inspector() {
                   say("Captions made on the Captions track, one clip for each sentence. Edit a caption's look in its Text card.", false, true);
               };
           };
+          const json *words_in = clip_json(cid);
+          const json spoken = words_in ? words_in->value("media_ref", json::object()).value("inputs", json::object()).value("text", json()) : json();
+          const bool has_words = spoken.is_string() && spoken.get<std::string>().find_first_not_of(' ') != std::string::npos;
+          ImGui::BeginDisabled(!has_words);
           make("pop", "Make captions");
           ImGui::SameLine(0.0f, 6.0f);
           make("box", "With a box");
+          ImGui::EndDisabled();
+          if (!has_words)
+            ImGui::TextColored(hexv(look::fg3), "Write what the voice says first, above.");
         }
       }
       end_card();
@@ -8769,8 +8807,7 @@ void App::draw_welcome() {
     ImGui::EndTable();
   }
   ImGui::End();
-  if (pending_)
-    std::exchange(pending_, nullptr)();
+  run_pending();
 }
 
 void App::draw_history() {
