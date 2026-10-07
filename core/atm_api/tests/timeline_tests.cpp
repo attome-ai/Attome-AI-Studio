@@ -770,3 +770,72 @@ TEST_CASE("timeline.edit set_property sets a field that is not there yet, and nu
   CHECK(f.get(t)["content"]["color"] == "#ff0000");
   CHECK(f.engine.call("project.validate", {{"project", f.project}})->at("ok") == true);
 }
+
+TEST_CASE("edl.export and edl.import take a cut to a cut list and back, with a speed and a missing file", "[timeline][edl][parity]") {
+  Fixture f;
+  const std::string file = (f.dir / "beach.mp4").string();
+  write_video(file, 4);
+  const json r = f.ok(json::array({{{"op", "add_clip"}, {"id", "$new:a"}, {"path", file}, {"at", "0s"}, {"duration", "2s"}},
+                                   {{"op", "add_clip"}, {"id", "$new:b"}, {"path", file}, {"at", "3s"}, {"source_in", "1s"}, {"duration", "2s"}},
+                                   {{"op", "add_text"}, {"text", "Not a file"}, {"at", "1s"}, {"duration", "1s"}}}));
+  const std::string b = r["id_map"]["$new:b"];
+  f.ok(json::array({{{"op", "set_speed"}, {"clip", b}, {"speed", 2.0}}}));
+  const std::string out = (f.dir / "cut.edl").string();
+  const auto ex = f.engine.call("edl.export", {{"project", f.project}, {"output", out}});
+  INFO((ex ? "" : ex.error().message + " | " + ex.error().hint));
+  REQUIRE(ex);
+  CHECK(ex->at("events") == 2);
+  CHECK(ex->at("with_speed") == 1);
+  CHECK(ex->at("fps") == 30);
+  std::ifstream in(out, std::ios::binary);
+  const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  CHECK(text.find("001  BEACH") != std::string::npos);
+  CHECK(text.find("01:00:00:00") != std::string::npos);
+  CHECK(text.find("* FROM CLIP NAME: beach.mp4") != std::string::npos);
+  CHECK(text.find("M2   BEACH") != std::string::npos);
+  CHECK(text.find("00:00:01:00 00:00:03:00 01:00:03:00") != std::string::npos); // the second clip reads 1 s to 3 s of the file at 2x
+  CHECK(text.find("Not a file") == std::string::npos);
+
+  // Into a new project, the file found in media_dir by the clip name; the film starts at zero again.
+  const std::string other = (f.dir / "Other.attome").string();
+  REQUIRE(f.engine.call("project.create", {{"path", other}}));
+  const auto missing = f.engine.call("edl.import", {{"project", other}, {"path", out}});
+  REQUIRE_FALSE(missing);
+  CHECK(missing.error().rule == "E_EDL_MEDIA");
+  CHECK(missing.error().message.find("beach.mp4") != std::string::npos);
+  const auto imp = f.engine.call("edl.import", {{"project", other}, {"path", out}, {"media_dir", f.dir.string()}});
+  INFO((imp ? "" : imp.error().message + " | " + imp.error().hint));
+  REQUIRE(imp);
+  CHECK(imp->at("clips") == 2);
+  CHECK(f.engine.call("project.validate", {{"project", other}})->at("ok") == true);
+  const json tracks = f.engine.call("project.inspect", {{"project", other}, {"level", "tracks"}})->at("data")["sequences"][0]["tracks"];
+  std::vector<json> clips;
+  for (const json &t : tracks)
+    if (t["kind"] == "video")
+      for (const json &c : t["clip_list"])
+        clips.push_back(c);
+  REQUIRE(clips.size() == 2);
+  std::sort(clips.begin(), clips.end(), [](const json &x, const json &y) {
+    const auto s = [](const std::string &t) { return t.find('/') == std::string::npos ? std::stod(t) : std::stod(t.substr(0, t.find('/'))) / std::stod(t.substr(t.find('/') + 1)); };
+    return s(x["record_in"]) < s(y["record_in"]);
+  });
+  const auto seconds = [](const std::string &t) { return t.find('/') == std::string::npos ? std::stod(t) : std::stod(t.substr(0, t.find('/'))) / std::stod(t.substr(t.find('/') + 1)); };
+  CHECK(seconds(clips[0]["record_in"]) == Catch::Approx(0.0).margin(0.001));
+  CHECK(seconds(clips[0]["duration"]) == Catch::Approx(2.0).margin(0.04));
+  CHECK(seconds(clips[1]["record_in"]) == Catch::Approx(3.0).margin(0.001));
+  CHECK(seconds(clips[1]["duration"]) == Catch::Approx(1.0).margin(0.04)); // 2 s of film at 2x is 1 s of the file... as the project has it
+  const std::string second = clips[1]["id"];
+  const json imported_clip = f.engine.call("project.get", {{"project", other}, {"id", second}})->at("object");
+  INFO(text << imported_clip.dump());
+  CHECK(imported_clip["timing"]["speed"] == 2.0);
+  CHECK(seconds(imported_clip["timing"]["source_in"].get<std::string>()) == Catch::Approx(0.5).margin(0.001)); // film time: 1 s of the file at 2x
+  // Undo takes the whole import out; a list with a wrong rate is still a list.
+  REQUIRE(f.engine.call("project.undo", {{"project", other}}));
+  size_t left = 0;
+  for (const json &t : f.engine.call("project.inspect", {{"project", other}, {"level", "tracks"}})->at("data")["sequences"][0]["tracks"])
+    left += t["clips"].get<size_t>();
+  CHECK(left == 0);
+  CHECK_FALSE(f.engine.call("edl.export", {{"project", other}, {"output", out}})); // no clips to write
+  CHECK_FALSE(f.engine.call("edl.export", {{"project", f.project}, {"output", out}, {"tracks", json::array({"Nowhere"})}}));
+  (void)f.engine.call("project.close", {{"project", other}});
+}

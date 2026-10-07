@@ -1,6 +1,7 @@
 #include "atm/api/engine.hpp"
 #include "atm/api/audio_tools.hpp"
 #include "atm/api/script_plan.hpp"
+#include "atm/api/edl.hpp"
 #include "atm/api/subtitles.hpp"
 #include <functional>
 #include "atm/api/gen_comfy.hpp"
@@ -1647,6 +1648,247 @@ struct Engine::Impl {
     done["format"] = parsed.format;
     done["cut_short"] = cut_short;
     done["skipped"] = parsed.skipped;
+    return done;
+  }
+
+  // The rate of a sequence as frames a second (nominal, 30 for 29.97) and whether it is a drop-frame rate.
+  struct EdlRate {
+    Rational rate;
+    int fps = 30;
+    bool drop = false;
+  };
+  Result<EdlRate> edl_rate(const json &sequence, const json &params) const {
+    ATM_TRY(Rational rate, Rational::parse(sequence.value("rate", std::string("30"))));
+    EdlRate r;
+    r.rate = rate;
+    r.fps = std::max(1, int(std::llround(rate.to_seconds_lossy() == 0.0 ? 30.0 : double(rate.num()) / double(rate.den()))));
+    r.drop = params.contains("drop") && params["drop"].is_boolean() ? params["drop"].get<bool>() : (rate.den() == 1001 && (r.fps == 30 || r.fps == 60));
+    return r;
+  }
+
+  static std::string edl_reel_of(const std::string &file_name) { // up to eight letters and digits of the file's name, upper case
+    std::string reel;
+    for (const unsigned char c : fs::path(std::u8string(file_name.begin(), file_name.end())).stem().string())
+      if (std::isalnum(c) && reel.size() < 8)
+        reel += char(std::toupper(c));
+    return reel.empty() ? "AX" : reel;
+  }
+
+  // edl.export {project, output, tracks? (names or IDs; default the first picture track), title?, start? ("01:00:00:00"), drop?, sequence?}: the clips of
+  // the tracks as a CMX 3600 cut list, one event for each clip of a file, in time order, as cuts. The source time of a file starts at 00:00:00:00.
+  // Clips that are not made from a file (text, adjustment layers, generated clips) are left out and named in `left_out`; transitions are not written.
+  Result<json> edl_export(const json &params) {
+    ATM_PROFILE_SCOPE("api.edl_export");
+    ATM_TRY(Project *pr, project(params));
+    const std::string output = params.value("output", std::string());
+    if (output.empty())
+      return bad_param("output", "is required: the .edl file to write");
+    const json &root = pr->doc.root();
+    std::string seq = params.value("sequence", std::string());
+    if (seq.empty() && root.contains("sequence_order") && !root["sequence_order"].empty())
+      seq = root["sequence_order"][0].get<std::string>();
+    if (!root.contains("sequences") || !root["sequences"].contains(seq))
+      return fail(ErrorCode::NotFound, "R_NO_SEQUENCE", "The project has no sequence \"" + seq + "\".");
+    const json &sequence = root["sequences"][seq];
+    ATM_TRY(EdlRate er, edl_rate(sequence, params));
+    const int64_t start_frames = edl::frames_of(params.value("start", std::string("01:00:00:00")), er.fps, er.drop);
+    if (start_frames < 0)
+      return bad_param("start", "is not a timecode like 01:00:00:00");
+    std::vector<std::string> wanted;
+    if (params.contains("tracks") && params["tracks"].is_array())
+      for (const json &t : params["tracks"])
+        if (t.is_string())
+          wanted.push_back(t.get<std::string>());
+    std::vector<std::string> track_ids;
+    const json order = sequence.value("track_order", json::array());
+    const json tracks = sequence.value("tracks", json::object());
+    if (wanted.empty()) {
+      for (const json &tid : order) { // the lowest picture track that holds clips of files
+        const auto t = tracks.find(tid.get<std::string>());
+        if (t != tracks.end() && t->value("kind", std::string()) == "video" && t->contains("clips") && !(*t)["clips"].empty() &&
+            t->value("name", std::string()) != "Titles" && t->value("name", std::string()) != "Effects" && track_ids.empty())
+          track_ids.push_back(tid.get<std::string>());
+      }
+      if (track_ids.empty())
+        return fail(ErrorCode::NotFound, "E_NO_TRACK", "There is no picture track with clips to write.", "Pass tracks: names or IDs.");
+    } else {
+      for (const std::string &w : wanted) {
+        std::string found;
+        for (const json &tid : order) {
+          const auto t = tracks.find(tid.get<std::string>());
+          if (t != tracks.end() && (tid.get<std::string>() == w || t->value("name", std::string()) == w))
+            found = tid.get<std::string>();
+        }
+        if (found.empty())
+          return fail(ErrorCode::NotFound, "E_NO_TRACK", "There is no track \"" + w + "\".", "project.inspect level \"tracks\" lists them.");
+        track_ids.push_back(found);
+      }
+    }
+    edl::List list;
+    list.title = params.value("title", pr->doc.root().value("name", std::string("Untitled")));
+    list.fps = er.fps;
+    list.drop = er.drop;
+    json left_out = json::array();
+    int number = 0, with_speed = 0;
+    const auto frames = [&](const Rational &r) { return int64_t(std::llround(r.to_seconds_lossy() * double(er.rate.num()) / double(er.rate.den()))); };
+    for (const std::string &tid : track_ids) {
+      const json &track = tracks[tid];
+      const bool sound = track.value("kind", std::string()) == "audio";
+      std::vector<std::pair<int64_t, edl::Event>> events;
+      const json track_clips = track.value("clips", json::object()); // kept: items() of a temporary would dangle
+      for (const auto &[cid, c] : track_clips.items()) {
+        const json ref = c.value("media_ref", json::object());
+        const std::string type = ref.value("type", std::string());
+        const std::string file = ref.value("path", std::string());
+        if ((type != "file" && type != "image") || file.empty()) {
+          left_out.push_back(c.value("name", cid));
+          continue;
+        }
+        const json timing = c.value("timing", json::object());
+        const Rational in = Rational::parse(timing.value("record_in", std::string("0"))).value_or(Rational());
+        const Rational dur = Rational::parse(timing.value("duration", std::string("0"))).value_or(Rational());
+        const Rational source_in = Rational::parse(timing.value("source_in", std::string("0"))).value_or(Rational());
+        const double speed = timing.contains("speed") && timing["speed"].is_number() ? timing["speed"].get<double>() : 1.0;
+        edl::Event e;
+        e.reel = edl_reel_of(file);
+        e.kind = sound ? "AA" : "V";
+        e.clip_name = to_utf8(fs::path(std::u8string(file.begin(), file.end())).filename());
+        e.rec_in = start_frames + frames(in);
+        e.rec_out = start_frames + frames(add(in, dur).value_or(in));
+        e.src_in = int64_t(std::llround(source_in.to_seconds_lossy() * speed * double(er.rate.num()) / double(er.rate.den()))); // source_in is in film time: the file is read at `speed` times that
+        e.src_out = e.src_in + std::max<int64_t>(1, int64_t(std::llround(double(e.rec_out - e.rec_in) * speed)));
+        e.speed = speed;
+        with_speed += speed != 1.0 ? 1 : 0;
+        events.emplace_back(e.rec_in, std::move(e));
+      }
+      std::sort(events.begin(), events.end(), [](const auto &a, const auto &b) { return a.first < b.first; });
+      for (auto &[at, e] : events) {
+        e.number = ++number;
+        list.events.push_back(std::move(e));
+      }
+    }
+    if (list.events.empty())
+      return fail(ErrorCode::NotFound, "E_NO_EVENTS", "The tracks have no clips made from files, so there is nothing to write.");
+    fs::path out_path = to_path(output);
+    std::error_code ec;
+    if (out_path.has_parent_path())
+      fs::create_directories(out_path.parent_path(), ec);
+    ATM_CHECK(storage::atomic_write(out_path, edl::format(list)));
+    return json{{"output", output}, {"events", list.events.size()}, {"fps", er.fps}, {"drop_frame", er.drop}, {"with_speed", with_speed}, {"left_out", std::move(left_out)}};
+  }
+
+  // edl.import {project, path, media? {name or reel: file}, media_dir?, start? ("01:00:00:00"), source_start? ("00:00:00:00"), drop?, fps?, sequence?}: the events of a
+  // CMX 3600 list become clips, in one edit (Undo takes them all out). Each event's file is found by its clip name (or reel) in `media`, in the project's assets,
+  // or in media_dir. If any file is missing nothing is changed and the answer names them. Events for sound only are used for sound files; for a video file they
+  // are left out (its own sound comes with its picture) and counted.
+  Result<json> edl_import(const json &params) {
+    ATM_PROFILE_SCOPE("api.edl_import");
+    ATM_TRY(Project *pr, project(params));
+    const std::string path = params.value("path", std::string());
+    if (path.empty())
+      return bad_param("path", "is required: the .edl file to read");
+    const auto text = storage::read_file(to_path(path));
+    if (!text)
+      return fail(ErrorCode::NotFound, "E_NO_FILE", "Could not read \"" + path + "\".", "Check that the file exists.");
+    const json &root = pr->doc.root();
+    std::string seq = params.value("sequence", std::string());
+    if (seq.empty() && root.contains("sequence_order") && !root["sequence_order"].empty())
+      seq = root["sequence_order"][0].get<std::string>();
+    if (!root.contains("sequences") || !root["sequences"].contains(seq))
+      return fail(ErrorCode::NotFound, "R_NO_SEQUENCE", "The project has no sequence \"" + seq + "\".");
+    ATM_TRY(EdlRate er, edl_rate(root["sequences"][seq], params));
+    if (params.contains("fps") && params["fps"].is_number_integer())
+      er.fps = params["fps"].get<int>();
+    ATM_TRY(edl::List list, edl::parse(*text, er.fps, er.drop));
+    const int64_t start_frames = edl::frames_of(params.value("start", std::string("01:00:00:00")), er.fps, list.drop);
+    const int64_t source_start = edl::frames_of(params.value("source_start", std::string("00:00:00:00")), er.fps, list.drop);
+    if (start_frames < 0 || source_start < 0)
+      return bad_param("start", "and source_start must be timecodes like 01:00:00:00");
+    const int64_t first_rec = std::min_element(list.events.begin(), list.events.end(), [](const edl::Event &a, const edl::Event &b) { return a.rec_in < b.rec_in; })->rec_in;
+    const int64_t shift = first_rec >= start_frames ? start_frames : 0; // a list that starts at one hour starts the film at zero
+    const json media = params.value("media", json::object());
+    const std::string media_dir = params.value("media_dir", std::string());
+    const json assets = root.contains("assets") ? root["assets"] : json::object();
+    const auto stem_of = [](const std::string &name) { return fs::path(std::u8string(name.begin(), name.end())).stem().string(); };
+    const auto lower = [](std::string s) {
+      std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+      return s;
+    };
+    const auto find_file = [&](const edl::Event &e) -> std::string {
+      for (const std::string &key : {e.clip_name, e.reel})
+        if (!key.empty() && media.contains(key) && media[key].is_string())
+          return media[key].get<std::string>();
+      for (const std::string &key : {e.clip_name, e.reel}) {
+        if (key.empty())
+          continue;
+        std::error_code ec;
+        if (fs::path(std::u8string(key.begin(), key.end())).is_absolute() && fs::is_regular_file(to_path(key), ec))
+          return key;
+        for (auto a = assets.begin(); a != assets.end(); ++a)
+          if (a->is_object()) {
+            const std::string p = a->value("path", std::string()), n = a->value("name", std::string());
+            if (lower(n) == lower(key) || lower(stem_of(n)) == lower(stem_of(key)))
+              return p;
+          }
+        if (!media_dir.empty())
+          for (const auto &entry : fs::directory_iterator(to_path(media_dir), ec))
+            if (entry.is_regular_file(ec) && (lower(to_utf8(entry.path().filename())) == lower(key) || lower(stem_of(to_utf8(entry.path().filename()))) == lower(stem_of(key))))
+              return to_utf8(entry.path());
+      }
+      return {};
+    };
+    std::map<std::string, std::string> files; // the name of an event's file -> where it is
+    json missing = json::array();
+    std::set<std::string> missing_seen;
+    for (const edl::Event &e : list.events) {
+      const std::string key = e.clip_name.empty() ? e.reel : e.clip_name;
+      if (files.count(key) || missing_seen.count(key))
+        continue;
+      const std::string file = find_file(e);
+      if (file.empty()) {
+        missing_seen.insert(key);
+        missing.push_back(key);
+      } else {
+        files[key] = file;
+      }
+    }
+    if (!missing.empty())
+      return fail(ErrorCode::NotFound, "E_EDL_MEDIA", "The list names " + std::to_string(missing.size()) + " file(s) that were not found: " + missing.dump() + ".",
+                  "Pass media {name: file} or media_dir, or import the files into the project first (their names are matched). Nothing was changed.");
+    const auto seconds = [&](int64_t frames) { return Rational::make(frames * er.rate.den(), er.rate.num()).value_or(Rational()).to_string(); };
+    json ops = json::array();
+    int left_out_audio = 0, n = 0;
+    std::set<std::string> video_files;
+    for (const edl::Event &e : list.events) {
+      const std::string key = e.clip_name.empty() ? e.reel : e.clip_name;
+      const std::string &file = files[key];
+      const bool sound_only = e.kind == "A" || e.kind == "AA" || e.kind == "A2" || e.kind == "NONE";
+      bool has_video = false;
+      if (auto info = media_probe({{"path", file}}); info)
+        has_video = info->value("has_video", false);
+      if (sound_only && has_video) {
+        ++left_out_audio;
+        continue;
+      }
+      const int64_t length = e.src_out - e.src_in;
+      const int64_t rec_length = e.rec_out - e.rec_in;
+      if (length <= 0 || rec_length <= 0)
+        continue;
+      const std::string id = "$new:e" + std::to_string(n++);
+      ops.push_back({{"op", "add_clip"}, {"id", id}, {"path", file}, {"at", seconds(e.rec_in - shift)}, {"source_in", seconds(std::max<int64_t>(0, e.src_in - source_start))},
+                     {"duration", seconds(length)}, {"with_audio", e.kind != "V"}});
+      if (std::fabs(e.speed - 1.0) > 0.001)
+        ops.push_back({{"op", "set_speed"}, {"clip", id}, {"speed", e.speed}});
+    }
+    if (ops.empty())
+      return fail(ErrorCode::InvalidArgument, "E_EDL", "None of the events could be used.");
+    json edit = {{"project", params["project"]}, {"ops", std::move(ops)}, {"label", "Import EDL"}, {"sequence", seq}};
+    ATM_TRY(json done, timeline_edit(edit));
+    done["events"] = list.events.size();
+    done["clips"] = n;
+    done["drop_frame"] = list.drop;
+    done["sound_events_left_out"] = left_out_audio;
+    done["skipped"] = list.skipped;
     return done;
   }
 
@@ -3849,6 +4091,26 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
     {"time.parse", "project", false, "Convert any accepted time spelling to its canonical forms.",
      R"({"type":"object","properties":{"value":{"type":["string","object"],"description":"\"12.5s\", \"375@30\" (frames@rate), SMPTE \"00:00:12:15\" or {num,den} seconds"},"rate":{"type":"string"}},"required":["value"]})",
      &Impl::time_parse},
+    {"edl.export", "edl", true,
+     "Write a track's clips as a CMX 3600 cut list, which other editors read: one cut event for each clip made from a file, with its reel (from the "
+     "file's name), source range, record range and clip name; a clip with a speed gets an M2 line. Timecode is non-drop-frame, or drop-frame for 29.97 and "
+     "59.94; the film starts at `start` (01:00:00:00). tracks (names or IDs) default to the lowest picture track with clips; an audio track is written as AA "
+     "events. Text, adjustment layers and generated clips are left out (named in left_out), and transitions are not written.",
+     R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},
+       "output":{"type":"string","description":"The .edl file to write"},"tracks":{"type":"array","items":{"type":"string"}},"title":{"type":"string"},
+       "start":{"type":"string","description":"Timecode of the first frame of the film, default 01:00:00:00"},"drop":{"type":"boolean"},"sequence":{"type":"string"}},
+       "required":["project","output"]})",
+     &Impl::edl_export},
+    {"edl.import", "edl", true,
+     "Read a CMX 3600 cut list into the project: each event becomes a clip of its file at its record time, with its source range and speed, all in one edit "
+     "(Undo takes them out). The file of an event is found by its clip name (the `* FROM CLIP NAME:` line) or reel in `media` {name: file}, in the "
+     "project's imported media, or in media_dir. If any file is missing nothing is changed and the answer names them. A list that starts at start "
+     "(01:00:00:00) starts the film at zero. Sound-only events for a file that has a picture are left out and counted (its sound comes with it).",
+     R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},
+       "path":{"type":"string","description":"The .edl file"},"media":{"type":"object","additionalProperties":{"type":"string"}},"media_dir":{"type":"string"},
+       "start":{"type":"string"},"source_start":{"type":"string","description":"Timecode of the first frame of the files, default 00:00:00:00"},
+       "drop":{"type":"boolean"},"fps":{"type":"integer"},"sequence":{"type":"string"}},"required":["project","path"]})",
+     &Impl::edl_import},
     {"subtitles.export", "subtitles", true,
      "Write the text clips of a track as a subtitle file (SRT or WebVTT, by the extension or format): one cue for each clip, from its start to its end. "
      "Without track it takes the one named Subtitles, else Captions. offset (seconds) shifts every cue.",
