@@ -31,6 +31,8 @@ public:
   void set_effect_param(const std::string &effect_id, int param, float value);
   void set_opacity(const std::string &clip_id, float opacity);
   void set_text_style(const std::string &clip_id, float size, uint32_t color);
+  void set_text(const std::string &clip_id, const std::string &text);
+  void show_composition(render::Composition composition); // a version of the film while a value is dragged (the decoders stay open)
 
   // Hands over the newest finished NV12 picture when there is one the caller has not seen. Returns false otherwise.
   bool take(std::vector<uint8_t> &nv12, int &width, int &height, int64_t &frame, std::string &warning);

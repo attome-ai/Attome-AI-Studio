@@ -173,6 +173,9 @@ public:
   void set_effect_param(const std::string &effect_id, int param, float value);
   void set_opacity(const std::string &clip_id, float opacity);
   void set_text_style(const std::string &clip_id, float size, uint32_t color);
+  void set_text(const std::string &clip_id, const std::string &text);
+  // Another version of the same composition (a value being dragged): the decoders and the stills that are open stay open, so it is cheap.
+  void replace_composition(Composition composition); // the words of a text clip, while they are typed (its timed words are not shown)
 
 private:
   Composition comp_;

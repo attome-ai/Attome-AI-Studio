@@ -332,6 +332,18 @@ private:
   bool rename_focus_ = false;
   void delete_track(const std::string &track_id);
   void freeze_frame(); // the selected video (or the picture of the selected sound) holds the frame at the playhead for 2 s
+  void select_nothing(); // a click on empty space: no clip, no media card
+  // While a value is dragged: the edit it would make, shown in the Monitor at once (the project is not changed until the value is let go).
+  // `ops` are the patch ops the release will send.
+  void preview_ops(const json &ops);
+  json speed_preview_ops(const ClipUi &c, float speed) const; // what set_speed would do to the clip, its linked and side-by-side sound
+  double last_live_ = -1.0;
+  // While a speed is dragged: the speed each clip will have, so the timeline draws the lengths it will have at once (and the clips after
+  // it where they will be pushed to). Cleared when nothing is dragged.
+  std::map<std::string, float> live_speed_;
+  bool insp_dur_live_ = false; // the Duration field shows the length a dragged speed will give
+  int64_t live_frames(const ClipUi &c) const; // its length as drawn now
+  void draw_multi_card(); // several clips selected: what they share, set on all of them
   std::set<std::string> picked_;      // every selected clip when there are several (it includes selected_clip_); empty for one or none
   struct Snap { // a clip as Copy took it
     json clip;
@@ -476,6 +488,8 @@ private:
   std::string mon_edit_;                     // the text clip whose words are being typed on the picture (a double click on it)
   char mon_edit_buf_[1024] = {};
   bool mon_edit_focus_ = false;
+  std::string mon_edit_was_;                 // the buffer the frame before: a plain Enter shows as one new line break in it
+  std::vector<std::string> partner_of(const std::string &clip_id) const; // see the .cpp
   int mon_crop_side_ = -1;                   // a side of the selected clip being cropped in the Monitor: 0 left, 1 top, 2 right, 3 bottom
   float mon_crop_[4] = {};                   // its crop while the side is dragged (left, top, right, bottom)
   bool mon_scaling_ = false;                 // a corner handle of the selected clip is being dragged in the Monitor

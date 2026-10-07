@@ -803,6 +803,19 @@ void Renderer::set_opacity(const std::string &clip_id, float opacity) {
     }
 }
 
+void Renderer::replace_composition(Composition composition) {
+  comp_ = std::move(composition);
+  back_.clear(); // the frames kept for a clip played backwards belong to its old timing
+}
+
+void Renderer::set_text(const std::string &clip_id, const std::string &text) {
+  for (Layer &l : comp_.layers)
+    if (l.clip_id == clip_id && l.is_text) {
+      l.text = text;
+      l.words.clear();
+    }
+}
+
 void Renderer::set_text_style(const std::string &clip_id, float size, uint32_t color) {
   for (Layer &l : comp_.layers)
     if (l.clip_id == clip_id && l.is_text) {

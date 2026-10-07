@@ -60,6 +60,15 @@ void Preview::set_opacity(const std::string &clip_id, float opacity) {
   live([clip_id, opacity](render::Renderer &r) { r.set_opacity(clip_id, opacity); });
 }
 
+void Preview::show_composition(render::Composition composition) {
+  auto shared = std::make_shared<render::Composition>(std::move(composition));
+  live([shared](render::Renderer &r) { r.replace_composition(std::move(*shared)); });
+}
+
+void Preview::set_text(const std::string &clip_id, const std::string &text) {
+  live([clip_id, text](render::Renderer &r) { r.set_text(clip_id, text); });
+}
+
 void Preview::set_text_style(const std::string &clip_id, float size, uint32_t color) {
   live([clip_id, size, color](render::Renderer &r) { r.set_text_style(clip_id, size, color); });
 }

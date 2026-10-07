@@ -1130,6 +1130,12 @@ void App::draw_clip_menu(const ClipUi &c) {
   if (count == 1) { // what is otherwise only in the Inspector
     const std::string id = c.id;
     const bool sound = home && home->kind == "audio";
+    if (const auto loose = partner_of(c.id); !loose.empty() && menu_item(sound ? "Link with its picture" : "Link with its sound", nullptr, false, !locked)) {
+      json ids = json::array({id});
+      for (const std::string &o : loose)
+        ids.push_back(o);
+      pending_ = [this, ids] { timeline_edit(json::array({{{"op", "link"}, {"clips", ids}}}), "Link"); };
+    }
     if (!c.link_group.empty() && menu_item(sound ? "Unlink from its picture" : "Unlink from its sound", nullptr, false, !locked))
       pending_ = [this, id] {
         json result;
@@ -2131,7 +2137,7 @@ void App::shortcuts() {
   }
   if (ImGui::IsKeyPressed(ImGuiKey_Space, false))
     play(!playing_);
-  if (ImGui::IsKeyPressed(ImGuiKey_Delete, false))
+  if (ImGui::IsKeyPressed(ImGuiKey_Delete, false) || ImGui::IsKeyPressed(ImGuiKey_Backspace, false))
     delete_selected();
   if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_C, false))
     copy_picked(false);
@@ -2775,6 +2781,8 @@ void App::frame(double dt) {
   take_dialog_results();
   poll(clock_);
   shortcuts();
+  if (!live_speed_.empty() && !ImGui::IsMouseDown(0) && !ImGui::IsAnyItemActive())
+    live_speed_.clear(); // the speed was let go: the saved lengths are drawn from now on
 
   if (auto mix = audio_mixer_.take()) {
     const bool was_playing = playing_;
@@ -3494,7 +3502,252 @@ void App::draw_media() {
     ImGui::TextColored(hexv(look::fg3), "None of this kind in the project.");
   }
   ImGui::EndChild();
+  if (ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows) && ImGui::IsMouseClicked(0) && !ImGui::IsAnyItemHovered())
+    select_nothing(); // a click on the panel's empty space
   ImGui::End();
+}
+
+// Several clips selected: the values they all have (speed, scale, rotation, opacity, gain). Where they differ the row says "mixed"; a
+// change sets that value on every one of them, as one edit.
+void App::draw_multi_card() {
+  std::vector<const ClipUi *> all, pictures, files, sounds;
+  for (const TrackUi &t : tracks_)
+    for (const ClipUi &k : t.clips)
+      if (is_picked(k.id)) {
+        all.push_back(&k);
+        if (t.kind != "audio" && !k.is_adjustment)
+          pictures.push_back(&k);
+        if (!k.path.empty() && !k.is_generative && !k.is_text)
+          files.push_back(&k);
+        if (t.kind == "audio")
+          sounds.push_back(&k);
+        else // a picture's own sound, linked to it, is part of it
+          for (const ClipUi *m : linked_of(k))
+            if (m->stream == "audio" && std::find(sounds.begin(), sounds.end(), m) == sounds.end())
+              sounds.push_back(m);
+      }
+  if (all.size() < 2 || !begin_card("##shared", "Shared", (std::to_string(all.size()) + " clips").c_str())) {
+    end_card();
+    return;
+  }
+  ImGui::PushTextWrapPos(0.0f);
+  ImGui::TextColored(hexv(look::fg3), "What the selected clips have in common. A change sets it on all of them; \"mixed\" means they differ now.");
+  ImGui::PopTextWrapPos();
+  ImGui::Spacing();
+  // One row: the name, "mixed" when the clips differ, the slider (at the first clip's value), and its number.
+  const auto row = [&](const char *label, const char *id, const std::vector<const ClipUi *> &clips, const std::function<float(const ClipUi &)> &get,
+                       float lo, float hi, float def, const char *fmt, float scale, float hard_lo, float hard_hi,
+                       const std::function<void(json &, const ClipUi &, float)> &op_for, const char *what) {
+    if (clips.size() < 2)
+      return;
+    const float first = get(*clips.front());
+    const bool mixed = std::any_of(clips.begin(), clips.end(), [&](const ClipUi *k) { return std::fabs(get(*k) - first) > 1e-4f; });
+    float &v = fx_edit_[std::string("multi/") + id];
+    if (fx_edit_active_ != std::string("multi/") + id)
+      v = first;
+    ImGui::TextColored(hexv(look::fg2), "%s", label);
+    if (mixed) {
+      ImGui::SameLine(0.0f, 6.0f);
+      ImGui::TextColored(ImVec4(0.89f, 0.64f, 0.23f, 1.0f), "mixed");
+      ui_mark(std::string("mixed:") + id);
+      if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("The selected clips have different values. A change sets this one on all of them.");
+    }
+    ImGui::SameLine(88.0f);
+    if (slim_slider((std::string("multi_") + id).c_str(), &v, lo, hi, ImGui::GetContentRegionAvail().x - 60.0f, "", def)) {
+      fx_edit_active_ = std::string("multi/") + id;
+      json shown = json::array(); // the Monitor shows the change on all of them while the value moves
+      for (const ClipUi *k : clips) {
+        if (std::string(id) == "speed")
+          for (json &op : speed_preview_ops(*k, v))
+            shown.push_back(std::move(op));
+        else
+          op_for(shown, *k, v);
+      }
+      preview_ops(shown);
+    }
+    const bool done = slider_done();
+    slider_number(fmt, v * scale, scale, hard_lo, hard_hi);
+    if (done) {
+      fx_edit_active_.clear();
+      json ops = json::array();
+      for (const ClipUi *k : clips)
+        op_for(ops, *k, v);
+      const std::string label_text = what;
+      if (std::string(id) == "speed")
+        pending_ = [this, ops, label_text] { timeline_edit(ops, label_text.c_str()); };
+      else
+        pending_ = [this, ops, label_text] { patch(ops, label_text.c_str()); };
+    }
+  };
+  row("Speed", "speed", files, [](const ClipUi &k) { return k.speed; }, 0.25f, 4.0f, 1.0f, "%.2fx", 1.0f, 0.1f, 10.0f,
+      [](json &ops, const ClipUi &k, float v) { ops.push_back({{"op", "set_speed"}, {"clip", k.id}, {"speed", std::round(v * 100.0f) / 100.0f}}); },
+      "Speed of the selected clips");
+  row("Scale", "scale", pictures, [this](const ClipUi &k) { return transform_now(k).scale_x; }, 0.1f, 4.0f, 1.0f, "%3.0f%%", 100.0f, 0.01f, 20.0f,
+      [this](json &ops, const ClipUi &k, float v) {
+        const float r = std::round(v * 100.0f) / 100.0f;
+        for (json &op : transform_ops(k, "scale", json::array({r, r})))
+          ops.push_back(std::move(op));
+      },
+      "Scale the selected clips");
+  row("Rotation", "rotation", pictures, [this](const ClipUi &k) { return transform_now(k).rotation; }, -180.0f, 180.0f, 0.0f, "%4.0f\xC2\xB0", 1.0f,
+      -180.0f, 180.0f,
+      [this](json &ops, const ClipUi &k, float v) {
+        for (json &op : transform_ops(k, "rotation", json(std::round(v * 10.0f) / 10.0f)))
+          ops.push_back(std::move(op));
+      },
+      "Rotate the selected clips");
+  row("Opacity", "opacity", pictures, [](const ClipUi &k) { return k.opacity; }, 0.0f, 1.0f, 1.0f, "%3.0f%%", 100.0f, 0.0f, 1.0f,
+      [this](json &ops, const ClipUi &k, float v) {
+        const float r = std::round(v * 100.0f) / 100.0f;
+        ops.push_back({{"op", "replace"}, {"path", k.id + "/transform/opacity"}, {"value", r}});
+        if (!k.opacity_keys.empty() && k.fades_only) // the fades rise to the new level
+          for (json &op : fade_ops(k, k.fade_in, k.fade_out, k.frames, r))
+            ops.push_back(std::move(op));
+      },
+      "Opacity of the selected clips");
+  row("Gain", "gain", sounds, [](const ClipUi &k) { return k.gain_db; }, -40.0f, 12.0f, 0.0f, "%+.1f dB", 1.0f, -60.0f, 24.0f,
+      [](json &ops, const ClipUi &k, float v) {
+        ops.push_back({{"op", "replace"}, {"path", k.id + "/audio/gain_db"}, {"value", std::round(v * 10.0f) / 10.0f}});
+      },
+      "Gain of the selected clips");
+  if (sounds.size() >= 2) { // Mute: on when all are muted; a click mutes all, or gives all their sound back
+    const bool all_muted = std::all_of(sounds.begin(), sounds.end(), [](const ClipUi *k) { return k->volume <= 0.0f; });
+    const bool some = std::any_of(sounds.begin(), sounds.end(), [](const ClipUi *k) { return k->volume <= 0.0f; });
+    bool muted = all_muted;
+    if (ImGui::Checkbox("Mute", &muted)) {
+      json ops = json::array();
+      for (const ClipUi *k : sounds)
+        ops.push_back({{"op", "replace"}, {"path", k->id + "/volume"}, {"value", muted ? 0.0f : 1.0f}});
+      pending_ = [this, ops, muted] { patch(ops, muted ? "Mute the selected clips" : "Unmute the selected clips"); };
+    }
+    ui_mark("check:multi_mute");
+    if (some && !all_muted) {
+      ImGui::SameLine(0.0f, 8.0f);
+      ImGui::TextColored(ImVec4(0.89f, 0.64f, 0.23f, 1.0f), "mixed");
+    }
+  }
+  end_card();
+}
+
+namespace {
+// The object with this ID anywhere in the document, or null.
+json *find_by_id(json &node, const std::string &id) {
+  if (!node.is_object())
+    return nullptr;
+  if (const auto it = node.find(id); it != node.end() && it->is_object())
+    return &*it;
+  for (auto &[key, value] : node.items())
+    if (value.is_object())
+      if (json *found = find_by_id(value, id))
+        return found;
+  return nullptr;
+}
+} // namespace
+
+void App::preview_ops(const json &ops) {
+  if (!ops.is_array() || ops.empty())
+    return;
+  json copy = doc_;
+  for (const json &op : ops) {
+    const std::string path = op.value("path", std::string()), kind = op.value("op", std::string());
+    std::vector<std::string> parts;
+    for (size_t at = 0; at <= path.size();) {
+      const size_t slash = path.find('/', at);
+      parts.push_back(path.substr(at, slash == std::string::npos ? std::string::npos : slash - at));
+      if (slash == std::string::npos)
+        break;
+      at = slash + 1;
+    }
+    json *node = parts.empty() ? nullptr : find_by_id(copy, parts[0]);
+    for (size_t i = 1; node && i + 1 < parts.size(); ++i) { // down to the parent, making what is not there yet (a first key)
+      if (node->is_null())
+        *node = json::object();
+      node = node->is_object() ? &(*node)[parts[i]] : nullptr;
+    }
+    if (!node)
+      continue;
+    if (parts.size() == 1) { // the object itself
+      if (kind == "remove")
+        continue; // (not shown live)
+      continue;
+    }
+    if (!node->is_object())
+      *node = json::object();
+    if (kind == "remove") {
+      node->erase(parts.back());
+    } else {
+      // Times the editor writes as "frames@rate" (60@30) are kept as fractions in the document: the engine turns them so when it saves,
+      // and the renderer reads only those.
+      json value = op.value("value", json());
+      const std::function<void(json &)> times = [&](json &v) {
+        if (v.is_string()) {
+          const std::string text = v.get<std::string>();
+          if (const size_t at = text.find('@'); at != std::string::npos)
+            if (const auto n = Rational::parse(text.substr(0, at)), r = Rational::parse(text.substr(at + 1)); n && r && r->num() > 0)
+              if (const auto t = div(*n, *r))
+                v = t->to_string();
+        } else if (v.is_object() || v.is_array()) {
+          for (auto &item : v)
+            times(item);
+        }
+      };
+      times(value);
+      (*node)[parts.back()] = std::move(value);
+    }
+  }
+  auto comp = render::compile(copy, {}, project_path_);
+  if (comp)
+    preview_.show_composition(std::move(*comp));
+}
+
+int64_t App::live_frames(const ClipUi &c) const {
+  const auto it = live_speed_.find(c.id);
+  if (it == live_speed_.end())
+    return c.frames;
+  return std::max<int64_t>(1, std::llround(double(c.frames) * double(c.speed) / double(std::max(0.1f, it->second))));
+}
+
+json App::speed_preview_ops(const ClipUi &c, float speed) const {
+  json ops = json::array();
+  std::vector<const ClipUi *> all = {&c};
+  for (const ClipUi *m : linked_of(c))
+    all.push_back(m);
+  for (const std::string &o : partner_of(c.id))
+    if (const ClipUi *k = find_clip(o))
+      all.push_back(k);
+  const auto sec = [](double s) { return Rational::make(std::llround(s * 1e6), 1000000).value_or(Rational()).to_string(); };
+  for (const ClipUi *k : all) {
+    const_cast<App *>(this)->live_speed_[k->id] = speed; // the timeline draws its new length while the value moves
+    const double factor = double(k->speed) / double(std::max(0.1f, speed));
+    const double dur = double(k->frames) / fps() * factor, src = double(k->source_frames) / fps() * factor;
+    ops.push_back({{"op", "replace"}, {"path", k->id + "/timing/speed"}, {"value", speed}});
+    ops.push_back({{"op", "replace"}, {"path", k->id + "/timing/duration"}, {"value", sec(dur)}});
+    ops.push_back({{"op", "replace"}, {"path", k->id + "/timing/source_in"}, {"value", sec(src)}});
+  }
+  return ops;
+}
+
+void App::select_nothing() {
+  selected_clip_.clear();
+  picked_.clear();
+  selected_media_.clear();
+  mon_edit_.clear();
+}
+
+// Two clips of one file side by side, the picture and its sound, that are not linked: the one on the other track that starts where this
+// one starts and plays the same part of the file. Speed and freeze change them together; the Inspector offers to link them.
+std::vector<std::string> App::partner_of(const std::string &clip_id) const {
+  std::vector<std::string> out;
+  const ClipUi *c = find_clip(clip_id);
+  if (!c || c->path.empty() || !c->link_group.empty())
+    return out;
+  for (const TrackUi &t : tracks_)
+    for (const ClipUi &o : t.clips)
+      if (o.id != c->id && o.path == c->path && o.link_group.empty() && o.stream != c->stream && o.start == c->start &&
+          o.source_frames == c->source_frames)
+        out.push_back(o.id);
+  return out;
 }
 
 void App::draw_text_panel() {
@@ -5463,8 +5716,10 @@ void App::draw_text_style(const ClipUi &c) {
     float &spacing = fx_edit_[id + "/line_spacing"];
     if (fx_edit_active_ != id + "/line_spacing")
       spacing = content.value("line_spacing", 1.0f);
-    if (slim_slider("text_line_spacing", &spacing, 0.6f, 2.0f, ImGui::GetContentRegionAvail().x - 52.0f, "", 1.0f))
+    if (slim_slider("text_line_spacing", &spacing, 0.6f, 2.0f, ImGui::GetContentRegionAvail().x - 52.0f, "", 1.0f)) {
       fx_edit_active_ = id + "/line_spacing";
+      preview_ops(json::array({{{"op", "replace"}, {"path", id + "/content/line_spacing"}, {"value", spacing}}}));
+    }
     if (slider_done()) {
       const float value = std::round(spacing * 20.0f) / 20.0f;
       fx_edit_active_.clear();
@@ -5513,8 +5768,14 @@ void App::draw_text_style(const ClipUi &c) {
     if (fx_edit_active_ != id + "/" + key) // while this slider is being dragged its own value stands; otherwise the clip's
       v = shown;
     const bool changed = slim_slider((std::string("text_") + key).c_str(), &v, 0.0f, hi, ImGui::GetContentRegionAvail().x - 52.0f, "", 0.0f);
-    if (changed)
+    if (changed) {
       fx_edit_active_ = id + "/" + key;
+      json made = content.value(field, json::object()); // the look as it will be, shown while the value moves
+      if (!made.is_object() || made.empty())
+        made = defaults;
+      made[sub] = v;
+      preview_ops(json::array({{{"op", "replace"}, {"path", id + "/content/" + field}, {"value", std::move(made)}}}));
+    }
     if (slider_done()) {
       const float value = std::round(v * 100.0f) / 100.0f;
       fx_edit_active_.clear();
@@ -5936,6 +6197,8 @@ void App::draw_viewer() {
         xf.pos_x = mon_x_;
         xf.pos_y = mon_y_;
         preview_.set_transform(dc->id, xf);
+        if (!dc->position_keys.empty()) // keyed: the plain value is not what shows; the key at the playhead is
+          preview_ops(transform_ops(*dc, "position", json::array({mon_x_, mon_y_})));
       }
     }
     if (mon_drag_ && ImGui::IsItemDeactivated()) {
@@ -5970,25 +6233,53 @@ void App::draw_viewer() {
         for (const ImVec2 &q : corners) {
           minx = std::min(minx, q.x), maxx = std::max(maxx, q.x), miny = std::min(miny, q.y), maxy = std::max(maxy, q.y);
         }
-        const float bw2 = std::clamp(maxx - minx + 40.0f, 260.0f, std::max(260.0f, s1.x - s0.x - 24.0f)), bh2 = std::clamp(maxy - miny + 24.0f, 74.0f, 220.0f);
+        // The picture shows the words as they are typed (the text itself, in its own look); the field is a small bar under it, with the keys.
+        const int lines = 1 + int(std::count(mon_edit_buf_, mon_edit_buf_ + std::strlen(mon_edit_buf_), '\n'));
+        const float bw2 = std::clamp(maxx - minx, 240.0f, std::max(240.0f, s1.x - s0.x - 24.0f));
+        const float bh2 = std::min(float(lines) * ImGui::GetTextLineHeight() + 10.0f, 120.0f);
+        const float below = maxy + 10.0f, above = miny - 10.0f - bh2 - 20.0f;
         const ImVec2 at(std::clamp((minx + maxx - bw2) * 0.5f, s0.x + 8.0f, std::max(s0.x + 8.0f, s1.x - bw2 - 8.0f)),
-                        std::clamp((miny + maxy - bh2) * 0.5f, s0.y + 8.0f, std::max(s0.y + 8.0f, s1.y - bh2 - 8.0f)));
+                        below + bh2 + 20.0f < s1.y - 4.0f ? below : std::max(s0.y + 4.0f, above));
         ImGui::SetCursorScreenPos(at);
-        ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.05f, 0.06f, 0.09f, 0.94f));
+        ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.05f, 0.06f, 0.09f, 0.82f));
         ImGui::PushStyleColor(ImGuiCol_Border, hexv(look::accent));
-        ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.5f);
-        if (mon_edit_focus_)
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6.0f, 4.0f));
+        const bool first = mon_edit_focus_;
+        if (first)
           ImGui::SetKeyboardFocusHere();
-        ImGui::InputTextMultiline("##mon_text", mon_edit_buf_, sizeof mon_edit_buf_, ImVec2(bw2, bh2), ImGuiInputTextFlags_AutoSelectAll);
+        ImGui::InputTextMultiline("##mon_text", mon_edit_buf_, sizeof mon_edit_buf_, ImVec2(bw2, bh2),
+                                  ImGuiInputTextFlags_AutoSelectAll | ImGuiInputTextFlags_NoHorizontalScroll);
         ui_mark("field:monitor_text");
-        const bool left = !mon_edit_focus_ && ImGui::IsItemDeactivated();
-        const bool changed = ImGui::IsItemDeactivatedAfterEdit();
+        const bool active = ImGui::IsItemActive();
+        bool left = !first && ImGui::IsItemDeactivated();
+        bool keep = left && !ImGui::IsKeyPressed(ImGuiKey_Escape, false);
         mon_edit_focus_ = false;
-        ImGui::PopStyleVar();
+        ImGui::PopStyleVar(2);
         ImGui::PopStyleColor(2);
+        ImGui::SetCursorScreenPos(ImVec2(at.x, at.y + bh2 + 3.0f));
+        ImGui::TextColored(hexv(look::fg3), "Enter to keep  -  Shift+Enter for a new line  -  Esc to leave it");
+        // A plain Enter put a line break in: take it out again, and keep the text. Shift+Enter leaves it.
+        if (active && ImGui::IsKeyPressed(ImGuiKey_Enter, false) && !ImGui::GetIO().KeyShift) {
+          std::string now = mon_edit_buf_;
+          const std::string &was = mon_edit_was_;
+          size_t i = 0;
+          while (i < now.size() && i < was.size() && now[i] == was[i])
+            ++i;
+          if (now.size() == was.size() + 1 && i < now.size() && now[i] == '\n')
+            now.erase(i, 1);
+          copy_to(mon_edit_buf_, sizeof mon_edit_buf_, now);
+          ImGui::ClearActiveID();
+          left = keep = true;
+        }
+        if (first || std::string(mon_edit_buf_) != mon_edit_was_) // the picture follows the typing
+          preview_.set_text(oid, mon_edit_buf_);
+        mon_edit_was_ = mon_edit_buf_;
+        if (left && !keep) // Esc: the picture as it was
+          preview_.set_text(oid, oc->text);
         if (left) {
           const std::string value = mon_edit_buf_;
-          if (changed && !value.empty() && value != oc->text) {
+          if (keep && !value.empty() && value != oc->text) {
             const bool timed = clip_json(oid) && clip_json(oid)->value("content", json::object()).contains("words");
             pending_ = [this, oid, value, timed] {
               json ops = json::array({{{"op", "replace"}, {"path", oid + "/content/text"}, {"value", value}}});
@@ -6089,6 +6380,8 @@ void App::draw_viewer() {
           xf.scale_x = mon_sx_;
           xf.scale_y = mon_sy_;
           preview_.set_transform(oid, xf);
+          if (!oc->scale_keys.empty())
+            preview_ops(transform_ops(*oc, "scale", json::array({mon_sx_, mon_sy_})));
         }
         if (mon_scaling_ && mon_clip_ == oid && ImGui::IsItemDeactivated()) {
           mon_scaling_ = false;
@@ -6119,6 +6412,8 @@ void App::draw_viewer() {
   }
   if (!mon_edit_.empty() && mon_edit_ != selected_clip_)
     mon_edit_.clear(); // something else was selected
+  if (ImGui::IsMouseHoveringRect(s0, s1) && ImGui::IsWindowHovered() && ImGui::IsMouseClicked(0) && !ImGui::IsAnyItemHovered())
+    select_nothing(); // a click on the stage around the picture
   ImGui::PopClipRect();
 
   // Transport: timecode on the left, the controls centred.
@@ -6130,7 +6425,18 @@ void App::draw_viewer() {
   dl->AddText(ImVec2(origin.x + 16.0f, ty + 20.0f), hex(look::fg), now_tc.c_str());
   ImGui::PopFont();
   ImGui::PushFont(g_fonts.mono, 13.0f);
-  const std::string total_tc = "/ " + timecode(total_frames_);
+  int64_t shown_total = total_frames_; // while a speed is dragged: the length the film will have
+  if (!live_speed_.empty())
+    for (const TrackUi &t : tracks_) {
+      int64_t push = 0;
+      for (const ClipUi &k : t.clips) {
+        const int64_t len = live_frames(k);
+        shown_total = std::max(shown_total, k.start + push + len);
+        if (live_speed_.count(k.id))
+          push += len - k.frames;
+      }
+    }
+  const std::string total_tc = "/ " + timecode(shown_total);
   const float total_w = ImGui::CalcTextSize(total_tc.c_str()).x;
   // The controls are centred when the timecodes leave room; in a narrow Monitor the length goes first, then the controls move right.
   const float ctrl_half = 66.0f;
@@ -6491,7 +6797,14 @@ void App::draw_timeline() {
     const std::string sel_link = sel_clip ? sel_clip->link_group : std::string();
     for (const ClipUi &c : track.clips) {
       // What the clip looks like while it is being dragged; the document changes on release.
-      int64_t start = c.start, frames = c.frames;
+      int64_t start = c.start, frames = live_frames(c);
+      if (!live_speed_.empty() && !live_speed_.count(c.id)) { // after a clip whose speed is being dragged: where the longer clip pushes it
+        int64_t push = 0;
+        for (const ClipUi &o : track.clips)
+          if (live_speed_.count(o.id) && o.start < c.start)
+            push = std::max(push, o.start + live_frames(o) - c.start);
+        start += std::max<int64_t>(0, push);
+      }
       int row = ti;
       if (drag_id_ == c.id) {
         if (drag_mode_ == 1) { // where it will land
@@ -7323,7 +7636,10 @@ void App::draw_fade_card(const ClipUi &c) {
   const auto row = [&](const char *label, const char *slider_id, float *value, bool is_in) {
     ImGui::TextColored(hexv(look::fg2), "%s", label);
     ImGui::SameLine(88.0f);
-    slim_slider(slider_id, value, 0.0f, max_s, ImGui::GetContentRegionAvail().x - 60.0f, "", 0.0f);
+    if (slim_slider(slider_id, value, 0.0f, max_s, ImGui::GetContentRegionAvail().x - 60.0f, "", 0.0f)) { // the fade, shown as it is dragged
+      const int64_t frames = std::llround(double(*value) * fps());
+      preview_ops(fade_ops(c, is_in ? frames : c.fade_in, is_in ? c.fade_out : frames, c.frames, c.opacity));
+    }
     if (slider_done()) {
       const int64_t frames = std::llround(double(*value) * fps());
       const ClipUi clip = c;
@@ -7371,6 +7687,7 @@ void App::draw_inspector() {
   const TrackUi *track = nullptr;
   const ClipUi *c = selected(&track);
   if (c && picked_.size() > 1) { // several clips: what can be done to all of them
+    draw_multi_card();
     if (begin_card("##multi", "Selection", (std::to_string(picked_.size()) + " clips").c_str())) {
       ImGui::PushTextWrapPos(0.0f);
       ImGui::TextColored(hexv(look::fg2), "Drag one of them to move all. Ctrl+click adds or removes a clip; drag a box on the empty timeline to select what it touches.");
@@ -7505,13 +7822,19 @@ void App::draw_inspector() {
   if (begin_card("##clip", "Clip", track->name.c_str())) {
     field("Name", name_buf_, sizeof name_buf_, "/name", "Rename clip", false);
     field("Start", in_buf_, sizeof in_buf_, "/timing/record_in", "Move clip", true);
+    if (live_speed_.count(c->id)) // a speed is being dragged: the length it will have
+      copy_to(dur_buf_, sizeof dur_buf_, timecode(live_frames(*c)));
+    else if (insp_dur_live_) // let go: the saved length again
+      copy_to(dur_buf_, sizeof dur_buf_, timecode(c->frames));
+    insp_dur_live_ = live_speed_.count(c->id) > 0;
     field("Duration", dur_buf_, sizeof dur_buf_, "/timing/duration", "Trim clip", true);
     if (!c->path.empty() && !c->is_generative) { // a file: it can be played faster or slower (its sound with it)
       if (!ImGui::IsAnyItemActive())
         speed_ = c->speed;
       ImGui::TextColored(hexv(look::fg2), "Speed");
       ImGui::SameLine(88.0f);
-      slim_slider("speed", &speed_, 0.25f, 4.0f, ImGui::GetContentRegionAvail().x - 52.0f, "", 1.0f);
+      if (slim_slider("speed", &speed_, 0.25f, 4.0f, ImGui::GetContentRegionAvail().x - 52.0f, "", 1.0f))
+        preview_ops(speed_preview_ops(*c, speed_)); // the Monitor plays it at that speed while the value moves
       const bool done = slider_done();
       slider_number("%.2fx", speed_, 1.0f, 0.1f, 10.0f);
       const auto set_speed = [&](float v) {
@@ -7522,7 +7845,10 @@ void App::draw_inspector() {
         pending_ = [this, cid, r] {
           char label[32];
           std::snprintf(label, sizeof label, "Speed %gx", double(r));
-          timeline_edit(json::array({{{"op", "set_speed"}, {"clip", cid}, {"speed", r}}}), label);
+          json ops = json::array({{{"op", "set_speed"}, {"clip", cid}, {"speed", r}}});
+          for (const std::string &other : partner_of(cid)) // its picture or sound, not linked but side by side: the same speed
+            ops.push_back({{"op", "set_speed"}, {"clip", other}, {"speed", r}});
+          timeline_edit(std::move(ops), label);
           insp_rev_ = 0;
         };
       };
@@ -7567,6 +7893,23 @@ void App::draw_inspector() {
             refresh();
           }
         };
+    }
+    end_card();
+  } else if (const auto loose = partner_of(c->id); !loose.empty()) {
+    // The picture and the sound of one file, side by side but not linked: say so, and put them together again.
+    const bool sound = track && track->kind == "audio";
+    if (begin_card("##loose", "Not linked")) {
+      ImGui::PushTextWrapPos(0.0f);
+      ImGui::TextColored(hexv(look::fg2), sound ? "Its picture is a clip of its own: moving, trimming and deleting change only this one."
+                                                : "Its sound is a clip of its own: moving, trimming and deleting change only this one.");
+      ImGui::TextColored(hexv(look::fg3), "Speed still changes both.");
+      ImGui::PopTextWrapPos();
+      if (soft_button("link_again", sound ? "Link with its picture" : "Link with its sound", ImVec2(-1.0f, 28.0f), true, true)) {
+        json ids = json::array({c->id});
+        for (const std::string &o : loose)
+          ids.push_back(o);
+        pending_ = [this, ids] { timeline_edit(json::array({{{"op", "link"}, {"clips", ids}}}), "Link"); };
+      }
     }
     end_card();
   }
@@ -7710,6 +8053,8 @@ void App::draw_inspector() {
       xf.pos_x = pos_px_[0] / float(canvas_w_) + 0.5f;
       xf.pos_y = pos_px_[1] / float(canvas_h_) + 0.5f;
       preview_.set_transform(id, xf);
+      if (!c->position_keys.empty())
+        preview_ops(transform_ops(*c, "position", json::array({xf.pos_x, xf.pos_y})));
     }
     if (moved_done) {
       const float x = std::round((pos_px_[0] / float(canvas_w_) + 0.5f) * 10000.0f) / 10000.0f;
@@ -7727,6 +8072,8 @@ void App::draw_inspector() {
       render::Transform xf = transform_of(*c);
       xf.scale_x = xf.scale_y = scale_;
       preview_.set_transform(id, xf);
+      if (!c->scale_keys.empty())
+        preview_ops(transform_ops(*c, "scale", json::array({scale_, scale_})));
     }
     if (slider_done()) {
       const float v = std::round(scale_ * 100.0f) / 100.0f;
@@ -7781,6 +8128,8 @@ void App::draw_inspector() {
       render::Transform xf = transform_of(*c);
       xf.rotation = rotation_;
       preview_.set_transform(id, xf);
+      if (!c->rotation_keys.empty())
+        preview_ops(transform_ops(*c, "rotation", json(rotation_)));
     }
     if (slider_done())
       commit_rotation(rotation_);
@@ -8416,7 +8765,7 @@ void App::draw_shortcuts_sheet() {
                      {"Up / Down", "The previous or next cut or marker"}, {"Home / End", "The start or the end"}, {"Ctrl+L", "Loop playback"}, {"Ctrl+F", "Full screen preview (Esc leaves)"},
                      {"I / O", "Mark In and Out at the playhead: play, loop and export just that part"}, {"Alt+X", "Clear In and Out"}}},
         {"Clips", {{"Click, Ctrl+click, Shift+click", "Select one, add or remove one, a range on the track"}, {"Drag on empty space", "A box that selects what it touches"},
-                   {"Ctrl+A", "Select all clips"}, {"S", "Split at the playhead"}, {"Delete", "Delete the selected clips"},
+                   {"Ctrl+A", "Select all clips"}, {"S", "Split at the playhead"}, {"Delete or Backspace", "Delete the selected clips"}, {"Click on empty space", "Select nothing"},
                    {"Ctrl+C / X / V", "Copy, cut, paste at the playhead"}, {"Ctrl+D", "Duplicate after the clips"}, {"Esc", "Select nothing"}, {"Right click", "The menu of a clip or of the empty timeline"}}},
         {"Project", {{"Ctrl+Z / Ctrl+Y", "Undo, redo (Ctrl+Shift+Z also redoes)"}, {"Ctrl+S", "Save now"}, {"Ctrl+I", "Import media"}, {"Ctrl+E", "Export"}, {"F1", "This list"}}},
         {"Timeline", {{"Shift+Z", "Fit the whole film in the window"}, {"+ / -", "Zoom in or out"}, {"Ctrl+mouse wheel", "Zoom about the pointer"}, {"M", "A marker at the playhead (again: remove it)"}, {"N", "Snapping on or off"}, {"Alt while dragging", "The opposite of the Snap switch, for one drag"}, {"Ctrl+plus / minus / 0", "Make the whole editor larger, smaller, or 100 %"}}},

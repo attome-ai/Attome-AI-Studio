@@ -33,6 +33,12 @@ $failed = $null
 $run = Invoke-EditorScript -Project $proj -SelectFirstClip -TimeoutSeconds 240 -Script @(
   'wait 1200'
   'expect @slider:speed', 'expect @button:speed_2'
+  'wide @clip:v 300'   # 4 s at 90 pixels a second: 360 wide
+  'drag @slider:speed -30 0 hold', 'wait 500'                 # slower while held: the timeline draws it longer at once
+  'wide @clip:v 500'
+  "shot $work\speed_held.jpg"
+  'release', 'wait 900'
+  'key Z ctrl', 'wait 800'                                    # back to 1x for the steps below
   'click @button:speed_2', 'wait 900'
   "shot $work\speed_2x.jpg"
 )
