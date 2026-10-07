@@ -77,6 +77,7 @@ struct ClipUi {
   std::string selected_take;
   bool locked = false;                      // the selected Take is pinned: the clip is never regenerated
   std::string link_group, stream;           // linked picture and sound clips share a group; stream "video" / "audio"
+  bool own_sound = false;                   // a video clip with its sound inside it (the usual import): one clip, one track
   std::vector<EffectUi> effects;            // its effects (blur, colour grade, vignette)
   int64_t audio_fade_in = 0, audio_fade_out = 0; // frames
 };
@@ -531,7 +532,7 @@ private:
   std::string library_renaming_;
   char library_name_buf_[128] = {};
   void draw_library_panel();
-  void add_to_library(bool with_linked = true);            // the selected clips (and, unless with_linked is false, what is linked to them) become one item
+  void add_to_library(bool with_linked = true, const std::string &only = {}, const std::string &part = {});            // the selected clips (and, unless with_linked is false, what is linked to them) become one item
   void insert_library(const std::string &id, int64_t at, const std::string &track = {}); // an item at `at`, its clips on tracks of their kind
   char text_buf_[1024] = {};
   float text_size_ = 0.08f, text_col_[3] = {1.0f, 1.0f, 1.0f};

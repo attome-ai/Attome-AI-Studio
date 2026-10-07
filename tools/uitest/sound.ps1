@@ -1,4 +1,4 @@
-# UI test: a video file and a sound file imported together land on a video track and an audio track; the Inspector's
+# UI test: a video file and a sound file imported together land on a video track (one clip, its sound inside) and an audio track (the music); the Inspector's
 # Audio card sets the sound clip's gain in dB and a fade in.
 # Virtual input only (uitest.psm1). Needs a build (build\win-msvc-release\bin). Exit code 0 = pass.
 #   .\tools\uitest\sound.ps1
@@ -32,18 +32,15 @@ try {
     $tracks = @(Get-Tracks $run)
     $video = $tracks | Where-Object { $_.kind -eq 'video' }
     $audios = @($tracks | Where-Object { $_.kind -eq 'audio' })
-    $audio = $audios | Where-Object { @($_.clip_list | Where-Object { $_.name -eq 'a' }).Count -gt 0 } | Select-Object -First 1    # the track of the video's own sound
     "tracks: $(($tracks | ForEach-Object { "$($_.name)/$($_.kind)/$($_.clips)" }) -join ', ')"
-    # The video's own sound is a linked clip on a sound track; the music is under it, on a sound track of its own.
+    # The video is ONE clip on its video track, with its sound inside it; the music is on an audio track of its own.
     $music = $audios | ForEach-Object { $_.clip_list } | Where-Object { $_.name -eq 'music' } | Select-Object -First 1
-    $own = $music -and $audio -and -not @($audio.clip_list | Where-Object { $_.name -eq 'music' }).Count
-    if (-not $video -or -not $audio -or $video.clips -ne 1 -or -not $music -or -not $own) {
-      $failed = 'expected the picture on a video track, its sound on a sound track, and the music on a sound track of its own'
+    if (-not $video -or $video.clips -ne 1 -or $audios.Count -ne 1 -or -not $music) {
+      $failed = 'expected one video clip on a video track, and the music alone on one audio track'
     } else {
       $picture = Get-Object $run $video.clip_list[0].id
-      $sound = Get-Object $run ($audio.clip_list | Where-Object { $_.name -eq 'a' }).id
-      "link: picture=$($picture.link_group) sound=$($sound.link_group) stream=$($picture.media_ref.stream)/$($sound.media_ref.stream)"
-      if (-not $picture.link_group -or $picture.link_group -ne $sound.link_group) { $failed = 'the video and its sound are not linked' }
+      "picture: stream='$($picture.media_ref.stream)' link='$($picture.link_group)'"
+      if ($picture.media_ref.stream -or $picture.link_group) { $failed = 'the video should carry its own sound: no stream, no link' }
       $clip = Get-Object $run $music.id
       "audio: $($clip.audio | ConvertTo-Json -Compress)"
       $fade = ConvertFrom-Rational $clip.audio.fade_in
@@ -55,5 +52,5 @@ try {
 } finally { Stop-Daemon $run }
 
 if ($failed) { Write-Host "FAIL: $failed" -ForegroundColor Red; exit 1 }
-Write-Host "PASS: a video's picture and linked sound, music on a sound track of its own; gain and fade set from the Audio card (captures in $work)" -ForegroundColor Green
+Write-Host "PASS: a video is one clip with its sound, music on an audio track of its own; gain and fade set from the Audio card (captures in $work)" -ForegroundColor Green
 exit 0

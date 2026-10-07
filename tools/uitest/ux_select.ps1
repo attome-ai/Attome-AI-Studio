@@ -23,7 +23,7 @@ try {
   & "$bin\attome.exe" new $proj --rate 30 --canvas 640x360 | Out-Null
   $a = ("$work\a.mp4").Replace('\', '\\')
   $ops = @(
-    @{ op = 'add_clip'; id = '$new:v'; path = "$work\a.mp4"; at = '0s' },
+    @{ op = 'add_clip'; separate_audio = $true; id = '$new:v'; path = "$work\a.mp4"; at = '0s' },
     @{ op = 'add_text'; id = '$new:t1'; text = 'One'; name = 'One'; at = '1s'; duration = '2s'; track = 'new'; track_name = 'T' },
     @{ op = 'add_text'; id = '$new:t2'; text = 'Two'; name = 'Two'; at = '4s'; duration = '2s'; track = '$new:t1.track' },
     @{ op = 'add_text'; id = '$new:t3'; text = 'Three'; name = 'Three'; at = '7s'; duration = '2s'; track = '$new:t1.track' },

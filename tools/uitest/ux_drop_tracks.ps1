@@ -18,7 +18,7 @@ try {
   New-Sample "$work\v.mp4" "--seconds 4 --height 360"
   New-Sample "$work\w.mp4" "--seconds 2 --height 360"
   & "$bin\attome.exe" new $proj --rate 30 | Out-Null
-  [IO.File]::WriteAllText("$work\call.json", (@{ project = $proj; ops = @(@{ op = 'add_clip'; path = "$work\v.mp4"; at = '0s' },
+  [IO.File]::WriteAllText("$work\call.json", (@{ project = $proj; ops = @(@{ op = 'add_clip'; separate_audio = $true; path = "$work\v.mp4"; at = '0s' },
         @{ op = 'add_text'; text = 'Hello'; name = 'Hello'; at = '0s'; duration = '3s' }) } | ConvertTo-Json -Depth 6 -Compress), (New-Object Text.UTF8Encoding($false)))
   $r = & "$bin\attome.exe" --json call timeline.edit "$work\call.json" | ConvertFrom-Json
   if (-not $r.ok) { throw "setup: $($r.error.message)" }

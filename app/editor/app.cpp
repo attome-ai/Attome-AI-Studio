@@ -457,6 +457,7 @@ void App::refresh() {
             }
           c.link_group = cit->value("link_group", std::string());
           c.stream = ref.value("stream", std::string());
+          c.own_sound = track.kind != "audio" && ref.value("type", std::string()) == "file" && ref.value("has_audio", false) && c.stream != "video" && c.stream != "audio";
           {
             if (const auto fx = cit->find("effects"); fx != cit->end() && fx->is_object())
               for (auto e = fx->begin(); e != fx->end(); ++e) {
@@ -758,7 +759,7 @@ void App::add_track(bool audio) {
   if (patch(json::array({{{"op", "add"},
                           {"path", seq_id_ + "/tracks/$new:t"},
                           {"value", {{"kind", audio ? "audio" : "video"}, {"name", name}}}}}),
-            audio ? "Add sound track" : "Add track", &ids))
+            audio ? "Add audio track" : "Add track", &ids))
     selected_track_ = ids.value("$new:t", "");
 }
 
@@ -1150,9 +1151,16 @@ void App::draw_clip_menu(const ClipUi &c) {
   }
   if (menu_item("Go to its start"))
     pending_ = [this, at = c.start] { seek(at); };
-  if (count == 1 && !linked_of(c).empty()) { // a picture with its sound, or a sound with its picture: the part, or both
+  if (count == 1 && c.own_sound) { // a video with its sound inside it: all of it, or only the picture or the sound
+    if (menu_item("Add the sound only to the library"))
+      pending_ = [this, id = c.id] { add_to_library(false, id, "sound"); };
+    if (menu_item("Add the video only to the library"))
+      pending_ = [this, id = c.id] { add_to_library(false, id, "picture"); };
+    if (menu_item("Add both to the library"))
+      pending_ = [this] { add_to_library(true); };
+  } else if (count == 1 && !linked_of(c).empty()) { // a picture with its sound, or a sound with its picture: the part, or both
     if (menu_item(c.stream == "audio" ? "Add the sound only to the library" : "Add the picture only to the library"))
-      pending_ = [this] { add_to_library(false); };
+      pending_ = [this, id = c.id] { add_to_library(false, id); };
     if (menu_item("Add both to the library"))
       pending_ = [this] { add_to_library(true); };
   } else if (menu_item(count > 1 ? ("Add " + std::to_string(count) + " clips to the library").c_str() : "Add to the library")) {
@@ -1172,17 +1180,23 @@ void App::draw_clip_menu(const ClipUi &c) {
   if (count == 1) { // what is otherwise only in the Inspector
     const std::string id = c.id;
     const bool sound = home && home->kind == "audio";
+    if (c.own_sound && menu_item("Detach audio", nullptr, false, !locked)) // its sound becomes a clip of its own, on an audio track
+      pending_ = [this, id] { timeline_edit(json::array({{{"op", "detach_audio"}, {"clip", id}}}), "Detach audio"); };
+    if (c.own_sound && menu_item(c.volume <= 0.0f ? "Unmute" : "Mute", nullptr, false, !locked))
+      pending_ = [this, id, v = c.volume <= 0.0f ? 1.0f : 0.0f] {
+        patch(json::array({{{"op", "replace"}, {"path", id + "/volume"}, {"value", v}}}), v > 0.0f ? "Unmute" : "Mute");
+      };
     if (const auto loose = partner_of(c.id); !loose.empty() && menu_item(sound ? "Link with its picture" : "Link with its sound", nullptr, false, !locked)) {
       json ids = json::array({id});
       for (const std::string &o : loose)
         ids.push_back(o);
       pending_ = [this, ids] { timeline_edit(json::array({{{"op", "link"}, {"clips", ids}}}), "Link"); };
     }
-    if (!c.link_group.empty() && menu_item(sound ? "Unlink from its picture" : "Unlink from its sound", nullptr, false, !locked))
-      pending_ = [this, id] {
+    if (!c.link_group.empty() && menu_item(sound ? "Unlink from its picture" : "Detach audio", nullptr, false, !locked))
+      pending_ = [this, id, sound] {
         json result;
         if (rpc("timeline.edit", {{"project", project_path_}, {"ops", json::array({{{"op", "unlink"}, {"clip", id}}})}, {"label", "Unlink"}}, result)) {
-          say("Unlink", false, true);
+          say(sound ? "Unlinked from its picture" : "Audio detached: its sound is a clip of its own now", false, true);
           refresh();
         }
       };
@@ -1221,9 +1235,9 @@ void App::draw_timeline_menu() {
   if (menu_item("Select all", "Ctrl+A"))
     pending_ = [this] { select_all_clips(); };
   ImGui::Separator();
-  if (menu_item("Add a picture track"))
+  if (menu_item("Add a video track"))
     pending_ = [this] { add_track(false); };
-  if (menu_item("Add a sound track"))
+  if (menu_item("Add an audio track"))
     pending_ = [this] { add_track(true); };
   if (menu_item("Fit the film in the window", "Shift+Z"))
     fit_pending_ = true;
@@ -1584,7 +1598,7 @@ App::DropPlan App::plan_drop(const std::string &payload, int row, int64_t frame)
     return p;
   }
   if (track && (track->kind == "audio") != p.sound) {
-    p.why = p.sound ? "Sound goes on an audio track." : "A picture goes on a video track.";
+    p.why = p.sound ? "Sound goes on an audio track." : "A video goes on a video track.";
     return p;
   }
   p.start = snap_frame(frame, p.frames, {});
@@ -1607,29 +1621,6 @@ App::DropPlan App::plan_drop(const std::string &payload, int row, int64_t frame)
       for (int i = 0; i < rows; ++i)
         if (tracks_[size_t(i)].kind == "audio" && free_start(tracks_[size_t(i)], asked, p.frames, {}) == asked) {
           p.row = i;
-          break;
-        }
-    }
-    if (p.kind == "media" && !p.sound && media_info(p.id).value("has_audio", false)) {
-      // Its sound goes on an audio track at the same time. When sound that is not sliding along is in the way there, the
-      // clip goes to the first place that is free on both tracks instead, and nothing is pushed.
-      std::map<std::string, int64_t> sliding;
-      show_pushes(l, sliding);
-      for (const TrackUi &t : tracks_)
-        if (t.kind == "audio") {
-          const bool blocked = std::any_of(t.clips.begin(), t.clips.end(), [&](const ClipUi &o) {
-            const auto it = sliding.find(o.id);
-            const int64_t shift = it == sliding.end() ? 0 : it->second - o.start;
-            return o.start_floor + shift < p.start + p.frames && p.start < o.end_ceil + shift;
-          });
-          if (blocked) {
-            p.pushed.clear();
-            p.start = asked;
-            for (int64_t before = -1; before != p.start;) {
-              before = p.start;
-              p.start = free_start(t, free_start(*track, p.start, p.frames, {}), p.frames, {});
-            }
-          }
           break;
         }
     }
@@ -3154,9 +3145,9 @@ void App::draw_menu() {
       if (ImGui::MenuItem("Delete", "Del", false, !selected_clip_.empty()))
         delete_selected();
       ImGui::Separator();
-      if (ImGui::MenuItem("Add a picture track", nullptr, false, open))
+      if (ImGui::MenuItem("Add a video track", nullptr, false, open))
         add_track(false);
-      if (ImGui::MenuItem("Add a sound track", nullptr, false, open))
+      if (ImGui::MenuItem("Add an audio track", nullptr, false, open))
         add_track(true);
       if (ImGui::MenuItem("Delete the selected track", nullptr, false, open && !selected_track_.empty()))
         pending_ = [this, tid = selected_track_] { delete_track(tid); };
@@ -3335,6 +3326,25 @@ void App::draw_rail() {
     }
   }
   ImGui::End();
+}
+
+// The bars of a sound's waveform in a tile at `p`: its real peaks when they are read, else a few bars that show it is a sound.
+static void draw_wave_bars(ImDrawList *dl, const std::vector<float> *peaks, ImVec2 p, float cell, float thumb_h) {
+  const bool real = peaks && !peaks->empty();
+  for (int i = 0; i < 40; ++i) {
+    float level = 0.2f + 0.6f * std::fabs(std::sin(float(i) * 1.7f));
+    if (real) { // the loudest value of this bar's slice of the file
+      const std::vector<float> &v = *peaks;
+      const size_t a = v.size() * size_t(i) / 40, b = std::max(a + 1, v.size() * size_t(i + 1) / 40);
+      level = 0.0f;
+      for (size_t k = a; k < b && k < v.size(); ++k)
+        level = std::max(level, v[k]);
+      level = std::sqrt(level);
+    }
+    const float h = std::max(2.0f, level * thumb_h * 0.78f);
+    const float x = p.x + cell * (0.1f + 0.8f * float(i) / 39.0f);
+    dl->AddLine(ImVec2(x, p.y + thumb_h * 0.5f - h * 0.5f), ImVec2(x, p.y + thumb_h * 0.5f + h * 0.5f), hex(look::aud), 2.4f);
+  }
 }
 
 void App::draw_media() {
@@ -3532,21 +3542,7 @@ void App::draw_media() {
     if (audio_only_.count(path)) { // no picture: the sound's own waveform (a few bars until it is read)
       thumbs_.request_peaks(path);
       const auto pk = peaks_.find(path);
-      const bool real = pk != peaks_.end() && !pk->second.empty();
-      for (int i = 0; i < 40; ++i) {
-        float level = 0.2f + 0.6f * std::fabs(std::sin(float(i) * 1.7f));
-        if (real) { // the loudest value of this bar's slice of the file
-          const std::vector<float> &v = pk->second;
-          const size_t a = v.size() * size_t(i) / 40, b = std::max(a + 1, v.size() * size_t(i + 1) / 40);
-          level = 0.0f;
-          for (size_t k = a; k < b && k < v.size(); ++k)
-            level = std::max(level, v[k]);
-          level = std::sqrt(level);
-        }
-        const float h = std::max(2.0f, level * thumb_h * 0.78f);
-        const float x = p.x + cell * (0.1f + 0.8f * float(i) / 39.0f);
-        dl->AddLine(ImVec2(x, p.y + thumb_h * 0.5f - h * 0.5f), ImVec2(x, p.y + thumb_h * 0.5f + h * 0.5f), hex(look::aud), 2.4f);
-      }
+      draw_wave_bars(dl, pk != peaks_.end() ? &pk->second : nullptr, p, cell, thumb_h);
     } else if (tex != thumb_tex_.end() && tex->second) { // fitted inside the tile, keeping its shape
       float tw = cell, th = thumb_h;
       if (SDL_GetTextureSize(tex->second, &tw, &th) && tw > 0.0f && th > 0.0f) {
@@ -3814,18 +3810,25 @@ json App::speed_preview_ops(const ClipUi &c, float speed) const {
   return ops;
 }
 
-void App::add_to_library(bool with_linked) {
+void App::add_to_library(bool with_linked, const std::string &only, const std::string &part) {
   std::vector<std::string> ids;
-  for (const ClipUi *c : picked_clips())
-    ids.push_back(c->id);
-  if (ids.empty() && !selected_clip_.empty())
-    ids.push_back(selected_clip_);
+  if (!only.empty()) { // "this clip only": exactly the clip the menu was opened on (the selection also holds what is linked to it)
+    ids.push_back(only);
+  } else {
+    for (const ClipUi *c : picked_clips())
+      ids.push_back(c->id);
+    if (ids.empty() && !selected_clip_.empty())
+      ids.push_back(selected_clip_);
+  }
   if (ids.empty()) {
     say("Select the clips to keep in the library.", true);
     return;
   }
   json result;
-  if (!rpc("library.add", {{"project", project_path_}, {"clips", ids}, {"linked", with_linked}}, result))
+  json params = {{"project", project_path_}, {"clips", ids}, {"linked", with_linked}};
+  if (!part.empty())
+    params["part"] = part;
+  if (!rpc("library.add", params, result))
     return;
   library_stale_ = true;
   say("\"" + result.value("name", std::string("Clip")) + "\" is in the library. Any project can use it: the Library panel on the left.");
@@ -3909,7 +3912,12 @@ void App::draw_library_panel() {
     if (const auto tex = thumb_tex_.find(thumb); !thumb.empty() && tex != thumb_tex_.end() && tex->second)
       dl->AddImageRounded(ImTextureID(reinterpret_cast<intptr_t>(tex->second)), p, ImVec2(p.x + cell, p.y + thumb_h), ImVec2(0, 0), ImVec2(1, 1),
                           IM_COL32_WHITE, 8.0f);
-    else { // sound only, or not read yet: a sign of what it is
+    else if (!item.value("picture", false) && !item.value("sound_path", std::string()).empty()) { // sound only: its waveform, as in the Media panel
+      const std::string sound = item.value("sound_path", std::string());
+      thumbs_.request_peaks(sound);
+      const auto pk = peaks_.find(sound);
+      draw_wave_bars(dl, pk != peaks_.end() ? &pk->second : nullptr, p, cell, thumb_h);
+    } else { // not read yet: a sign of what it is
       const std::string g = glyph(item.value("picture", false) ? icon::video : icon::audio);
       ImGui::PushFont(g_fonts.ui, 22.0f);
       const ImVec2 gs = text_size(g.c_str());
@@ -7040,6 +7048,28 @@ void App::draw_timeline() {
   }
 
   dl->PushClipRect(ImVec2(win.x + header_w, win.y), ImVec2(win.x + view_w, win.y + view_h), true);
+  // A video and its sound are one clip to look at (as in Final Cut and CapCut): the picture shows its waveform along the bottom, and the sound's own lane
+  // shows only a thin line where it is. They are still two linked clips (their own gain, fades and track), and "Detach audio" makes them two blocks.
+  std::set<std::string> pictures_with_sound, sounds_of_pictures; // link groups where a picture has its sound / clip ids of those sounds
+  {
+    std::map<std::string, std::pair<bool, bool>> groups; // link group -> (has a picture of a video, has its sound)
+    for (const TrackUi &t : tracks_)
+      for (const ClipUi &k : t.clips)
+        if (!k.link_group.empty()) {
+          if (t.kind != "audio" && k.stream == "video")
+            groups[k.link_group].first = true;
+          if (t.kind == "audio" && k.stream == "audio")
+            groups[k.link_group].second = true;
+        }
+    for (const auto &[group, has] : groups)
+      if (has.first && has.second)
+        pictures_with_sound.insert(group);
+    for (const TrackUi &t : tracks_)
+      if (t.kind == "audio")
+        for (const ClipUi &k : t.clips)
+          if (k.stream == "audio" && pictures_with_sound.count(k.link_group))
+            sounds_of_pictures.insert(k.id);
+  }
   for (int ti = 0; ti < rows; ++ti) {
     const TrackUi &track = tracks_[size_t(ti)];
     const float y = origin.y + ruler_h + float(ti) * row_h;
@@ -7104,10 +7134,16 @@ void App::draw_timeline() {
       const uint32_t base = blocked ? look::blocked : c.is_generative ? look::gen : c.is_adjustment ? look::adj : c.is_text ? look::txt
                             : track.kind == "audio" ? look::aud : look::vid;
       const int alpha = int((120.0f + c.opacity * 135.0f) * (track.hidden || track.muted || (track.locked && !is_selected) ? 0.55f : 1.0f));
-      dl->AddRectFilled(ImVec2(x0, cy), ImVec2(x1 - 1.0f, cy + ch), hex(base, alpha), 5.0f);
-      dl->AddRectFilled(ImVec2(x0, cy), ImVec2(x1 - 1.0f, cy + 3.0f), IM_COL32(255, 255, 255, 70), 5.0f, ImDrawFlags_RoundCornersTop);
+      const bool attached_sound = sounds_of_pictures.count(c.id) > 0 && drag_id_ != c.id; // the sound of a picture: a thin line, its waveform is in the picture
+      if (attached_sound) {
+        const float mid = cy + ch * 0.5f;
+        dl->AddRectFilled(ImVec2(x0, mid - 2.5f), ImVec2(x1 - 1.0f, mid + 2.5f), hex(base, track.muted ? 90 : 190), 2.5f);
+      } else {
+        dl->AddRectFilled(ImVec2(x0, cy), ImVec2(x1 - 1.0f, cy + ch), hex(base, alpha), 5.0f);
+        dl->AddRectFilled(ImVec2(x0, cy), ImVec2(x1 - 1.0f, cy + 3.0f), IM_COL32(255, 255, 255, 70), 5.0f, ImDrawFlags_RoundCornersTop);
+      }
       bool picture_under_label = false; // frames or a waveform are drawn: the name gets a backing so it can be read
-      if (!c.media_path.empty() && !c.is_text && !c.is_adjustment && x1 - x0 > 6.0f && drag_id_ != c.id) {
+      if (!c.media_path.empty() && !c.is_text && !c.is_adjustment && x1 - x0 > 6.0f && drag_id_ != c.id && !attached_sound) {
         const float from = std::max(x0, win.x + header_w), to = std::min(x1 - 1.0f, win.x + view_w);
         const double src0 = double(c.source_frames) / rate; // seconds into the file where the clip starts (in the clip's own time)
         // The clip's time at a point of the drawn clip: a reversed clip shows its last moment first.
@@ -7152,6 +7188,27 @@ void App::draw_timeline() {
             dl->PopClipRect();
             picture_under_label = true;
           }
+          if ((c.own_sound || pictures_with_sound.count(c.link_group)) && ch > 34.0f) { // its sound, along the bottom
+            thumbs_.request_peaks(c.media_path);
+            if (const auto pk = peaks_.find(c.media_path); pk != peaks_.end() && !pk->second.empty() && to > from) {
+              const std::vector<float> &v = pk->second;
+              const float band = std::min(16.0f, ch * 0.32f), bottom = cy + ch - 1.0f, mid = bottom - band * 0.5f, amp = band * 0.5f - 1.0f;
+              dl->PushClipRect(ImVec2(from, bottom - band), ImVec2(to, bottom), true);
+              dl->AddRectFilled(ImVec2(from, bottom - band), ImVec2(to, bottom), IM_COL32(8, 24, 20, 150));
+              for (float x = from; x < to; x += 2.0f) {
+                double t0 = clip_time(x) * double(c.speed), t1 = clip_time(x + 2.0f) * double(c.speed);
+                if (t1 < t0)
+                  std::swap(t0, t1);
+                const size_t i0 = size_t(std::max(0.0, t0 / Peaks::kSeconds)), i1 = std::min(v.size(), size_t(std::max(0.0, t1 / Peaks::kSeconds)) + 1);
+                float loud = 0.0f;
+                for (size_t i = i0; i < i1; ++i)
+                  loud = std::max(loud, v[i]);
+                const float h = std::max(0.5f, std::sqrt(loud) * amp);
+                dl->AddLine(ImVec2(x + 0.5f, mid - h), ImVec2(x + 0.5f, mid + h), hex(look::aud, 235), 1.4f);
+              }
+              dl->PopClipRect();
+            }
+          }
         }
       }
       if (const auto st = gen_state_.find(c.id); c.is_generative && !blocked && st != gen_state_.end()) {
@@ -7166,10 +7223,11 @@ void App::draw_timeline() {
         dl->AddCircleFilled(m, 8.0f, IM_COL32(255, 96, 86, 255));
         dl->AddText(ImVec2(m.x - 2.0f, m.y - 7.0f), IM_COL32(255, 255, 255, 255), "!");
       }
+      const float ring_top = attached_sound ? cy + ch * 0.5f - 4.0f : cy, ring_bottom = attached_sound ? cy + ch * 0.5f + 4.0f : cy + ch; // around the thin line of an attached sound
       if (is_selected)
-        dl->AddRect(ImVec2(x0, cy), ImVec2(x1 - 1.0f, cy + ch), hex(look::accent), 5.0f, 0, 2.0f);
+        dl->AddRect(ImVec2(x0, ring_top), ImVec2(x1 - 1.0f, ring_bottom), hex(look::accent), attached_sound ? 3.0f : 5.0f, 0, 2.0f);
       else if (picked_.count(c.id)) // the rest of a group
-        dl->AddRect(ImVec2(x0, cy), ImVec2(x1 - 1.0f, cy + ch), hex(look::accent, 220), 5.0f, 0, 2.0f);
+        dl->AddRect(ImVec2(x0, ring_top), ImVec2(x1 - 1.0f, ring_bottom), hex(look::accent, 220), attached_sound ? 3.0f : 5.0f, 0, 2.0f);
       if (is_selected) // the keys of its effects' parameters: a small diamond at each key time
         for (const EffectUi &fx : c.effects)
           for (const eval::Curve &curve : fx.curve)
@@ -7183,7 +7241,7 @@ void App::draw_timeline() {
               dl->AddPolyline(quad, 4, IM_COL32(20, 24, 34, 200), ImDrawFlags_Closed, 1.0f);
             }
       else if (!c.link_group.empty() && sel_link == c.link_group) // the selected clip's linked partner
-        dl->AddRect(ImVec2(x0, cy), ImVec2(x1 - 1.0f, cy + ch), hex(look::accent, 150), 5.0f, 0, 1.0f);
+        dl->AddRect(ImVec2(x0, ring_top), ImVec2(x1 - 1.0f, ring_bottom), hex(look::accent, 150), attached_sound ? 3.0f : 5.0f, 0, 1.0f);
       if ((c.audio_fade_in > 0 || c.audio_fade_out > 0) && drag_id_ != c.id) { // sound fades: ramps at the ends
         const float fx_in = x_of(double(start + std::min(c.audio_fade_in, frames)));
         const float fx_out = x_of(double(start + frames - std::min(c.audio_fade_out, frames)));
@@ -7229,7 +7287,8 @@ void App::draw_timeline() {
         const ImVec2 ts = text_size(label.c_str());
         dl->AddRectFilled(ImVec2(label_x - 4.0f, cy + (ch - ts.y) * 0.5f - 2.0f), ImVec2(label_x + ts.x + 5.0f, cy + (ch + ts.y) * 0.5f + 2.0f), IM_COL32(8, 10, 16, 150), 5.0f);
       }
-      dl->AddText(ImVec2(label_x, cy + (ch - ImGui::GetFontSize()) * 0.5f), IM_COL32(255, 255, 255, 235), label.c_str());
+      if (!attached_sound) // the sound of a picture is a thin line: its name is the picture's
+        dl->AddText(ImVec2(label_x, cy + (ch - ImGui::GetFontSize()) * 0.5f), IM_COL32(255, 255, 255, 235), label.c_str());
       // The keys of its position, scale and rotation: small diamonds along the bottom, where they are in time.
       for (const eval::Curve *curve : {&c.position_keys, &c.scale_keys, &c.rotation_keys})
         for (const eval::Key &k : curve->keys) {
@@ -7560,7 +7619,7 @@ void App::draw_timeline() {
     }
     const bool audio = track.kind == "audio";
     const uint32_t base = audio ? look::aud : all_text ? look::txt : all_adj ? look::adj : look::vid;
-    const char *kind_word = audio ? "Sound track" : all_text ? "Text track" : all_adj ? "Effect layers" : "Picture track";
+    const char *kind_word = audio ? "Audio track" : all_text ? "Text track" : all_adj ? "Effect layers" : "Video track";
     const ImVec2 badge(win.x + 10.0f, y + 10.0f);
     dl->AddRectFilled(badge, ImVec2(badge.x + 24.0f, badge.y + 24.0f), hex(base), 6.0f);
     {
@@ -7631,9 +7690,9 @@ void App::draw_timeline() {
         pending_ = [this, tid2, on = !track.hidden] { set_track_flag(tid2, "hidden", on, on ? "Hide track" : "Show track"); };
       }
       ImGui::Separator();
-      if (menu_item("Add a picture track"))
+      if (menu_item("Add a video track"))
         pending_ = [this] { add_track(false); };
-      if (menu_item("Add a sound track"))
+      if (menu_item("Add an audio track"))
         pending_ = [this] { add_track(true); };
       ImGui::Separator();
       char label[64];
@@ -8194,7 +8253,7 @@ void App::draw_inspector() {
   end_card();
   ImGui::PopStyleColor();
 
-  // A linked clip says what it is linked to; Unlink lets the two be edited apart for good.
+  // A linked clip says what it is linked to; Unlink (for a picture with its sound: Detach audio) lets the two be edited apart for good.
   if (const auto partners = linked_of(*c); !partners.empty()) {
     if (begin_card("##link", "Linked")) {
       ImGui::PushTextWrapPos(0.0f);
@@ -8204,11 +8263,12 @@ void App::draw_inspector() {
       ImGui::TextColored(hexv(look::fg3), "Moving, trimming, splitting and deleting change them together.");
       ImGui::PopTextWrapPos();
       const std::string cid = c->id;
-      if (soft_button("unlink", "Unlink", ImVec2(-1.0f, 28.0f)))
-        pending_ = [this, cid] {
+      const bool picture_with_sound = std::any_of(partners.begin(), partners.end(), [](const ClipUi *m) { return m->stream == "audio"; }) && c->stream == "video";
+      if (soft_button("unlink", picture_with_sound ? "Detach audio" : "Unlink", ImVec2(-1.0f, 28.0f)))
+        pending_ = [this, cid, picture_with_sound] {
           json result;
           if (rpc("timeline.edit", {{"project", project_path_}, {"ops", json::array({{{"op", "unlink"}, {"clip", cid}}})}, {"label", "Unlink"}}, result)) {
-            say("Unlink");
+            say(picture_with_sound ? "Audio detached: its sound is a clip of its own now" : "Unlink");
             refresh();
           }
         };

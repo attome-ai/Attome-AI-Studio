@@ -21,7 +21,7 @@ try {
   New-Sample "$work\clip.mp4" "--seconds 3 --height 360"
   & "$bin\attome.exe" new $a --rate 30 | Out-Null
   & "$bin\attome.exe" new $b --rate 30 | Out-Null
-  [IO.File]::WriteAllText("$work\call.json", (@{ project = $a; ops = @(@{ op = 'add_clip'; path = "$work\clip.mp4"; at = '0s' }) } | ConvertTo-Json -Depth 6 -Compress), (New-Object Text.UTF8Encoding($false)))
+  [IO.File]::WriteAllText("$work\call.json", (@{ project = $a; ops = @(@{ op = 'add_clip'; separate_audio = $true; path = "$work\clip.mp4"; at = '0s' }) } | ConvertTo-Json -Depth 6 -Compress), (New-Object Text.UTF8Encoding($false)))
   $r = & "$bin\attome.exe" --json call timeline.edit "$work\call.json" | ConvertFrom-Json
   if (-not $r.ok) { throw "setup: $($r.error.message)" }
 } finally { Remove-Item Env:\ATTOME_ENDPOINT -ErrorAction SilentlyContinue }

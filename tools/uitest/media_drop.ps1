@@ -1,4 +1,4 @@
-# UI test: a media file dragged from the Media panel onto the timeline, with its linked sound. Let go on the right half
+# UI test: a media file dragged from the Media panel onto the timeline (one clip, its sound inside it). Let go on the right half
 # of a clip it goes after it; on the left half before it, and the clips in the way slide right with their sound. Then a
 # linked clip is moved in front of the others on the timeline. Nothing may overlap on either track, and every picture
 # must still start with its sound. Virtual input only.
@@ -18,8 +18,7 @@ try {
   & "$bin\attome.exe" new $proj --rate 30 | Out-Null
 } finally { Remove-Item Env:\ATTOME_ENDPOINT -ErrorAction SilentlyContinue }
 
-# The clips of the picture track and of the audio track, by start. Throws when clips of a track overlap or a picture and
-# its sound do not start together.
+# The clips of the picture track (and of the audio track: there is none, a video carries its sound), by start. Throws when clips of a track overlap.
 function Get-Pairs($run) {
   $out = @{ video = @(); audio = @() }
   foreach ($t in (Get-Tracks $run)) {
@@ -35,11 +34,7 @@ function Get-Pairs($run) {
       if ($out[$kind][$i].At -lt $out[$kind][$i - 1].End - 0.0005) { throw "two $kind clips overlap: one ends at $($out[$kind][$i - 1].End) s, the next starts at $($out[$kind][$i].At) s" }
     }
   }
-  foreach ($v in $out.video) {
-    $s = $out.audio | Where-Object { $_.Link -and $_.Link -eq $v.Link }
-    if (-not $s) { throw "the picture at $($v.At) s has no linked sound" }
-    if ($s.At -ne $v.At) { throw "the picture at $($v.At) s has its sound at $($s.At) s" }
-  }
+  if ($out.audio.Count -gt 0) { throw 'a video is one clip with its sound inside it: the import made an audio clip' }
   $out
 }
 

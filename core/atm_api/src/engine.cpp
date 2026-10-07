@@ -1006,6 +1006,29 @@ struct Engine::Impl {
             add_one(cid);
     if (found.empty())
       return bad_param("clips", "names no clip of this project");
+    // part: a video with its sound inside it is kept as only its sound (a sound clip) or only its picture (silent).
+    const std::string part = params.value("part", std::string());
+    if (part != "" && part != "sound" && part != "picture" && part != "both")
+      return bad_param("part", "must be sound, picture or both");
+    if (part == "sound" || part == "picture")
+      for (Found &f : found) {
+        json &mr = f.clip["media_ref"];
+        const std::string stream = mr.value("stream", std::string());
+        if (f.audio || mr.value("type", std::string()) != "file" || !mr.value("has_audio", false) || !stream.empty())
+          continue; // not a video with its own sound
+        if (part == "sound") {
+          mr["stream"] = "audio";
+          for (const char *k : {"width", "height", "rate"})
+            mr.erase(k);
+          f.clip.erase("transform");
+          f.clip.erase("effects");
+          f.audio = true;
+        } else {
+          mr["stream"] = "video";
+          f.clip.erase("audio");
+          f.clip.erase("volume");
+        }
+      }
     std::sort(found.begin(), found.end(), [](const Found &a, const Found &b) { return compare(a.in, b.in) < 0; });
     Rational first = found.front().in;
     for (const Found &f : found)
@@ -1789,7 +1812,7 @@ struct Engine::Impl {
         const double speed = timing.contains("speed") && timing["speed"].is_number() ? timing["speed"].get<double>() : 1.0;
         edl::Event e;
         e.reel = edl_reel_of(file);
-        e.kind = sound ? "AA" : "V";
+        e.kind = sound ? "AA" : (ref.value("has_audio", false) && ref.value("stream", std::string()) != "video" && type == "file") ? "B" : "V"; // B: its own sound is in it
         e.clip_name = to_utf8(fs::path(std::u8string(file.begin(), file.end())).filename());
         e.rec_in = start_frames + frames(in);
         e.rec_out = start_frames + frames(add(in, dur).value_or(in));
@@ -1944,6 +1967,9 @@ struct Engine::Impl {
                     {"clips", item->value("clips", json::array()).size()}};
       if (item->contains("thumb"))
         brief["thumb"] = to_utf8(entry.path() / item->value("thumb", std::string()));
+      for (const json &c : item->value("clips", json::array())) // the file of its sound, to draw its waveform from
+        if (c.value("audio", false) && brief.value("sound_path", std::string()).empty())
+          brief["sound_path"] = c.value("clip", json::object()).value("media_ref", json::object()).value("path", std::string());
       items.push_back(std::move(brief));
     }
     std::sort(items.begin(), items.end(), [](const json &a, const json &b) { return a.value("made", std::string()) > b.value("made", std::string()); });
@@ -2096,12 +2122,14 @@ struct Engine::Impl {
          "- add_track {kind (video | audio), name?, position? (top | bottom), below? / above? (track ID), sync_lock? (true: the track's clips follow make_room and ripple_delete)}\n"
          "- delete {clip} or {transition}; ripple_delete {clip} (closes the gap, on the tracks locked to the cut too); move {clip, to?, track?}; trim {clip, edge (in | out), to or delta}; set_speed {clip, speed (0.1..10, 2 = twice as fast)} - the clip and its linked sound play faster or slower, and get shorter or longer; "
          "set_reverse {clip, reverse (true | false)} - the clip and its linked sound play backwards, or forwards again; "
-         "fade {clip, in?, out?} - a picture fades up from nothing over `in` and down over `out` (opacity keys); a sound clip's own sound fades the same way; "
+         "fade {clip, in?, out?, sound? (true)} - a picture fades up from nothing over `in` and down over `out` (opacity keys), and the sound it carries fades with it unless sound is false; a sound clip's own sound fades the same way; "
          "a side left out keeps its fade, 0 takes it away; "
          "set_keyframe {clip, property (position | scale | rotation | opacity), at (counted from the clip's start), value} - a key that animates the property: "
          "position [x, y] in canvas fractions (0.5, 0.5 is the centre), scale [x, y] or one number, rotation in degrees, opacity 0..1; a key at that time takes the new value; "
          "remove_keyframe {clip, property, at?} - the key at `at`, or every key of the property (the last one's value stays as the plain value); "
          "fit_clip {clip, mode (fit | fill)} - fit shows the whole picture centred, fill covers the canvas (two sides cut off); "
+         "detach_audio {clip} - the sound of a video clip becomes a clip of its own on an audio track, and the video is silent from then on (add_clip makes ONE clip with "
+         "its sound; separate_audio: true on add_clip makes the pair at once); "
          "delete_track {track} - the track and every clip on it (a locked track is refused); "
          "add_marker {at, name?} and remove_marker {marker} - markers on the ruler; "
          "freeze_frame {clip, at, duration? (2s)} - the picture at that time holds for the duration: the clip is cut there, a still of the frame "
@@ -4071,7 +4099,7 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
      R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},
        "ops":{"type":"array","items":{"type":"object","properties":{
          "op":{"type":"string","enum":["add_track","add_clip","add_text","add_captions","sync_captions","add_adjustment","add_transition","delete",
-                                       "ripple_delete","move","trim","split","duplicate","slip","roll","slide","set_speed","freeze_frame","set_reverse","fade","set_keyframe","remove_keyframe","fit_clip","delete_track","add_marker","remove_marker","add_effect","remove_effect",
+                                       "ripple_delete","move","trim","split","duplicate","slip","roll","slide","set_speed","freeze_frame","set_reverse","detach_audio","fade","set_keyframe","remove_keyframe","fit_clip","delete_track","add_marker","remove_marker","add_effect","remove_effect",
                                        "set_effect_enabled","link","unlink","set_property"]},
          "id":{"type":"string","description":"$new:name for what this op creates"}},"required":["op"]}},
        "sequence":{"type":"string"},"label":{"type":"string"},"dry_run":{"type":"boolean"},
@@ -4093,9 +4121,10 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
     {"library.add", "library", false,
      "Keep clips in the user's clip library, which every project can use: the clips (and their linked sound or picture) become one item, "
      "with copies of their files. Clips linked to the ones named come along unless linked is false (only the clips named: the music without its picture). "
-     "Returns the item's id.",
+     "part sound or picture keeps only that part of a video with its sound inside it. Returns the item's id.",
      R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},
-       "clips":{"type":"array","items":{"type":"string"}},"name":{"type":"string"},"linked":{"type":"boolean","description":"Default true: the linked picture or sound comes too"}},"required":["project","clips"]})",
+       "clips":{"type":"array","items":{"type":"string"}},"name":{"type":"string"},"linked":{"type":"boolean","description":"Default true: the linked picture or sound comes too"},
+       "part":{"type":"string","enum":["both","sound","picture"],"description":"For a video with its sound inside it: keep only its sound, or only its picture"}},"required":["project","clips"]})",
      &Impl::library_add},
     {"library.list", "library", false, "The items of the user's clip library, the newest first.", R"({"type":"object","properties":{}})", &Impl::library_list},
     {"library.get", "library", false,

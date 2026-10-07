@@ -84,13 +84,13 @@ try {
       if (-not $failed -and $left -and @($left.PSObject.Properties).Count -ne 0) { $failed = 'Remove all markers left a marker' }
     }
   }
-  if (-not $failed) { # the media card's menu: the file leaves the project with its picture and its sound
+  if (-not $failed) { # the media card's menu: the file leaves the project with the clip made from it
     $before = Clip-Count $run
     $media = Invoke-EditorScript -Project $proj -Endpoint $run.Endpoint -Script @(
       'rclick @media:a.mp4', 'wait 400'
-      'expect @menuitem:Add_to_the_timeline', 'expect @menuitem:Show_in_folder', 'expect @menuitem:Remove,_and_delete_its_2_clips'
+      'expect @menuitem:Add_to_the_timeline', 'expect @menuitem:Show_in_folder', 'expect @menuitem:Remove,_and_delete_its_1_clip'
       "shot $work\media_menu.jpg"
-      'click @menuitem:Remove,_and_delete_its_2_clips', 'wait 900'
+      'click @menuitem:Remove,_and_delete_its_1_clip', 'wait 900'
       'absent @media:a.mp4'
       "shot $work\media_removed.jpg"
     )
@@ -98,7 +98,7 @@ try {
     if (-not $failed) {
       $after = Clip-Count $run
       "clips: $before before, $after after the file was removed"
-      if ($after -ne $before - 2) { $failed = "removing the file left $after clips of $before" }
+      if ($after -ne $before - 1) { $failed = "removing the file left $after clips of $before" }
       elseif (-not (Test-Path "$work\a.mp4")) { $failed = 'the file on the disk was deleted' }
     }
   }

@@ -115,6 +115,8 @@ public:
       return wrap(freeze_frame());
     if (name == "set_reverse")
       return wrap(set_reverse());
+    if (name == "detach_audio")
+      return wrap(detach_audio());
     if (name == "fade")
       return wrap(fade());
     if (name == "set_keyframe")
@@ -427,12 +429,13 @@ private:
           ref[k] = media[k];
     const std::u8string stem = std::filesystem::path(std::u8string(path.begin(), path.end())).stem().u8string();
     const std::string clip_name = op_.value("name", std::string(stem.begin(), stem.end()));
-    // A video with sound becomes two linked clips (F1 §5.8): the picture here, the sound on an audio track, so the
-    // sound can be cut, faded and mixed on its own while edits keep the two together. with_audio: false keeps only
-    // the picture.
-    const bool sound = has_video && media.value("has_audio", false) && op_.value("with_audio", true);
-    if (has_video && !image)
-      ref["stream"] = "video";
+    // A video with sound is ONE clip on its video track, with its own sound (as in CapCut and Final Cut): the clip's audio {gain_db, pan, fades} and
+    // volume are the sound's. with_audio: false makes a silent picture. separate_audio: true makes two linked clips instead (the picture here, the
+    // sound on an audio track), for edits that treat them apart from the start; detach_audio does that to a clip later.
+    const bool has_sound = has_video && !image && media.value("has_audio", false) && op_.value("with_audio", true);
+    const bool sound = has_sound && op_.value("separate_audio", false);
+    if (has_video && !image && (sound || !has_sound))
+      ref["stream"] = "video"; // a picture with no sound of its own
     json sound_ref = ref;
     sound_ref["stream"] = "audio";
     for (const char *k : {"width", "height", "rate"})
@@ -1431,9 +1434,12 @@ private:
     const Rational dur = span_of(node).duration;
     const bool sound = track(c.second)->value("kind", "") == "audio";
     const auto clamp_to = [&](Rational v, Rational most) { return compare(v, Rational()) < 0 ? Rational() : compare(v, most) > 0 ? most : v; };
-    if (sound) {
+    const json fade_ref = node.value("media_ref", json::object());
+    const bool embedded = !sound && fade_ref.value("type", std::string()) == "file" && fade_ref.value("has_audio", false) && fade_ref.value("stream", std::string()) != "video" &&
+                          op_.value("sound", true); // a video with its own sound fades the sound with the picture
+    const auto fade_sound = [&]() {
       const json au = node.value("audio", json::object());
-      json fresh = json::object(); // the sound clip has no "audio" yet: it is made once, with both fades
+      json fresh = json::object(); // the clip has no "audio" yet: it is made once, with both fades
       const auto set = [&](const char *key, const std::optional<Rational> &v) {
         if (!v)
           return;
@@ -1452,8 +1458,13 @@ private:
       set("fade_out", out);
       if (!fresh.empty())
         push({{"op", "add"}, {"path", id + "/audio"}, {"value", std::move(fresh)}});
+    };
+    if (sound) {
+      fade_sound();
       return {};
     }
+    if (embedded)
+      fade_sound();
     // The fades the clip has now: a first key at 0 with value 0 rising to the next, a last key at the end with value 0 falling from the one before.
     const std::vector<Key> keys = keys_of(node, "opacity");
     Rational now_in, now_out;
@@ -1616,6 +1627,38 @@ private:
       return fail("E_PARAM", "\"marker\" must be the ID of a marker, not \"" + id + "\".",
                   "The markers are in the sequence's \"markers\" (project.get on the sequence).");
     push({{"op", "remove"}, {"path", id}});
+    return {};
+  }
+
+  // detach_audio {clip}: the sound of a video clip becomes a clip of its own on an audio track (the first that is free there, else a new one), and the
+  // video clip is silent from then on. The sound keeps the clip's time, speed, direction, gain, pan and fades; the two are not linked: they move apart.
+  Result<void> detach_audio() {
+    ATM_TRY(auto c, clip("clip"));
+    const std::string id = op_.value("clip", std::string());
+    const json &node = *c.first;
+    const json ref = node.value("media_ref", json::object());
+    const bool silent = ref.value("stream", std::string()) == "video";
+    if (ref.value("type", std::string()) != "file" || !ref.value("has_audio", false) || ref.value("stream", std::string()) == "audio")
+      return fail("E_PARAM", "detach_audio needs a clip of a video file that has sound; " + id + " is not one.");
+    if (silent)
+      return fail("E_PARAM", "The clip's sound is already detached (or it was added without sound).");
+    const json timing = node.value("timing", json::object());
+    ATM_TRY(std::string audio_track, sound_track_for(span_of(node).in, span_of(node).duration));
+    json sound_ref = ref;
+    sound_ref["stream"] = "audio";
+    for (const char *k : {"width", "height", "rate"})
+      sound_ref.erase(k);
+    json sound = {{"name", node.value("name", std::string("Sound"))}, {"timing", timing}, {"media_ref", std::move(sound_ref)}, {"volume", node.value("volume", 1.0)}};
+    if (node.contains("audio"))
+      sound["audio"] = node["audio"]; // gain, pan and fades go with the sound
+    push({{"op", "replace"}, {"path", id + "/media_ref/stream"}, {"value", "video"}});
+    if (!node.value("media_ref", json::object()).contains("stream"))
+      out_.ops.back()["op"] = "add";
+    if (node.contains("audio"))
+      push({{"op", "remove"}, {"path", id + "/audio"}});
+    if (node.contains("volume"))
+      push({{"op", "replace"}, {"path", id + "/volume"}, {"value", 1.0}});
+    push({{"op", "add"}, {"path", audio_track + "/clips/" + placeholder(".audio")}, {"value", std::move(sound)}});
     return {};
   }
 

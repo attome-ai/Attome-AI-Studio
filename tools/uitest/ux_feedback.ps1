@@ -1,4 +1,4 @@
-# UI test: the editor says what it did and does not do things silently (UX review B1, B5, B6, U2, U5, D1).
+﻿# UI test: the editor says what it did and does not do things silently (UX review B1, B5, B6, U2, U5, D1).
 #  - a click on a media card only selects it; a double click, or the plus on the card, adds it, with a toast that has Undo;
 #    Undo takes the clips away again
 #  - the save state is shown; File > Save exists
@@ -115,7 +115,9 @@ try {
     $failed = $del.Errors
     if (-not $failed -and (Count-Clips $run) -ne $before) { $failed = 'a clip on a locked track was deleted' }
   }
-  if (-not $failed) { # an audio track made by the add: mute and solo
+  if (-not $failed) { # an audio track (a video is one clip with its sound inside it: the import makes none): mute and solo
+    [IO.File]::WriteAllText("$work\addtrack.json", (@{ project = $proj; ops = @(@{ op = 'add_track'; kind = 'audio' }) } | ConvertTo-Json -Depth 5 -Compress), (New-Object Text.UTF8Encoding($false)))
+    $null = Invoke-Attome $run --json call timeline.edit "$work\addtrack.json"
     $names = (@(Get-Tracks $run) | Where-Object { $_.kind -eq 'audio' } | Select-Object -First 1).name
     if ($names) {
       $mute = Invoke-EditorScript -Project $proj -Endpoint $run.Endpoint -Script @("click @mute:$names", 'wait 500', "click @solo:$names", 'wait 500', "shot $work\ux_mute.jpg")
@@ -136,3 +138,4 @@ try {
 if ($failed) { Write-Host "FAIL: $failed" -ForegroundColor Red; exit 1 }
 Write-Host "PASS: media cards select and add with a toast and Undo; track switches work and are saved; nothing in the navigation leads nowhere (captures in $work)" -ForegroundColor Green
 exit 0
+

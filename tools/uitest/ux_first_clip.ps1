@@ -29,7 +29,7 @@ $run = Invoke-EditorScript -Project $proj -TimeoutSeconds 240 -Script @(
   'expect @media:v.mp4'
   'drag @media:v.mp4 @lane:Video@0.6,0.5 hold', 'wait 200', 'release', 'wait 900'
   "shot $work\first.jpg"
-  'drag @media:m.wav @track:A1@0.0,0.5 hold', 'wait 200', 'release', 'wait 900'
+  'drag @media:m.wav @clip:v@0.1,1.6 hold', 'wait 200', 'release', 'wait 900'     # below the video's lane: a new audio track
   "shot $work\music.jpg"
 )
 $failed = $run.Errors
@@ -41,12 +41,12 @@ try {
     "first clip starts at $start s"
     if ($start -ne 0) { $failed = "the first clip starts at $start s, not 0" }
   }
-  if (-not $failed) { # music dropped over the picture's own sound plays on a track of its own: nothing is pushed
+  if (-not $failed) { # music dropped under the video gets an audio track of its own: nothing is pushed
     $tr = @(Get-Tracks $run)
     $aud = @($tr | Where-Object { $_.kind -eq 'audio' })
     $c = Get-Object $run (@($tr | Where-Object { $_.kind -eq 'video' })[0].clip_list[0].id)
     "sound tracks: $($aud.Count), picture starts at $([double](ConvertFrom-Rational $c.timing.start)) s"
-    if ($aud.Count -lt 2) { $failed = 'the music did not get a sound track of its own' }
+    if ($aud.Count -ne 1) { $failed = "the music should have one audio track of its own, found $($aud.Count)" }
     elseif ([double](ConvertFrom-Rational $c.timing.start) -ne 0) { $failed = 'the music pushed the picture along' }
   }
   if (-not $failed) {

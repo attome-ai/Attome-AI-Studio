@@ -249,10 +249,10 @@ TEST_CASE("timeline.edit + media.import: clips, dissolves, music and edits by na
   CHECK(f.engine.call("media.import", {{"project", f.project}, {"paths", {a}}})->at("assets")[0]["id"] == ast_a);
 
   const json r = f.ok(json::array(
-      {{{"op", "add_clip"}, {"id", "$new:a"}, {"asset", ast_a}, {"source_in", "1s"}, {"duration", "2s"}, {"with_audio", false}},
-       {{"op", "add_clip"}, {"id", "$new:b"}, {"asset", ast_b}, {"source_in", "1s"}, {"duration", "2s"}, {"with_audio", false}},
+      {{{"op", "add_clip"}, {"separate_audio", true}, {"id", "$new:a"}, {"asset", ast_a}, {"source_in", "1s"}, {"duration", "2s"}, {"with_audio", false}},
+       {{"op", "add_clip"}, {"separate_audio", true}, {"id", "$new:b"}, {"asset", ast_b}, {"source_in", "1s"}, {"duration", "2s"}, {"with_audio", false}},
        {{"op", "add_transition"}, {"id", "$new:d"}, {"between", {"$new:a", "$new:b"}}, {"duration", "1s"}},
-       {{"op", "add_clip"}, {"id", "$new:music"}, {"asset", ast_m}, {"at", "0s"}, {"duration", "4s"}, {"gain_db", -12}, {"fade_out", "2s"}}}));
+       {{"op", "add_clip"}, {"separate_audio", true}, {"id", "$new:music"}, {"asset", ast_m}, {"at", "0s"}, {"duration", "4s"}, {"gain_db", -12}, {"fade_out", "2s"}}}));
   const std::string ca = r["id_map"]["$new:a"], cb = r["id_map"]["$new:b"], music = r["id_map"]["$new:music"];
   CHECK(r["duration"]["rational"] == "4");
   const json clip_b = f.get(cb);
@@ -279,7 +279,7 @@ TEST_CASE("timeline.edit + media.import: clips, dissolves, music and edits by na
     // The hint names the longest dissolve that fits, in plain seconds: 1 s of spare media on each side.
     CHECK(refused.error().hint.find("centred dissolve of at most 2 s") != std::string::npos);
   }
-  CHECK(f.fail_rule(json::array({{{"op", "add_clip"}, {"asset", ast_a}, {"source_in", "1s"}, {"duration", "9s"}}})) ==
+  CHECK(f.fail_rule(json::array({{{"op", "add_clip"}, {"separate_audio", true}, {"asset", ast_a}, {"source_in", "1s"}, {"duration", "9s"}}})) ==
         "E_MEDIA_RANGE");
 
   // Split b, trim the right half, ripple-delete a, animate the music's level: all by name, in one call.
@@ -305,8 +305,8 @@ TEST_CASE("timeline.edit: set_speed plays a clip and its sound faster or slower,
   Fixture f;
   const std::string file = (f.dir / "v.mp4").string();
   write_video(file, 6);
-  const json r = f.ok(json::array({{{"op", "add_clip"}, {"id", "$new:a"}, {"path", file}, {"source_in", "1s"}, {"duration", "2s"}},
-                                   {{"op", "add_clip"}, {"id", "$new:b"}, {"path", file}, {"duration", "1s"}, {"with_audio", false}},
+  const json r = f.ok(json::array({{{"op", "add_clip"}, {"separate_audio", true}, {"id", "$new:a"}, {"path", file}, {"source_in", "1s"}, {"duration", "2s"}},
+                                   {{"op", "add_clip"}, {"separate_audio", true}, {"id", "$new:b"}, {"path", file}, {"duration", "1s"}, {"with_audio", false}},
                                    {{"op", "set_property"}, {"target", "$new:a"}, {"path", "transform.opacity"},
                                     {"keyframes", {{{"t", "0s"}, {"v", 0}}, {{"t", "1s"}, {"v", 1}}}}}}));
   const std::string a = r["id_map"]["$new:a"], sa = r["id_map"]["$new:a.audio"], b = r["id_map"]["$new:b"];
@@ -339,7 +339,7 @@ TEST_CASE("timeline.edit: set_speed plays a clip and its sound faster or slower,
   CHECK(f.fail_rule(json::array({{{"op", "set_speed"}, {"clip", a}, {"speed", 20}}})) == "E_PARAM");
 
   // A clip that plays its file to the very end takes any speed, many times over (the rounding of its times never refuses one).
-  const json whole = f.ok(json::array({{{"op", "add_clip"}, {"id", "$new:w"}, {"path", file}}}));
+  const json whole = f.ok(json::array({{{"op", "add_clip"}, {"separate_audio", true}, {"id", "$new:w"}, {"path", file}}}));
   const std::string w = whole["id_map"]["$new:w"];
   for (const double sp : {0.62, 1.37, 0.33, 2.71, 0.1, 9.9, 1.0, 0.75, 1.25})
     f.ok(json::array({{{"op", "set_speed"}, {"clip", w}, {"speed", sp}}}));
@@ -352,8 +352,8 @@ TEST_CASE("timeline.edit: freeze_frame holds a frame: the clip and its sound are
   Fixture f;
   const std::string file = (f.dir / "v.mp4").string();
   write_video(file, 4);
-  const json r = f.ok(json::array({{{"op", "add_clip"}, {"id", "$new:a"}, {"path", file}, {"duration", "3s"}},
-                                   {{"op", "add_clip"}, {"id", "$new:b"}, {"path", file}, {"duration", "1s"}, {"with_audio", false}}}));
+  const json r = f.ok(json::array({{{"op", "add_clip"}, {"separate_audio", true}, {"id", "$new:a"}, {"path", file}, {"duration", "3s"}},
+                                   {{"op", "add_clip"}, {"separate_audio", true}, {"id", "$new:b"}, {"path", file}, {"duration", "1s"}, {"with_audio", false}}}));
   const std::string a = r["id_map"]["$new:a"], sa = r["id_map"]["$new:a.audio"], b = r["id_map"]["$new:b"];
   const json e = f.ok(json::array({{{"op", "freeze_frame"}, {"id", "$new:fz"}, {"clip", a}, {"at", "1s"}, {"duration", "2s"}}}));
   // a: 0..1 s; the still: 1..3 s; the rest of a: 3..5 s (from 1 s into the file); b: 5..6 s; the sound: 0..1, a gap, 3..5.
@@ -386,7 +386,7 @@ TEST_CASE("timeline.edit: new tracks take the first free name of their kind, als
   const std::string file = (f.dir / "v.mp4").string();
   write_video(file, 2);
   // A title first makes "Titles"; the first picture track after it is still V1, its sound A1.
-  f.ok(json::array({{{"op", "add_text"}, {"text", "Hi"}, {"duration", "1s"}}, {{"op", "add_clip"}, {"path", file}}}));
+  f.ok(json::array({{{"op", "add_text"}, {"text", "Hi"}, {"duration", "1s"}}, {{"op", "add_clip"}, {"separate_audio", true}, {"path", file}}}));
   json names = json::array();
   for (const json &t : f.tracks())
     names.push_back(t["name"]);
@@ -408,7 +408,7 @@ TEST_CASE("library: clips kept from one project, with copies of their files, are
   _putenv_s("ATTOME_LIBRARY_DIR", lib.string().c_str());
   const std::string file = (f.dir / "v.mp4").string();
   write_video(file, 3);
-  const json r = f.ok(json::array({{{"op", "add_clip"}, {"id", "$new:v"}, {"path", file}, {"at", "1s"}},
+  const json r = f.ok(json::array({{{"op", "add_clip"}, {"separate_audio", true}, {"id", "$new:v"}, {"path", file}, {"at", "1s"}},
                                    {{"op", "add_text"}, {"id", "$new:t"}, {"text", "Hi"}, {"at", "2s"}, {"duration", "1s"}},
                                    {{"op", "set_property"}, {"target", "$new:v"}, {"path", "transform.opacity"}, {"value", 0.5}}}));
   const std::string v = r["id_map"]["$new:v"], t = r["id_map"]["$new:t"];
@@ -478,7 +478,7 @@ TEST_CASE("library: the colour table of an effect is kept with the item", "[time
   const std::string file = (f.dir / "v.mp4").string(), cube = (f.dir / "look.cube").string();
   write_video(file, 2);
   { std::ofstream(cube) << "LUT_1D_SIZE 2" << char(10) << "0 0 0" << char(10) << "1 1 1" << char(10); }
-  const json r = f.ok(json::array({{{"op", "add_clip"}, {"id", "$new:v"}, {"path", file}}}));
+  const json r = f.ok(json::array({{{"op", "add_clip"}, {"separate_audio", true}, {"id", "$new:v"}, {"path", file}}}));
   const std::string v = r["id_map"]["$new:v"];
   f.ok(json::array({{{"op", "add_effect"}, {"target", v}, {"type", "lut"}, {"file", cube}, {"strength", 0.5}}}));
   REQUIRE(f.engine.call("library.add", {{"project", f.project}, {"clips", {v}}, {"name", "Graded"}}));
@@ -500,7 +500,7 @@ TEST_CASE("timeline.edit: slip, roll and slide change timing the way editors exp
   const std::string file = (f.dir / "a.mp4").string();
   write_video(file, 6);
   const auto clip = [&](const char *id) {
-    return json{{"op", "add_clip"}, {"id", id}, {"path", file}, {"source_in", "1s"}, {"duration", "2s"}};
+    return json{{"op", "add_clip"}, {"separate_audio", true}, {"id", id}, {"path", file}, {"source_in", "1s"}, {"duration", "2s"}};
   };
   const json r = f.ok(json::array({clip("$new:c1"), clip("$new:c2"), clip("$new:c3")})); // 0-2, 2-4, 4-6 s
   const std::string c1 = r["id_map"]["$new:c1"], c2 = r["id_map"]["$new:c2"], c3 = r["id_map"]["$new:c3"];
@@ -541,7 +541,7 @@ TEST_CASE("timeline.edit: a video with sound becomes linked picture and sound cl
   const std::string file = (f.dir / "v.mp4").string();
   write_video(file, 6);
   const auto add = [&](const char *id) {
-    return json{{"op", "add_clip"}, {"id", id}, {"path", file}, {"source_in", "1s"}, {"duration", "2s"}};
+    return json{{"op", "add_clip"}, {"separate_audio", true}, {"id", id}, {"path", file}, {"source_in", "1s"}, {"duration", "2s"}};
   };
   const json r = f.ok(json::array({add("$new:a"), add("$new:b")}));
   const std::string a = r["id_map"]["$new:a"], b = r["id_map"]["$new:b"];
@@ -622,7 +622,7 @@ TEST_CASE("timeline.edit: fade, keyframes, fit, delete_track and markers do what
   Fixture f;
   const std::string file = (f.dir / "v.mp4").string();
   write_video(file, 4);
-  const json r = f.ok(json::array({{{"op", "add_clip"}, {"id", "$new:a"}, {"path", file}}}));
+  const json r = f.ok(json::array({{{"op", "add_clip"}, {"separate_audio", true}, {"id", "$new:a"}, {"path", file}}}));
   const std::string a = r["id_map"]["$new:a"], sa = r["id_map"]["$new:a.audio"];
 
   // fade: opacity keys 0 -> 1 over the first second, 1 -> 0 over the last half second; a side left out keeps its fade.
@@ -697,7 +697,7 @@ TEST_CASE("library.insert puts an item into a project on free tracks, and media.
   _putenv_s("ATTOME_LIBRARY_DIR", (f.dir / "library").string().c_str());
   const std::string file = (f.dir / "v.mp4").string();
   write_video(file, 3);
-  const json r = f.ok(json::array({{{"op", "add_clip"}, {"id", "$new:v"}, {"path", file}, {"at", "0s"}},
+  const json r = f.ok(json::array({{{"op", "add_clip"}, {"separate_audio", true}, {"id", "$new:v"}, {"path", file}, {"at", "0s"}},
                                    {{"op", "add_text"}, {"id", "$new:t"}, {"text", "Hi"}, {"at", "1s"}, {"duration", "1s"}}}));
   const std::string v = r["id_map"]["$new:v"], t = r["id_map"]["$new:t"];
   REQUIRE(f.engine.call("library.add", {{"project", f.project}, {"clips", {v, t}}, {"name", "Intro"}}));
@@ -762,7 +762,7 @@ TEST_CASE("timeline.edit set_property sets a field that is not there yet, and nu
   Fixture f;
   const std::string file = (f.dir / "v.mp4").string();
   write_video(file, 3);
-  const json r = f.ok(json::array({{{"op", "add_clip"}, {"id", "$new:a"}, {"path", file}}, {{"op", "add_text"}, {"id", "$new:t"}, {"text", "Hi"}, {"duration", "1s"}}}));
+  const json r = f.ok(json::array({{{"op", "add_clip"}, {"separate_audio", true}, {"id", "$new:a"}, {"path", file}}, {{"op", "add_text"}, {"id", "$new:t"}, {"text", "Hi"}, {"duration", "1s"}}}));
   const std::string a = r["id_map"]["$new:a"], sa = r["id_map"]["$new:a.audio"], t = r["id_map"]["$new:t"];
   const json tracks = f.tracks();
   const std::string video_track = tracks[0]["id"], sound_track = tracks[1]["id"];
@@ -814,6 +814,7 @@ TEST_CASE("edl.export and edl.import take a cut to a cut list and back, with a s
   std::ifstream in(out, std::ios::binary);
   const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
   CHECK(text.find("001  BEACH") != std::string::npos);
+  CHECK(text.find("001  BEACH    B") != std::string::npos); // the clip carries its own sound: picture and sound
   CHECK(text.find("01:00:00:00") != std::string::npos);
   CHECK(text.find("* FROM CLIP NAME: beach.mp4") != std::string::npos);
   CHECK(text.find("M2   BEACH") != std::string::npos);
@@ -868,7 +869,7 @@ TEST_CASE("render.sequence png_sequence writes a numbered PNG for each frame, fo
   Fixture f;
   const std::string file = (f.dir / "v.mp4").string();
   write_video(file, 2);
-  f.ok(json::array({{{"op", "add_clip"}, {"path", file}, {"at", "0s"}}}));
+  f.ok(json::array({{{"op", "add_clip"}, {"separate_audio", true}, {"path", file}, {"at", "0s"}}}));
   const auto wait = [&](const json &started) {
     for (int i = 0; i < 3000; ++i) {
       const json state = *f.engine.call("jobs.get", {{"job_id", started["job_id"]}});
@@ -916,4 +917,79 @@ TEST_CASE("render.sequence png_sequence writes a numbered PNG for each frame, fo
   // A file where a folder belongs is refused, and so is a folder that already holds the frames when overwrite is false.
   CHECK_FALSE(f.engine.call("render.sequence", {{"project", f.project}, {"output", (f.dir / "x.png").string()}, {"format", "png_sequence"}}));
   CHECK_FALSE(f.engine.call("render.sequence", {{"project", f.project}, {"output", out.string()}, {"format", "png_sequence"}, {"from", "6@30"}, {"to", "12@30"}, {"overwrite", false}}));
+}
+
+TEST_CASE("timeline.edit: a video with sound is one clip on one track; detach_audio makes its sound a clip of its own", "[timeline][media][parity]") {
+  Fixture f;
+  const std::string file = (f.dir / "v.mp4").string();
+  write_video(file, 3);
+  // The default: one clip, one track, the sound inside it (no "stream" says "picture only").
+  const json r = f.ok(json::array({{{"op", "add_clip"}, {"id", "$new:a"}, {"path", file}, {"at", "0s"}},
+                                   {{"op", "add_clip"}, {"id", "$new:quiet"}, {"path", file}, {"at", "5s"}, {"with_audio", false}}}));
+  const std::string a = r["id_map"]["$new:a"], quiet = r["id_map"]["$new:quiet"];
+  CHECK_FALSE(r["id_map"].contains("$new:a.audio"));
+  const json one = f.tracks();
+  REQUIRE(one.size() == 1); // no audio track was made
+  CHECK(one[0]["kind"] == "video");
+  CHECK(one[0]["clips"] == 2);
+  CHECK_FALSE(f.get(a)["media_ref"].contains("stream"));
+  CHECK(f.get(a)["media_ref"]["has_audio"] == true);
+  CHECK(f.get(quiet)["media_ref"]["stream"] == "video"); // with_audio false: a silent picture
+  // Its sound is its own: gain and fades are set on the clip.
+  f.ok(json::array({{{"op", "set_property"}, {"target", a}, {"path", "audio.gain_db"}, {"value", -6}},
+                    {{"op", "fade"}, {"clip", a}, {"in", "0.5s"}}}));
+  CHECK(f.get(a)["audio"]["gain_db"] == -6);
+  CHECK(f.engine.call("project.validate", {{"project", f.project}})->at("ok") == true);
+
+  // Detach: the sound becomes a clip on a new audio track with the same time, gain and fade; the video is silent and the two are not linked.
+  const json d = f.ok(json::array({{{"op", "detach_audio"}, {"id", "$new:d"}, {"clip", a}}}));
+  const std::string sound = d["id_map"]["$new:d.audio"];
+  CHECK(f.get(a)["media_ref"]["stream"] == "video");
+  CHECK_FALSE(f.get(a).contains("audio"));
+  CHECK_FALSE(f.get(a).contains("link_group"));
+  const json parted = f.get(sound);
+  CHECK(parted["media_ref"]["stream"] == "audio");
+  CHECK(parted["audio"]["gain_db"] == -6);
+  CHECK(parted["audio"]["fade_in"] == "1/2"); // the sound's fade went with it
+  CHECK(parted["timing"]["record_in"] == "0");
+  CHECK_FALSE(parted.contains("link_group"));
+  const json two = f.tracks();
+  REQUIRE(two.size() == 2);
+  CHECK(two[1]["kind"] == "audio");
+  CHECK(f.engine.call("project.validate", {{"project", f.project}})->at("ok") == true);
+  // Moving the video no longer moves the sound.
+  f.ok(json::array({{{"op", "move"}, {"clip", a}, {"to", "1s"}}}));
+  CHECK(f.get(sound)["timing"]["record_in"] == "0");
+  // Nothing to detach from a silent picture, or from a sound.
+  CHECK(f.fail_rule(json::array({{{"op", "detach_audio"}, {"clip", a}}})) == "E_PARAM");
+  CHECK(f.fail_rule(json::array({{{"op", "detach_audio"}, {"clip", quiet}}})) == "E_PARAM");
+  CHECK(f.fail_rule(json::array({{{"op", "detach_audio"}, {"clip", sound}}})) == "E_PARAM");
+}
+
+TEST_CASE("timeline.edit: a video clip's own sound is mixed and keeps its speed, and detached sound is heard once", "[timeline][render][parity]") {
+  Fixture f;
+  const std::string file = (f.dir / "v.mp4").string();
+  write_video(file, 2);
+  const json r = f.ok(json::array({{{"op", "add_clip"}, {"id", "$new:a"}, {"path", file}, {"at", "0s"}}}));
+  const std::string a = r["id_map"]["$new:a"];
+  const auto loudness = [&](const std::string &name) {
+    const std::string out = (f.dir / name).string();
+    const auto started = f.engine.call("render.sequence", {{"project", f.project}, {"output", out}, {"format", "wav"}});
+    REQUIRE(started);
+    for (int i = 0; i < 3000; ++i) {
+      if ((*f.engine.call("jobs.get", {{"job_id", started->at("job_id")}}))["state"] != "running")
+        break;
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    std::ifstream in(out, std::ios::binary);
+    std::string bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    double peak = 0.0;
+    for (size_t i = 44; i + 1 < bytes.size(); i += 2)
+      peak = std::max(peak, std::fabs(double(int16_t(uint8_t(bytes[i]) | (uint8_t(bytes[i + 1]) << 8))) / 32768.0));
+    return peak;
+  };
+  const double with_sound = loudness("one.wav");
+  CHECK(with_sound > 0.05); // the clip's own sound is in the mix
+  f.ok(json::array({{{"op", "detach_audio"}, {"clip", a}}}));
+  CHECK(loudness("two.wav") == Catch::Approx(with_sound).margin(0.02)); // the same sound, now from its own clip, once
 }
