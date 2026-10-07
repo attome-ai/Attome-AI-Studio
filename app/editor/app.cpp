@@ -4469,6 +4469,7 @@ void App::add_generative_clip(const std::string &model, const std::string &track
   say("Add generative clip");
   refresh();
   selected_clip_ = made.value("clip", "");
+  focus_prompt_ = true; // the next thing to do is to write what it should make
   insp_rev_ = 0;
 }
 
@@ -4593,6 +4594,7 @@ void App::draw_generate_panel() {
     }
     ImGui::Dummy(ImVec2(0, 4.0f));
   }
+  panel_hint("Click a model to add a clip at the end, or drag it onto the timeline. Then write what it should make in the Inspector.");
 }
 
 // The clips whose workflow cannot run on this computer, and why. Asked again when the project changes and while a
@@ -5147,6 +5149,10 @@ void App::draw_workflow_card(const ClipUi &c) {
       }
     } else if (e.name == "prompt" && multi) { // the prompt: a box of its own, as before
       const float box_h = std::clamp(ImGui::CalcTextSize(prompt_buf_, nullptr, false, ImGui::GetContentRegionAvail().x - 18.0f).y + 20.0f, 76.0f, 300.0f);
+      if (focus_prompt_) {
+        ImGui::SetKeyboardFocusHere();
+        focus_prompt_ = false;
+      }
       ImGui::InputTextMultiline("##prompt", prompt_buf_, sizeof prompt_buf_, ImVec2(-1.0f, box_h), ImGuiInputTextFlags_WordWrap);
       ui_mark("field:prompt");
       if (ImGui::IsItemActive() && c.prompt != prompt_buf_)
