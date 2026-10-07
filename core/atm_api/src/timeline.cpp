@@ -776,7 +776,19 @@ private:
     json effects = json::object();
     int n = 0;
     const auto add_fx = [&](const eval::EffectDef &def, const json &src) {
-      effects[placeholder(".fx" + std::to_string(n++))] = effect_object(def, src);
+      const std::string ph = placeholder(".fx" + std::to_string(n++));
+      json fx = effect_object(def, src);
+      // "keyframes": {param: [{t, v, interp?, ease?}]}, t counted from the start of the layer: a flash that rises and falls.
+      if (const auto kf = src.is_object() ? src.find("keyframes") : src.end(); kf != src.end() && kf->is_object())
+        for (const auto &[param, list] : kf->items()) {
+          const bool known = std::any_of(def.params.begin(), def.params.end(), [&](const eval::EffectParam &p) { return param == p.key; });
+          if (!known || !list.is_array())
+            continue;
+          int k = 0;
+          for (const json &key : list)
+            fx["keyframes"][param][ph + ".k" + std::to_string(k++)] = key;
+        }
+      effects[ph] = std::move(fx);
     };
     const eval::EffectDef &blur_def = *eval::find_effect("gaussian_blur");
     if (op_.contains("blur"))

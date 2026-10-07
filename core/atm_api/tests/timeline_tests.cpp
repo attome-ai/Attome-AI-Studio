@@ -1073,3 +1073,30 @@ TEST_CASE("clip.motion puts the same keys, with easing, on several clips, relati
   CHECK_FALSE(f.engine.call("clip.motion", {{"project", f.project}, {"clips", json::array({a})}, {"keys", json::array({{{"property", "scale"}, {"value", 1.0}, {"ease", "wobble"}}})}}));
   CHECK_FALSE(f.engine.call("clip.motion", {{"project", f.project}, {"clips", json::array({a})}}));
 }
+
+TEST_CASE("flash.cuts puts a rising and falling flash on the cuts", "[timeline][parity]") {
+  Fixture f;
+  const json made = f.ok(json::array({{{"op", "add_text"}, {"id", "$new:a"}, {"text", "One"}, {"duration", "2s"}},
+                                      {{"op", "add_text"}, {"id", "$new:b"}, {"text", "Two"}, {"duration", "2s"}, {"at", "2s"}},
+                                      {{"op", "add_text"}, {"id", "$new:c"}, {"text", "Three"}, {"duration", "2s"}, {"at", "4s"}}}));
+  const std::string b = made["id_map"]["$new:b"], c = made["id_map"]["$new:c"];
+  const auto flashed = f.engine.call("flash.cuts", {{"project", f.project}, {"clips", json::array({b, c})}, {"brightness", 0.5}});
+  INFO((flashed ? "" : flashed.error().message + " | " + flashed.error().hint));
+  REQUIRE(flashed);
+  CHECK(flashed->at("flashes").get<int>() == 2);
+  CHECK(f.engine.call("project.validate", {{"project", f.project}})->at("ok") == true);
+  // Two adjustment layers (Flash 1 and Flash 2), each with a brightness animation falling from 0.5 to 0 over 0.23 s.
+  const std::string text = f.engine.call("project.inspect", {{"project", f.project}, {"level", "tracks"}})->dump();
+  CHECK(text.find("Flash 1") != std::string::npos);
+  CHECK(text.find("Flash 2") != std::string::npos);
+  CHECK(text.find("Flash 3") == std::string::npos);
+  REQUIRE(f.engine.call("project.save", {{"project", f.project}}));
+  std::ifstream saved(fs::path(f.project) / "project.json");
+  const std::string file((std::istreambuf_iterator<char>(saved)), std::istreambuf_iterator<char>());
+  CHECK(file.find("ease_out_quad") != std::string::npos); // the flash's brightness key
+  REQUIRE(f.engine.call("project.undo", {{"project", f.project}}));
+  CHECK(f.engine.call("project.inspect", {{"project", f.project}, {"level", "tracks"}})->dump().find("Flash ") == std::string::npos);
+  CHECK_FALSE(f.engine.call("flash.cuts", {{"project", f.project}}));
+  CHECK_FALSE(f.engine.call("flash.cuts", {{"project", f.project}, {"clips", json::array({b})}, {"brightness", 3}}));
+  CHECK_FALSE(f.engine.call("flash.cuts", {{"project", f.project}, {"clips", json::array({"clp_nope"})}}));
+}

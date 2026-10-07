@@ -1472,6 +1472,48 @@ struct Engine::Impl {
     return done;
   }
 
+  // flash.cuts {project, track | clips, seconds?, brightness?, saturation?, ease?}: a flash on every cut: an adjustment layer of `seconds` (default 0.23) at the start of each clip
+  // of the track (or of `clips`) but the first, whose brightness starts at `brightness` (default 0.65) and falls to nothing. One edit.
+  Result<json> flash_cuts(const json &params) {
+    ATM_PROFILE_SCOPE("api.flash_cuts");
+    ATM_TRY(Project *pr, project(params));
+    std::vector<std::string> wanted;
+    const std::string track_id = params.value("track", std::string());
+    if (params.contains("clips") && params["clips"].is_array())
+      for (const json &c : params["clips"])
+        if (c.is_string())
+          wanted.push_back(c.get<std::string>());
+    if (track_id.empty() && wanted.empty())
+      return bad_param("track", "or clips is required: the track whose cuts flash, or the clips that start a scene");
+    const double seconds = params.value("seconds", 0.23), brightness = params.value("brightness", 0.65);
+    if (!(seconds > 0.0 && seconds <= 5.0))
+      return bad_param("seconds", "must be above 0 and at most 5");
+    if (!(brightness > 0.0 && brightness <= 1.0))
+      return bad_param("brightness", "must be above 0 and at most 1");
+    std::vector<double> starts;
+    for_each_clip(pr->doc.root(), [&](const std::string &clip_id, const json &c, const std::string &tid, const json &) {
+      if ((!track_id.empty() && tid == track_id) || std::find(wanted.begin(), wanted.end(), clip_id) != wanted.end())
+        starts.push_back(Rational::parse(c.value("timing", json::object()).value("record_in", std::string("0"))).value_or(Rational()).to_seconds_lossy());
+    });
+    std::sort(starts.begin(), starts.end());
+    if (!track_id.empty() && !starts.empty())
+      starts.erase(starts.begin()); // the first clip has no cut before it
+    if (starts.empty())
+      return fail(ErrorCode::InvalidArgument, "E_PARAM", "There is no cut to flash: the track or clips hold no second clip.");
+    const auto sec = [](double v) { return std::to_string(int64_t(std::llround(v * 1000000.0))) + "/1000000"; };
+    json ops = json::array();
+    int n = 0;
+    for (double at : starts)
+      ops.push_back({{"op", "add_adjustment"}, {"name", "Flash " + std::to_string(++n)}, {"at", sec(at)}, {"duration", sec(seconds)},
+                     {"effects", json::array({{{"type", "color_grade"},
+                                               {"saturation", params.value("saturation", 1.0)},
+                                               {"keyframes", {{"brightness", json::array({{{"t", "0"}, {"v", brightness}, {"interp", "easing"}, {"ease", params.value("ease", std::string("ease_out_quad"))}},
+                                                                                         {{"t", sec(seconds)}, {"v", 0.0}}})}}}}})}});
+    ATM_TRY(json done, timeline_edit({{"project", params["project"]}, {"ops", std::move(ops)}, {"label", "Flash on the cuts"}}));
+    done["flashes"] = starts.size();
+    return done;
+  }
+
   // music.cuts {project, music, clip, every?, from?, until?}: `clip` is cut on the beats of the music clip (every `every`-th beat, default 1), inside from..until (seconds of
   // the film; default the whole clip). The beats come from audio.analyze, placed where the music plays (its speed and start), so it composes with music.fit. Uses split.
   Result<json> music_cuts(const json &params) {
@@ -4613,6 +4655,12 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
        "keys":{"type":"array","items":{"type":"object","properties":{"property":{"type":"string","enum":["scale","position","rotation","opacity"]},"at":{"type":"number"},"at_end":{"type":"number"},
        "value":{},"relative":{"type":"boolean"},"ease":{"type":"string"},"hold":{"type":"boolean"}},"required":["property","value"]}}},"required":["project","clips","keys"]})",
      &Impl::clip_motion},
+    {"flash.cuts", "core", true,
+     "Flash on every cut: an adjustment layer (default 0.23 s) at the start of each clip of `track` but the first (or at each clip of `clips`), whose brightness starts at "
+     "`brightness` (default 0.65) and falls to nothing, shaped by `ease`. Adjustment layers on the Effects track: remove one with delete. One edit; Undo takes them all back.",
+     R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},"track":{"type":"string"},
+       "clips":{"type":"array","items":{"type":"string"}},"seconds":{"type":"number"},"brightness":{"type":"number"},"saturation":{"type":"number"},"ease":{"type":"string"}},"required":["project"]})",
+     &Impl::flash_cuts},
     {"music.cuts", "core", true,
      "Cut a clip on the beats of a music clip: every `every`-th beat (default 1) that falls inside the clip (and inside from..until, seconds of the film). Beats are found with "
      "audio.analyze and placed where the music plays (its speed and start), so it works after music.fit. Linked sound is cut with the picture. One edit; Undo takes it back. "
