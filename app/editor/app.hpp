@@ -511,6 +511,7 @@ private:
   std::map<std::string, std::vector<float>> peaks_;    // the waveform of a sound file, by path: a value per 20 ms
   std::vector<std::string> media_paths_;
   std::set<std::string> opened_cards_; // "<clip id>:fade" and "<clip id>:transition": cards the user added before anything is set
+  bool menu_seen_ = false; // a menu or popup was open when the shortcuts were last looked at
   bool focus_prompt_ = false; // a generative clip was just added: its prompt box takes the keyboard
   bool assets_listed_ = false; // the project's own imported files are put in the media list once, when it is opened
   std::set<std::string> audio_only_; // media files without a picture

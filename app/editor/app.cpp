@@ -2140,6 +2140,9 @@ void App::take_dialog_results() {
 
 void App::shortcuts() {
   const ImGuiIO &io = ImGui::GetIO();
+  // Escape that closes a menu is already used: the menu was open at the start of the last frame, and Escape shut it before this ran.
+  const bool menu_was_open = menu_seen_;
+  menu_seen_ = ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel);
   if (ImGui::IsKeyPressed(ImGuiKey_F1, false))
     shortcuts_open_ = !shortcuts_open_;
   if (io.WantTextInput || project_path_.empty() || export_open_ || export_sheet_)
@@ -2227,7 +2230,7 @@ void App::shortcuts() {
     pps_ = std::clamp(pps_ * 1.25f, 4.0f, 800.0f);
   if ((ImGui::IsKeyPressed(ImGuiKey_Minus, true) || ImGui::IsKeyPressed(ImGuiKey_KeypadSubtract, true)) && !io.KeyCtrl)
     pps_ = std::clamp(pps_ / 1.25f, 4.0f, 800.0f);
-  if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+  if (ImGui::IsKeyPressed(ImGuiKey_Escape, false) && !menu_was_open && !menu_seen_) {
     if (mon_full_) {
       mon_full_ = false;
       return;
@@ -7238,6 +7241,12 @@ void App::draw_timeline() {
       }
       if (c.reverse)
         label += "  reversed";
+      if (c.is_generative) // a clip that has made nothing yet says so, so it is found among the others
+        if (const auto g = gen_state_.find(c.id); g != gen_state_.end()) {
+          const std::string st = g->second.value("state", std::string());
+          if (st == "empty" || st == "dirty")
+            label += !gen_job_.empty() ? "  generating..." : st == "empty" ? "  not generated yet" : "  changed, not generated";
+        }
       if (picture_under_label) { // a dark pill under the name, so it reads over frames and waveforms
         const ImVec2 ts = text_size(label.c_str());
         dl->AddRectFilled(ImVec2(label_x - 4.0f, cy + (ch - ts.y) * 0.5f - 2.0f), ImVec2(label_x + ts.x + 5.0f, cy + (ch + ts.y) * 0.5f + 2.0f), IM_COL32(8, 10, 16, 150), 5.0f);
