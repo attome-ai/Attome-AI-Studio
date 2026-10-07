@@ -1,4 +1,4 @@
-﻿# UI test: the first clip of a project. Files imported earlier (and not on the timeline) are listed in the Media panel when the project is
+# UI test: the first clip of a project. Files imported earlier (and not on the timeline) are listed in the Media panel when the project is
 # opened; the first clip dropped on the empty timeline starts at 0 wherever it is dropped; a canvas shape that was chosen (9:16) stays.
 # Virtual input only (uitest.psm1). Needs a build. Exit code 0 = pass.
 #   .\tools\uitest\ux_first_clip.ps1
@@ -15,8 +15,9 @@ Remove-Item -LiteralPath $proj -Recurse -Force -ErrorAction SilentlyContinue
 $env:ATTOME_ENDPOINT = "\\.\pipe\attome-uitest-setup-$PID"
 try {
   New-Sample "$work\v.mp4" "--seconds 4 --height 360"
+  New-Sample "$work\m.wav" "--seconds 6"
   & "$bin\attome.exe" new $proj --rate 30 --canvas 1080x1920 | Out-Null
-  $pj = @{ project = $proj; paths = @("$work\v.mp4") } | ConvertTo-Json -Compress
+  $pj = @{ project = $proj; paths = @("$work\v.mp4", "$work\m.wav") } | ConvertTo-Json -Compress
   [IO.File]::WriteAllText("$work\call.json", $pj, (New-Object Text.UTF8Encoding($false)))
   $r = & "$bin\attome.exe" --json call media.import "$work\call.json" | ConvertFrom-Json
   if (-not $r.ok) { throw "setup: $($r.error.message)" }
@@ -28,6 +29,8 @@ $run = Invoke-EditorScript -Project $proj -TimeoutSeconds 240 -Script @(
   'expect @media:v.mp4'
   'drag @media:v.mp4 @lane:Video@0.6,0.5 hold', 'wait 200', 'release', 'wait 900'
   "shot $work\first.jpg"
+  'drag @media:m.wav @track:A1@0.0,0.5 hold', 'wait 200', 'release', 'wait 900'
+  "shot $work\music.jpg"
 )
 $failed = $run.Errors
 try {
@@ -37,6 +40,14 @@ try {
     $start = [double](ConvertFrom-Rational $c.timing.start)
     "first clip starts at $start s"
     if ($start -ne 0) { $failed = "the first clip starts at $start s, not 0" }
+  }
+  if (-not $failed) { # music dropped over the picture's own sound plays on a track of its own: nothing is pushed
+    $tr = @(Get-Tracks $run)
+    $aud = @($tr | Where-Object { $_.kind -eq 'audio' })
+    $c = Get-Object $run (@($tr | Where-Object { $_.kind -eq 'video' })[0].clip_list[0].id)
+    "sound tracks: $($aud.Count), picture starts at $([double](ConvertFrom-Rational $c.timing.start)) s"
+    if ($aud.Count -lt 2) { $failed = 'the music did not get a sound track of its own' }
+    elseif ([double](ConvertFrom-Rational $c.timing.start) -ne 0) { $failed = 'the music pushed the picture along' }
   }
   if (-not $failed) {
     $info = (Invoke-Attome $run --json inspect $proj | ConvertFrom-Json).result

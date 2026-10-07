@@ -1573,6 +1573,18 @@ App::DropPlan App::plan_drop(const std::string &payload, int row, int64_t frame)
     const TrackLanding l = landing(*track, asked, asked, p.frames, {}); // a card is held by its start: the pointer is there
     p.start = l.start;
     p.pushed = l.pushed;
+    if (p.kind == "media" && p.sound && free_start(*track, asked, p.frames, {}) != asked) {
+      // Music or a voice dropped where a sound already is plays with it, on a track of its own: it does not push the sound (and the pictures
+      // linked to it) along. The first sound track that is free there, else a new one under the others.
+      p.pushed.clear();
+      p.start = asked;
+      p.row = rows;
+      for (int i = 0; i < rows; ++i)
+        if (tracks_[size_t(i)].kind == "audio" && free_start(tracks_[size_t(i)], asked, p.frames, {}) == asked) {
+          p.row = i;
+          break;
+        }
+    }
     if (p.kind == "media" && !p.sound && media_info(p.id).value("has_audio", false)) {
       // Its sound goes on an audio track at the same time. When sound that is not sliding along is in the way there, the
       // clip goes to the first place that is free on both tracks instead, and nothing is pushed.
