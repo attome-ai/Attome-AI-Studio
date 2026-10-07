@@ -1,5 +1,8 @@
+#include <chrono>
 #include <cmath>
 #include <filesystem>
+#include <fstream>
+#include <thread>
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -190,6 +193,77 @@ TEST_CASE("music.fit sets a music clip's speed to a tempo and puts a beat where 
   REQUIRE_FALSE(none);
   CHECK(none.error().rule == "E_NO_BEAT");
   CHECK_FALSE(engine.call("music.fit", {{"project", project}, {"clip", "clp_nope"}}));
+  (void)engine.call("project.close", {{"project", project}});
+  fs::remove_all(dir, ec);
+}
+
+TEST_CASE("audio.duck lowers the music under the voice and brings it back, as keys on the music clip", "[audio][engine][parity]") {
+  const fs::path dir = fs::temp_directory_path() / "attome-audio-duck";
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+  fs::create_directories(dir);
+  Engine engine({.fsync = false});
+  const std::string project = (dir / "D.attome").string();
+  REQUIRE(engine.call("project.create", {{"path", project}}));
+  const auto tone = [](double seconds, float level) {
+    std::vector<float> pcm(size_t(seconds * 48000) * 2);
+    for (size_t i = 0; i < pcm.size() / 2; ++i)
+      pcm[2 * i] = pcm[2 * i + 1] = level * float(std::sin(2.0 * 3.14159265 * 440.0 * double(i) / 48000.0));
+    return pcm;
+  };
+  const std::string song = (dir / "song.wav").string(), voice = (dir / "voice.wav").string();
+  REQUIRE(audio::write_wav(song, tone(10.0, 0.5f)));
+  REQUIRE(audio::write_wav(voice, tone(2.0, 0.1f)));
+  const auto edit_result = engine.call("timeline.edit", {{"project", project}, {"ops", json::array({{{"op", "add_clip"}, {"id", "$new:m"}, {"path", song}, {"at", "0s"}},
+                                                                                                {{"op", "add_clip"}, {"id", "$new:v"}, {"path", voice}, {"at", "4s"}, {"track", "new"}}})}});
+  if (!edit_result)
+    UNSCOPED_INFO(edit_result.error().message + " / " + edit_result.error().hint);
+  REQUIRE(edit_result);
+  const json added = *edit_result;
+  const std::string music = added["id_map"]["$new:m"], speech = added["id_map"]["$new:v"];
+  // The mix, as a WAV: the level (RMS) in a window of seconds.
+  const auto rms = [&](const std::string &name, double from, double to) {
+    const std::string out = (dir / name).string();
+    const auto started = engine.call("render.sequence", {{"project", project}, {"output", out}, {"format", "wav"}});
+    REQUIRE(started);
+    for (int i = 0; i < 3000; ++i) {
+      if ((*engine.call("jobs.get", {{"job_id", started->at("job_id")}}))["state"] != "running")
+        break;
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    std::ifstream in(out, std::ios::binary);
+    std::string bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    double sum = 0.0;
+    size_t count = 0;
+    for (size_t i = 44 + size_t(from * 48000) * 4; i + 1 < bytes.size() && i < 44 + size_t(to * 48000) * 4; i += 2, ++count) {
+      const double v = double(int16_t(uint8_t(bytes[i]) | (uint8_t(bytes[i + 1]) << 8))) / 32768.0;
+      sum += v * v;
+    }
+    return count ? std::sqrt(sum / double(count)) : 0.0;
+  };
+  const double before = rms("a.wav", 1.0, 3.0);
+  CHECK(before == Catch::Approx(0.5 / std::sqrt(2.0)).margin(0.02));
+
+  const auto ducked = engine.call("audio.duck", {{"project", project}, {"clip", music}, {"over", json::array({speech})}, {"db", 12}});
+  REQUIRE(ducked);
+  CHECK(ducked->at("ducked").size() == 1);
+  CHECK(ducked->at("keys").get<int>() == 5); // the start, then down and up around the voice
+  CHECK(engine.call("project.validate", {{"project", project}})->at("ok") == true);
+  const double want = before * std::pow(10.0, -12.0 / 20.0) + 0.1 / std::sqrt(2.0); // the voice is the same tone, in step with the music, so the levels add
+  CHECK(rms("b.wav", 1.0, 3.0) == Catch::Approx(before).margin(0.01));        // before the voice: unchanged
+  CHECK(rms("b.wav", 4.5, 5.5) == Catch::Approx(want).margin(0.015));         // under it: the music 12 dB down (a quarter of its level), the voice on top
+  CHECK(rms("b.wav", 7.0, 9.0) == Catch::Approx(before).margin(0.01));        // after it: back
+
+  // Again: the keys are replaced, not added to.
+  CHECK(engine.call("audio.duck", {{"project", project}, {"clip", music}, {"over", json::array({speech})}, {"db", 6}}));
+  const json node = engine.call("project.get", {{"project", project}, {"id", music}}).value();
+  CHECK(node.dump().find("gain_db") != std::string::npos);
+  CHECK(engine.call("project.validate", {{"project", project}})->at("ok") == true);
+
+  // Errors: no "over", a nonsense amount, an unknown clip.
+  CHECK_FALSE(engine.call("audio.duck", {{"project", project}, {"clip", music}}));
+  CHECK_FALSE(engine.call("audio.duck", {{"project", project}, {"clip", music}, {"over", json::array({speech})}, {"db", -3}}));
+  CHECK_FALSE(engine.call("audio.duck", {{"project", project}, {"clip", "clp_nope"}, {"over", json::array({speech})}}));
   (void)engine.call("project.close", {{"project", project}});
   fs::remove_all(dir, ec);
 }

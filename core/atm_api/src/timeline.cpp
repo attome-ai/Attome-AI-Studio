@@ -996,8 +996,8 @@ private:
           if (const auto t = Rational::parse(k->value("t", std::string("0"))))
             push({{"op", "replace"}, {"path", k.key() + "/t"}, {"value", minus(*t, delta).to_string()}});
     };
-    if (n.contains("transform") && n["transform"].contains("keyframes"))
-      shift_props(n["transform"]["keyframes"]);
+    for (const json *key_maps : key_maps_of(n))
+      shift_props(*key_maps);
     if (n.contains("effects") && n["effects"].is_object())
       for (const auto &[fx_id, fx] : n["effects"].items())
         if (fx.contains("keyframes"))
@@ -1375,8 +1375,8 @@ private:
                 push({{"op", "replace"}, {"path", kid + "/t"}, {"value", scaled(*t).to_string()}});
         (void)base;
       };
-      if (node.contains("transform"))
-        move_keys(node["transform"].value("keyframes", json::object()), mid);
+      for (const json *key_maps : key_maps_of(node))
+        move_keys(*key_maps, mid);
       if (node.contains("effects") && node["effects"].is_object())
         for (const auto &[fid, e] : node["effects"].items())
           move_keys(e.value("keyframes", json::object()), fid);
@@ -1409,9 +1409,28 @@ private:
     Rational t;
     json v;
   };
+  // The maps of keys a clip carries ({property: {key id: {t, v}}}): the picture's (transform.keyframes) and the sound's (audio.keyframes).
+  static std::vector<json *> key_maps_of(json &clip) {
+    std::vector<json *> maps;
+    for (const char *owner : {"transform", "audio"})
+      if (clip.contains(owner) && clip[owner].is_object() && clip[owner].contains("keyframes") && clip[owner]["keyframes"].is_object())
+        maps.push_back(&clip[owner]["keyframes"]);
+    return maps;
+  }
+  static std::vector<const json *> key_maps_of(const json &clip) {
+    std::vector<const json *> maps;
+    for (const char *owner : {"transform", "audio"})
+      if (const auto o = clip.find(owner); o != clip.end() && o->is_object())
+        if (const auto kf = o->find("keyframes"); kf != o->end() && kf->is_object())
+          maps.push_back(&*kf);
+    return maps;
+  }
+  // Where a property's keys live: gain_db is the sound's, the rest the picture's.
+  static const char *key_owner(const std::string &prop) { return prop == "gain_db" ? "audio" : "transform"; }
+
   std::vector<Key> keys_of(const json &clip, const std::string &prop) const {
     std::vector<Key> keys;
-    const json tr = clip.value("transform", json::object());
+    const json tr = clip.value(key_owner(prop), json::object());
     if (const auto kf = tr.find("keyframes"); kf != tr.end() && kf->is_object())
       if (const auto list = kf->find(prop); list != kf->end() && list->is_object())
         for (auto k = list->begin(); k != list->end(); ++k)
@@ -1512,8 +1531,8 @@ private:
 
   Result<std::string> key_property() const {
     const std::string prop = op_.value("property", std::string());
-    if (prop != "position" && prop != "scale" && prop != "rotation" && prop != "opacity")
-      return fail("E_PARAM", "\"property\" must be position, scale, rotation or opacity.");
+    if (prop != "position" && prop != "scale" && prop != "rotation" && prop != "opacity" && prop != "gain_db")
+      return fail("E_PARAM", "\"property\" must be position, scale, rotation, opacity or gain_db (the sound's level in dB).");
     return prop;
   }
 
@@ -1534,7 +1553,7 @@ private:
         push({{"op", "replace"}, {"path", k.id + "/v"}, {"value", value}});
         return {};
       }
-    push({{"op", "add"}, {"path", id + "/transform/keyframes/" + prop + "/" + placeholder()}, {"value", {{"t", at->to_string()}, {"v", value}}}});
+    push({{"op", "add"}, {"path", id + "/" + key_owner(prop) + "/keyframes/" + prop + "/" + placeholder()}, {"value", {{"t", at->to_string()}, {"v", value}}}});
     return {};
   }
 
@@ -1557,8 +1576,8 @@ private:
     for (const Key &k : gone)
       push({{"op", "remove"}, {"path", k.id}});
     if (gone.size() == keys.size() && !gone.back().v.is_null()) {
-      const bool had = node_of(id).value("transform", json::object()).contains(prop);
-      push({{"op", had ? "replace" : "add"}, {"path", id + "/transform/" + prop}, {"value", gone.back().v}});
+      const bool had = node_of(id).value(key_owner(prop), json::object()).contains(prop);
+      push({{"op", had ? "replace" : "add"}, {"path", id + "/" + key_owner(prop) + "/" + prop}, {"value", gone.back().v}});
     }
     return {};
   }
@@ -1789,8 +1808,8 @@ private:
     else
       right["link_group"] = group;
     int n = 0;
-    if (right.contains("transform") && right["transform"].contains("keyframes"))
-      for (auto &[prop, keys] : right["transform"]["keyframes"].items()) {
+    for (json *key_maps : key_maps_of(right)) // the picture's and the sound's keys, local to the half
+      for (auto &[prop, keys] : key_maps->items()) {
         json moved = json::object();
         for (const auto &[kid, key] : keys.items()) {
           json k = key;
@@ -1832,8 +1851,8 @@ private:
   // generative clip's workflow gets a fresh copy of its nodes and links, and no Takes: the copy makes its own, from the same inputs.
   void fresh_children(json &node, const std::string &ph) {
     int n = 0;
-    if (node.contains("transform") && node["transform"].contains("keyframes") && node["transform"]["keyframes"].is_object())
-      for (auto &[prop, keys] : node["transform"]["keyframes"].items()) {
+    for (json *key_maps : key_maps_of(node))
+      for (auto &[prop, keys] : key_maps->items()) {
         json moved = json::object();
         for (const auto &[kid, key] : keys.items())
           moved[ph + ".k" + std::to_string(n++)] = key;

@@ -380,6 +380,24 @@ void check_audio(const json &clip, const std::string &clip_id, const Rational &d
   }
   check_number(*it, "gain_db", -96.0, 24.0, clip_id, path, problems);
   check_number(*it, "pan", -1.0, 1.0, clip_id, path, problems);
+  if (const auto kfs = it->find("keyframes"); kfs != it->end()) { // the level over time: {"gain_db": {"$new:k1": {"t": "0s", "v": -6}, …}}
+    const auto gain = kfs->is_object() ? kfs->find("gain_db") : kfs->end();
+    if (!kfs->is_object() || kfs->size() > 1 || (kfs->size() == 1 && gain == kfs->end())) {
+      problems.push_back(problem("KEYFRAME_PROPERTY_UNSUPPORTED", path + "/keyframes", clip_id,
+                                 "audio.keyframes of clip " + clip_id + " can only hold gain_db.",
+                                 "Write {\"gain_db\": {\"$new:k1\": {\"t\": \"0s\", \"v\": -12}, …}}."));
+    } else if (gain != kfs->end()) {
+      if (auto curve = eval::parse_curve(*gain, 1); !curve)
+        problems.push_back(problem(curve.error().rule, curve.error().path.empty() ? path + "/keyframes/gain_db" : path + "/keyframes/gain_db/" + curve.error().path,
+                                   clip_id, curve.error().message, curve.error().hint));
+      else
+        for (const auto &[kid, key] : gain->items())
+          if (key.is_object() && key.contains("v") && key["v"].is_number() && (key["v"].get<double>() < -96.0 || key["v"].get<double>() > 24.0))
+            problems.push_back(problem("AUDIO_TYPE_MISMATCH", path + "/keyframes/gain_db/" + kid + "/v", clip_id,
+                                       "A gain_db key of clip " + clip_id + " is " + key["v"].dump() + ".",
+                                       "Gain in decibels, from -96 to 24."));
+    }
+  }
   const std::string curve = it->value("fade_curve", std::string("equal_power"));
   if (curve != "equal_power" && curve != "linear")
     problems.push_back(problem("AUDIO_TYPE_MISMATCH", path + "/fade_curve", clip_id,

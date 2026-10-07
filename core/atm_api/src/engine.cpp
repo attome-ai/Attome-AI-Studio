@@ -1418,6 +1418,79 @@ struct Engine::Impl {
     return done;
   }
 
+  // audio.duck {project, clip, over, db?, ramp?}: the clip's level goes down by `db` (default 12) under the clips in `over` (clip IDs, or a track ID for all its clips) and
+  // comes back after them, over `ramp` seconds (default 0.12). It is the clip's audio.keyframes.gain_db around its own gain_db; the keys it had are replaced. One edit.
+  Result<json> audio_duck(const json &params) {
+    ATM_PROFILE_SCOPE("api.audio_duck");
+    ATM_TRY(Project *pr, project(params));
+    const std::string id = params.value("clip", std::string());
+    const doc::NodeRef *ref = id.empty() ? nullptr : pr->doc.find(id);
+    if (!ref || !ref->node || id.rfind("clp_", 0) != 0)
+      return fail(ErrorCode::NotFound, "E_UNKNOWN_CLIP", "\"clip\" must be the ID of a clip of the project, not \"" + id + "\".");
+    if (!params.contains("over") || !params["over"].is_array() || params["over"].empty())
+      return bad_param("over", "is required: the clip IDs (or a track ID) the music makes room for");
+    const double db = params.value("db", 12.0), ramp = std::max(0.0, params.value("ramp", 0.12));
+    if (!(db > 0.0 && db <= 60.0))
+      return bad_param("db", "must be above 0 and at most 60: how far the level goes down");
+    const auto seconds_of = [](const json &timing, const char *key) {
+      return Rational::parse(timing.value(key, std::string("0"))).value_or(Rational()).to_seconds_lossy();
+    };
+    const json timing = ref->node->value("timing", json::object());
+    const double start = seconds_of(timing, "record_in"), length = seconds_of(timing, "duration");
+    const double base = ref->node->value("audio", json::object()).value("gain_db", 0.0);
+    std::vector<std::string> over;
+    for (const json &o : params["over"])
+      if (o.is_string())
+        over.push_back(o.get<std::string>());
+    std::vector<std::pair<double, double>> spans; // where the others speak, in seconds from the start of the clip
+    for_each_clip(pr->doc.root(), [&](const std::string &clip_id, const json &c, const std::string &track_id, const json &) {
+      if (clip_id == id || (std::find(over.begin(), over.end(), clip_id) == over.end() && std::find(over.begin(), over.end(), track_id) == over.end()))
+        return;
+      const json t = c.value("timing", json::object());
+      const double a = std::max(0.0, seconds_of(t, "record_in") - start), b = std::min(length, seconds_of(t, "record_in") + seconds_of(t, "duration") - start);
+      if (b > a)
+        spans.emplace_back(a, b);
+    });
+    std::sort(spans.begin(), spans.end());
+    std::vector<std::pair<double, double>> merged; // spans closer than two ramps are one: the music does not come back for a breath
+    for (const auto &s : spans)
+      if (!merged.empty() && s.first - merged.back().second < 2.0 * ramp)
+        merged.back().second = std::max(merged.back().second, s.second);
+      else
+        merged.push_back(s);
+    const auto sec = [](double v) { return std::to_string(int64_t(std::llround(v * 1000000.0))) + "/1000000"; };
+    json ops = json::array();
+    if (const json audio = ref->node->value("audio", json::object()); audio.contains("keyframes") && audio["keyframes"].contains("gain_db") && !audio["keyframes"]["gain_db"].empty())
+      ops.push_back({{"op", "remove_keyframe"}, {"clip", id}, {"property", "gain_db"}});
+    std::vector<std::pair<double, double>> keys; // (seconds, dB), in order, one per time
+    const auto key = [&](double t, double v) {
+      t = std::clamp(t, 0.0, length);
+      if (!keys.empty() && t <= keys.back().first + 1e-6)
+        keys.back().second = std::min(keys.back().second, v); // the same moment: the lower level wins
+      else
+        keys.emplace_back(t, v);
+    };
+    for (const auto &[a, b] : merged) {
+      key(a - ramp, base);
+      key(a, base - db);
+      key(b, base - db);
+      key(b + ramp, base);
+    }
+    if (!keys.empty() && keys.front().first > 1e-6) // the level the clip starts at
+      keys.insert(keys.begin(), {0.0, base});
+    for (const auto &[t, v] : keys)
+      ops.push_back({{"op", "set_keyframe"}, {"clip", id}, {"property", "gain_db"}, {"at", sec(t)}, {"value", v}});
+    if (ops.empty())
+      return json{{"ducked", json::array()}, {"keys", 0}};
+    ATM_TRY(json done, timeline_edit({{"project", params["project"]}, {"ops", std::move(ops)}, {"label", "Duck the music"}}));
+    json ducked = json::array();
+    for (const auto &[a, b] : merged)
+      ducked.push_back({{"from", std::round(a * 1000.0) / 1000.0}, {"to", std::round(b * 1000.0) / 1000.0}});
+    done["ducked"] = std::move(ducked);
+    done["keys"] = keys.size();
+    return done;
+  }
+
   // sfx.make {kind, output? | project?, seed?, seconds?}: a synthesised effect as a WAV file. With a project it goes in the project's
   // .attome/sfx folder and is imported as an asset (asset_id comes back), ready for timeline.edit add_clip.
   Result<json> sfx_make(const json &params) {
@@ -4429,6 +4502,13 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
      R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},"clip":{"type":"string"},
        "bpm":{"type":"number"},"at":{"type":"number"},"until":{"type":"number"},"from":{"type":"number"}},"required":["project","clip"]})",
      &Impl::music_fit},
+    {"audio.duck", "core", true,
+     "Lower a music clip's level under other clips (the voice) and bring it back after them: `over` lists clip IDs, or a track ID for all its clips; `db` is how far "
+     "it goes down (default 12), `ramp` the seconds it takes each way (default 0.12). Writes audio.keyframes.gain_db on the music clip (replacing its keys), so the "
+     "levels stay editable with timeline.edit set_keyframe/remove_keyframe (property gain_db). One edit; Undo takes it back.",
+     R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},"clip":{"type":"string"},
+       "over":{"type":"array","items":{"type":"string"}},"db":{"type":"number"},"ramp":{"type":"number"}},"required":["project","clip","over"]})",
+     &Impl::audio_duck},
     {"sfx.make", "core", true,
      "Make a sound effect: whoosh (builds and lands on a cut), click, pop, riser (builds up to its end; seconds sets the length), impact. "
      "Writes a 48 kHz stereo WAV: pass output (a file), or project to put it in the project and import it (asset_id comes back for "

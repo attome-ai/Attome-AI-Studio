@@ -128,6 +128,9 @@ struct Layer {
   // 0 is `origin_frame`, the clip's record_in (start_frame moves earlier when a dissolve leads into the clip).
   int64_t origin_frame = 0;
   eval::Curve opacity_keys, position_keys, scale_keys, rotation_keys, anchor_keys;
+  // audio.keyframes.gain_db: the clip's level in dB over its length (replaces audio.gain_db while it exists); the track's volume_db adds.
+  eval::Curve gain_keys;
+  float track_db = 0.0f;
 };
 
 // The parameters of an effect of a layer at one frame, keyframes applied, in the order of the effect's table entry.
