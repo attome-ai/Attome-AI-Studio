@@ -921,6 +921,7 @@ struct Engine::Impl {
   // library.add {project, clips, name?}: the clips (and what is linked to them) become one item of the library. Their files are copied
   // into it, so the item works in any project, also when the files are moved or deleted. A small picture of its first frame is kept.
   Result<json> library_add(const json &params) {
+    ATM_PROFILE_SCOPE("api.library_add");
     ATM_TRY(Project *pr, project(params));
     const auto ids = params.find("clips");
     if (ids == params.end() || !ids->is_array() || ids->empty())

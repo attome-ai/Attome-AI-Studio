@@ -346,12 +346,52 @@ int bench_export() {
   return 0;
 }
 
+// One 10 s clip exported plain, reversed, and at 2x with the pitch kept (the sound is stretched): how much slower than plain each is.
+int bench_modes() {
+  const fs::path dir = fs::temp_directory_path() / "attome-bench-export";
+  fs::create_directories(dir);
+  std::printf("Clip modes (1080p30, 10 s clip, hardware H.264, wall time)\n");
+  const std::string hd = test_clip(dir, 1920, 1080, 20);
+  Engine engine({.fsync = false});
+  atm::prof::reset();
+  const auto run = [&](const char *name, json timing_extra, int seconds) {
+    const std::string project = (dir / "Modes.attome").string();
+    std::error_code ec;
+    fs::remove_all(project, ec);
+    const std::string seq = must(engine, "project.create", {{"path", project}, {"canvas", {{"width", 1920}, {"height", 1080}}}})["sequence"];
+    json timing = {{"record_in", "0s"}, {"duration", std::to_string(seconds) + "s"}, {"source_in", "0"}};
+    for (auto it = timing_extra.begin(); it != timing_extra.end(); ++it)
+      timing[it.key()] = it.value();
+    json ops = json::array({{{"op", "add"}, {"path", seq + "/tracks/$new:v1"}, {"value", {{"kind", "video"}, {"name", "V1"}}}}});
+    ops.push_back({{"op", "add"}, {"path", "$new:v1/clips/$new:a"}, {"value", {{"name", "c"}, {"timing", timing}, {"media_ref", {{"type", "file"}, {"path", hd}}}}}});
+    must(engine, "project.patch", {{"project", project}, {"patch", {{"ops", ops}}}});
+    const auto t0 = Clock::now();
+    const json job = must(engine, "render.sequence", {{"project", project}, {"output", (dir / "out.mp4").string()}});
+    json state;
+    do {
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+      state = must(engine, "jobs.get", {{"job_id", job["job_id"]}});
+    } while (state["state"] == "running");
+    const double wall = ms_since(t0) / 1000.0;
+    must(engine, "project.close", {{"project", project}});
+    std::printf("  %-52s %12.2f x real time\n", name, double(seconds) / wall);
+  };
+  run("plain", json::object(), 10);
+  run("reversed", {{"reverse", true}}, 10);
+  run("2x, pitch kept (10 s of film from 20 s of file)", {{"speed", 2.0}}, 10);
+  std::printf("\nZone profile\n%s", atm::prof::format_report(atm::prof::snapshot()).c_str());
+  return 0;
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
   int clip_count = 10000, patch_count = 2000;
   for (int i = 1; i < argc; ++i)
-    if (!std::strcmp(argv[i], "--export")) {
+    if (!std::strcmp(argv[i], "--modes")) {
+      atm::prof::set_thread_name("atm-bench");
+      return bench_modes();
+    } else if (!std::strcmp(argv[i], "--export")) {
       atm::prof::set_thread_name("atm-bench");
       return bench_export();
     }

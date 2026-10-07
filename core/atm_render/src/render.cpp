@@ -1803,6 +1803,7 @@ void Renderer::draw(const Layer &l, int64_t frame, uint8_t *out, bool &cleared, 
     if (l.reverse) {
       BackCache &cache = back_[l.clip_id];
       if (cache.first < 0 || rel < cache.first || rel >= cache.first + int64_t(cache.frames.size())) {
+        ATM_PROFILE_SCOPE("decode.reverse_run");
         constexpr int64_t kRun = 24; // the run read in one go: the frame needed is its last, the next ones needed come before it
         cache.first = std::max<int64_t>(0, rel - kRun + 1);
         cache.frames.clear();
@@ -1997,6 +1998,7 @@ Result<void> Renderer::render(int64_t frame, uint8_t *out) {
 // every hop * speed and laid down every hop (half a window, Hann, so they add up to one); each is taken where it lines up best (within
 // 10 ms) with how the last one went on, so voices and tones do not flutter.
 std::vector<float> stretch_keeping_pitch(const std::vector<float> &in, double speed, size_t out_frames) {
+  ATM_PROFILE_SCOPE("audio.stretch_pitch");
   const size_t n_in = in.size() / 2;
   constexpr size_t W = 1920, H = W / 2, T = 480, kStep = 4; // window, hop, search, the stride of the comparison
   std::vector<float> out(out_frames * 2, 0.0f), weight(out_frames, 0.0f), window(W);

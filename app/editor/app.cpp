@@ -3708,6 +3708,7 @@ json *find_by_id(json &node, const std::string &id) {
 } // namespace
 
 void App::preview_ops(const json &ops, bool sound) {
+  ATM_PROFILE_SCOPE("ui.preview_ops");
   if (!ops.is_array() || ops.empty())
     return;
   json copy = doc_;
