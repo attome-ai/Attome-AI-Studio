@@ -1638,21 +1638,46 @@ private:
     const json &node = *c.first;
     const json ref = node.value("media_ref", json::object());
     const bool silent = ref.value("stream", std::string()) == "video";
-    if (ref.value("type", std::string()) != "file" || !ref.value("has_audio", false) || ref.value("stream", std::string()) == "audio")
-      return fail("E_PARAM", "detach_audio needs a clip of a video file that has sound; " + id + " is not one.");
+    const bool generated = ref.value("type", std::string()) == "workflow";
+    if (!generated && (ref.value("type", std::string()) != "file" || !ref.value("has_audio", false) || ref.value("stream", std::string()) == "audio"))
+      return fail("E_PARAM", "detach_audio needs a clip of a video file that has sound, or a generated clip; " + id + " is not one.");
     if (silent)
       return fail("E_PARAM", "The clip's sound is already detached (or it was added without sound).");
     const json timing = node.value("timing", json::object());
+    json sound_ref;
+    if (generated) {
+      // A generated clip plays the picture file of its selected Take; the sound is the Take's audio output when it has one, else the sound of that file.
+      const std::string selected = ref.value("selected", std::string());
+      const json outputs = ref.contains("takes") && ref["takes"].contains(selected) ? ref["takes"][selected].value("outputs", json::object()) : json::object();
+      if (selected.empty() || outputs.empty())
+        return fail("E_PARAM", id + " has not been generated yet, so it has no sound to detach.", "Run gen.run for it first.");
+      const std::string primary = ref.value("workflow", json::object()).value("exposed", json::object()).value("primary", std::string());
+      std::string file;
+      for (const std::string &name : {std::string("audio"), primary})
+        if (file.empty() && !name.empty() && outputs.contains(name) && outputs[name].is_object() && outputs[name].contains("path") && outputs[name]["path"].is_string())
+          file = outputs[name]["path"].get<std::string>();
+      if (file.empty())
+        return fail("E_PARAM", id + " has no sound output to detach.");
+      if (!std::filesystem::path(std::u8string(file.begin(), file.end())).is_absolute() && !ctx_.project_dir.empty())
+        file = ctx_.project_dir + "/" + file;
+      if (!ctx_.probe)
+        return fail("E_PARAM", "Detaching audio is not available here.");
+      ATM_TRY(json info, ctx_.probe(file));
+      if (!info.value("has_audio", false))
+        return fail("E_PARAM", id + " has no sound: the file its take made has none.");
+      sound_ref = {{"type", "file"}, {"path", file}, {"duration", info.value("duration", std::string("0"))}, {"has_audio", true}, {"stream", "audio"}};
+    } else {
+      sound_ref = ref;
+      sound_ref["stream"] = "audio";
+      for (const char *k : {"width", "height", "rate"})
+        sound_ref.erase(k);
+    }
     ATM_TRY(std::string audio_track, sound_track_for(span_of(node).in, span_of(node).duration));
-    json sound_ref = ref;
-    sound_ref["stream"] = "audio";
-    for (const char *k : {"width", "height", "rate"})
-      sound_ref.erase(k);
     json sound = {{"name", node.value("name", std::string("Sound"))}, {"timing", timing}, {"media_ref", std::move(sound_ref)}, {"volume", node.value("volume", 1.0)}};
     if (node.contains("audio"))
       sound["audio"] = node["audio"]; // gain, pan and fades go with the sound
     push({{"op", "replace"}, {"path", id + "/media_ref/stream"}, {"value", "video"}});
-    if (!node.value("media_ref", json::object()).contains("stream"))
+    if (!ref.contains("stream"))
       out_.ops.back()["op"] = "add";
     if (node.contains("audio"))
       push({{"op", "remove"}, {"path", id + "/audio"}});

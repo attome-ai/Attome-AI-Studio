@@ -299,6 +299,12 @@ int main(int argc, char **argv) {
       }
     }
     app.shutdown();
+    if (const char *dump = std::getenv("ATTOME_PROFILE_DUMP")) // a development hook: the zone timings of this run, as the Profiler tab shows them
+      if (FILE *f = std::fopen(dump, "wb")) {
+        const std::string report = atm::prof::format_report(atm::prof::snapshot());
+        std::fwrite(report.data(), 1, report.size(), f);
+        std::fclose(f);
+      }
   }
 
   ImGui_ImplSDLRenderer3_Shutdown();

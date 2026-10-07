@@ -229,6 +229,40 @@ std::string wav_bytes(const std::vector<float> &stereo, size_t from, size_t to) 
   return wav;
 }
 
+// The sequence a call works on: the one named in params ("sequence"), else the project's first. Every Tool that edits or reads a sequence asks here.
+struct SequenceRef {
+  std::string id;
+  const json *node = nullptr;
+};
+Result<SequenceRef> sequence_of(const json &root, const json &params) {
+  std::string id = params.value("sequence", std::string());
+  if (id.empty() && root.contains("sequence_order") && !root["sequence_order"].empty())
+    id = root["sequence_order"][0].get<std::string>();
+  if (!root.contains("sequences") || !root["sequences"].contains(id))
+    return fail(ErrorCode::NotFound, "R_NO_SEQUENCE", "The project has no sequence \"" + id + "\".");
+  return SequenceRef{id, &root["sequences"][id]};
+}
+
+// Every clip of every track of every sequence: fn(clip ID, clip, track ID, track). One place for the walk, in the order of the document.
+template <class F> void for_each_clip(const json &root, F &&fn) {
+  const auto seqs = root.find("sequences");
+  if (seqs == root.end() || !seqs->is_object())
+    return;
+  for (auto sq = seqs->begin(); sq != seqs->end(); ++sq) {
+    const auto tracks = sq->find("tracks");
+    if (!sq->is_object() || tracks == sq->end() || !tracks->is_object())
+      continue;
+    for (auto t = tracks->begin(); t != tracks->end(); ++t) {
+      const auto clips = t->find("clips");
+      if (!t->is_object() || clips == t->end() || !clips->is_object())
+        continue;
+      for (auto c = clips->begin(); c != clips->end(); ++c)
+        if (c->is_object())
+          fn(c.key(), *c, t.key(), *t);
+    }
+  }
+}
+
 // "Sound only" and "a picture of one frame" as jobs: nothing to encode, so one unit.
 void run_extract(const std::shared_ptr<Job> &job, render::Composition comp, std::string path, bool sound, int64_t first, int64_t last, int width, int height) {
   prof::set_thread_name("atm-render-0");
@@ -1149,12 +1183,9 @@ struct Engine::Impl {
     ATM_TRY(Project *pr, project(params));
     ATM_TRY(json item, library_read(params.value("id", std::string())));
     const json &root = pr->doc.root();
-    std::string seq = params.value("sequence", std::string());
-    if (seq.empty() && root.contains("sequence_order") && !root["sequence_order"].empty())
-      seq = root["sequence_order"][0].get<std::string>();
-    if (!root.contains("sequences") || !root["sequences"].contains(seq))
-      return fail(ErrorCode::NotFound, "R_NO_SEQUENCE", "The project has no sequence \"" + seq + "\".");
-    const json &sequence = root["sequences"][seq];
+    ATM_TRY(const SequenceRef sq, sequence_of(root, params));
+    const std::string &seq = sq.id;
+    const json &sequence = *sq.node;
     struct Lane {
       std::string id, kind;
       std::vector<std::pair<Rational, Rational>> spans;
@@ -1598,12 +1629,8 @@ struct Engine::Impl {
     if (format != "srt" && format != "vtt")
       return bad_param("format", "must be srt or vtt");
     const json &root = pr->doc.root();
-    std::string seq = params.value("sequence", std::string());
-    if (seq.empty() && root.contains("sequence_order") && !root["sequence_order"].empty())
-      seq = root["sequence_order"][0].get<std::string>();
-    if (!root.contains("sequences") || !root["sequences"].contains(seq))
-      return fail(ErrorCode::NotFound, "R_NO_SEQUENCE", "The project has no sequence \"" + seq + "\".");
-    const json &sequence = root["sequences"][seq];
+    ATM_TRY(const SequenceRef sq, sequence_of(root, params));
+    const json &sequence = *sq.node;
     const auto tracks = text_tracks_of(sequence);
     std::string track = params.value("track", std::string());
     std::string chosen;
@@ -1745,12 +1772,8 @@ struct Engine::Impl {
     if (output.empty())
       return bad_param("output", "is required: the .edl file to write");
     const json &root = pr->doc.root();
-    std::string seq = params.value("sequence", std::string());
-    if (seq.empty() && root.contains("sequence_order") && !root["sequence_order"].empty())
-      seq = root["sequence_order"][0].get<std::string>();
-    if (!root.contains("sequences") || !root["sequences"].contains(seq))
-      return fail(ErrorCode::NotFound, "R_NO_SEQUENCE", "The project has no sequence \"" + seq + "\".");
-    const json &sequence = root["sequences"][seq];
+    ATM_TRY(const SequenceRef sq, sequence_of(root, params));
+    const json &sequence = *sq.node;
     ATM_TRY(EdlRate er, edl_rate(sequence, params));
     const int64_t start_frames = edl::frames_of(params.value("start", std::string("01:00:00:00")), er.fps, er.drop);
     if (start_frames < 0)
@@ -1852,12 +1875,9 @@ struct Engine::Impl {
     if (!text)
       return fail(ErrorCode::NotFound, "E_NO_FILE", "Could not read \"" + path + "\".", "Check that the file exists.");
     const json &root = pr->doc.root();
-    std::string seq = params.value("sequence", std::string());
-    if (seq.empty() && root.contains("sequence_order") && !root["sequence_order"].empty())
-      seq = root["sequence_order"][0].get<std::string>();
-    if (!root.contains("sequences") || !root["sequences"].contains(seq))
-      return fail(ErrorCode::NotFound, "R_NO_SEQUENCE", "The project has no sequence \"" + seq + "\".");
-    ATM_TRY(EdlRate er, edl_rate(root["sequences"][seq], params));
+    ATM_TRY(const SequenceRef sq, sequence_of(root, params));
+    const std::string &seq = sq.id;
+    ATM_TRY(EdlRate er, edl_rate(*sq.node, params));
     if (params.contains("fps") && params["fps"].is_number_integer())
       er.fps = params["fps"].get<int>();
     ATM_TRY(edl::List list, edl::parse(*text, er.fps, er.drop));
@@ -2621,6 +2641,7 @@ struct Engine::Impl {
       return fail(ErrorCode::NotFound, "R_NO_SEQUENCE", "The project has no sequence \"" + ctx.sequence + "\".");
     ATM_TRY(Rational rate, Rational::parse(root["sequences"][ctx.sequence].value("rate", std::string("30"))));
     ctx.rate = rate;
+    ctx.project_dir = to_utf8(pr->dir);
     ctx.probe = [this](const std::string &path) { return media_probe({{"path", path}}); };
     ctx.still = [pr, seq = ctx.sequence](const std::string &clip_id, double at) -> Result<json> {
       ATM_TRY(render::Composition comp, render::compile(pr->doc.root(), seq, to_utf8(pr->dir)));

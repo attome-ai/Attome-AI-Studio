@@ -644,7 +644,7 @@ Result<Composition> compile(const json &project, std::string_view sequence_id, c
         if (const auto sp = timing->find("speed"); sp != timing->end() && sp->is_number())
           l.speed = std::clamp(sp->get<double>(), 0.1, 10.0);
         l.reverse = timing->value("reverse", false);
-        l.keep_pitch = timing->value("keep_pitch", true);
+        l.keep_pitch = timing->value("keep_pitch", false);
         if (const auto tr = clip.find("transform"); tr != clip.end() && tr->is_object()) {
           if (const auto op = tr->find("opacity"); op != tr->end() && op->is_number())
             l.opacity = std::clamp(op->get<float>(), 0.0f, 1.0f);

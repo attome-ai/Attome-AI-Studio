@@ -61,9 +61,9 @@ struct Layer {
   double speed = 1.0;
   // timing.reverse: the clip plays its part of the file backwards (the last frame first), its sound too.
   bool reverse = false;
-  // timing.keep_pitch (true unless false): at another speed the sound keeps its pitch (it is stretched, not played faster); false plays
-  // it faster or slower like a tape, the pitch moving with the speed.
-  bool keep_pitch = true;
+  // timing.keep_pitch (false unless true): at another speed the sound is played faster or slower like a tape, the pitch moving with the speed
+  // (what everyone expects of a speed-up); true stretches it instead, so a voice keeps its pitch (the stretch is an approximation: it can sound a little rough).
+  bool keep_pitch = false;
   float opacity = 1.0f;
   float volume = 1.0f;
   // media_ref.stream: a linked pair shares one file, the picture clip with "video" (silent here) and the sound clip

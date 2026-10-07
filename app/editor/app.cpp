@@ -1180,7 +1180,7 @@ void App::draw_clip_menu(const ClipUi &c) {
   if (count == 1) { // what is otherwise only in the Inspector
     const std::string id = c.id;
     const bool sound = home && home->kind == "audio";
-    if (c.own_sound && menu_item("Detach audio", nullptr, false, !locked)) // its sound becomes a clip of its own, on an audio track
+    if ((c.own_sound || (c.is_generative && !c.takes.empty())) && menu_item("Detach audio", nullptr, false, !locked)) // its sound becomes a clip of its own, on an audio track
       pending_ = [this, id] { timeline_edit(json::array({{{"op", "detach_audio"}, {"clip", id}}}), "Detach audio"); };
     if (c.own_sound && menu_item(c.volume <= 0.0f ? "Unmute" : "Mute", nullptr, false, !locked))
       pending_ = [this, id, v = c.volume <= 0.0f ? 1.0f : 0.0f] {
@@ -7070,6 +7070,8 @@ void App::draw_timeline() {
           if (k.stream == "audio" && pictures_with_sound.count(k.link_group))
             sounds_of_pictures.insert(k.id);
   }
+  // Only the clips that are on the screen are drawn and given a button: a film of thousands of clips costs what the window shows, not what it holds.
+  const float vis_l = win.x + header_w - 16.0f, vis_r = win.x + view_w + 16.0f, vis_t = win.y - 8.0f, vis_b = win.y + view_h + 8.0f;
   for (int ti = 0; ti < rows; ++ti) {
     const TrackUi &track = tracks_[size_t(ti)];
     const float y = origin.y + ruler_h + float(ti) * row_h;
@@ -7129,6 +7131,8 @@ void App::draw_timeline() {
       }
       const float x0 = x_of(double(start)), x1 = std::max(x0 + 2.0f, x_of(double(start + frames)));
       const float cy = origin.y + ruler_h + float(row) * row_h + 4.0f, ch = row_h - 8.0f;
+      if (drag_id_ != c.id && (x1 < vis_l || x0 > vis_r || cy + ch < vis_t || cy > vis_b)) // not on the screen: nothing to draw, and nothing to click
+        continue;
       const bool is_selected = c.id == selected_clip_;
       const bool blocked = c.is_generative && gen_problems_.contains(c.id); // its model is not here: red, like a missing node
       const uint32_t base = blocked ? look::blocked : c.is_generative ? look::gen : c.is_adjustment ? look::adj : c.is_text ? look::txt
@@ -8219,9 +8223,9 @@ void App::draw_inspector() {
         if (soft_button(mark, text, ImVec2(pw, 22.0f), true, std::fabs(c->speed - kPresets[i]) < 0.001f))
           set_speed(kPresets[i]);
       }
-      if (std::fabs(c->speed - 1.0f) > 0.001f) { // faster or slower: the voice keeps its pitch, or moves like a tape
+      if (std::fabs(c->speed - 1.0f) > 0.001f) { // faster or slower: the sound moves like a tape, or (an option) keeps its pitch
         const json *cj = clip_json(c->id);
-        bool keep = !cj || cj->value("timing", json::object()).value("keep_pitch", true);
+        bool keep = cj && cj->value("timing", json::object()).value("keep_pitch", false);
         ImGui::Dummy(ImVec2(80.0f, 0.0f));
         ImGui::SameLine(88.0f);
         if (ImGui::Checkbox("Keep the pitch", &keep)) {
@@ -8234,16 +8238,16 @@ void App::draw_inspector() {
           for (const std::string &k : ids) {
             const json *kj = clip_json(k);
             const bool has = kj && kj->value("timing", json::object()).contains("keep_pitch");
-            if (keep && has)
+            if (!keep && has)
               ops.push_back({{"op", "remove"}, {"path", k + "/timing/keep_pitch"}});
-            else if (!keep)
-              ops.push_back({{"op", has ? "replace" : "add"}, {"path", k + "/timing/keep_pitch"}, {"value", false}});
+            else if (keep)
+              ops.push_back({{"op", has ? "replace" : "add"}, {"path", k + "/timing/keep_pitch"}, {"value", true}});
           }
           pending_ = [this, ops, keep] { patch(ops, keep ? "Keep the pitch" : "Pitch moves with the speed"); };
         }
         ui_mark("check:keep_pitch");
         if (ImGui::IsItemHovered())
-          ImGui::SetTooltip("On: a voice sounds the same, only faster or slower. Off: like a tape, faster is higher.");
+          ImGui::SetTooltip("Off: like a tape, faster is higher (the usual speed-up). On: a voice sounds the same, only faster or slower; the stretch can sound rough.");
       }
     }
     ImGui::PushTextWrapPos(0.0f);

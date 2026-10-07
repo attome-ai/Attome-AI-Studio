@@ -1098,3 +1098,36 @@ TEST_CASE("voice.make and voice.fit make the voices of a script and fit them to 
   std::error_code ec;
   fs::remove_all(dir, ec);
 }
+
+TEST_CASE("generate: detach_audio makes the sound of a generated clip a clip of its own", "[gen][generate][parity]") {
+  auto mock = std::make_shared<MockProvider>();
+  const fs::path dir = fs::temp_directory_path() / atm::new_id("attome-detach-gen");
+  fs::create_directories(dir);
+  const std::string project = (dir / "D.attome").string();
+  atm::api::EngineConfig cfg;
+  cfg.models_dir = (dir / "models").string();
+  cfg.providers = {mock};
+  Engine engine(cfg);
+  ok(engine, "project.create", {{"path", project}, {"rate", "30"}, {"canvas", "320x176"}});
+  const json made = ok(engine, "gen.create_clip", {{"project", project}, {"prompt", "a kite"}, {"model", "attome-mock"}, {"seconds", 2}});
+  const std::string clip = made["clip"];
+  // Before it is generated there is no sound to detach.
+  const auto early = engine.call("timeline.edit", {{"project", project}, {"ops", json::array({{{"op", "detach_audio"}, {"clip", clip}}})}});
+  REQUIRE_FALSE(early);
+  CHECK(early.error().rule == "E_PARAM");
+  const json started = ok(engine, "gen.run", {{"project", project}});
+  for (int i = 0; i < 3000 && ok(engine, "jobs.get", {{"job_id", started["job_id"]}})["state"] == "running"; ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  (void)ok(engine, "gen.status", {{"project", project}});
+  const auto done = engine.call("timeline.edit", {{"project", project}, {"ops", json::array({{{"op", "detach_audio"}, {"id", "$new:d"}, {"clip", clip}}})}});
+  INFO((done ? "" : done.error().message + " | " + done.error().hint));
+  REQUIRE(done);
+  const json sound = ok(engine, "project.get", {{"project", project}, {"id", (*done)["id_map"]["$new:d.audio"]}})["object"];
+  CHECK(sound["media_ref"]["stream"] == "audio");
+  CHECK(sound["media_ref"]["type"] == "file");
+  CHECK(fs::exists(fs::path(sound["media_ref"]["path"].get<std::string>())));
+  CHECK(ok(engine, "project.get", {{"project", project}, {"id", clip}})["object"]["media_ref"]["stream"] == "video"); // silent from now on
+  CHECK(ok(engine, "project.validate", {{"project", project}})["ok"] == true);
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}

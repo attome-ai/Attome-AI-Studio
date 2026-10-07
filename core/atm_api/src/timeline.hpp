@@ -18,6 +18,7 @@ struct Context {
   std::string sequence;                                    // the edited sequence's ID
   Rational rate;                                           // its frame rate
   std::function<Result<json>(const std::string &)> probe; // media.probe for clips added by path
+  std::string project_dir;                                 // the project's folder: where the files of a generated clip's takes are (their paths are relative to it)
   // When each word of a generative clip's speech is said, as the selected Take has it ([{"text","start","end"}], seconds): null when it has none.
   std::function<json(const std::string &)> words_of;
   // A picture of one frame of a clip's own file (no transform, no effects), at `at` seconds on the sequence, as a JPEG in the project:

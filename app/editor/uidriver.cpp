@@ -148,12 +148,25 @@ struct UiDriver::Impl {
       search_from = now + std::chrono::milliseconds(300);
     if (now < search_from || settle > 0)
       return;
+    // The windows that scroll sideways (the timeline draws only the clips that are in view) are swept across, and down a page after each pass; the others
+    // are swept down.
     for (ImGuiWindow *w : GImGui->Windows)
-      if (w->Active && !w->Hidden && w->ScrollMax.y > 0.0f &&
+      if (w->Active && !w->Hidden && (w->ScrollMax.y > 0.0f || w->ScrollMax.x > 0.0f) &&
           std::strncmp(w->Name, "WindowOverViewport", 18) != 0) { // the dock host holds panels, it is not one
-
         const float page = std::max(40.0f, w->InnerClipRect.GetHeight() * 0.6f);
-        ImGui::SetScrollY(w, w->Scroll.y >= w->ScrollMax.y ? 0.0f : std::min(w->ScrollMax.y, w->Scroll.y + page));
+        const auto down = [&] { ImGui::SetScrollY(w, w->Scroll.y >= w->ScrollMax.y ? 0.0f : std::min(w->ScrollMax.y, w->Scroll.y + page)); };
+        if (w->ScrollMax.x > 0.0f) {
+          const float across = std::max(80.0f, w->InnerClipRect.GetWidth() * 0.8f);
+          if (w->Scroll.x >= w->ScrollMax.x) {
+            ImGui::SetScrollX(w, 0.0f);
+            if (w->ScrollMax.y > 0.0f)
+              down();
+          } else {
+            ImGui::SetScrollX(w, std::min(w->ScrollMax.x, w->Scroll.x + across));
+          }
+        } else {
+          down();
+        }
       }
     settle = 3;
   }
