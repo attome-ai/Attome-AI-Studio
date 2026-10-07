@@ -644,6 +644,7 @@ Result<Composition> compile(const json &project, std::string_view sequence_id, c
         if (const auto sp = timing->find("speed"); sp != timing->end() && sp->is_number())
           l.speed = std::clamp(sp->get<double>(), 0.1, 10.0);
         l.reverse = timing->value("reverse", false);
+        l.keep_pitch = timing->value("keep_pitch", true);
         if (const auto tr = clip.find("transform"); tr != clip.end() && tr->is_object()) {
           if (const auto op = tr->find("opacity"); op != tr->end() && op->is_number())
             l.opacity = std::clamp(op->get<float>(), 0.0f, 1.0f);
@@ -1992,6 +1993,52 @@ Result<void> Renderer::render(int64_t frame, uint8_t *out) {
   return {};
 }
 
+// Interleaved stereo at `speed` times its pace, `out_frames` long, with its pitch kept: WSOLA. Windows of 40 ms are taken from the input
+// every hop * speed and laid down every hop (half a window, Hann, so they add up to one); each is taken where it lines up best (within
+// 10 ms) with how the last one went on, so voices and tones do not flutter.
+std::vector<float> stretch_keeping_pitch(const std::vector<float> &in, double speed, size_t out_frames) {
+  const size_t n_in = in.size() / 2;
+  constexpr size_t W = 1920, H = W / 2, T = 480, kStep = 4; // window, hop, search, the stride of the comparison
+  std::vector<float> out(out_frames * 2, 0.0f), weight(out_frames, 0.0f), window(W);
+  for (size_t i = 0; i < W; ++i)
+    window[i] = 0.5f - 0.5f * std::cos(6.283185307179586f * float(i) / float(W));
+  const auto mono = [&](size_t f) { return f < n_in ? in[f * 2] + in[f * 2 + 1] : 0.0f; };
+  size_t prev = 0; // where the last window was taken from
+  for (size_t at = 0, k = 0; at < out_frames; at += H, ++k) {
+    const double nominal = double(at) * speed;
+    size_t from = size_t(std::max(0.0, nominal));
+    if (k > 0) { // the place near `nominal` most like what follows the last window: its continuation from prev + H
+      const size_t natural = prev + H;
+      double best = -1e30;
+      const size_t lo = from > T ? from - T : 0, hi = from + T;
+      for (size_t cand = lo; cand <= hi; cand += kStep) {
+        double score = 0.0;
+        for (size_t i = 0; i < H; i += kStep)
+          score += double(mono(cand + i)) * double(mono(natural + i));
+        if (score > best) {
+          best = score;
+          from = cand;
+        }
+      }
+    }
+    prev = from;
+    for (size_t i = 0; i < W && at + i < out_frames; ++i) {
+      const size_t src = from + i;
+      if (src >= n_in)
+        break;
+      out[(at + i) * 2] += in[src * 2] * window[i];
+      out[(at + i) * 2 + 1] += in[src * 2 + 1] * window[i];
+      weight[at + i] += window[i];
+    }
+  }
+  for (size_t f = 0; f < out_frames; ++f) // the first and the last half window, where fewer windows overlap
+    if (weight[f] > 1e-3f && std::fabs(weight[f] - 1.0f) > 1e-3f) {
+      out[f * 2] /= weight[f];
+      out[f * 2 + 1] /= weight[f];
+    }
+  return out;
+}
+
 Result<std::vector<float>> mix_audio(const Composition &c) {
   ATM_PROFILE_SCOPE("audio.mix");
   const size_t total = size_t(c.frame_hns(c.frames) * media::kAudioRate / media::kHnsPerSecond);
@@ -2002,7 +2049,9 @@ Result<std::vector<float>> mix_audio(const Composition &c) {
     auto pcm = media::read_audio(l.path, int64_t(double(l.source_in_hns) * l.speed), int64_t(double(c.frame_hns(l.frames)) * l.speed));
     if (!pcm)
       continue; // a clip without readable audio is silent
-    if (l.speed != 1.0) { // played faster or slower: the stretch of the file is fitted to the clip's length (the pitch moves with it)
+    if (l.speed != 1.0 && l.keep_pitch) { // faster or slower with its own pitch
+      *pcm = stretch_keeping_pitch(*pcm, l.speed, size_t(c.frame_hns(l.frames) * media::kAudioRate / media::kHnsPerSecond));
+    } else if (l.speed != 1.0) { // played faster or slower like a tape: the stretch of the file is fitted to the clip's length (the pitch moves with it)
       const size_t in_frames = pcm->size() / 2;
       const size_t out_frames = size_t(c.frame_hns(l.frames) * media::kAudioRate / media::kHnsPerSecond);
       std::vector<float> fitted(out_frames * 2, 0.0f);

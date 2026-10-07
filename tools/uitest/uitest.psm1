@@ -41,8 +41,10 @@ function Invoke-EditorScript {
   $file = Join-Path $env:TEMP "attome-uitest-$tag.txt"
   $errFile = Join-Path $env:TEMP "attome-uitest-$tag.err"
   [IO.File]::WriteAllLines($file, $Script, (New-Object Text.UTF8Encoding $false))
-  $saved = @{ ATTOME_ENDPOINT = $env:ATTOME_ENDPOINT; ATTOME_EDITOR_SCRIPT = $env:ATTOME_EDITOR_SCRIPT; ATTOME_EDITOR_SELECT = $env:ATTOME_EDITOR_SELECT; ATTOME_PREF_DIR = $env:ATTOME_PREF_DIR }
+  $saved = @{ ATTOME_ENDPOINT = $env:ATTOME_ENDPOINT; ATTOME_EDITOR_SCRIPT = $env:ATTOME_EDITOR_SCRIPT; ATTOME_EDITOR_SELECT = $env:ATTOME_EDITOR_SELECT; ATTOME_PREF_DIR = $env:ATTOME_PREF_DIR
+              ATTOME_LIBRARY_DIR = $env:ATTOME_LIBRARY_DIR }
   if (-not $env:ATTOME_PREF_DIR) { $env:ATTOME_PREF_DIR = Join-Path $env:TEMP "attome-uitest-prefs-$tag" } # the user's own preferences are never used by a test
+  if (-not $env:ATTOME_LIBRARY_DIR) { $env:ATTOME_LIBRARY_DIR = Join-Path $env:TEMP "attome-uitest-library-$tag" } # nor the user's clip library
   $env:ATTOME_ENDPOINT = $Endpoint
   $env:ATTOME_EDITOR_SCRIPT = $file
   if ($SelectFirstClip) { $env:ATTOME_EDITOR_SELECT = '1' } else { $env:ATTOME_EDITOR_SELECT = $null }

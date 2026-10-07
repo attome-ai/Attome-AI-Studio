@@ -98,7 +98,9 @@ struct UiDriver::Impl {
     const Mark &m = it->second;
     // Bring it into view. It must sit inside the visible part of every window that holds it (a card inside the
     // Inspector, say); where it does not, scroll the nearest window that can scroll so the widget sits near its top.
-    for (ImGuiWindow *w = m.window; w; w = w->ParentWindow) { // sideways first: a clip far along the timeline
+    // A popup (a menu) floats over the window that opened it, wherever it fits: the windows under it do not hold it.
+    const auto holder = [](ImGuiWindow *w) { return (w->Flags & (ImGuiWindowFlags_Popup | ImGuiWindowFlags_Tooltip)) ? nullptr : w->ParentWindow; };
+    for (ImGuiWindow *w = m.window; w; w = holder(w)) { // sideways first: a clip far along the timeline
       const float centre = m.rect.GetCenter().x;
       if (w->ScrollMax.x > 0.0f && (centre > w->InnerClipRect.Max.x - 4.0f || centre < w->InnerClipRect.Min.x + 4.0f)) {
         if (settle > 0)
@@ -108,12 +110,12 @@ struct UiDriver::Impl {
         return std::nullopt;
       }
     }
-    for (ImGuiWindow *w = m.window; w; w = w->ParentWindow) {
+    for (ImGuiWindow *w = m.window; w; w = holder(w)) {
       if (m.rect.Min.y >= w->InnerClipRect.Min.y && m.rect.Max.y <= w->InnerClipRect.Max.y)
         continue;
       ImGuiWindow *s = w;
       while (s && s->ScrollMax.y <= 0.0f)
-        s = s->ParentWindow;
+        s = holder(s);
       if (!s)
         break; // nothing can scroll it further: use it as it is
       if (settle > 0)

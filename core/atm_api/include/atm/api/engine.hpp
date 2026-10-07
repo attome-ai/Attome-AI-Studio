@@ -39,6 +39,9 @@ struct EngineConfig {
   // Read and write the user's settings file (the ComfyUI address): ATTOME_SETTINGS, or settings.json beside the
   // models folder's default place. Off for tests, on for the daemon and the command line.
   bool user_settings = false;
+  // The user's clip library, shared by every project: ATTOME_LIBRARY_DIR, else (with user_settings) Attome\Library in the per-user folder.
+  // Tests give their own folder; empty and none of those = no library.
+  std::string library_dir;
 };
 
 class Engine {

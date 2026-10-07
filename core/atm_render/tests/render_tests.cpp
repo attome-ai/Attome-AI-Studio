@@ -961,6 +961,43 @@ double channel_rms(const std::vector<float> &stereo, int channel, double from_s,
 
 } // namespace
 
+TEST_CASE("render: sound at another speed keeps its pitch, or moves with the speed when asked", "[media]") {
+  const fs::path dir = fs::temp_directory_path() / atm::new_id("attome-pitch");
+  fs::create_directories(dir);
+  const std::string tone = (dir / "tone.wav").string();
+  write_wav(tone, 4.0); // 440 Hz
+  // The pitch of the middle of the clip's sound: zero crossings going up, over half a second.
+  const auto pitch_of = [&](double speed, bool keep) {
+    atm::render::Composition comp;
+    comp.width = 64;
+    comp.height = 64;
+    comp.frames = 30; // 1 s
+    atm::render::Layer l;
+    l.clip_id = "clp_tone";
+    l.path = tone;
+    l.video = false;
+    l.frames = 30;
+    l.clip_end_frame = 30;
+    l.speed = speed;
+    l.keep_pitch = keep;
+    comp.layers.push_back(l);
+    auto mix = atm::render::mix_audio(comp);
+    REQUIRE(mix);
+    const size_t from = 12000, to = 36000; // 0.25 s .. 0.75 s
+    int ups = 0;
+    for (size_t f = from + 1; f < to; ++f)
+      if ((*mix)[(f - 1) * 2] < 0.0f && (*mix)[f * 2] >= 0.0f)
+        ++ups;
+    return double(ups) / (double(to - from) / 48000.0);
+  };
+  CHECK(pitch_of(1.0, true) == Catch::Approx(440.0).margin(8.0));
+  CHECK(pitch_of(2.0, true) == Catch::Approx(440.0).margin(8.0));  // twice as fast, the same note
+  CHECK(pitch_of(0.5, true) == Catch::Approx(440.0).margin(8.0));  // half as fast, the same note
+  CHECK(pitch_of(2.0, false) == Catch::Approx(880.0).margin(12.0)); // like a tape: an octave up
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}
+
 TEST_CASE("render: a sound file on an audio track, with gain in dB, pan, fades and track volume", "[media]") {
   const fs::path dir = fs::temp_directory_path() / atm::new_id("attome-sound");
   fs::create_directories(dir);

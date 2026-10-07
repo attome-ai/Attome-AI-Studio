@@ -890,6 +890,223 @@ struct Engine::Impl {
 #endif
   }
 
+  // ---- library.* : the user's clip library, the same in every project (a folder of items, each with its own copy of its media) ----
+
+  fs::path library_dir() const {
+    if (!cfg.library_dir.empty())
+      return to_path(cfg.library_dir);
+    if (const char *dir = std::getenv("ATTOME_LIBRARY_DIR"); dir && *dir)
+      return to_path(dir);
+    if (!cfg.user_settings)
+      return {};
+#ifdef _WIN32
+    if (const char *local = std::getenv("LOCALAPPDATA"); local && *local)
+      return to_path(local) / "Attome" / "Library";
+#else
+    if (const char *home = std::getenv("HOME"); home && *home)
+      return to_path(home) / ".local" / "share" / "attome" / "library";
+#endif
+    return {};
+  }
+
+  Result<fs::path> library_root() const {
+    const fs::path dir = library_dir();
+    if (dir.empty())
+      return fail(ErrorCode::NotFound, "L_NO_LIBRARY", "There is no clip library here.", {}, "Set ATTOME_LIBRARY_DIR to a folder.");
+    ATM_CHECK(storage::make_dirs(dir / "clips"));
+    return dir / "clips";
+  }
+
+  // library.add {project, clips, name?}: the clips (and what is linked to them) become one item of the library. Their files are copied
+  // into it, so the item works in any project, also when the files are moved or deleted. A small picture of its first frame is kept.
+  Result<json> library_add(const json &params) {
+    ATM_TRY(Project *pr, project(params));
+    const auto ids = params.find("clips");
+    if (ids == params.end() || !ids->is_array() || ids->empty())
+      return bad_param("clips", "is required: the IDs of the clips to keep");
+    ATM_TRY(fs::path base, library_root());
+    const json &root = pr->doc.root();
+    // The clips, with the tracks they are on; the ones linked to them come along.
+    struct Found {
+      std::string id;
+      json clip;
+      bool audio = false;
+      Rational in;
+    };
+    std::vector<Found> found;
+    const auto add_one = [&](const std::string &id) {
+      if (std::any_of(found.begin(), found.end(), [&](const Found &f) { return f.id == id; }))
+        return;
+      const doc::NodeRef *ref = pr->doc.find(id);
+      if (!ref || id.rfind("clp_", 0) != 0)
+        return;
+      const doc::NodeRef *track = ref->parent.empty() ? nullptr : pr->doc.find(ref->parent);
+      Found f;
+      f.id = id;
+      f.clip = ref->node ? *ref->node : json();
+      if (!f.clip.is_object())
+        return;
+      f.audio = track && track->node && track->node->is_object() && track->node->value("kind", std::string()) == "audio";
+      f.in = Rational::parse(f.clip.value("timing", json::object()).value("record_in", std::string("0"))).value_or(Rational());
+      found.push_back(std::move(f));
+    };
+    for (const json &id : *ids)
+      if (id.is_string())
+        add_one(id.get<std::string>());
+    std::vector<std::pair<std::string, std::string>> all_clips; // (clip, link group) of the whole project
+    if (const auto seqs = root.find("sequences"); seqs != root.end() && seqs->is_object())
+      for (auto seq = seqs->begin(); seq != seqs->end(); ++seq)
+        if (const auto tracks = seq->find("tracks"); seq->is_object() && tracks != seq->end() && tracks->is_object())
+          for (auto t = tracks->begin(); t != tracks->end(); ++t)
+            if (const auto cl = t->find("clips"); t->is_object() && cl != t->end() && cl->is_object())
+              for (auto c = cl->begin(); c != cl->end(); ++c)
+                if (c->is_object())
+                  all_clips.emplace_back(c.key(), c->value("link_group", std::string()));
+    for (size_t i = 0; i < found.size(); ++i) // linked ones (their sound, their picture)
+      if (const std::string group = found[i].clip.value("link_group", std::string()); !group.empty())
+        for (const auto &[cid, g] : all_clips)
+          if (g == group)
+            add_one(cid);
+    if (found.empty())
+      return bad_param("clips", "names no clip of this project");
+    std::sort(found.begin(), found.end(), [](const Found &a, const Found &b) { return compare(a.in, b.in) < 0; });
+    Rational first = found.front().in;
+    for (const Found &f : found)
+      if (compare(f.in, first) < 0)
+        first = f.in;
+
+    const std::string item_id = new_id("lib");
+    const fs::path dir = base / item_id;
+    ATM_CHECK(storage::make_dirs(dir / "media"));
+    int n = 0;
+    std::map<std::string, std::string> copied; // a file used by several clips is copied once
+    const auto keep_file = [&](const std::string &path_text) -> Result<std::string> {
+      fs::path from = to_path(path_text);
+      if (from.is_relative())
+        from = pr->dir / from;
+      const std::string key = to_utf8(from);
+      if (const auto it = copied.find(key); it != copied.end())
+        return it->second;
+      std::error_code ec;
+      if (!fs::is_regular_file(from, ec))
+        return fail(ErrorCode::NotFound, "L_MISSING", "The file \"" + key + "\" of a clip is not there, so it cannot be kept in the library.");
+      const fs::path to = dir / "media" / (std::to_string(n++) + "_" + to_utf8(from.filename()));
+      fs::copy_file(from, to, fs::copy_options::overwrite_existing, ec);
+      if (ec)
+        return fail(ErrorCode::Internal, "L_COPY", "The file \"" + key + "\" could not be copied into the library: " + ec.message());
+      return copied[key] = to_utf8(to);
+    };
+    json clips = json::array();
+    double seconds = 0.0;
+    bool picture = false, sound = false;
+    for (Found &f : found) {
+      json &ref = f.clip["media_ref"];
+      const std::string type = ref.value("type", std::string());
+      if ((type == "file" || type == "image") && ref.contains("path")) {
+        ATM_TRY(std::string kept, keep_file(ref["path"].get<std::string>()));
+        ref["path"] = kept;
+        ref.erase("asset");
+      }
+      if (type == "workflow" && ref.contains("takes") && ref["takes"].is_object()) // the files a generative clip has made
+        for (auto take = ref["takes"].begin(); take != ref["takes"].end(); ++take)
+          if (take->is_object() && take->contains("outputs") && (*take)["outputs"].is_object())
+            for (auto out = (*take)["outputs"].begin(); out != (*take)["outputs"].end(); ++out)
+              if (out->is_object() && out->contains("path") && (*out)["path"].is_string()) {
+                const auto kept = keep_file((*out)["path"].get<std::string>());
+                if (kept)
+                  (*out)["path"] = *kept;
+              }
+      const Rational offset = sub(f.in, first).value_or(Rational());
+      const Rational duration = Rational::parse(f.clip.value("timing", json::object()).value("duration", std::string("0"))).value_or(Rational());
+      seconds = std::max(seconds, add(offset, duration).value_or(offset).to_seconds_lossy());
+      (f.audio ? sound : picture) = true;
+      clips.push_back({{"clip", f.clip}, {"audio", f.audio}, {"offset", offset.to_string()}});
+    }
+    std::string name = params.value("name", std::string());
+    if (name.empty())
+      name = found.front().clip.value("name", std::string("Clip"));
+    json item = {{"id", item_id}, {"name", name}, {"made", utc_now_iso8601()}, {"seconds", seconds}, {"picture", picture}, {"sound", sound}, {"clips", clips}};
+    // Its picture: the first frame of what it shows, drawn on its own.
+    if (picture)
+      if (auto comp = render::compile(root, {}, to_utf8(pr->dir))) {
+        std::vector<render::Layer> keep;
+        int64_t at = -1;
+        for (const render::Layer &l : comp->layers)
+          if (std::any_of(found.begin(), found.end(), [&](const Found &f) { return f.id == l.clip_id; }) && l.video) {
+            keep.push_back(l);
+            at = at < 0 ? l.origin_frame : std::min(at, l.origin_frame);
+          }
+        if (!keep.empty()) {
+          comp->layers = std::move(keep);
+          const int h = 180, w = std::max(2, int(int64_t(comp->width) * h / std::max(1, comp->height))) & ~1;
+          render::Renderer renderer(std::move(*comp), w, h);
+          std::vector<uint8_t> nv12(media::nv12_size(renderer.width(), renderer.height())), bgrx(size_t(renderer.width()) * size_t(renderer.height()) * 4);
+          if (renderer.render(std::max<int64_t>(0, at), nv12.data())) {
+            media::nv12_to_bgrx(nv12.data(), renderer.width(), renderer.height(), bgrx.data());
+            if (media::write_jpeg(to_utf8(dir / "thumb.jpg"), bgrx.data(), renderer.width() & ~1, renderer.height() & ~1))
+              item["thumb"] = "thumb.jpg";
+          }
+        }
+      }
+    ATM_CHECK(storage::atomic_write(dir / "item.json", item.dump(2)));
+    return json{{"id", item_id}, {"name", name}, {"clips", clips.size()}, {"seconds", seconds}};
+  }
+
+  Result<json> library_read(const std::string &id) const {
+    ATM_TRY(fs::path base, library_root());
+    if (id.empty() || id.find_first_of("/\\.") != std::string::npos)
+      return bad_param("id", "must be the ID of a library item");
+    const auto text = storage::read_file(base / id / "item.json");
+    const json item = text ? json::parse(*text, nullptr, false) : json();
+    if (!item.is_object())
+      return fail(ErrorCode::NotFound, "L_UNKNOWN", "There is no library item \"" + id + "\".", {}, "library.list names them.");
+    return item;
+  }
+
+  // library.list: the items, the newest first, without their clips.
+  Result<json> library_list(const json &) {
+    ATM_TRY(fs::path base, library_root());
+    json items = json::array();
+    std::error_code ec;
+    for (const auto &entry : fs::directory_iterator(base, ec)) {
+      const auto item = library_read(to_utf8(entry.path().filename()));
+      if (!item)
+        continue;
+      json brief = {{"id", (*item)["id"]}, {"name", item->value("name", std::string())}, {"made", item->value("made", std::string())},
+                    {"seconds", item->value("seconds", 0.0)}, {"picture", item->value("picture", false)}, {"sound", item->value("sound", false)},
+                    {"clips", item->value("clips", json::array()).size()}};
+      if (item->contains("thumb"))
+        brief["thumb"] = to_utf8(entry.path() / item->value("thumb", std::string()));
+      items.push_back(std::move(brief));
+    }
+    std::sort(items.begin(), items.end(), [](const json &a, const json &b) { return a.value("made", std::string()) > b.value("made", std::string()); });
+    return json{{"items", std::move(items)}, {"folder", to_utf8(base)}};
+  }
+
+  // library.get {id}: an item with its clips, each a snapshot ({clip, audio, offset}) for timeline.edit's duplicate op.
+  Result<json> library_get(const json &params) { return library_read(params.value("id", std::string())); }
+
+  Result<json> library_rename(const json &params) {
+    ATM_TRY(json item, library_read(params.value("id", std::string())));
+    const std::string name = params.value("name", std::string());
+    if (name.empty())
+      return bad_param("name", "is required");
+    item["name"] = name;
+    ATM_TRY(fs::path base, library_root());
+    ATM_CHECK(storage::atomic_write(base / item.value("id", std::string()) / "item.json", item.dump(2)));
+    return json{{"id", item["id"]}, {"name", name}};
+  }
+
+  Result<json> library_remove(const json &params) {
+    ATM_TRY(json item, library_read(params.value("id", std::string())));
+    ATM_TRY(fs::path base, library_root());
+    std::error_code ec;
+    fs::remove_all(base / item.value("id", std::string()), ec);
+    if (ec)
+      return fail(ErrorCode::Internal, "L_REMOVE", "The item could not be removed: " + ec.message());
+    return json{{"removed", item["id"]}};
+  }
+
   Result<json> skill_list(const json &params) {
     json list = json::array();
     const Project *pr = nullptr;
@@ -2958,6 +3175,21 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
      "The font families a text clip can use (content.font, or font on add_text): the ones installed on this computer, or the bundled ones. A name not in "
      "the list falls back to the default font.",
      R"({"type":"object","properties":{}})", &Impl::fonts_list},
+    {"library.add", "library", false,
+     "Keep clips in the user's clip library, which every project can use: the clips (and their linked sound or picture) become one item, "
+     "with copies of their files. Returns the item's id.",
+     R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},
+       "clips":{"type":"array","items":{"type":"string"}},"name":{"type":"string"}},"required":["project","clips"]})",
+     &Impl::library_add},
+    {"library.list", "library", false, "The items of the user's clip library, the newest first.", R"({"type":"object","properties":{}})", &Impl::library_list},
+    {"library.get", "library", false,
+     "One library item with its clips: each {clip, audio, offset}. To put it in a project, pass them as snapshots to timeline.edit's duplicate "
+     "op ({\"snapshot\": clip, \"track\", \"at\": start + offset}).",
+     R"({"type":"object","properties":{"id":{"type":"string"}},"required":["id"]})", &Impl::library_get},
+    {"library.rename", "library", false, "Give a library item another name.",
+     R"({"type":"object","properties":{"id":{"type":"string"},"name":{"type":"string"}},"required":["id","name"]})", &Impl::library_rename},
+    {"library.remove", "library", false, "Take an item out of the clip library (its copies of the files go with it; projects that used it keep their clips).",
+     R"({"type":"object","properties":{"id":{"type":"string"}},"required":["id"]})", &Impl::library_remove},
     {"skill.list", "skill", false,
      "START HERE for a kind of video you have not made before (a Short, ...): the skills available, built in and the project's own, each "
      "with what it is for. Read one with skill.get; it says which Tools to call in which order and what to ask the user.",

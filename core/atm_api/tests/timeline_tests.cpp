@@ -401,6 +401,76 @@ TEST_CASE("timeline.edit: new tracks take the first free name of their kind, als
   CHECK(names.dump().find("\"A3\"") != std::string::npos);
 }
 
+TEST_CASE("library: clips kept from one project, with copies of their files, are put into another", "[timeline][media][library]") {
+  Fixture f;
+  const fs::path lib = f.dir / "library";
+  _putenv_s("ATTOME_LIBRARY_DIR", lib.string().c_str());
+  const std::string file = (f.dir / "v.mp4").string();
+  write_video(file, 3);
+  const json r = f.ok(json::array({{{"op", "add_clip"}, {"id", "$new:v"}, {"path", file}, {"at", "1s"}},
+                                   {{"op", "add_text"}, {"id", "$new:t"}, {"text", "Hi"}, {"at", "2s"}, {"duration", "1s"}},
+                                   {{"op", "set_property"}, {"target", "$new:v"}, {"path", "transform.opacity"}, {"value", 0.5}}}));
+  const std::string v = r["id_map"]["$new:v"], t = r["id_map"]["$new:t"];
+  // The picture is named: its sound (linked) comes along; the title too.
+  const auto add_result = f.engine.call("library.add", {{"project", f.project}, {"clips", {v, t}}, {"name", "Intro"}});
+  INFO((add_result ? "" : add_result.error().message + " | " + add_result.error().hint));
+  REQUIRE(add_result);
+  const json added = *add_result;
+  CHECK(added["clips"] == 3);
+  CHECK(added["seconds"].get<double>() == Catch::Approx(3.0).margin(0.05));
+  const json list = *f.engine.call("library.list", json::object());
+  REQUIRE(list["items"].size() == 1);
+  CHECK(list["items"][0]["name"] == "Intro");
+  CHECK(list["items"][0]["picture"] == true);
+  CHECK(list["items"][0]["sound"] == true);
+  CHECK(fs::exists(fs::path(list["items"][0]["thumb"].get<std::string>())));
+  const std::string id = list["items"][0]["id"];
+  const json item = *f.engine.call("library.get", {{"id", id}});
+  REQUIRE(item["clips"].size() == 3);
+  // Its files are its own: the original can go.
+  fs::remove(file);
+  for (const json &c : item["clips"])
+    if (c["clip"]["media_ref"].value("type", "") == "file")
+      CHECK(fs::exists(fs::path(c["clip"]["media_ref"]["path"].get<std::string>())));
+
+  // Another project: the item goes in at 5 s through duplicate, its clips keep their places (the title 1 s after the picture).
+  const std::string other = (f.dir / "Other.attome").string();
+  REQUIRE(f.engine.call("project.create", {{"path", other}}));
+  REQUIRE(f.engine.call("timeline.edit", {{"project", other}, {"ops", json::array({{{"op", "add_track"}, {"id", "$new:p"}, {"kind", "video"}},
+                                                                                   {{"op", "add_track"}, {"id", "$new:s"}, {"kind", "audio"}}})}}));
+  const json tracks = f.engine.call("project.inspect", {{"project", other}, {"level", "tracks"}})->at("data")["sequences"][0]["tracks"];
+  std::string picture_track, sound_track;
+  for (const json &tr : tracks)
+    (tr["kind"] == "audio" ? sound_track : picture_track) = tr["id"];
+  json snaps = json::array();
+  for (const json &c : item["clips"]) {
+    const auto offset = atm::Rational::parse(c["offset"].get<std::string>());
+    snaps.push_back({{"snapshot", c["clip"]}, {"track", c["audio"] == true ? sound_track : picture_track},
+                     {"at", std::to_string(5.0 + offset->to_seconds_lossy()) + "s"}});
+  }
+  // the picture and the title would share a track: the title on a track of its own
+  REQUIRE(f.engine.call("timeline.edit", {{"project", other}, {"ops", json::array({{{"op", "add_track"}, {"id", "$new:x"}, {"kind", "video"}}})}}));
+  const json tracks2 = f.engine.call("project.inspect", {{"project", other}, {"level", "tracks"}})->at("data")["sequences"][0]["tracks"];
+  std::string third;
+  for (const json &tr : tracks2)
+    if (tr["kind"] == "video" && tr["id"] != picture_track)
+      third = tr["id"];
+  for (size_t i = 0; i < item["clips"].size(); ++i)
+    if (item["clips"][i]["clip"]["media_ref"].value("type", "") == "text")
+      snaps[i]["track"] = third;
+  const auto put = f.engine.call("timeline.edit", {{"project", other}, {"ops", json::array({{{"op", "duplicate"}, {"id", "$new:lib"}, {"clips", snaps}}})}});
+  INFO((put ? "" : put.error().message + " " + put.error().hint));
+  REQUIRE(put);
+  CHECK(f.engine.call("project.validate", {{"project", other}})->at("ok") == true);
+  CHECK(f.engine.call("project.inspect", {{"project", other}})->at("data")["sequences"][0]["tracks"].size() == 3);
+
+  CHECK(f.engine.call("library.rename", {{"id", id}, {"name", "Opening"}}));
+  CHECK(f.engine.call("library.list", json::object())->at("items")[0]["name"] == "Opening");
+  CHECK(f.engine.call("library.remove", {{"id", id}}));
+  CHECK(f.engine.call("library.list", json::object())->at("items").empty());
+  _putenv_s("ATTOME_LIBRARY_DIR", "");
+}
+
 TEST_CASE("timeline.edit: slip, roll and slide change timing the way editors expect", "[timeline][media]") {
   Fixture f;
   const std::string file = (f.dir / "a.mp4").string();

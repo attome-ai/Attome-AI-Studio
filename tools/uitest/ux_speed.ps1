@@ -50,6 +50,20 @@ try {
     if ($b.video.timing.speed -ne 2 -or [math]::Abs((Sec $b.video.timing.duration) - 2.005) -gt 0.01) { $failed = 'the 2x button did not make the picture twice as fast and 2 s long' }
     elseif ($b.audio.timing.speed -ne 2 -or [math]::Abs((Sec $b.audio.timing.duration) - 2.005) -gt 0.01) { $failed = 'the sound did not follow the picture to 2x' }
   }
+  if (-not $failed) { # at 2x the pitch is kept unless "Keep the pitch" is turned off: then like a tape, on the picture and its sound
+    $kp = Invoke-EditorScript -Project $proj -SelectFirstClip -Endpoint $run.Endpoint -Script @('expect @check:keep_pitch', "shot $work\speed_pitch.jpg", 'click @check:keep_pitch', 'wait 800')
+    $failed = $kp.Errors
+    if (-not $failed) {
+      $b = Both $run
+      "keep_pitch after the switch: picture $($b.video.timing.keep_pitch), sound $($b.audio.timing.keep_pitch)"
+      if ($b.video.timing.keep_pitch -ne $false -or $b.audio.timing.keep_pitch -ne $false) { $failed = 'turning Keep the pitch off did not reach the picture and its sound' }
+    }
+    if (-not $failed) {
+      $back = Invoke-EditorScript -Project $proj -SelectFirstClip -Endpoint $run.Endpoint -Script @('click @check:keep_pitch', 'wait 800')
+      $failed = $back.Errors
+      if (-not $failed -and ((Both $run).audio.timing.PSObject.Properties.Name -contains 'keep_pitch')) { $failed = 'turning it on again did not take the field away' }
+    }
+  }
   if (-not $failed) { # a typed speed
     $typed = Invoke-EditorScript -Project $proj -SelectFirstClip -Endpoint $run.Endpoint -Script @('click @number:speed', 'wait 300', 'type 0.5', 'key Enter', 'wait 900', "shot $work\speed_half.jpg")
     $failed = $typed.Errors

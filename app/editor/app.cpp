@@ -1120,6 +1120,8 @@ void App::draw_clip_menu(const ClipUi &c) {
   }
   if (menu_item("Go to its start"))
     pending_ = [this, at = c.start] { seek(at); };
+  if (menu_item(count > 1 ? ("Add " + std::to_string(count) + " clips to the library").c_str() : "Add to the library"))
+    pending_ = [this] { add_to_library(); };
   if (!c.path.empty() && !c.is_generative && !audio_only_.count(c.path) &&
       menu_item("Freeze frame (2 s)", nullptr, false, !locked && playhead_ > c.start && playhead_ < c.start + c.frames))
     pending_ = [this] { freeze_frame(); };
@@ -1514,6 +1516,17 @@ App::DropPlan App::plan_drop(const std::string &payload, int row, int64_t frame)
     if (p.id.rfind("cwf_", 0) == 0 && doc_.contains("workflows") && doc_["workflows"].is_object() && doc_["workflows"].contains(p.id))
       p.label = doc_["workflows"][p.id].value("name", std::string("Shot")); // a card of the library
     p.frames = std::max<int64_t>(1, std::llround(double(std::round(gen_seconds_ * 2.0f) / 2.0f) * fps()));
+  } else if (p.kind == "lib") {
+    for (const json &item : library_items_)
+      if (item.value("id", std::string()) == p.id) {
+        p.label = item.value("name", std::string("Clip"));
+        p.sound = !item.value("picture", false);
+        p.frames = std::max<int64_t>(1, std::llround(item.value("seconds", 1.0) * fps()));
+      }
+    if (p.label.empty()) {
+      p.why = "This item is not in the library any more.";
+      return p;
+    }
   } else if (p.kind == "media") {
     const json &info = media_info(p.id);
     p.label = file_name(p.id);
@@ -1656,6 +1669,8 @@ void App::commit_drop(const DropPlan &p) {
     add_generative_clip(p.id, track, p.start);
   } else if (p.kind == "title") {
     add_title(std::atoi(p.id.c_str()), track, p.start);
+  } else if (p.kind == "lib") {
+    insert_library(p.id, p.start, track);
   } else if (p.kind == "media") {
     import_files({p.id}, track, p.start);
   } else if (def && def->file_param[0] != 0) { // the layer is made when the file is chosen
@@ -2246,7 +2261,7 @@ constexpr Icon play{0xE768, 0xE13C}, pause{0xE769, 0xE12E}, prev{0xE892, 0xE15F}
     search{0xE721, 0xE151}, video{0xE714, 0xE29B}, audio{0xE8D6, 0xE122}, text{0xE8D2, 0xE198}, star{0xE734, 0xE412},
     bolt{0xE945, 0xE1B4}, share{0xE72D, 0xE207}, models{0xE950, 0xE061}, chat{0xE8BD, 0xE117},
     zoom_out{0xE71F, 0xE1B7}, zoom_in{0xE8A3, 0xE1B6}, eye{0xE7B3, 0xE0BA}, import_{0xE896, 0xE22F},
-    pointer{0xE8B0, 0xE1C3};
+    pointer{0xE8B0, 0xE1C3}, library{0xE8F1, 0xE22F};
 }
 
 ImVec2 text_size(const char *t) { return ImGui::CalcTextSize(t); }
@@ -3217,7 +3232,7 @@ void App::draw_rail() {
       Icon cp;
     };
     static const Item items[] = {{"Media", icon::video}, {"Text", icon::text}, {"Effects", icon::star},
-                                 {"Generate", icon::bolt}, {"Models", icon::models}};
+                                 {"Generate", icon::bolt}, {"Library", icon::library}, {"Models", icon::models}};
     const ImVec2 origin = ImGui::GetWindowPos();
     ImDrawList *dl = ImGui::GetWindowDrawList();
     float y = 8.0f;
@@ -3251,7 +3266,7 @@ void App::draw_rail() {
     };
     for (const Item &it : items) {
       const std::string name = it.label;
-      const int tab = name == "Media" ? 0 : name == "Text" ? 2 : name == "Effects" ? 3 : name == "Generate" ? 4 : 6; // 6: Models
+      const int tab = name == "Media" ? 0 : name == "Text" ? 2 : name == "Effects" ? 3 : name == "Generate" ? 4 : name == "Library" ? 7 : 6; // 6: Models
       if (place(it, rail_tab_ == tab, nullptr))
         rail_tab_ = tab;
     }
@@ -3276,8 +3291,10 @@ void App::draw_media() {
   solo_panel();
   ImGui::PopStyleVar();
   ImGui::PopStyleColor();
-  if (rail_tab_ == 2 || rail_tab_ == 3 || rail_tab_ == 4 || rail_tab_ == 6) {
-    if (rail_tab_ == 2)
+  if (rail_tab_ == 2 || rail_tab_ == 3 || rail_tab_ == 4 || rail_tab_ == 6 || rail_tab_ == 7) {
+    if (rail_tab_ == 7)
+      draw_library_panel();
+    else if (rail_tab_ == 2)
       draw_text_panel();
     else if (rail_tab_ == 3)
       draw_effects_panel();
@@ -3564,7 +3581,7 @@ void App::draw_multi_card() {
         else
           op_for(shown, *k, v);
       }
-      preview_ops(shown);
+      preview_ops(shown, std::string(id) == "speed" || std::string(id) == "gain");
     }
     const bool done = slider_done();
     slider_number(fmt, v * scale, scale, hard_lo, hard_hi);
@@ -3645,7 +3662,7 @@ json *find_by_id(json &node, const std::string &id) {
 }
 } // namespace
 
-void App::preview_ops(const json &ops) {
+void App::preview_ops(const json &ops, bool sound) {
   if (!ops.is_array() || ops.empty())
     return;
   json copy = doc_;
@@ -3697,8 +3714,13 @@ void App::preview_ops(const json &ops) {
     }
   }
   auto comp = render::compile(copy, {}, project_path_);
-  if (comp)
-    preview_.show_composition(std::move(*comp));
+  if (!comp)
+    return;
+  if (sound && clock_ - last_live_mix_ > 0.15) { // the newest wins in the mixer; a few a second are enough to hear the change
+    last_live_mix_ = clock_;
+    audio_mixer_.set_composition(*comp);
+  }
+  preview_.show_composition(std::move(*comp));
 }
 
 int64_t App::live_frames(const ClipUi &c) const {
@@ -3726,6 +3748,230 @@ json App::speed_preview_ops(const ClipUi &c, float speed) const {
     ops.push_back({{"op", "replace"}, {"path", k->id + "/timing/source_in"}, {"value", sec(src)}});
   }
   return ops;
+}
+
+void App::add_to_library() {
+  std::vector<std::string> ids;
+  for (const ClipUi *c : picked_clips())
+    ids.push_back(c->id);
+  if (ids.empty() && !selected_clip_.empty())
+    ids.push_back(selected_clip_);
+  if (ids.empty()) {
+    say("Select the clips to keep in the library.", true);
+    return;
+  }
+  json result;
+  if (!rpc("library.add", {{"project", project_path_}, {"clips", ids}}, result))
+    return;
+  library_stale_ = true;
+  say("\"" + result.value("name", std::string("Clip")) + "\" is in the library. Any project can use it: the Library panel on the left.");
+}
+
+void App::insert_library(const std::string &id, int64_t at, const std::string &track) {
+  json item;
+  if (!rpc("library.get", {{"id", id}}, item))
+    return;
+  // Its clips as copied clips, each at its place in the item. Clips of one kind that play at the same time need tracks of their own.
+  struct Piece {
+    json clip;
+    bool audio = false;
+    int64_t start = 0, frames = 0;
+    int lane = 0;
+  };
+  std::vector<Piece> pieces;
+  for (const json &c : item.value("clips", json::array())) {
+    Piece p;
+    p.clip = c.value("clip", json::object());
+    p.audio = c.value("audio", false);
+    if (const auto off = Rational::parse(c.value("offset", std::string("0"))))
+      p.start = to_frames(*off, rate_, Round::nearest_even).value_or(0);
+    const json timing = p.clip.value("timing", json::object());
+    if (const auto d = Rational::parse(timing.value("duration", std::string("1"))))
+      p.frames = std::max<int64_t>(1, to_frames(*d, rate_, Round::ceil).value_or(1));
+    pieces.push_back(std::move(p));
+  }
+  if (pieces.empty())
+    return;
+  int lanes[2] = {0, 0};
+  for (size_t i = 0; i < pieces.size(); ++i) // the first lane of its kind where nothing of the item plays at the same time
+    for (int lane = 0;; ++lane) {
+      const bool taken = std::any_of(pieces.begin(), pieces.begin() + std::ptrdiff_t(i), [&](const Piece &o) {
+        return o.audio == pieces[i].audio && o.lane == lane && o.start < pieces[i].start + pieces[i].frames && pieces[i].start < o.start + o.frames;
+      });
+      if (!taken) {
+        pieces[i].lane = lane;
+        lanes[pieces[i].audio ? 1 : 0] = std::max(lanes[pieces[i].audio ? 1 : 0], lane + 1);
+        break;
+      }
+    }
+  // The tracks for the lanes: the one it was dropped on first, then the others of that kind; new ones when there are too few.
+  const auto tracks_of = [&](bool audio) {
+    std::vector<std::string> out;
+    for (const TrackUi &t : tracks_)
+      if ((t.kind == "audio") == audio && t.id == track)
+        out.push_back(t.id);
+    if (!audio) // pictures: from the bottom layer up (the rows run from the top down)
+      for (auto t = tracks_.rbegin(); t != tracks_.rend(); ++t) {
+        if (t->kind != "audio" && t->id != track && !t->locked)
+          out.push_back(t->id);
+      }
+    else
+      for (const TrackUi &t : tracks_)
+        if (t.kind == "audio" && t.id != track && !t.locked)
+          out.push_back(t.id);
+    return out;
+  };
+  for (const bool audio : {false, true})
+    for (size_t have = tracks_of(audio).size(); int(have) < lanes[audio ? 1 : 0]; ++have) {
+      add_track(audio);
+      refresh();
+    }
+  const std::vector<std::string> picture = tracks_of(false), sound = tracks_of(true);
+  const std::vector<Snap> keep = clipboard_; // the clipboard is not touched
+  clipboard_.clear();
+  for (const Piece &p : pieces) {
+    Snap s;
+    s.clip = p.clip;
+    s.audio = p.audio;
+    s.start = p.start;
+    s.frames = p.frames;
+    const std::vector<std::string> &list = p.audio ? sound : picture;
+    s.track = size_t(p.lane) < list.size() ? list[size_t(p.lane)] : std::string();
+    clipboard_.push_back(std::move(s));
+  }
+  paste_clips(at, clipboard_.size() == 1 ? track : std::string());
+  clipboard_ = keep;
+  std::erase_if(toasts_, [](const Toast &t) { return t.text.starts_with("Pasted"); });
+  say("\"" + item.value("name", std::string("Clip")) + "\" from the library", false, true);
+}
+
+namespace {
+} // namespace
+
+// The Library panel: the user's kept clips, in every project. A card goes in by a double click, its plus, or a drag onto the timeline.
+void App::draw_library_panel() {
+  if (library_stale_) {
+    library_stale_ = false;
+    json result;
+    RpcError error;
+    if (client_.call("library.list", json::object(), result, error))
+      library_items_ = result.value("items", json::array());
+  }
+  section_label("LIBRARY");
+  ImGui::PushTextWrapPos(0.0f);
+  ImGui::TextColored(hexv(look::fg3), "Clips kept here can be used in any project. Right-click clips on the timeline and choose Add to the library.");
+  ImGui::PopTextWrapPos();
+  ImGui::Spacing();
+  if (library_items_.empty()) {
+    ImGui::TextColored(hexv(look::fg2), "Nothing is kept yet.");
+    return;
+  }
+  ImGui::BeginChild("##library", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_NoBackground);
+  const float avail = ImGui::GetContentRegionAvail().x;
+  const int columns = std::max(1, int((avail + 10.0f) / (130.0f + 10.0f)));
+  const float cell = (avail - 10.0f * float(columns - 1)) / float(columns), thumb_h = cell * 9.0f / 16.0f;
+  int column = 0;
+  std::string remove_id;
+  for (const json &item : library_items_) {
+    const std::string id = item.value("id", std::string()), name = item.value("name", std::string("Clip"));
+    const std::string thumb = item.value("thumb", std::string());
+    if (!thumb.empty())
+      thumbs_.request(thumb);
+    if (column)
+      ImGui::SameLine(0.0f, 10.0f);
+    ImGui::BeginGroup();
+    ImGui::PushID(id.c_str());
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    ImGui::SetNextItemAllowOverlap();
+    ImGui::InvisibleButton("##card", ImVec2(cell, thumb_h + 38.0f));
+    ui_mark("library:" + name);
+    const bool hovered = ImGui::IsItemHovered();
+    card_source("lib:" + id, name.c_str());
+    const bool add_by_double_click = hovered && ImGui::IsMouseDoubleClicked(0);
+    bool add_now = add_by_double_click;
+    if (ImGui::BeginPopupContextItem("##libctx")) {
+      if (menu_item("Add at the playhead"))
+        add_now = true;
+      if (menu_item("Rename")) {
+        library_renaming_ = id;
+        copy_to(library_name_buf_, sizeof library_name_buf_, name);
+      }
+      ImGui::Separator();
+      if (menu_item("Remove from the library"))
+        remove_id = id;
+      ImGui::EndPopup();
+    }
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(p, ImVec2(p.x + cell, p.y + thumb_h), hex(look::bg), 8.0f);
+    if (const auto tex = thumb_tex_.find(thumb); !thumb.empty() && tex != thumb_tex_.end() && tex->second)
+      dl->AddImageRounded(ImTextureID(reinterpret_cast<intptr_t>(tex->second)), p, ImVec2(p.x + cell, p.y + thumb_h), ImVec2(0, 0), ImVec2(1, 1),
+                          IM_COL32_WHITE, 8.0f);
+    else { // sound only, or not read yet: a sign of what it is
+      const std::string g = glyph(item.value("picture", false) ? icon::video : icon::audio);
+      ImGui::PushFont(g_fonts.ui, 22.0f);
+      const ImVec2 gs = text_size(g.c_str());
+      dl->AddText(ImVec2(p.x + (cell - gs.x) * 0.5f, p.y + (thumb_h - gs.y) * 0.5f), hex(look::fg3), g.c_str());
+      ImGui::PopFont();
+    }
+    if (hovered)
+      dl->AddRect(p, ImVec2(p.x + cell, p.y + thumb_h), hex(look::accent), 8.0f, 0, 1.5f);
+    {
+      const ImVec2 here = ImGui::GetCursorScreenPos();
+      ImGui::SetCursorScreenPos(ImVec2(p.x + cell - 34.0f, p.y + 6.0f));
+      ImGui::InvisibleButton("##add", ImVec2(28.0f, 28.0f));
+      ui_mark("button:add_library_" + name);
+      if (ImGui::IsItemClicked())
+        add_now = true;
+      if (hovered || ImGui::IsItemHovered()) {
+        dl->AddCircleFilled(ImVec2(p.x + cell - 20.0f, p.y + 20.0f), 13.0f, hex(look::accent));
+        const std::string g = glyph(icon::add);
+        const ImVec2 gs = text_size(g.c_str());
+        dl->AddText(ImVec2(p.x + cell - 20.0f - gs.x * 0.5f, p.y + 20.0f - gs.y * 0.5f), IM_COL32_WHITE, g.c_str());
+      }
+      ImGui::SetCursorScreenPos(here);
+      ImGui::Dummy(ImVec2(0.0f, 0.0f));
+    }
+    if (library_renaming_ == id) {
+      ImGui::SetCursorScreenPos(ImVec2(p.x, p.y + thumb_h + 4.0f));
+      ImGui::SetNextItemWidth(cell);
+      ImGui::SetKeyboardFocusHere();
+      if (ImGui::InputText("##libname", library_name_buf_, sizeof library_name_buf_, ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll)) {
+        json ignored;
+        if (library_name_buf_[0] && rpc("library.rename", {{"id", id}, {"name", std::string(library_name_buf_)}}, ignored))
+          library_stale_ = true;
+        library_renaming_.clear();
+      }
+      ui_mark("field:library_name");
+      if (ImGui::IsKeyPressed(ImGuiKey_Escape, false))
+        library_renaming_.clear();
+    } else {
+      std::string shown = name; // cut to the card, at a character boundary
+      while (shown.size() > 1 && text_size(shown.c_str()).x > cell - 4.0f) {
+        shown.pop_back();
+        while (!shown.empty() && (static_cast<unsigned char>(shown.back()) & 0xC0) == 0x80)
+          shown.pop_back();
+      }
+      dl->AddText(ImVec2(p.x + 2.0f, p.y + thumb_h + 4.0f), hex(look::fg), shown.c_str());
+      char info[48];
+      std::snprintf(info, sizeof info, "%.1f s  -  %d %s", item.value("seconds", 0.0), item.value("clips", 1), item.value("clips", 1) == 1 ? "clip" : "clips");
+      dl->AddText(ImVec2(p.x + 2.0f, p.y + thumb_h + 20.0f), hex(look::fg3), info);
+    }
+    if (hovered && !ImGui::IsMouseDown(0))
+      ImGui::SetTooltip("Double-click or the plus: at the playhead. Drag it onto the timeline to choose where. Right-click for more.");
+    if (add_now)
+      pending_ = [this, id] { insert_library(id, playhead_); };
+    ImGui::PopID();
+    ImGui::EndGroup();
+    column = (column + 1) % columns;
+  }
+  ImGui::EndChild();
+  if (!remove_id.empty()) {
+    json ignored;
+    if (rpc("library.remove", {{"id", remove_id}}, ignored)) {
+      library_stale_ = true;
+      say("Removed from the library. Projects that use it keep their clips.");
+    }
+  }
 }
 
 void App::select_nothing() {
@@ -6834,14 +7080,20 @@ void App::draw_timeline() {
       bool picture_under_label = false; // frames or a waveform are drawn: the name gets a backing so it can be read
       if (!c.media_path.empty() && !c.is_text && !c.is_adjustment && x1 - x0 > 6.0f && drag_id_ != c.id) {
         const float from = std::max(x0, win.x + header_w), to = std::min(x1 - 1.0f, win.x + view_w);
-        const double src0 = double(c.source_frames) / rate; // seconds into the file where the clip starts
+        const double src0 = double(c.source_frames) / rate; // seconds into the file where the clip starts (in the clip's own time)
+        // The clip's time at a point of the drawn clip: a reversed clip shows its last moment first.
+        const double drawn_s = double(x1 - x0) / pps_;
+        const auto clip_time = [&](float x) { return src0 + (c.reverse ? drawn_s - double(x - x0) / pps_ : double(x - x0) / pps_); };
         if (track.kind == "audio") { // a sound: its waveform, mirrored around the middle
           thumbs_.request_peaks(c.media_path);
           if (const auto pk = peaks_.find(c.media_path); pk != peaks_.end() && !pk->second.empty() && to > from) {
             const std::vector<float> &v = pk->second;
             const float mid = cy + ch * 0.5f, amp = (ch - 10.0f) * 0.5f;
             for (float x = from; x < to; x += 2.0f) {
-              const double t0 = src0 + double(x - x0) / pps_, t1 = src0 + double(x + 2.0f - x0) / pps_;
+              // the file's own time (the peaks are in it): the clip's time times its speed
+              double t0 = clip_time(x) * double(c.speed), t1 = clip_time(x + 2.0f) * double(c.speed);
+              if (t1 < t0)
+                std::swap(t0, t1);
               const size_t i0 = size_t(std::max(0.0, t0 / Peaks::kSeconds)), i1 = std::min(v.size(), size_t(std::max(0.0, t1 / Peaks::kSeconds)) + 1);
               float loud = 0.0f;
               for (size_t i = i0; i < i1; ++i)
@@ -6862,7 +7114,7 @@ void App::draw_timeline() {
               if (x + tile_w < from)
                 continue;
               const float shown = std::min(tile_w, x1 - 1.0f - x);
-              const double secs = src0 + double(x + tile_w * 0.5f - x0) / pps_; // the file's time at the tile's middle
+              const double secs = clip_time(x + tile_w * 0.5f); // the file's time at the tile's middle (in the clip's own time, as file_s is)
               const int index = info.count == 1 ? 0 : std::clamp(int(secs / std::max(0.001, file_s) * info.count), 0, info.count - 1);
               const float u0 = float(index) / float(info.count), u1 = u0 + (1.0f / float(info.count)) * (shown / tile_w);
               dl->AddImage(ImTextureID(reinterpret_cast<intptr_t>(info.tex)), ImVec2(x, cy + 1.0f), ImVec2(x + shown, cy + 1.0f + tile_h), ImVec2(u0, 0.0f),
@@ -7834,7 +8086,7 @@ void App::draw_inspector() {
       ImGui::TextColored(hexv(look::fg2), "Speed");
       ImGui::SameLine(88.0f);
       if (slim_slider("speed", &speed_, 0.25f, 4.0f, ImGui::GetContentRegionAvail().x - 52.0f, "", 1.0f))
-        preview_ops(speed_preview_ops(*c, speed_)); // the Monitor plays it at that speed while the value moves
+        preview_ops(speed_preview_ops(*c, speed_), true); // the Monitor plays it at that speed while the value moves, the sound too
       const bool done = slider_done();
       slider_number("%.2fx", speed_, 1.0f, 0.1f, 10.0f);
       const auto set_speed = [&](float v) {
@@ -7866,6 +8118,32 @@ void App::draw_inspector() {
         std::snprintf(mark, sizeof mark, "speed_%g", double(kPresets[i]));
         if (soft_button(mark, text, ImVec2(pw, 22.0f), true, std::fabs(c->speed - kPresets[i]) < 0.001f))
           set_speed(kPresets[i]);
+      }
+      if (std::fabs(c->speed - 1.0f) > 0.001f) { // faster or slower: the voice keeps its pitch, or moves like a tape
+        const json *cj = clip_json(c->id);
+        bool keep = !cj || cj->value("timing", json::object()).value("keep_pitch", true);
+        ImGui::Dummy(ImVec2(80.0f, 0.0f));
+        ImGui::SameLine(88.0f);
+        if (ImGui::Checkbox("Keep the pitch", &keep)) {
+          json ops = json::array();
+          std::vector<std::string> ids = {c->id};
+          for (const ClipUi *m : linked_of(*c))
+            ids.push_back(m->id);
+          for (const std::string &o : partner_of(c->id))
+            ids.push_back(o);
+          for (const std::string &k : ids) {
+            const json *kj = clip_json(k);
+            const bool has = kj && kj->value("timing", json::object()).contains("keep_pitch");
+            if (keep && has)
+              ops.push_back({{"op", "remove"}, {"path", k + "/timing/keep_pitch"}});
+            else if (!keep)
+              ops.push_back({{"op", has ? "replace" : "add"}, {"path", k + "/timing/keep_pitch"}, {"value", false}});
+          }
+          pending_ = [this, ops, keep] { patch(ops, keep ? "Keep the pitch" : "Pitch moves with the speed"); };
+        }
+        ui_mark("check:keep_pitch");
+        if (ImGui::IsItemHovered())
+          ImGui::SetTooltip("On: a voice sounds the same, only faster or slower. Off: like a tape, faster is higher.");
       }
     }
     ImGui::PushTextWrapPos(0.0f);
@@ -8260,7 +8538,10 @@ void App::draw_inspector() {
                          const char *key, const char *what, bool is_time) {
       ImGui::TextColored(hexv(look::fg2), "%s", label);
       ImGui::SameLine(88.0f);
-      slim_slider(slider, value, lo, hi, ImGui::GetContentRegionAvail().x - 60.0f, "", 0.0f);
+      if (slim_slider(slider, value, lo, hi, ImGui::GetContentRegionAvail().x - 60.0f, "", 0.0f)) { // heard while it moves
+        const json v = is_time ? json(frames_text(std::llround(double(*value) * fps()))) : json(std::round(*value * 10.0f) / 10.0f);
+        preview_ops(json::array({{{"op", "replace"}, {"path", aid + "/audio/" + key}, {"value", v}}}), true);
+      }
       if (slider_done()) {
         const float v = *value;
         const std::string k = key, w = what;

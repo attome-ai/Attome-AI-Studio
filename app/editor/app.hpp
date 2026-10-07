@@ -335,7 +335,8 @@ private:
   void select_nothing(); // a click on empty space: no clip, no media card
   // While a value is dragged: the edit it would make, shown in the Monitor at once (the project is not changed until the value is let go).
   // `ops` are the patch ops the release will send.
-  void preview_ops(const json &ops);
+  void preview_ops(const json &ops, bool sound = false); // sound: the sound is mixed again too (a few times a second), so it is heard
+  double last_live_mix_ = -1.0;
   json speed_preview_ops(const ClipUi &c, float speed) const; // what set_speed would do to the clip, its linked and side-by-side sound
   double last_live_ = -1.0;
   // While a speed is dragged: the speed each clip will have, so the timeline draws the lengths it will have at once (and the clips after
@@ -515,7 +516,15 @@ private:
   int media_kind_ = 0; // the Media panel's filter: 0 all, 1 video, 2 audio, 3 pictures
   int text_tab_ = 0, fx_tab_ = 0, gen_tab_ = 0; // the tab chosen in the Text, Effects and Generate panels; 0 is All
   int inspector_tab_ = 0;
-  int rail_tab_ = 0; // 0 Media, 2 Text, 3 Effects, 4 Generate, 6 Models
+  int rail_tab_ = 0; // 0 Media, 2 Text, 3 Effects, 4 Generate, 6 Models, 7 Library
+  // The user's clip library (library.*), the same in every project.
+  json library_items_ = json::array();
+  bool library_stale_ = true;
+  std::string library_renaming_;
+  char library_name_buf_[128] = {};
+  void draw_library_panel();
+  void add_to_library();                                   // the selected clips (and what is linked to them) become one item
+  void insert_library(const std::string &id, int64_t at, const std::string &track = {}); // an item at `at`, its clips on tracks of their kind
   char text_buf_[1024] = {};
   float text_size_ = 0.08f, text_col_[3] = {1.0f, 1.0f, 1.0f};
   bool text_bold_ = false;
