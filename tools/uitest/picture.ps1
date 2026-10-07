@@ -29,6 +29,9 @@ try { & "$bin\attome.exe" new $proj --rate 30 | Out-Null } finally { Remove-Item
 $run = Invoke-EditorScript -Project $proj -Import $png -Script @(
   'wait 500'
   'expect @clip:logo'
+  'click @clip:logo', 'wait 500'
+  'expect @slider:opacity'   # a picture's own card: its transform and opacity
+  'absent @slider:speed', 'absent @slider:gain'    # a picture has no speed and no sound
   "shot $work\picture.jpg"
 )
 $failed = $run.Errors

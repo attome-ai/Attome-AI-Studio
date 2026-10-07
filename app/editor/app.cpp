@@ -3614,7 +3614,7 @@ void App::draw_multi_card() {
         all.push_back(&k);
         if (t.kind != "audio" && !k.is_adjustment)
           pictures.push_back(&k);
-        if (!k.path.empty() && !k.is_generative && !k.is_text)
+        if (!k.path.empty() && !k.is_generative && !k.is_text && !media::is_still(k.path))
           files.push_back(&k);
         if (t.kind == "audio")
           sounds.push_back(&k);
@@ -8205,7 +8205,7 @@ void App::draw_inspector() {
       copy_to(dur_buf_, sizeof dur_buf_, timecode(c->frames));
     insp_dur_live_ = live_speed_.count(c->id) > 0;
     field("Duration", dur_buf_, sizeof dur_buf_, "/timing/duration", "Trim clip", true);
-    if (!c->path.empty() && !c->is_generative) { // a file: it can be played faster or slower (its sound with it)
+    if (!c->path.empty() && !c->is_generative && !media::is_still(c->path)) { // a file with time in it: it can be played faster or slower (its sound with it)
       if (!ImGui::IsAnyItemActive())
         speed_ = c->speed;
       ImGui::TextColored(hexv(look::fg2), "Speed");
@@ -8669,7 +8669,8 @@ void App::draw_inspector() {
 
   // Text, adjustment layers and pictures whose sound lives in a linked clip have no sound of their own here.
   // The sound of what is selected: its own, or for the picture of a video the sound clip linked to it, so one selection has both.
-  const ClipUi *ac = !c->is_text && !c->is_adjustment && c->stream != "video" ? c : nullptr;
+  const bool still = !c->path.empty() && media::is_still(c->path); // a picture has no sound and no speed
+  const ClipUi *ac = !c->is_text && !c->is_adjustment && !still && c->stream != "video" ? c : nullptr;
   if (!ac && c->stream == "video")
     for (const ClipUi *m : linked_of(*c))
       if (m->stream == "audio")
