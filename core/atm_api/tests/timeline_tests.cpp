@@ -1036,3 +1036,40 @@ TEST_CASE("timeline.edit: speed, reverse, freeze frame, split, move and delete w
   CHECK(f.tracks()[0]["clips"] == 3);
   CHECK(f.engine.call("project.validate", {{"project", f.project}})->at("ok") == true);
 }
+
+TEST_CASE("clip.motion puts the same keys, with easing, on several clips, relative to their own values", "[timeline][parity]") {
+  Fixture f;
+  const json made = f.ok(json::array({{{"op", "add_text"}, {"id", "$new:a"}, {"text", "One"}, {"duration", "2s"}},
+                                      {{"op", "add_text"}, {"id", "$new:b"}, {"text", "Two"}, {"duration", "3s"}, {"at", "2s"}}}));
+  const std::string a = made["id_map"]["$new:a"], b = made["id_map"]["$new:b"];
+  // A punch-in at the start settling to the clip's own size, and a push to the end.
+  const auto m = f.engine.call("clip.motion", {{"project", f.project}, {"clips", json::array({a, b})},
+                                               {"keys", json::array({{{"property", "scale"}, {"at", 0}, {"value", 1.2}, {"relative", true}, {"ease", "ease_out_expo"}},
+                                                                     {{"property", "scale"}, {"at", 0.33}, {"value", 1.0}, {"relative", true}},
+                                                                     {{"property", "position"}, {"at_end", 0}, {"value", {0.0, -0.05}}, {"relative", true}}})}});
+  INFO((m ? "" : m.error().message + " | " + m.error().hint));
+  REQUIRE(m);
+  CHECK(m->at("keys").get<int>() == 6);
+  for (const std::string &id : {a, b}) {
+    const json node = f.get(id);
+    const json &scale = node["transform"]["keyframes"]["scale"];
+    REQUIRE(scale.size() == 2);
+    bool eased = false;
+    for (const auto &[kid, k] : scale.items())
+      if (k["t"] == "0") {
+        eased = k.value("ease", "") == "ease_out_expo" && k.value("interp", "") == "easing";
+        CHECK(k["v"][0].get<double>() == 1.2 * node["transform"].value("scale", json::array({1.0}))[0].get<double>());
+      }
+    CHECK(eased);
+    CHECK(node["transform"]["keyframes"]["position"].size() == 1);
+  }
+  CHECK(f.engine.call("project.validate", {{"project", f.project}})->at("ok") == true);
+  // Undo takes it all back at once.
+  REQUIRE(f.engine.call("project.undo", {{"project", f.project}}));
+  CHECK_FALSE(f.get(a)["transform"].contains("keyframes"));
+  // Errors: unknown clip, bad property, bad ease, no keys.
+  CHECK_FALSE(f.engine.call("clip.motion", {{"project", f.project}, {"clips", json::array({"clp_nope"})}, {"keys", json::array({{{"property", "scale"}, {"value", 1.0}}})}}));
+  CHECK_FALSE(f.engine.call("clip.motion", {{"project", f.project}, {"clips", json::array({a})}, {"keys", json::array({{{"property", "colour"}, {"value", 1.0}}})}}));
+  CHECK_FALSE(f.engine.call("clip.motion", {{"project", f.project}, {"clips", json::array({a})}, {"keys", json::array({{{"property", "scale"}, {"value", 1.0}, {"ease", "wobble"}}})}}));
+  CHECK_FALSE(f.engine.call("clip.motion", {{"project", f.project}, {"clips", json::array({a})}}));
+}

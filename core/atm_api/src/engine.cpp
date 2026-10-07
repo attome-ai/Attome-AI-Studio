@@ -1418,6 +1418,60 @@ struct Engine::Impl {
     return done;
   }
 
+  // clip.motion {project, clips, keys}: the same keys on every clip of `clips`: [{property (scale | position | rotation | opacity), at | at_end (seconds from the start / before the end),
+  // value, relative?, ease?, hold?}]. With relative the value is a change to the clip's own: a factor for scale and opacity, an offset for position and rotation. A look in data:
+  // a punch-in at a cut, a push, a shake, a sway. A key at a time where the clip has one takes the new value. Written with set_keyframe: one edit.
+  Result<json> clip_motion(const json &params) {
+    ATM_PROFILE_SCOPE("api.clip_motion");
+    ATM_TRY(Project *pr, project(params));
+    if (!params.contains("clips") || !params["clips"].is_array() || params["clips"].empty())
+      return bad_param("clips", "is required: the IDs of the clips that move");
+    if (!params.contains("keys") || !params["keys"].is_array() || params["keys"].empty())
+      return bad_param("keys", "is required: [{property, at, value, ...}]");
+    const auto sec = [](double v) { return std::to_string(int64_t(std::llround(v * 1000000.0))) + "/1000000"; };
+    json ops = json::array();
+    int count = 0;
+    for (const json &cid : params["clips"]) {
+      const std::string id = cid.is_string() ? cid.get<std::string>() : std::string();
+      const doc::NodeRef *ref = id.empty() ? nullptr : pr->doc.find(id);
+      if (!ref || !ref->node || id.rfind("clp_", 0) != 0)
+        return fail(ErrorCode::NotFound, "E_UNKNOWN_CLIP", "\"clips\" must hold IDs of clips of the project, not \"" + id + "\".");
+      const double length = Rational::parse(ref->node->value("timing", json::object()).value("duration", std::string("0"))).value_or(Rational()).to_seconds_lossy();
+      const json tr = ref->node->value("transform", json::object());
+      for (const json &k : params["keys"]) {
+        const std::string prop = k.value("property", std::string());
+        if (prop != "scale" && prop != "position" && prop != "rotation" && prop != "opacity")
+          return bad_param("keys.property", "must be scale, position, rotation or opacity");
+        if (!k.contains("value") || !(k["value"].is_number() || (k["value"].is_array() && k["value"].size() == 2)))
+          return bad_param("keys.value", "must be a number or [x, y]");
+        double at = k.contains("at_end") ? length - k.value("at_end", 0.0) : k.value("at", 0.0);
+        at = std::clamp(at, 0.0, length);
+        const bool pair = prop == "scale" || prop == "position";
+        const auto part = [&](const json &v, size_t i) { return v.is_array() ? v[i].get<double>() : v.get<double>(); };
+        json value = k["value"];
+        if (k.value("relative", false)) {
+          const json own = tr.contains(prop) ? tr[prop] : json(prop == "position" ? json::array({0.5, 0.5}) : prop == "scale" ? json::array({1.0, 1.0}) : json(prop == "opacity" ? 1.0 : 0.0));
+          const bool offset = prop == "position" || prop == "rotation";
+          const auto combine = [&](double a, double b) { return offset ? a + b : a * b; };
+          if (pair)
+            value = json::array({combine(part(own, 0), part(value, 0)), combine(part(own, own.is_array() ? 1 : 0), part(value, value.is_array() ? 1 : 0))});
+          else
+            value = combine(own.get<double>(), value.get<double>());
+        }
+        json op = {{"op", "set_keyframe"}, {"clip", id}, {"property", prop}, {"at", sec(at)}, {"value", std::move(value)}};
+        if (k.contains("ease"))
+          op["ease"] = k["ease"];
+        if (k.value("hold", false))
+          op["hold"] = true;
+        ops.push_back(std::move(op));
+        ++count;
+      }
+    }
+    ATM_TRY(json done, timeline_edit({{"project", params["project"]}, {"ops", std::move(ops)}, {"label", "Motion"}}));
+    done["keys"] = count;
+    return done;
+  }
+
   // music.cuts {project, music, clip, every?, from?, until?}: `clip` is cut on the beats of the music clip (every `every`-th beat, default 1), inside from..until (seconds of
   // the film; default the whole clip). The beats come from audio.analyze, placed where the music plays (its speed and start), so it composes with music.fit. Uses split.
   Result<json> music_cuts(const json &params) {
@@ -4550,6 +4604,15 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
      R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},"clip":{"type":"string"},
        "bpm":{"type":"number"},"at":{"type":"number"},"until":{"type":"number"},"from":{"type":"number"}},"required":["project","clip"]})",
      &Impl::music_fit},
+    {"clip.motion", "core", true,
+     "Put the same movement on clips: `keys` is [{property (scale | position | rotation | opacity), at (seconds from the clip's start) | at_end (seconds before its end), value "
+     "(a number, or [x, y] for scale and position), relative (the value changes the clip's own: a factor for scale and opacity, an offset for position and rotation), ease "
+     "(ease_out_expo, ease_out_back, ease_in_out_quad ...), hold}]. A punch-in at a cut is scale 1.2 relative at 0 with ease_out_expo, then 1.0 at 0.33; a shake is a run "
+     "of small position offsets. A key where the clip has one takes the new value. One edit; Undo takes it back. Keep the keys in a look file and pass them again to repeat it.",
+     R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},"clips":{"type":"array","items":{"type":"string"}},
+       "keys":{"type":"array","items":{"type":"object","properties":{"property":{"type":"string","enum":["scale","position","rotation","opacity"]},"at":{"type":"number"},"at_end":{"type":"number"},
+       "value":{},"relative":{"type":"boolean"},"ease":{"type":"string"},"hold":{"type":"boolean"}},"required":["property","value"]}}},"required":["project","clips","keys"]})",
+     &Impl::clip_motion},
     {"music.cuts", "core", true,
      "Cut a clip on the beats of a music clip: every `every`-th beat (default 1) that falls inside the clip (and inside from..until, seconds of the film). Beats are found with "
      "audio.analyze and placed where the music plays (its speed and start), so it works after music.fit. Linked sound is cut with the picture. One edit; Undo takes it back. "

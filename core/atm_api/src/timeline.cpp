@@ -11,6 +11,7 @@
 #include "atm/base/id.hpp"
 #include "atm/base/time.hpp"
 #include "atm/eval/effects.hpp"
+#include "atm/eval/keyframes.hpp"
 #include "atm/gen/library.hpp"
 
 namespace atm::api::timeline {
@@ -1537,7 +1538,8 @@ private:
   }
 
   // set_keyframe {clip, property, at, value}: a key at `at` (counted from the clip's start); one that is there already takes the new value.
-  // position: [x, y] in canvas fractions (0.5, 0.5 is the centre), scale: [x, y] or one number, rotation: degrees, opacity: 0..1.
+  // position: [x, y] in canvas fractions (0.5, 0.5 is the centre), scale: [x, y] or one number, rotation: degrees, opacity: 0..1, gain_db: the sound's level.
+  // "ease" (ease_out_expo, ease_out_back ...) shapes the way from this key to the next; "hold" true keeps the value until the next key.
   Result<void> set_keyframe() {
     ATM_TRY(auto c, clip("clip"));
     const std::string id = op_.value("clip", std::string());
@@ -1548,12 +1550,25 @@ private:
     if (compare(*at, Rational()) < 0 || compare(*at, span_of(*c.first).duration) > 0)
       return fail("E_PARAM", "\"at\" is outside the clip: it counts from the clip's start and the clip is " + span_of(*c.first).duration.to_string() + " long.");
     ATM_TRY(json value, key_value(prop, op_.value("value", json())));
+    json made = {{"t", at->to_string()}, {"v", value}};
+    if (op_.contains("ease") && op_["ease"].is_string()) {
+      if (!eval::ease_from_name(op_["ease"].get<std::string>()))
+        return fail("E_PARAM", "\"ease\" \"" + op_["ease"].get<std::string>() + "\" is not known.", "Use ease_in_quad, ease_out_quad, ease_in_out_quad, the cubic and expo ones, or ease_out_back.");
+      made["interp"] = "easing";
+      made["ease"] = op_["ease"];
+    } else if (op_.value("hold", false)) {
+      made["interp"] = "hold";
+    }
     for (const Key &k : keys_of(*c.first, prop))
-      if (compare(k.t, *at) == 0) {
-        push({{"op", "replace"}, {"path", k.id + "/v"}, {"value", value}});
+      if (compare(k.t, *at) == 0) { // the key that is there takes the new value, and the new way to the next when one is given
+        const json &had = (*c.first)[key_owner(prop)]["keyframes"][prop][k.id];
+        push({{"op", "replace"}, {"path", k.id + "/v"}, {"value", made["v"]}});
+        for (const char *field : {"interp", "ease"})
+          if (made.contains(field))
+            push({{"op", had.contains(field) ? "replace" : "add"}, {"path", k.id + "/" + field}, {"value", made[field]}});
         return {};
       }
-    push({{"op", "add"}, {"path", id + "/" + key_owner(prop) + "/keyframes/" + prop + "/" + placeholder()}, {"value", {{"t", at->to_string()}, {"v", value}}}});
+    push({{"op", "add"}, {"path", id + "/" + key_owner(prop) + "/keyframes/" + prop + "/" + placeholder()}, {"value", std::move(made)}});
     return {};
   }
 
