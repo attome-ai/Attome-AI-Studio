@@ -261,6 +261,36 @@ void run_extract(const std::shared_ptr<Job> &job, render::Composition comp, std:
   finish(Job::done);
 }
 
+// An image sequence: each frame of the range as a numbered PNG in `dir` (name_000000.png, numbered by the frame of the sequence). One thread renders
+// and writes, a frame at a time; the job can be cancelled between frames.
+void run_png_sequence(const std::shared_ptr<Job> &job, render::Composition comp, std::string dir, std::string name, int64_t first, int64_t last, int width, int height) {
+  prof::set_thread_name("atm-render-0");
+  const auto finish = [&](Job::State state, const Error *error = nullptr) {
+    std::lock_guard lock(job->mutex);
+    if (error)
+      job->error = *error;
+    job->seconds = std::chrono::duration<double>(Clock::now() - job->started).count();
+    job->state.store(state);
+  };
+  render::Renderer renderer(std::move(comp), width, height);
+  const int w = renderer.width() & ~1, h = renderer.height() & ~1;
+  std::vector<uint8_t> nv12(media::nv12_size(renderer.width(), renderer.height())), bgrx(size_t(renderer.width()) * size_t(renderer.height()) * 4);
+  for (int64_t frame = first; frame < last; ++frame) {
+    if (job->cancel.load())
+      return finish(Job::cancelled);
+    ATM_PROFILE_SCOPE("render.png_frame");
+    if (auto r = renderer.render(frame, nv12.data()); !r)
+      return finish(Job::failed, &r.error());
+    media::nv12_to_bgrx(nv12.data(), renderer.width(), renderer.height(), bgrx.data());
+    char number[16];
+    std::snprintf(number, sizeof number, "%06lld", static_cast<long long>(frame));
+    if (auto r = media::write_png(dir + "/" + name + "_" + number + ".png", bgrx.data(), w, h); !r)
+      return finish(Job::failed, &r.error());
+    job->units_done.fetch_add(1);
+  }
+  finish(Job::done);
+}
+
 // The export runs as a pipeline: this thread renders frames into a few slots while "atm-encode" converts and
 // encodes the previous ones, so the two never wait for each other. The encoder starts (hardware set-up, about half a
 // second) and the audio is mixed while the first frames render.
@@ -968,7 +998,8 @@ struct Engine::Impl {
               for (auto c = cl->begin(); c != cl->end(); ++c)
                 if (c->is_object())
                   all_clips.emplace_back(c.key(), c->value("link_group", std::string()));
-    for (size_t i = 0; i < found.size(); ++i) // linked ones (their sound, their picture)
+    const bool with_linked = params.value("linked", true); // false: only the clips named, not the picture or sound they are linked to
+    for (size_t i = 0; with_linked && i < found.size(); ++i) // linked ones (their sound, their picture)
       if (const std::string group = found[i].clip.value("link_group", std::string()); !group.empty())
         for (const auto &[cid, g] : all_clips)
           if (g == group)
@@ -1148,6 +1179,13 @@ struct Engine::Impl {
       const Rational start = add(at, offset).value_or(at);
       const Rational end = add(start, Rational::parse(timing.value("duration", std::string("0"))).value_or(Rational())).value_or(start);
       Lane *home = nullptr;
+      const auto fits = [&](const Lane &lane) {
+        return lane.kind == kind && lane.usable &&
+               std::none_of(lane.spans.begin(), lane.spans.end(), [&](const auto &s) { return compare(s.first, end) < 0 && compare(start, s.second) < 0; });
+      };
+      for (Lane &lane : lanes) // the track the caller prefers (where it was dropped) first, when it is free there
+        if (!home && lane.id == params.value("track", std::string()) && fits(lane))
+          home = &lane;
       for (Lane &lane : lanes)
         if (!home && lane.kind == kind && lane.usable &&
             std::none_of(lane.spans.begin(), lane.spans.end(), [&](const auto &s) { return compare(s.first, end) < 0 && compare(start, s.second) < 0; }))
@@ -2253,8 +2291,8 @@ struct Engine::Impl {
       return fail(ErrorCode::InvalidArgument, "R_EMPTY", "The sequence has no media clips to render.", {},
                   "Add a clip whose media_ref is {\"type\": \"file\", \"path\": …} first.");
     const std::string format = params.value("format", std::string("mp4"));
-    if (format != "mp4" && format != "wav" && format != "jpeg")
-      return bad_param("format", "is \"mp4\" (video, the default), \"wav\" (the sound only) or \"jpeg\" (a picture of the frame at \"from\")");
+    if (format != "mp4" && format != "wav" && format != "jpeg" && format != "png_sequence")
+      return bad_param("format", "is \"mp4\" (video, the default), \"wav\" (the sound only), \"jpeg\" (a picture of the frame at \"from\") or \"png_sequence\" (a numbered PNG for each frame, in the folder \"output\")");
     // The part to export: "from" (the first frame, default the start) and "to" (where it ends, that frame not drawn, default the end).
     const Rational frame_rate = *Rational::make(comp.rate_num, comp.rate_den);
     int64_t first = 0, last = comp.frames;
@@ -2267,6 +2305,32 @@ struct Engine::Impl {
     }
     first = std::clamp<int64_t>(first, 0, comp.frames - 1);
     last = std::clamp<int64_t>(last, first + 1, comp.frames);
+    if (format == "png_sequence") { // a folder of numbered pictures: `output` is the folder
+      const fs::path folder = fs::absolute(to_path(*output));
+      if (folder.extension() == ".png" || folder.extension() == ".mp4")
+        return bad_param("output", "is the folder the pictures go in for png_sequence, not a file");
+      if (!params.value("overwrite", true) && storage::exists(folder / (to_utf8(folder.filename()) + "_" + [&] {
+                                                                char n[16];
+                                                                std::snprintf(n, sizeof n, "%06lld", static_cast<long long>(first));
+                                                                return std::string(n);
+                                                              }() + ".png")))
+        return fail(ErrorCode::OutputExists, "R_EXISTS", "\"" + to_utf8(folder) + "\" already holds these pictures.", {}, "Pass \"overwrite\": true or choose another folder.");
+      ATM_CHECK(storage::make_dirs(folder));
+      const int h = params.value("height", comp.height);
+      const int w = params.contains("width") ? params.value("width", comp.width) : int(int64_t(comp.width) * h / std::max(1, comp.height));
+      if (w < 16 || h < 16 || w > 16384 || h > 16384)
+        return bad_param("height", "gives a size outside 16 x 16 … 16384 x 16384");
+      auto job = std::make_shared<Job>();
+      job->id = new_id("job");
+      job->kind = "render.sequence";
+      job->output = to_utf8(folder);
+      job->units_total.store(last - first);
+      jobs[job->id] = job;
+      const std::string name = to_utf8(folder.filename());
+      job->thread = std::thread(run_png_sequence, job, std::move(comp), to_utf8(folder), name, first, last, w, h);
+      return json{{"job_id", job->id}, {"output", job->output}, {"frames", last - first}, {"format", format}, {"first_frame", first},
+                  {"pattern", name + "_%06d.png"}, {"width", w & ~1}, {"height", h & ~1}};
+    }
     const char *extension = format == "mp4" ? ".mp4" : format == "wav" ? ".wav" : ".jpg";
     fs::path out_path = fs::absolute(to_path(*output));
     if (format == "jpeg" && out_path.extension() == ".jpeg")
@@ -4028,9 +4092,10 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
      R"({"type":"object","properties":{}})", &Impl::fonts_list},
     {"library.add", "library", false,
      "Keep clips in the user's clip library, which every project can use: the clips (and their linked sound or picture) become one item, "
-     "with copies of their files. Returns the item's id.",
+     "with copies of their files. Clips linked to the ones named come along unless linked is false (only the clips named: the music without its picture). "
+     "Returns the item's id.",
      R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},
-       "clips":{"type":"array","items":{"type":"string"}},"name":{"type":"string"}},"required":["project","clips"]})",
+       "clips":{"type":"array","items":{"type":"string"}},"name":{"type":"string"},"linked":{"type":"boolean","description":"Default true: the linked picture or sound comes too"}},"required":["project","clips"]})",
      &Impl::library_add},
     {"library.list", "library", false, "The items of the user's clip library, the newest first.", R"({"type":"object","properties":{}})", &Impl::library_list},
     {"library.get", "library", false,
@@ -4042,7 +4107,7 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
      "item had them, each on a track that is free there (a new one when none is). One edit: Undo takes the item out again.",
      R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},
        "id":{"type":"string","description":"The library item, as library.list names it"},"at":{"type":"string","description":"A time like 2.5s, 75@30 or timecode"},
-       "sequence":{"type":"string"}},"required":["project","id"]})",
+       "track":{"type":"string","description":"A track to try first for the clips of its kind"},"sequence":{"type":"string"}},"required":["project","id"]})",
      &Impl::library_insert},
     {"library.rename", "library", false, "Give a library item another name.",
      R"({"type":"object","properties":{"id":{"type":"string"},"name":{"type":"string"}},"required":["id","name"]})", &Impl::library_rename},
@@ -4207,12 +4272,12 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
        "required":["project"]})",
      &Impl::see_contact_sheet},
     {"render.sequence", "core", false,
-     "Export a sequence to an H.264 + AAC .mp4 as a background job (with format wav its sound only, with jpeg one frame as a picture); from and to export only a part. Returns job_id at once; follow it with jobs.get.",
+     "Export a sequence to an H.264 + AAC .mp4 as a background job (with format wav its sound only, with jpeg one frame as a picture, with png_sequence a numbered PNG for each frame in the folder `output`: lossless 8-bit pictures for a colour or effects pipeline, to be paired with a wav of the sound); from and to export only a part. Returns job_id at once; follow it with jobs.get.",
      R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},
-       "output":{"type":"string","description":"Absolute path of the .mp4 to write"},
+       "output":{"type":"string","description":"Absolute path of the .mp4 to write; for png_sequence the folder"},
        "height":{"type":"integer","description":"Output height, default the canvas height"},
        "bitrate":{"type":"integer"},"audio":{"type":"boolean"},
-       "format":{"type":"string","enum":["mp4","wav","jpeg"],"description":"mp4 video (the default), wav the sound only, jpeg one frame: the one at from"},
+       "format":{"type":"string","enum":["mp4","wav","jpeg","png_sequence"],"description":"mp4 video (the default), wav the sound only, jpeg one frame: the one at from, png_sequence a PNG for each frame in the folder output name_000000.png, numbered by frame"},
        "from":{"type":"string","description":"Where the export starts, such as 2.5s or 00:00:02:15; default the start"},
        "to":{"type":"string","description":"Where the export ends, the frame there not included; default the end"},
        "overwrite":{"type":"boolean","description":"Default true"},"sequence":{"type":"string"}},

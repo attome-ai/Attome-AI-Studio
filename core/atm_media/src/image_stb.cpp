@@ -25,6 +25,31 @@
 
 namespace atm::media {
 
+Result<void> write_png(const std::string &path, const uint8_t *bgrx, int width, int height) {
+  ATM_PROFILE_SCOPE("image.png");
+  const auto failed = [&](const char *step) {
+    return fail(ErrorCode::IoError, "M_IMAGE_WRITE", std::string("Could not write the image \"") + path + "\" (" + step + ").");
+  };
+  if (width <= 0 || height <= 0)
+    return failed("size");
+  std::vector<uint8_t> rgb(size_t(width) * size_t(height) * 3);
+  for (size_t i = 0, n = size_t(width) * size_t(height); i < n; ++i) {
+    rgb[i * 3 + 0] = bgrx[i * 4 + 2];
+    rgb[i * 3 + 1] = bgrx[i * 4 + 1];
+    rgb[i * 3 + 2] = bgrx[i * 4 + 0];
+  }
+  std::ofstream out(std::filesystem::path(std::u8string(path.begin(), path.end())), std::ios::binary);
+  if (!out)
+    return failed("open");
+  const auto put = [](void *context, void *data, int size) { static_cast<std::ofstream *>(context)->write(static_cast<const char *>(data), size); };
+  if (!stbi_write_png_to_func(put, &out, width, height, 3, rgb.data(), width * 3))
+    return failed("encode");
+  out.close();
+  if (!out)
+    return failed("write");
+  return {};
+}
+
 Result<void> write_jpeg(const std::string &path, const uint8_t *bgrx, int width, int height, float quality) {
   ATM_PROFILE_SCOPE("image.jpeg");
   const auto failed = [&](const char *step) {

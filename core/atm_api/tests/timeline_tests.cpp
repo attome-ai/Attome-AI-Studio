@@ -4,6 +4,7 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <thread>
 
 #include "atm/api/engine.hpp"
 #include "atm/base/id.hpp"
@@ -719,6 +720,29 @@ TEST_CASE("library.insert puts an item into a project on free tracks, and media.
   CHECK(f.engine.call("project.validate", {{"project", f.project}})->at("ok") == true);
   CHECK_FALSE(f.engine.call("library.insert", {{"project", f.project}, {"id", "lib_missing"}}));
 
+  // Only the sound of a clip, not the picture it is linked to: one clip in the item; put back on the sound track it is dropped on.
+  const std::string sound_of_v = r["id_map"]["$new:v.audio"];
+  const json only = *f.engine.call("library.add", {{"project", f.project}, {"clips", json::array({sound_of_v})}, {"name", "Sound only"}, {"linked", false}});
+  CHECK(only["clips"] == 1);
+  const json both = *f.engine.call("library.add", {{"project", f.project}, {"clips", json::array({sound_of_v})}, {"name", "Both"}});
+  CHECK(both["clips"] == 2); // the picture comes with it unless linked is false
+  std::string sound_track, sound_item;
+  for (const json &tr : f.tracks())
+    if (tr["kind"] == "audio")
+      sound_track = tr["id"];
+  const json listed_items = (*f.engine.call("library.list", json::object()))["items"];
+  for (const json &i : listed_items)
+    if (i["name"] == "Sound only")
+      sound_item = i["id"];
+  const auto placed = f.engine.call("library.insert", {{"project", f.project}, {"id", sound_item}, {"at", "40s"}, {"track", sound_track}});
+  INFO((placed ? "" : placed.error().message + " | " + placed.error().hint));
+  REQUIRE(placed);
+  CHECK(f.engine.call("project.validate", {{"project", f.project}})->at("ok") == true);
+  // Where the track is busy the clip does not land on it: it overlaps nothing, whatever track it was dropped on.
+  const auto crowded = f.engine.call("library.insert", {{"project", f.project}, {"id", sound_item}, {"at", "40s"}, {"track", sound_track}});
+  REQUIRE(crowded);
+  CHECK(f.engine.call("project.validate", {{"project", f.project}})->at("ok") == true);
+
   // media.remove: the clips made from the file go (the title stays), then the asset.
   const json imported = *f.engine.call("media.import", {{"project", f.project}, {"paths", {file}}});
   const std::string asset = imported["assets"][0]["id"];
@@ -838,4 +862,58 @@ TEST_CASE("edl.export and edl.import take a cut to a cut list and back, with a s
   CHECK_FALSE(f.engine.call("edl.export", {{"project", other}, {"output", out}})); // no clips to write
   CHECK_FALSE(f.engine.call("edl.export", {{"project", f.project}, {"output", out}, {"tracks", json::array({"Nowhere"})}}));
   (void)f.engine.call("project.close", {{"project", other}});
+}
+
+TEST_CASE("render.sequence png_sequence writes a numbered PNG for each frame, for a part, at another size", "[timeline][render][parity]") {
+  Fixture f;
+  const std::string file = (f.dir / "v.mp4").string();
+  write_video(file, 2);
+  f.ok(json::array({{{"op", "add_clip"}, {"path", file}, {"at", "0s"}}}));
+  const auto wait = [&](const json &started) {
+    for (int i = 0; i < 3000; ++i) {
+      const json state = *f.engine.call("jobs.get", {{"job_id", started["job_id"]}});
+      if (state["state"] != "running")
+        return state;
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return json{{"state", "timeout"}};
+  };
+  const auto png_ok = [](const fs::path &p) {
+    std::ifstream in(p, std::ios::binary);
+    char sig[8] = {};
+    in.read(sig, 8);
+    return in.gcount() == 8 && std::string(sig + 1, 3) == "PNG" && static_cast<unsigned char>(sig[0]) == 0x89;
+  };
+  const fs::path out = f.dir / "frames" / "shot";
+  const auto started = f.engine.call("render.sequence", {{"project", f.project}, {"output", out.string()}, {"format", "png_sequence"}, {"from", "6@30"}, {"to", "12@30"}, {"height", 120}});
+  INFO((started ? "" : started.error().message + " | " + started.error().hint));
+  REQUIRE(started);
+  CHECK(started->at("frames") == 6);
+  CHECK(started->at("pattern") == "shot_%06d.png");
+  CHECK(started->at("height") == 120);
+  const json done = wait(*started);
+  INFO(done.dump());
+  REQUIRE(done["state"] == "done");
+  size_t count = 0;
+  for (const auto &entry : fs::directory_iterator(out))
+    count += entry.path().extension() == ".png" ? 1 : 0;
+  CHECK(count == 6);
+  for (int frame = 6; frame < 12; ++frame) {
+    char name[32];
+    std::snprintf(name, sizeof name, "shot_%06d.png", frame);
+    CHECK(fs::exists(out / name));
+    CHECK(png_ok(out / name));
+  }
+  CHECK_FALSE(fs::exists(out / "shot_000005.png"));
+  CHECK_FALSE(fs::exists(out / "shot_000012.png"));
+  // The picture's size is the one asked for: 120 high, the canvas's shape wide (the PNG header holds width then height).
+  std::ifstream in(out / "shot_000006.png", std::ios::binary);
+  unsigned char header[24] = {};
+  in.read(reinterpret_cast<char *>(header), 24);
+  const int w = (header[16] << 24) | (header[17] << 16) | (header[18] << 8) | header[19], h = (header[20] << 24) | (header[21] << 16) | (header[22] << 8) | header[23];
+  CHECK(h == 120);
+  CHECK(w == 160); // 320 x 240 canvas
+  // A file where a folder belongs is refused, and so is a folder that already holds the frames when overwrite is false.
+  CHECK_FALSE(f.engine.call("render.sequence", {{"project", f.project}, {"output", (f.dir / "x.png").string()}, {"format", "png_sequence"}}));
+  CHECK_FALSE(f.engine.call("render.sequence", {{"project", f.project}, {"output", out.string()}, {"format", "png_sequence"}, {"from", "6@30"}, {"to", "12@30"}, {"overwrite", false}}));
 }

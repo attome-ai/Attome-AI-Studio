@@ -1150,8 +1150,14 @@ void App::draw_clip_menu(const ClipUi &c) {
   }
   if (menu_item("Go to its start"))
     pending_ = [this, at = c.start] { seek(at); };
-  if (menu_item(count > 1 ? ("Add " + std::to_string(count) + " clips to the library").c_str() : "Add to the library"))
+  if (count == 1 && !linked_of(c).empty()) { // a picture with its sound, or a sound with its picture: the part, or both
+    if (menu_item(c.stream == "audio" ? "Add the sound only to the library" : "Add the picture only to the library"))
+      pending_ = [this] { add_to_library(false); };
+    if (menu_item("Add both to the library"))
+      pending_ = [this] { add_to_library(true); };
+  } else if (menu_item(count > 1 ? ("Add " + std::to_string(count) + " clips to the library").c_str() : "Add to the library")) {
     pending_ = [this] { add_to_library(); };
+  }
   if (!c.path.empty() && !c.is_generative && !audio_only_.count(c.path) &&
       menu_item("Freeze frame (2 s)", nullptr, false, !locked && playhead_ > c.start && playhead_ < c.start + c.frames))
     pending_ = [this] { freeze_frame(); };
@@ -3808,7 +3814,7 @@ json App::speed_preview_ops(const ClipUi &c, float speed) const {
   return ops;
 }
 
-void App::add_to_library() {
+void App::add_to_library(bool with_linked) {
   std::vector<std::string> ids;
   for (const ClipUi *c : picked_clips())
     ids.push_back(c->id);
@@ -3819,88 +3825,27 @@ void App::add_to_library() {
     return;
   }
   json result;
-  if (!rpc("library.add", {{"project", project_path_}, {"clips", ids}}, result))
+  if (!rpc("library.add", {{"project", project_path_}, {"clips", ids}, {"linked", with_linked}}, result))
     return;
   library_stale_ = true;
   say("\"" + result.value("name", std::string("Clip")) + "\" is in the library. Any project can use it: the Library panel on the left.");
 }
 
 void App::insert_library(const std::string &id, int64_t at, const std::string &track) {
-  json item;
-  if (!rpc("library.get", {{"id", id}}, item))
+  // The engine puts each clip of the item on a track that is free where it goes (the one it was dropped on first), or on a new one:
+  // nothing already on the timeline moves and nothing overlaps.
+  json params = {{"project", project_path_}, {"id", id}, {"at", frames_text(std::max<int64_t>(0, at))}};
+  if (!track.empty())
+    params["track"] = track;
+  json result;
+  if (!rpc("library.insert", params, result))
     return;
-  // Its clips as copied clips, each at its place in the item. Clips of one kind that play at the same time need tracks of their own.
-  struct Piece {
-    json clip;
-    bool audio = false;
-    int64_t start = 0, frames = 0;
-    int lane = 0;
-  };
-  std::vector<Piece> pieces;
-  for (const json &c : item.value("clips", json::array())) {
-    Piece p;
-    p.clip = c.value("clip", json::object());
-    p.audio = c.value("audio", false);
-    if (const auto off = Rational::parse(c.value("offset", std::string("0"))))
-      p.start = to_frames(*off, rate_, Round::nearest_even).value_or(0);
-    const json timing = p.clip.value("timing", json::object());
-    if (const auto d = Rational::parse(timing.value("duration", std::string("1"))))
-      p.frames = std::max<int64_t>(1, to_frames(*d, rate_, Round::ceil).value_or(1));
-    pieces.push_back(std::move(p));
-  }
-  if (pieces.empty())
-    return;
-  int lanes[2] = {0, 0};
-  for (size_t i = 0; i < pieces.size(); ++i) // the first lane of its kind where nothing of the item plays at the same time
-    for (int lane = 0;; ++lane) {
-      const bool taken = std::any_of(pieces.begin(), pieces.begin() + std::ptrdiff_t(i), [&](const Piece &o) {
-        return o.audio == pieces[i].audio && o.lane == lane && o.start < pieces[i].start + pieces[i].frames && pieces[i].start < o.start + o.frames;
-      });
-      if (!taken) {
-        pieces[i].lane = lane;
-        lanes[pieces[i].audio ? 1 : 0] = std::max(lanes[pieces[i].audio ? 1 : 0], lane + 1);
-        break;
-      }
-    }
-  // The tracks for the lanes: the one it was dropped on first, then the others of that kind; new ones when there are too few.
-  const auto tracks_of = [&](bool audio) {
-    std::vector<std::string> out;
-    for (const TrackUi &t : tracks_)
-      if ((t.kind == "audio") == audio && t.id == track)
-        out.push_back(t.id);
-    if (!audio) // pictures: from the bottom layer up (the rows run from the top down)
-      for (auto t = tracks_.rbegin(); t != tracks_.rend(); ++t) {
-        if (t->kind != "audio" && t->id != track && !t->locked)
-          out.push_back(t->id);
-      }
-    else
-      for (const TrackUi &t : tracks_)
-        if (t.kind == "audio" && t.id != track && !t.locked)
-          out.push_back(t.id);
-    return out;
-  };
-  for (const bool audio : {false, true})
-    for (size_t have = tracks_of(audio).size(); int(have) < lanes[audio ? 1 : 0]; ++have) {
-      add_track(audio);
-      refresh();
-    }
-  const std::vector<std::string> picture = tracks_of(false), sound = tracks_of(true);
-  const std::vector<Snap> keep = clipboard_; // the clipboard is not touched
-  clipboard_.clear();
-  for (const Piece &p : pieces) {
-    Snap s;
-    s.clip = p.clip;
-    s.audio = p.audio;
-    s.start = p.start;
-    s.frames = p.frames;
-    const std::vector<std::string> &list = p.audio ? sound : picture;
-    s.track = size_t(p.lane) < list.size() ? list[size_t(p.lane)] : std::string();
-    clipboard_.push_back(std::move(s));
-  }
-  paste_clips(at, clipboard_.size() == 1 ? track : std::string());
-  clipboard_ = keep;
-  std::erase_if(toasts_, [](const Toast &t) { return t.text.starts_with("Pasted"); });
-  say("\"" + item.value("name", std::string("Clip")) + "\" from the library", false, true);
+  refresh();
+  std::string name = "Clip";
+  for (const json &item : library_items_)
+    if (item.value("id", std::string()) == id)
+      name = item.value("name", name);
+  say("\"" + name + "\" from the library", false, true);
 }
 
 namespace {

@@ -31,7 +31,7 @@ function Clips($run) { $n = 0; foreach ($t in @(Get-Tracks $run)) { $n += @($t.c
 $failed = $null
 $runA = Invoke-EditorScript -Project $a -TimeoutSeconds 240 -Script @(
   'wait 1200'
-  'rclick @clip:clip', 'wait 400', 'expect @menuitem:Add_to_the_library', 'click @menuitem:Add_to_the_library', 'wait 900'
+  'rclick @clip:clip', 'wait 400', 'expect @menuitem:Add_both_to_the_library', 'click @menuitem:Add_both_to_the_library', 'wait 900'
   'click @rail:Library', 'wait 700', 'expect @library:clip'
   "shot $work\library_a.jpg"
 )
@@ -56,6 +56,8 @@ try {
       'rclick @library:clip', 'wait 400', 'click @menuitem:Rename', 'wait 400', 'expect @field:library_name', 'key A ctrl', 'type Intro', 'key Enter', 'wait 800'
       'expect @library:Intro'
       'drag @library:Intro @clip:clip@1.6,-0.6', 'wait 1200'  # dragged onto the picture track (the row above the sound's mark), after the clip there
+      'drag @library:Intro @clip:clip@0.3,-0.6', 'wait 1200'  # and right on top of a clip: it goes on tracks that are free there, nothing overlaps
+      "shot $work\on_top.jpg"
       'rclick @library:Intro', 'wait 400', 'click @menuitem:Remove_from_the_library', 'wait 800'
       'absent @library:Intro'
       'expect @clip:clip'                                   # the project keeps its clips
@@ -65,7 +67,7 @@ try {
       $n = Clips $runB
       $kinds = @(Get-Tracks $runB | Where-Object { @($_.clip_list).Count -gt 0 } | ForEach-Object { $_.kind }) -join ','
       "project B: $n clips on tracks of kind $kinds"
-      if ($n -ne 4) { $failed = "project B has $n clips, not twice the picture and its sound (a double click and a drag)" }
+      if ($n -ne 6) { $failed = "project B has $n clips, not three times the picture and its sound (a double click and two drags)" }
       elseif ($kinds -notmatch 'video' -or $kinds -notmatch 'audio') { $failed = 'the picture and the sound are not on a picture and a sound track' }
       else {
         $valid = Invoke-Attome $runB --json validate $b | ConvertFrom-Json

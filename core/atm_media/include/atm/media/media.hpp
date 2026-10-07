@@ -134,5 +134,7 @@ std::string font_dir();
 
 // A packed BGRX picture as a JPEG file (quality 0..1). For agents and thumbnails, not for delivery.
 Result<void> write_jpeg(const std::string &path, const uint8_t *bgrx, int width, int height, float quality = 0.85f);
+// The same picture as a PNG: lossless, 8 bits a channel (the frames of an image sequence).
+Result<void> write_png(const std::string &path, const uint8_t *bgrx, int width, int height);
 
 } // namespace atm::media
