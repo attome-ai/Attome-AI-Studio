@@ -616,3 +616,157 @@ TEST_CASE("timeline.edit: a video with sound becomes linked picture and sound cl
   CHECK(f.engine.call("project.validate", {{"project", f.project}})->at("ok") == true);
 }
 #endif
+
+TEST_CASE("timeline.edit: fade, keyframes, fit, delete_track and markers do what the editor does", "[timeline][media][parity]") {
+  Fixture f;
+  const std::string file = (f.dir / "v.mp4").string();
+  write_video(file, 4);
+  const json r = f.ok(json::array({{{"op", "add_clip"}, {"id", "$new:a"}, {"path", file}}}));
+  const std::string a = r["id_map"]["$new:a"], sa = r["id_map"]["$new:a.audio"];
+
+  // fade: opacity keys 0 -> 1 over the first second, 1 -> 0 over the last half second; a side left out keeps its fade.
+  f.ok(json::array({{{"op", "fade"}, {"clip", a}, {"in", "1s"}, {"out", "0.5s"}}}));
+  json keys = f.get(a)["transform"]["keyframes"]["opacity"];
+  CHECK(keys.size() == 4);
+  f.ok(json::array({{{"op", "fade"}, {"clip", a}, {"out", "1s"}}}));
+  keys = f.get(a)["transform"]["keyframes"]["opacity"];
+  CHECK(keys.size() == 4);
+  int rising = 0;
+  for (const auto &k : keys)
+    rising += k["t"] == "1" && k["v"] == 1.0 ? 1 : 0; // the fade in is still one second
+  CHECK(rising == 1);
+  f.ok(json::array({{{"op", "fade"}, {"clip", a}, {"in", "0"}, {"out", "0"}}}));
+  CHECK(f.get(a)["transform"]["keyframes"]["opacity"].empty());
+  // A sound clip fades its own sound.
+  f.ok(json::array({{{"op", "fade"}, {"clip", sa}, {"in", "0.5s"}, {"out", "0.25s"}}}));
+  CHECK(f.get(sa)["audio"]["fade_in"] == "1/2");
+  CHECK(f.get(sa)["audio"]["fade_out"] == "1/4");
+  CHECK(f.fail_rule(json::array({{{"op", "fade"}, {"clip", a}}})) == "E_PARAM");
+
+  // keyframes: two keys make an animation; a key at the same time takes the new value; removing both leaves the last value.
+  f.ok(json::array({{{"op", "set_keyframe"}, {"clip", a}, {"property", "scale"}, {"at", "0s"}, {"value", 1.0}},
+                    {{"op", "set_keyframe"}, {"clip", a}, {"property", "scale"}, {"at", "2s"}, {"value", 2.0}},
+                    {{"op", "set_keyframe"}, {"clip", a}, {"property", "position"}, {"at", "1s"}, {"value", {0.25, 0.75}}}}));
+  CHECK(f.get(a)["transform"]["keyframes"]["scale"].size() == 2);
+  CHECK(f.get(a)["transform"]["keyframes"]["position"].size() == 1);
+  f.ok(json::array({{{"op", "set_keyframe"}, {"clip", a}, {"property", "scale"}, {"at", "2s"}, {"value", 3.0}}}));
+  CHECK(f.get(a)["transform"]["keyframes"]["scale"].size() == 2);
+  const json scale_keys = f.get(a)["transform"]["keyframes"]["scale"];
+  double top = 0;
+  for (const auto &k : scale_keys)
+    top = std::max(top, k["v"][0].get<double>());
+  CHECK(top == 3.0);
+  f.ok(json::array({{{"op", "remove_keyframe"}, {"clip", a}, {"property", "scale"}, {"at", "0s"}}}));
+  CHECK(f.get(a)["transform"]["keyframes"]["scale"].size() == 1);
+  f.ok(json::array({{{"op", "remove_keyframe"}, {"clip", a}, {"property", "scale"}}}));
+  CHECK(f.get(a)["transform"]["scale"] == json::array({3.0, 3.0}));
+  CHECK(f.fail_rule(json::array({{{"op", "set_keyframe"}, {"clip", a}, {"property", "colour"}, {"at", "0s"}, {"value", 1}}})) == "E_PARAM");
+  CHECK(f.fail_rule(json::array({{{"op", "set_keyframe"}, {"clip", a}, {"property", "opacity"}, {"at", "9s"}, {"value", 1}}})) == "E_PARAM");
+  CHECK(f.fail_rule(json::array({{{"op", "remove_keyframe"}, {"clip", a}, {"property", "rotation"}}})) == "E_PARAM");
+
+  // fit_clip: fit is scale 1; fill covers the 320 x 240 canvas, as much larger as the picture's shape differs from the canvas's.
+  const json media = f.get(a)["media_ref"];
+  const double rw = 320.0 / media["width"].get<double>(), rh = 240.0 / media["height"].get<double>();
+  const double fill = std::max(rw, rh) / std::min(rw, rh);
+  f.ok(json::array({{{"op", "fit_clip"}, {"clip", a}, {"mode", "fill"}}}));
+  CHECK(f.get(a)["transform"]["scale"][0].get<double>() == Catch::Approx(fill).margin(0.001));
+  f.ok(json::array({{{"op", "fit_clip"}, {"clip", a}, {"mode", "fit"}}}));
+  CHECK(f.get(a)["transform"]["scale"] == json::array({1.0, 1.0}));
+  CHECK(f.fail_rule(json::array({{{"op", "fit_clip"}, {"clip", a}, {"mode", "stretch"}}})) == "E_PARAM");
+
+  // markers
+  const json m = f.ok(json::array({{{"op", "add_marker"}, {"id", "$new:m"}, {"at", "1.5s"}, {"name", "Beat"}}}));
+  const std::string mid = m["id_map"]["$new:m"];
+  CHECK(f.get(mid)["name"] == "Beat");
+  f.ok(json::array({{{"op", "remove_marker"}, {"marker", mid}}}));
+  CHECK(f.fail_rule(json::array({{{"op", "remove_marker"}, {"marker", mid}}})) == "E_PARAM");
+
+  // delete_track: the sound track goes with what is on it; the picture stays.
+  const json t = f.tracks();
+  REQUIRE(t.size() == 2);
+  const std::string sound_track = t[1]["id"];
+  f.ok(json::array({{{"op", "delete_track"}, {"track", sound_track}}}));
+  CHECK(f.tracks().size() == 1);
+  CHECK(f.fail_rule(json::array({{{"op", "delete_track"}, {"track", sound_track}}})) == "E_UNKNOWN_TRACK");
+  CHECK(f.engine.call("project.validate", {{"project", f.project}})->at("ok") == true);
+}
+
+TEST_CASE("library.insert puts an item into a project on free tracks, and media.remove takes a file out", "[timeline][library][parity]") {
+  Fixture f;
+  _putenv_s("ATTOME_LIBRARY_DIR", (f.dir / "library").string().c_str());
+  const std::string file = (f.dir / "v.mp4").string();
+  write_video(file, 3);
+  const json r = f.ok(json::array({{{"op", "add_clip"}, {"id", "$new:v"}, {"path", file}, {"at", "0s"}},
+                                   {{"op", "add_text"}, {"id", "$new:t"}, {"text", "Hi"}, {"at", "1s"}, {"duration", "1s"}}}));
+  const std::string v = r["id_map"]["$new:v"], t = r["id_map"]["$new:t"];
+  REQUIRE(f.engine.call("library.add", {{"project", f.project}, {"clips", {v, t}}, {"name", "Intro"}}));
+  const std::string item = (*f.engine.call("library.list", json::object()))["items"][0]["id"];
+
+  // Into the same project, after the film: nothing moves, and the item's clips get tracks that are free there.
+  const size_t before = f.tracks().size();
+  const auto put = f.engine.call("library.insert", {{"project", f.project}, {"id", item}, {"at", "10s"}});
+  INFO((put ? "" : put.error().message + " | " + put.error().hint));
+  REQUIRE(put);
+  CHECK(f.engine.call("project.validate", {{"project", f.project}})->at("ok") == true);
+  size_t clips = 0;
+  for (const json &tr : f.tracks())
+    clips += tr["clips"].get<size_t>();
+  CHECK(clips == 6); // three clips (picture, sound, title) twice
+  CHECK(f.tracks().size() == before); // the second copy fits the tracks the first one has: they are free at 10 s
+  // Again, on the same spot: the tracks are taken there, so new ones are made.
+  REQUIRE(f.engine.call("library.insert", {{"project", f.project}, {"id", item}, {"at", "10s"}}));
+  CHECK(f.tracks().size() > before);
+  CHECK(f.engine.call("project.validate", {{"project", f.project}})->at("ok") == true);
+  CHECK_FALSE(f.engine.call("library.insert", {{"project", f.project}, {"id", "lib_missing"}}));
+
+  // media.remove: the clips made from the file go (the title stays), then the asset.
+  const json imported = *f.engine.call("media.import", {{"project", f.project}, {"paths", {file}}});
+  const std::string asset = imported["assets"][0]["id"];
+  const auto gone = f.engine.call("media.remove", {{"project", f.project}, {"asset", asset}});
+  INFO((gone ? "" : gone.error().message + " | " + gone.error().hint));
+  REQUIRE(gone);
+  CHECK(gone->at("removed_clips").get<size_t>() == 1); // the picture; its linked sound goes with it
+  CHECK_FALSE(f.engine.call("project.get", {{"project", f.project}, {"id", v}}));
+  CHECK_FALSE(f.engine.call("project.get", {{"project", f.project}, {"id", r["id_map"]["$new:v.audio"].get<std::string>()}}));
+  CHECK(f.engine.call("project.get", {{"project", f.project}, {"id", t}})); // the title stays
+  CHECK(f.engine.call("project.get", {{"project", f.project}, {"id", asset}}).has_value() == false); // the asset is gone too
+  CHECK(f.engine.call("project.validate", {{"project", f.project}})->at("ok") == true);
+  CHECK_FALSE(f.engine.call("media.remove", {{"project", f.project}, {"asset", asset}})); // gone already
+}
+
+TEST_CASE("timeline.edit set_property sets a field that is not there yet, and null takes it away", "[timeline][parity]") {
+  Fixture f;
+  const std::string file = (f.dir / "v.mp4").string();
+  write_video(file, 3);
+  const json r = f.ok(json::array({{{"op", "add_clip"}, {"id", "$new:a"}, {"path", file}}, {{"op", "add_text"}, {"id", "$new:t"}, {"text", "Hi"}, {"duration", "1s"}}}));
+  const std::string a = r["id_map"]["$new:a"], sa = r["id_map"]["$new:a.audio"], t = r["id_map"]["$new:t"];
+  const json tracks = f.tracks();
+  const std::string video_track = tracks[0]["id"], sound_track = tracks[1]["id"];
+
+  // a track's flags, which a new track does not have
+  f.ok(json::array({{{"op", "set_property"}, {"target", sound_track}, {"path", "locked"}, {"value", true}},
+                    {{"op", "set_property"}, {"target", sound_track}, {"path", "muted"}, {"value", true}},
+                    {{"op", "set_property"}, {"target", video_track}, {"path", "hidden"}, {"value", true}},
+                    {{"op", "set_property"}, {"target", sound_track}, {"path", "volume_db"}, {"value", -6}}}));
+  CHECK(f.get(sound_track)["locked"] == true);
+  CHECK(f.get(sound_track)["muted"] == true);
+  CHECK(f.get(video_track)["hidden"] == true);
+  CHECK(f.get(sound_track)["volume_db"] == -6);
+  // a nested field whose parent is not there either: the sound's gain, the picture's opacity
+  f.ok(json::array({{{"op", "set_property"}, {"target", sa}, {"path", "audio.gain_db"}, {"value", -9}},
+                    {{"op", "set_property"}, {"target", sa}, {"path", "audio.pan"}, {"value", 0.5}},
+                    {{"op", "set_property"}, {"target", a}, {"path", "transform.opacity"}, {"value", 0.4}}}));
+  CHECK(f.get(sa)["audio"]["gain_db"] == -9);
+  CHECK(f.get(sa)["audio"]["pan"] == 0.5);
+  CHECK(f.get(a)["transform"]["opacity"] == 0.4);
+  // changing one that is there still works, and null takes it away
+  f.ok(json::array({{{"op", "set_property"}, {"target", sa}, {"path", "audio.gain_db"}, {"value", -3}}}));
+  CHECK(f.get(sa)["audio"]["gain_db"] == -3);
+  f.ok(json::array({{{"op", "set_property"}, {"target", sound_track}, {"path", "locked"}, {"value", nullptr}}}));
+  CHECK_FALSE(f.get(sound_track).contains("locked"));
+  f.ok(json::array({{{"op", "set_property"}, {"target", sound_track}, {"path", "locked"}, {"value", nullptr}}})); // already gone: nothing to do
+  // the text's style
+  f.ok(json::array({{{"op", "set_property"}, {"target", t}, {"path", "content.color"}, {"value", "#ff0000"}}}));
+  CHECK(f.get(t)["content"]["color"] == "#ff0000");
+  CHECK(f.engine.call("project.validate", {{"project", f.project}})->at("ok") == true);
+}

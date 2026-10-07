@@ -1084,6 +1084,136 @@ struct Engine::Impl {
     return item;
   }
 
+  // library.insert {project, id, at?}: the item's clips go into the project, the first of them at `at` (default: the end of the film), the others
+  // where the item had them. Each goes on the first unlocked track of its kind that is free there, else on a track made for it; nothing that is
+  // in the project moves. One edit: Undo takes the whole item out.
+  Result<json> library_insert(const json &params) {
+    ATM_TRY(Project *pr, project(params));
+    ATM_TRY(json item, library_read(params.value("id", std::string())));
+    const json &root = pr->doc.root();
+    std::string seq = params.value("sequence", std::string());
+    if (seq.empty() && root.contains("sequence_order") && !root["sequence_order"].empty())
+      seq = root["sequence_order"][0].get<std::string>();
+    if (!root.contains("sequences") || !root["sequences"].contains(seq))
+      return fail(ErrorCode::NotFound, "R_NO_SEQUENCE", "The project has no sequence \"" + seq + "\".");
+    const json &sequence = root["sequences"][seq];
+    struct Lane {
+      std::string id, kind;
+      std::vector<std::pair<Rational, Rational>> spans;
+      bool usable = true;
+    };
+    std::vector<Lane> lanes;
+    Rational film_end;
+    if (const auto order = sequence.find("track_order"); order != sequence.end() && order->is_array() && sequence.contains("tracks"))
+      for (const json &tid : *order) {
+        const auto t = sequence["tracks"].find(tid.get<std::string>());
+        if (t == sequence["tracks"].end() || !t->is_object())
+          continue;
+        Lane lane{tid.get<std::string>(), t->value("kind", std::string("video")), {}, !t->value("locked", false)};
+        if (const auto cl = t->find("clips"); cl != t->end() && cl->is_object())
+          for (auto c = cl->begin(); c != cl->end(); ++c) {
+            if (!c->is_object())
+              continue;
+            const json timing = c->value("timing", json::object());
+            const Rational in = Rational::parse(timing.value("record_in", std::string("0"))).value_or(Rational());
+            const Rational end = add(in, Rational::parse(timing.value("duration", std::string("0"))).value_or(Rational())).value_or(in);
+            lane.spans.emplace_back(in, end);
+            if (compare(end, film_end) > 0)
+              film_end = end;
+          }
+        lanes.push_back(std::move(lane));
+      }
+    Rational at = film_end;
+    if (params.contains("at")) {
+      ATM_TRY(Rational rate, Rational::parse(sequence.value("rate", std::string("30"))));
+      auto t = parse_time(params["at"], TimeContext{rate});
+      if (!t)
+        return bad_param("at", ("is not a time: " + t.error().message).c_str());
+      at = *t;
+    }
+    const json clips = item.value("clips", json::array());
+    if (!clips.is_array() || clips.empty())
+      return fail(ErrorCode::NotFound, "L_EMPTY", "The library item has no clips.");
+    json ops = json::array(), snaps = json::array();
+    int made = 0;
+    for (const json &entry : clips) {
+      const json clip = entry.value("clip", json::object());
+      const std::string kind = entry.value("audio", false) ? "audio" : "video";
+      const json timing = clip.value("timing", json::object());
+      const Rational offset = Rational::parse(entry.value("offset", std::string("0"))).value_or(Rational());
+      const Rational start = add(at, offset).value_or(at);
+      const Rational end = add(start, Rational::parse(timing.value("duration", std::string("0"))).value_or(Rational())).value_or(start);
+      Lane *home = nullptr;
+      for (Lane &lane : lanes)
+        if (!home && lane.kind == kind && lane.usable &&
+            std::none_of(lane.spans.begin(), lane.spans.end(), [&](const auto &s) { return compare(s.first, end) < 0 && compare(start, s.second) < 0; }))
+          home = &lane;
+      if (!home) {
+        const std::string ph = "$new:lib_t" + std::to_string(made++);
+        ops.push_back({{"op", "add_track"}, {"id", ph}, {"kind", kind}});
+        lanes.push_back({ph, kind, {}, true});
+        home = &lanes.back();
+      }
+      home->spans.emplace_back(start, end);
+      snaps.push_back({{"snapshot", clip}, {"track", home->id}, {"at", start.to_string()}});
+    }
+    ops.push_back({{"op", "duplicate"}, {"id", "$new:lib"}, {"clips", std::move(snaps)}});
+    json edit = {{"project", params["project"]}, {"ops", std::move(ops)}, {"sequence", seq}, {"label", "Insert " + item.value("name", std::string("clip"))}};
+    return timeline_edit(edit);
+  }
+
+  // media.remove {project, asset (or path)}: the file leaves the project: every clip made from it (with the clips linked to them) is deleted, then the
+  // asset. The clips go in one edit and the asset in a second, so Undo takes two steps to bring it all back.
+  Result<json> media_remove(const json &params) {
+    ATM_TRY(Project *pr, project(params));
+    const json &root = pr->doc.root();
+    std::string asset = params.value("asset", std::string());
+    const json assets = root.contains("assets") ? root["assets"] : json::object();
+    if (asset.empty() && params.contains("path"))
+      for (auto a = assets.begin(); a != assets.end(); ++a)
+        if (a->is_object() && a->value("path", std::string()) == params.value("path", std::string()))
+          asset = a.key();
+    if (asset.empty() || !assets.contains(asset))
+      return fail(ErrorCode::NotFound, "E_UNKNOWN_ASSET", "There is no asset \"" + asset + "\" in the project.",
+                  "project.inspect lists the assets; media.import adds one.");
+    const std::string path = assets[asset].value("path", std::string());
+    std::vector<std::string> matched;
+    std::set<std::string> seen_groups;
+    bool is_locked_any = false;
+    if (const auto seqs = root.find("sequences"); seqs != root.end() && seqs->is_object())
+      for (auto sq = seqs->begin(); sq != seqs->end(); ++sq)
+        if (const auto tracks = sq->find("tracks"); sq->is_object() && tracks != sq->end() && tracks->is_object())
+          for (auto tr = tracks->begin(); tr != tracks->end(); ++tr)
+            if (const auto cl = tr->find("clips"); tr->is_object() && cl != tr->end() && cl->is_object())
+              for (auto c = cl->begin(); c != cl->end(); ++c) {
+                if (!c->is_object())
+                  continue;
+                const json ref = c->value("media_ref", json::object());
+                if (ref.value("asset", std::string()) != asset && (path.empty() || ref.value("path", std::string()) != path))
+                  continue;
+                is_locked_any = is_locked_any || tr->value("locked", false);
+                const std::string g = c->value("link_group", std::string());
+                if (!g.empty() && !seen_groups.insert(g).second)
+                  continue; // its linked partner is deleted with it
+                matched.push_back(c.key());
+              }
+    if (is_locked_any)
+      return fail(ErrorCode::InvalidArgument, "E_LOCKED", "A clip made from this file is on a locked track.", "Unlock the track first.");
+    json removed = json::object();
+    if (!matched.empty()) {
+      json ops = json::array();
+      for (const std::string &id : matched)
+        ops.push_back({{"op", "delete"}, {"clip", id}});
+      ATM_TRY(json deleted, timeline_edit({{"project", params["project"]}, {"ops", std::move(ops)}, {"label", "Remove " + assets[asset].value("name", std::string("media"))}}));
+      (void)deleted;
+    }
+    json ops = json::array({{{"op", "remove"}, {"path", asset}}});
+    json patch = {{"project", params["project"]}, {"patch", {{"ops", std::move(ops)}, {"label", "Remove " + assets[asset].value("name", std::string("media"))}}}};
+    ATM_TRY(json done, project_patch(patch));
+    done["removed_clips"] = matched.size();
+    return done;
+  }
+
   // library.list: the items, the newest first, without their clips.
   Result<json> library_list(const json &) {
     ATM_TRY(fs::path base, library_root());
@@ -1250,6 +1380,14 @@ struct Engine::Impl {
          "- add_track {kind (video | audio), name?, position? (top | bottom), below? / above? (track ID), sync_lock? (true: the track's clips follow make_room and ripple_delete)}\n"
          "- delete {clip} or {transition}; ripple_delete {clip} (closes the gap, on the tracks locked to the cut too); move {clip, to?, track?}; trim {clip, edge (in | out), to or delta}; set_speed {clip, speed (0.1..10, 2 = twice as fast)} - the clip and its linked sound play faster or slower, and get shorter or longer; "
          "set_reverse {clip, reverse (true | false)} - the clip and its linked sound play backwards, or forwards again; "
+         "fade {clip, in?, out?} - a picture fades up from nothing over `in` and down over `out` (opacity keys); a sound clip's own sound fades the same way; "
+         "a side left out keeps its fade, 0 takes it away; "
+         "set_keyframe {clip, property (position | scale | rotation | opacity), at (counted from the clip's start), value} - a key that animates the property: "
+         "position [x, y] in canvas fractions (0.5, 0.5 is the centre), scale [x, y] or one number, rotation in degrees, opacity 0..1; a key at that time takes the new value; "
+         "remove_keyframe {clip, property, at?} - the key at `at`, or every key of the property (the last one's value stays as the plain value); "
+         "fit_clip {clip, mode (fit | fill)} - fit shows the whole picture centred, fill covers the canvas (two sides cut off); "
+         "delete_track {track} - the track and every clip on it (a locked track is refused); "
+         "add_marker {at, name?} and remove_marker {marker} - markers on the ruler; "
          "freeze_frame {clip, at, duration? (2s)} - the picture at that time holds for the duration: the clip is cut there, a still of the frame "
          "goes in between, and what follows on its tracks (its sound too) moves later by the duration; "
          "add_captions {clip (a voice clip) or text + at + duration, style? (pop | plain | box), size? (0.07), y? (0.72), color?, emphasis? [words shown in emphasis_color], track?} - "
@@ -1264,7 +1402,8 @@ struct Engine::Impl {
          "into what is below; remove_effect {effect}; set_effect_enabled {effect, enabled}\n"
          "- link {clips: [...]} joins clips so edits move them together; unlink {clip} takes one out of its group\n"
          "- set_property {target (clip, track or fx ID), path (e.g. \"audio.gain_db\", \"transform.opacity\", "
-         "\"content.text\", \"volume\", \"params.radius\", \"transform.crop\"), value} or {target, path "
+         "\"content.text\", \"volume\", \"params.radius\", \"transform.crop\"), value; a track's name, locked, muted, hidden, solo, volume_db; a marker's name; "
+         "the sequence's canvas.width and canvas.height; a field that is not there yet is made, and value null takes it away} or {target, path "
          "\"transform.opacity|position|scale|rotation|anchor\", keyframes: [{t, v, interp?, ease?}]} or, for an effect, "
          "{target (fx ID), path \"params.<name>\", keyframes: [...]} to animate that parameter\n"
          "Example: four clips with dissolves, a fading title, a blur and music:\n"
@@ -1311,6 +1450,10 @@ struct Engine::Impl {
          "names the largest offsets that fit; timeline.edit make_room (or add_transition with make_room true) trims and moves "
          "up what is missing instead. To fade one clip to or from black, use opacity keyframes instead."},
         {"keyframes",
+         "The short way, with timeline.edit ops: fade {clip, in?, out?} fades a picture up and down (a sound clip's own sound too), "
+         "set_keyframe {clip, property (position | scale | rotation | opacity), at, value} adds or changes one key, "
+         "remove_keyframe {clip, property, at?} takes one or all away. The rest of this topic is the long way, with patch paths, "
+         "which also reaches anchor and effect parameters.\n"
          "Animate opacity, position, scale, rotation or anchor with keyframes inside the clip's transform (crop stays "
          "fixed). t is the time from the "
          "clip's start. Fade a 4-second title in over 0.5 s and out over its last 0.5 s:\n"
@@ -3186,7 +3329,7 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
      R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},
        "ops":{"type":"array","items":{"type":"object","properties":{
          "op":{"type":"string","enum":["add_track","add_clip","add_text","add_captions","sync_captions","add_adjustment","add_transition","delete",
-                                       "ripple_delete","move","trim","split","duplicate","slip","roll","slide","set_speed","freeze_frame","set_reverse","add_effect","remove_effect",
+                                       "ripple_delete","move","trim","split","duplicate","slip","roll","slide","set_speed","freeze_frame","set_reverse","fade","set_keyframe","remove_keyframe","fit_clip","delete_track","add_marker","remove_marker","add_effect","remove_effect",
                                        "set_effect_enabled","link","unlink","set_property"]},
          "id":{"type":"string","description":"$new:name for what this op creates"}},"required":["op"]}},
        "sequence":{"type":"string"},"label":{"type":"string"},"dry_run":{"type":"boolean"},
@@ -3216,6 +3359,13 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
      "One library item with its clips: each {clip, audio, offset}. To put it in a project, pass them as snapshots to timeline.edit's duplicate "
      "op ({\"snapshot\": clip, \"track\", \"at\": start + offset}).",
      R"({"type":"object","properties":{"id":{"type":"string"}},"required":["id"]})", &Impl::library_get},
+    {"library.insert", "library", true,
+     "Put a library item into a project: its clips go in with their files, the first at `at` (default the end of the film), the others where the "
+     "item had them, each on a track that is free there (a new one when none is). One edit: Undo takes the item out again.",
+     R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},
+       "id":{"type":"string","description":"The library item, as library.list names it"},"at":{"type":"string","description":"A time like 2.5s, 75@30 or timecode"},
+       "sequence":{"type":"string"}},"required":["project","id"]})",
+     &Impl::library_insert},
     {"library.rename", "library", false, "Give a library item another name.",
      R"({"type":"object","properties":{"id":{"type":"string"},"name":{"type":"string"}},"required":["id","name"]})", &Impl::library_rename},
     {"library.remove", "library", false, "Take an item out of the clip library (its copies of the files go with it; projects that used it keep their clips).",
@@ -3263,6 +3413,12 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
     {"time.parse", "project", false, "Convert any accepted time spelling to its canonical forms.",
      R"({"type":"object","properties":{"value":{"type":["string","object"],"description":"\"12.5s\", \"375@30\" (frames@rate), SMPTE \"00:00:12:15\" or {num,den} seconds"},"rate":{"type":"string"}},"required":["value"]})",
      &Impl::time_parse},
+    {"media.remove", "core", true,
+     "Take a file out of the project: every clip made from it (and the clips linked to them) is deleted, then the asset itself. "
+     "Pass asset (its ast_ ID) or the file's path. A clip on a locked track stops it. Undo takes two steps: the clips, then the asset.",
+     R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},
+       "asset":{"type":"string"},"path":{"type":"string"}},"required":["project"]})",
+     &Impl::media_remove},
     {"media.probe", "core", false,
      "Size, frame rate, duration and audio format of a media file. Still pictures (PNG, JPEG, BMP, GIF, TGA) report "
      "image: true and their size, and have no duration.",

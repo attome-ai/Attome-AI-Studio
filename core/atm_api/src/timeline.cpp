@@ -1,6 +1,7 @@
 #include "timeline.hpp"
 
 #include <algorithm>
+#include <sstream>
 #include <set>
 #include <cctype>
 #include <filesystem>
@@ -114,6 +115,20 @@ public:
       return wrap(freeze_frame());
     if (name == "set_reverse")
       return wrap(set_reverse());
+    if (name == "fade")
+      return wrap(fade());
+    if (name == "set_keyframe")
+      return wrap(set_keyframe());
+    if (name == "remove_keyframe")
+      return wrap(remove_keyframe());
+    if (name == "fit_clip")
+      return wrap(fit_clip());
+    if (name == "delete_track")
+      return wrap(delete_track());
+    if (name == "add_marker")
+      return wrap(add_marker());
+    if (name == "remove_marker")
+      return wrap(remove_marker());
     if (name == "split")
       return wrap(split());
     if (name == "duplicate")
@@ -1383,6 +1398,227 @@ private:
     return {};
   }
 
+  // ---- fades, keyframes, fit, tracks and markers (what the editor does with a slider or a menu) ------------------------------
+
+  // The keys of one animated property of a clip, as {id, time, value}, earliest first.
+  struct Key {
+    std::string id;
+    Rational t;
+    json v;
+  };
+  std::vector<Key> keys_of(const json &clip, const std::string &prop) const {
+    std::vector<Key> keys;
+    const json tr = clip.value("transform", json::object());
+    if (const auto kf = tr.find("keyframes"); kf != tr.end() && kf->is_object())
+      if (const auto list = kf->find(prop); list != kf->end() && list->is_object())
+        for (auto k = list->begin(); k != list->end(); ++k)
+          if (k->is_object())
+            keys.push_back({k.key(), Rational::parse(k->value("t", std::string("0"))).value_or(Rational()), k->value("v", json())});
+    std::sort(keys.begin(), keys.end(), [](const Key &a, const Key &b) { return compare(a.t, b.t) < 0; });
+    return keys;
+  }
+
+  // fade {clip, in?, out?}: a picture fades up from nothing over `in` and down to nothing over `out` (opacity keys); a sound clip's
+  // audio fades the same way. A side that is left out keeps the fade it has; 0 takes it away.
+  Result<void> fade() {
+    ATM_TRY(auto c, clip("clip"));
+    const std::string id = op_.value("clip", std::string());
+    const json &node = *c.first;
+    ATM_TRY(auto in, time("in"));
+    ATM_TRY(auto out, time("out"));
+    if (!in && !out)
+      return fail("E_PARAM", "fade needs \"in\" and/or \"out\": how long the fade up and the fade down last (0 takes one away).");
+    const Rational dur = span_of(node).duration;
+    const bool sound = track(c.second)->value("kind", "") == "audio";
+    const auto clamp_to = [&](Rational v, Rational most) { return compare(v, Rational()) < 0 ? Rational() : compare(v, most) > 0 ? most : v; };
+    if (sound) {
+      const json au = node.value("audio", json::object());
+      json fresh = json::object(); // the sound clip has no "audio" yet: it is made once, with both fades
+      const auto set = [&](const char *key, const std::optional<Rational> &v) {
+        if (!v)
+          return;
+        const Rational len = clamp_to(*v, dur);
+        const bool had = au.contains(key);
+        if (len.num() == 0) {
+          if (had)
+            push({{"op", "remove"}, {"path", id + "/audio/" + key}});
+        } else if (node.contains("audio")) {
+          push({{"op", had ? "replace" : "add"}, {"path", id + "/audio/" + key}, {"value", len.to_string()}});
+        } else {
+          fresh[key] = len.to_string();
+        }
+      };
+      set("fade_in", in);
+      set("fade_out", out);
+      if (!fresh.empty())
+        push({{"op", "add"}, {"path", id + "/audio"}, {"value", std::move(fresh)}});
+      return {};
+    }
+    // The fades the clip has now: a first key at 0 with value 0 rising to the next, a last key at the end with value 0 falling from the one before.
+    const std::vector<Key> keys = keys_of(node, "opacity");
+    Rational now_in, now_out;
+    if (keys.size() >= 2 && keys.front().t.num() == 0 && keys.front().v.is_number() && keys.front().v.get<double>() == 0.0)
+      now_in = keys[1].t;
+    if (keys.size() >= 2 && keys.back().v.is_number() && keys.back().v.get<double>() == 0.0 && compare(keys.back().t, dur) == 0)
+      now_out = sub(dur, keys[keys.size() - 2].t).value_or(Rational());
+    const Rational fin = clamp_to(in ? *in : now_in, dur);
+    const Rational fout = clamp_to(out ? *out : now_out, sub(dur, fin).value_or(Rational()));
+    const double full = node.value("transform", json::object()).value("opacity", 1.0);
+    for (const Key &k : keys)
+      push({{"op", "remove"}, {"path", k.id}});
+    int n = 0;
+    const auto key = [&](Rational t, double v) {
+      const std::string ph = "$new:op" + std::to_string(index_) + "_k" + std::to_string(n++);
+      out_.names[ph] = ph;
+      push({{"op", "add"}, {"path", id + "/transform/keyframes/opacity/" + ph}, {"value", {{"t", t.to_string()}, {"v", v}}}});
+    };
+    if (fin.num() > 0) {
+      key(Rational(), 0.0);
+      key(fin, full);
+    }
+    if (fout.num() > 0) {
+      const Rational start = sub(dur, fout).value_or(Rational());
+      if (fin.num() == 0 || compare(start, fin) != 0) // one plateau key when the fades meet
+        key(start, full);
+      key(dur, 0.0);
+    }
+    return {};
+  }
+
+  // The value of a property key as the document stores it: position and scale are [x, y], rotation and opacity are numbers.
+  Result<json> key_value(const std::string &prop, const json &v) const {
+    if (prop == "position" || prop == "scale") {
+      if (v.is_number() && prop == "scale")
+        return json::array({v.get<double>(), v.get<double>()});
+      if (v.is_array() && v.size() == 2 && v[0].is_number() && v[1].is_number())
+        return json::array({v[0].get<double>(), v[1].get<double>()});
+      return fail("E_PARAM", "\"value\" of " + prop + " must be [x, y]" + std::string(prop == "scale" ? " (or one number for both)" : "") + ".");
+    }
+    if (!v.is_number())
+      return fail("E_PARAM", "\"value\" of " + prop + " must be a number.");
+    return json(v.get<double>());
+  }
+
+  Result<std::string> key_property() const {
+    const std::string prop = op_.value("property", std::string());
+    if (prop != "position" && prop != "scale" && prop != "rotation" && prop != "opacity")
+      return fail("E_PARAM", "\"property\" must be position, scale, rotation or opacity.");
+    return prop;
+  }
+
+  // set_keyframe {clip, property, at, value}: a key at `at` (counted from the clip's start); one that is there already takes the new value.
+  // position: [x, y] in canvas fractions (0.5, 0.5 is the centre), scale: [x, y] or one number, rotation: degrees, opacity: 0..1.
+  Result<void> set_keyframe() {
+    ATM_TRY(auto c, clip("clip"));
+    const std::string id = op_.value("clip", std::string());
+    ATM_TRY(std::string prop, key_property());
+    ATM_TRY(auto at, time("at"));
+    if (!at)
+      return fail("E_PARAM", "set_keyframe needs \"at\": the time of the key, counted from the start of the clip.");
+    if (compare(*at, Rational()) < 0 || compare(*at, span_of(*c.first).duration) > 0)
+      return fail("E_PARAM", "\"at\" is outside the clip: it counts from the clip's start and the clip is " + span_of(*c.first).duration.to_string() + " long.");
+    ATM_TRY(json value, key_value(prop, op_.value("value", json())));
+    for (const Key &k : keys_of(*c.first, prop))
+      if (compare(k.t, *at) == 0) {
+        push({{"op", "replace"}, {"path", k.id + "/v"}, {"value", value}});
+        return {};
+      }
+    push({{"op", "add"}, {"path", id + "/transform/keyframes/" + prop + "/" + placeholder()}, {"value", {{"t", at->to_string()}, {"v", value}}}});
+    return {};
+  }
+
+  // remove_keyframe {clip, property, at?}: the key at `at`, or every key of the property. The value of the last key left stays as the plain value.
+  Result<void> remove_keyframe() {
+    ATM_TRY(auto c, clip("clip"));
+    const std::string id = op_.value("clip", std::string());
+    ATM_TRY(std::string prop, key_property());
+    ATM_TRY(auto at, time("at"));
+    const std::vector<Key> keys = keys_of(*c.first, prop);
+    if (keys.empty())
+      return fail("E_PARAM", "The clip has no keys on " + prop + ".");
+    std::vector<Key> gone;
+    for (const Key &k : keys)
+      if (!at || compare(k.t, *at) == 0)
+        gone.push_back(k);
+    if (gone.empty())
+      return fail("E_PARAM", "There is no key on " + prop + " at that time.",
+                  "The keys are from " + keys.front().t.to_string() + " to " + keys.back().t.to_string() + " (counted from the clip's start).");
+    for (const Key &k : gone)
+      push({{"op", "remove"}, {"path", k.id}});
+    if (gone.size() == keys.size() && !gone.back().v.is_null()) {
+      const bool had = node_of(id).value("transform", json::object()).contains(prop);
+      push({{"op", had ? "replace" : "add"}, {"path", id + "/transform/" + prop}, {"value", gone.back().v}});
+    }
+    return {};
+  }
+
+  // fit_clip {clip, mode (fit | fill)}: fit shows the whole picture, centred (bars where it is not the canvas's shape); fill covers the canvas
+  // (two sides cut off). The clip's picture size comes from its media.
+  Result<void> fit_clip() {
+    ATM_TRY(auto c, clip("clip"));
+    const std::string id = op_.value("clip", std::string());
+    const std::string mode = op_.value("mode", std::string());
+    if (mode != "fit" && mode != "fill")
+      return fail("E_PARAM", "fit_clip needs \"mode\": \"fit\" (the whole picture) or \"fill\" (covers the canvas).");
+    const json ref = c.first->value("media_ref", json::object());
+    double mw = ref.value("width", 0.0), mh = ref.value("height", 0.0); // a clip keeps the size of its picture
+    if (mw <= 0 && ref.contains("asset") && ref["asset"].is_string())
+      if (const doc::NodeRef *asset = doc_.find(ref["asset"].get<std::string>()); asset && asset->node) {
+        mw = asset->node->value("width", 0.0);
+        mh = asset->node->value("height", 0.0);
+      }
+    if (mw <= 0 || mh <= 0)
+      return fail("E_PARAM", "The size of the clip's picture is not known, so it cannot be fitted.",
+                  "Only a clip of an imported picture or video has one; set transform.scale yourself for other clips.");
+    const json canvas = node_of(ctx_.sequence).value("canvas", json::object());
+    const double cw = canvas.value("width", 1920.0), ch = canvas.value("height", 1080.0);
+    const double rw = cw / mw, rh = ch / mh;
+    const double scale = mode == "fit" ? 1.0 : std::max(rw, rh) / std::max(1e-6, std::min(rw, rh));
+    const double r = std::round(scale * 1000.0) / 1000.0;
+    const json tr = c.first->value("transform", json::object());
+    if (!c.first->contains("transform")) {
+      push({{"op", "add"}, {"path", id + "/transform"}, {"value", json{{"scale", json::array({r, r})}, {"position", json::array({0.5, 0.5})}}}});
+    } else {
+      push({{"op", tr.contains("scale") ? "replace" : "add"}, {"path", id + "/transform/scale"}, {"value", json::array({r, r})}});
+      push({{"op", tr.contains("position") ? "replace" : "add"}, {"path", id + "/transform/position"}, {"value", json::array({0.5, 0.5})}});
+    }
+    return {};
+  }
+
+  // delete_track {track}: the track with every clip on it (undo brings it back). A locked track is not deleted.
+  Result<void> delete_track() {
+    const std::string id = op_.value("track", std::string());
+    const json *t = id.empty() ? nullptr : track(id);
+    if (!t)
+      return fail("E_UNKNOWN_TRACK", "\"track\" must be the ID of a track of this sequence, not \"" + id + "\".",
+                  "Read the track IDs with project.inspect level \"tracks\".");
+    if (t->value("locked", false))
+      return fail("E_LOCKED", "The track " + t->value("name", id) + " is locked.",
+                  "Unlock it first: set_property {target: the track, path: \"locked\", value: false}.");
+    push({{"op", "remove"}, {"path", id}});
+    return {};
+  }
+
+  // add_marker {at, name?}: a marker on the ruler. remove_marker {marker}.
+  Result<void> add_marker() {
+    ATM_TRY(auto at, time("at"));
+    if (!at)
+      return fail("E_PARAM", "add_marker needs \"at\": the time of the marker.");
+    json value = {{"t", at->to_string()}, {"name", op_.value("name", std::string())}};
+    push({{"op", "add"}, {"path", ctx_.sequence + "/markers/" + placeholder()}, {"value", std::move(value)}});
+    return {};
+  }
+
+  Result<void> remove_marker() {
+    const std::string id = op_.value("marker", std::string());
+    const doc::NodeRef *ref = id.empty() ? nullptr : doc_.find(id);
+    if (!ref || id.rfind("mrk_", 0) != 0)
+      return fail("E_PARAM", "\"marker\" must be the ID of a marker, not \"" + id + "\".",
+                  "The markers are in the sequence's \"markers\" (project.get on the sequence).");
+    push({{"op", "remove"}, {"path", id}});
+    return {};
+  }
+
   // set_reverse {clip, reverse}: the clip (and its linked sound) plays its part of the file backwards, or forwards again.
   Result<void> set_reverse() {
     ATM_TRY(auto c, clip("clip"));
@@ -1857,6 +2093,15 @@ private:
     }
     if (!op_.contains("value"))
       return fail("E_PARAM", "set_property needs \"value\" (or \"keyframes\" for a transform property).");
+    if (op_["value"].is_null()) { // null takes the field away (back to its default); one that is not there is already done
+      const json *at = ref->node;
+      std::stringstream parts(path);
+      for (std::string part; at && std::getline(parts, part, '/');)
+        at = at->is_object() && at->contains(part) ? &(*at)[part] : nullptr;
+      if (at)
+        push({{"op", "remove"}, {"path", target + "/" + path}});
+      return {};
+    }
     push({{"op", "replace"}, {"path", target + "/" + path}, {"value", op_["value"]}});
     return {};
   }
