@@ -119,6 +119,7 @@ public:
   // 1180 x 690 points are left for the layout (the panels would be squeezed to nothing). main.cpp calls it every frame.
   float apply_ui_scale(float w, float h);
   void shutdown();
+  std::string profile_report(); // this editor's zone timings and the daemon's, as text (ATTOME_PROFILE_DUMP)
 
 private:
   // daemon

@@ -298,13 +298,13 @@ int main(int argc, char **argv) {
         SDL_RenderPresent(renderer);
       }
     }
-    app.shutdown();
     if (const char *dump = std::getenv("ATTOME_PROFILE_DUMP")) // a development hook: the zone timings of this run, as the Profiler tab shows them
       if (FILE *f = std::fopen(dump, "wb")) {
-        const std::string report = atm::prof::format_report(atm::prof::snapshot());
+        const std::string report = app.profile_report();
         std::fwrite(report.data(), 1, report.size(), f);
         std::fclose(f);
       }
+    app.shutdown();
   }
 
   ImGui_ImplSDLRenderer3_Shutdown();

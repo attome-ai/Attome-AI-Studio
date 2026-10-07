@@ -10,6 +10,8 @@
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <future>
+#include <thread>
 
 #include <imgui.h>
 #include <imgui_internal.h>
@@ -182,6 +184,15 @@ App::~App() {
     SDL_DestroyTexture(texture_);
 }
 
+std::string App::profile_report() {
+  std::string out = atm::prof::format_report(atm::prof::snapshot());
+  json daemon;
+  RpcError error;
+  if (client_.call("profile.get", json::object(), daemon, error))
+    out += std::string(1, char(10)) + "--- the daemon" + std::string(1, char(10)) + atm::prof::format_report(daemon);
+  return out;
+}
+
 void App::shutdown() {
   json unused;
   RpcError error;
@@ -331,12 +342,17 @@ void App::open_project(const std::string &path) {
 void App::refresh() {
   ATM_PROFILE_SCOPE("ui.refresh");
   json got;
-  if (!rpc("project.get", {{"project", project_path_}, {"id", project_id_}}, got))
+  if (!rpc("project.get", {{"project", project_path_}, {"id", project_id_}, {"raw_json", true}}, got))
     return;
   {
     ATM_PROFILE_SCOPE("ui.refresh.take");
+    json old = std::move(doc_); // a big document takes tens of milliseconds to free: that is not done on the thread that draws
     doc_ = std::move(got["object"]);
+    if (!old.is_null())
+      std::thread([dead = std::move(old)]() mutable { dead = json(); }).detach();
   }
+  // The preview is compiled from the document while the tracks are built from it (both only read it).
+  std::future<Result<render::Composition>> compiled = std::async(std::launch::async, [this] { return render::compile(doc_, {}, project_path_); });
   revision_ = got.value("revision", uint64_t(0));
   if (!assets_listed_) { // files imported earlier and not on the timeline are still the project's media
     assets_listed_ = true;
@@ -570,7 +586,7 @@ void App::refresh() {
     mark_out_ = -1;
 
   ATM_PROFILE_SCOPE("ui.refresh.preview");
-  if (auto comp = render::compile(doc_, {}, project_path_)) {
+  if (auto comp = compiled.get()) {
     audio_mixer_.set_composition(*comp);
     const auto [pw, ph] = preview_size();
     preview_.set_composition(std::move(*comp), pw, ph);

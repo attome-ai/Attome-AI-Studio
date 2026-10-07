@@ -42,7 +42,10 @@ bool Client::call(const char *method, const json &params, json &result, RpcError
       error = {0, problem, "Run attomed in a terminal to see why."};
       return false;
     }
-    sent = api::write_frame(*stream_, request) && reader_->read(body_);
+    {
+      ATM_PROFILE_SCOPE("ui.rpc.exchange"); // the request out, the daemon at work, the reply in
+      sent = api::write_frame(*stream_, request) && reader_->read(body_);
+    }
     if (!sent) {
       reader_.reset();
       stream_.reset();
@@ -53,6 +56,7 @@ bool Client::call(const char *method, const json &params, json &result, RpcError
     error = {0, "The connection to the daemon was lost.", "Try again."};
     return false;
   }
+  ATM_PROFILE_SCOPE("ui.rpc.parse");
   json response = json::parse(body_, nullptr, false);
   if (response.is_object() && response.contains("result")) {
     result = std::move(response["result"]);

@@ -764,6 +764,12 @@ struct Engine::Impl {
     if (!ref)
       return fail(ErrorCode::UnknownId, "P_UNKNOWN_ID", "No object has the ID \"" + *id + "\".", *id,
                   "List the project's IDs with: attome inspect <project> --level full");
+    if (params.value("raw_json", false)) {
+      // For the daemon's own clients that read big objects (the editor reads the whole project after every edit): the reply text is made here, straight
+      // from the document, and the server splices it into its answer, instead of copying the object into a reply and serializing that again.
+      ATM_PROFILE_SCOPE("api.project_get_raw");
+      return json{{"$raw", "{\"object\":" + ref->node->dump() + ",\"parent\":" + json(ref->parent).dump() + ",\"revision\":" + std::to_string(pr->revision) + "}"}};
+    }
     json out = json::object();
     out["object"] = *ref->node;
     out["parent"] = ref->parent;

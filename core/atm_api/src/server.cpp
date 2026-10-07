@@ -100,7 +100,13 @@ void Server::serve_stream(Stream &stream) {
     std::string text;
     {
       ATM_PROFILE_SCOPE("rpc.serialize");
-      text = response.dump();
+      const auto result = response.find("result");
+      if (result != response.end() && result->is_object() && result->size() == 1 && result->contains("$raw") && (*result)["$raw"].is_string()) {
+        // A result that is already JSON text (project.get with raw_json): put it in the reply as it is.
+        text = "{\"jsonrpc\":\"2.0\",\"id\":" + response.value("id", json()).dump() + ",\"result\":" + (*result)["$raw"].get<std::string>() + "}";
+      } else {
+        text = response.dump();
+      }
     }
     ATM_PROFILE_SCOPE("rpc.write");
     if (!write_frame(stream, text))
