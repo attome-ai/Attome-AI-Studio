@@ -2760,3 +2760,39 @@ TEST_CASE("render: a blue screen is removed in the light and in deep shadow alik
   std::error_code ec;
   fs::remove_all(dir, ec);
 }
+
+TEST_CASE("render: a clip that fills the canvas takes the short way through its effects and comes out byte for byte the same", "[media]") {
+  const fs::path dir = fs::temp_directory_path() / atm::new_id("attome-fullcover");
+  fs::create_directories(dir);
+  const std::string video = (dir / "v.mp4").string();
+  write_clip(video, 320, 240, 30); // red over blue: a hard edge for the blur and the sharpen to work on, the size of the canvas
+  const auto frame_of = [&](const json &transform, const json &effects, bool measure) {
+    atm::render::set_always_measure_coverage(measure);
+    json clip = {{"timing", {{"record_in", "0"}, {"duration", "1"}, {"source_in", "0"}}},
+                 {"media_ref", {{"type", "file"}, {"path", video}, {"stream", "video"}}},
+                 {"transform", transform},
+                 {"effects", effects}};
+    const json doc = {{"sequences", {{"seq_1", {{"rate", "30"}, {"canvas", {{"width", 320}, {"height", 240}}}, {"track_order", {"trk_a"}}, {"tracks", {{"trk_a", {{"clips", {{"clp_a", clip}}}}}}}}}}},
+                      {"sequence_order", {"seq_1"}}};
+    auto comp = atm::render::compile(doc);
+    REQUIRE(comp);
+    atm::render::Renderer renderer(*comp, 320, 240);
+    std::vector<uint8_t> nv12(media::nv12_size(320, 240));
+    REQUIRE(renderer.render(5, nv12.data()));
+    atm::render::set_always_measure_coverage(false);
+    return nv12;
+  };
+  const json effects = {{"fx_1", {{"effect", "attome.gaussian_blur@1.0.0"}, {"params", {{"radius", 0.05}}}}},
+                        {"fx_2", {{"effect", "attome.color_grade@1.0.0"}, {"params", {{"contrast", 0.3}, {"saturation", 1.4}}}}},
+                        {"fx_3", {{"effect", "attome.sharpen@1.0.0"}, {"params", json::object()}}}};
+  // The picture exactly the canvas, and a larger one (scaled up, off centre) that still covers it: both take the short way.
+  for (const json &transform : {json{{"opacity", 1.0}}, json{{"scale", {1.4, 1.4}}, {"position", {0.55, 0.45}}, {"opacity", 0.8}}}) {
+    const auto short_way = frame_of(transform, effects, false), full_way = frame_of(transform, effects, true);
+    CHECK(short_way == full_way);
+  }
+  // A clip that does not cover the canvas (half size) is not changed by this: it still has soft edges over black.
+  const auto half = frame_of(json{{"scale", {0.5, 0.5}}}, json{{"fx_1", {{"effect", "attome.gaussian_blur@1.0.0"}, {"params", {{"radius", 0.05}}}}}}, false);
+  CHECK(half[size_t(5) * 320 + 5] == 16); // the corner is black
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}

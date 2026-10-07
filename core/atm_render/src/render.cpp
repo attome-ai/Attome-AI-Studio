@@ -1,6 +1,7 @@
 #include "atm/render/render.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -871,7 +872,8 @@ void box_vertical(const uint8_t *src, uint8_t *dst, int width, int rows, int r) 
 
 // Gaussian blur of a packed NV12 picture in place, as three box passes each way (close to a Gaussian of `sigma`
 // pixels). The chroma plane has half the resolution, so it gets half the sigma, per channel (U and V interleave).
-void blur_nv12(uint8_t *nv12, int W, int H, float sigma, std::vector<uint8_t> &tmp) {
+void blur_nv12(uint8_t *nv12, int W, int H, float sigma, std::vector<uint8_t> &tmp, bool luma_only = false) {
+  ATM_PROFILE_SCOPE("effect.blur");
   const auto box_radius = [](float s) { return int(std::lround((std::sqrt(1.0 + 4.0 * double(s) * double(s)) - 1.0) / 2.0)); };
   tmp.resize(media::nv12_size(W, H));
   const struct Plane {
@@ -879,7 +881,7 @@ void blur_nv12(uint8_t *nv12, int W, int H, float sigma, std::vector<uint8_t> &t
     int width, rows, r;
   } planes[2] = {{nv12, tmp.data(), W, H, box_radius(sigma)},
                  {nv12 + size_t(W) * size_t(H), tmp.data() + size_t(W) * size_t(H), W, H / 2, box_radius(sigma * 0.5f)}};
-  for (int p = 0; p < 2; ++p) {
+  for (int p = 0; p < (luma_only ? 1 : 2); ++p) {
     const Plane &pl = planes[p];
     if (pl.r < 1)
       continue;
@@ -1323,9 +1325,10 @@ void zoom_blend(uint8_t *out, const uint8_t *incoming, int W, int H, float progr
 // so edges get steeper. The chroma is left as it is (sharpening colour only fringes it). `sigma` is the blur's, in pixels.
 void sharpen_nv12(uint8_t *nv12, int W, int H, float amount, float sigma, std::vector<uint8_t> &tmp) {
   ATM_PROFILE_SCOPE("effect.sharpen");
-  static thread_local std::vector<uint8_t> blurred; // the whole picture is blurred (the blur works on both planes); only luma is used
-  blurred.assign(nv12, nv12 + media::nv12_size(W, H));
-  blur_nv12(blurred.data(), W, H, sigma, tmp);
+  static thread_local std::vector<uint8_t> blurred; // only the luma plane is blurred and read
+  blurred.resize(media::nv12_size(W, H));
+  std::memcpy(blurred.data(), nv12, size_t(W) * size_t(H));
+  blur_nv12(blurred.data(), W, H, sigma, tmp, true);
   const uint8_t *soft = blurred.data(); // the worker threads of the loop must read this thread's buffer, not their own
   parallel_for(H, 16, [&](int64_t first, int64_t last) {
     for (size_t i = size_t(first) * size_t(W); i < size_t(last) * size_t(W); ++i) {
@@ -1663,6 +1666,7 @@ void Renderer::draw(const Layer &l, int64_t frame, uint8_t *out, bool &cleared, 
                     bool raw) {
   const size_t pitch = size_t(width_); // Y and UV rows of the packed NV12 output
   uint8_t *out_uv = out + pitch * size_t(height_);
+  drew_everywhere_ = false;
   Pose p = pose_at(l, comp_, frame);
   if (p.opacity <= 0.0f)
     return;
@@ -1858,6 +1862,15 @@ void Renderer::draw(const Layer &l, int64_t frame, uint8_t *out, bool &cleared, 
   const bool plain = xf.scale_x == 1.0f && xf.scale_y == 1.0f && xf.pos_x == 0.5f && xf.pos_y == 0.5f &&
                      xf.anchor_x == 0.5f && xf.anchor_y == 0.5f && !pl.rotated && !xf.cropped() && !view->alpha;
   const bool covers = plain ? (w >= width_ && h >= height_) : false;
+  if (!view->alpha && !xf.cropped() && xf.scale_x > 0.0f && xf.scale_y > 0.0f) { // do the four corners of the canvas fall on the picture?
+    drew_everywhere_ = true;
+    for (const auto &[x, y] : {std::pair{0.0f, 0.0f}, std::pair{float(width_), 0.0f}, std::pair{0.0f, float(height_)}, std::pair{float(width_), float(height_)}}) {
+      float u = 0.0f, v = 0.0f;
+      pl.source(x, y, u, v);
+      if (u < 0.0f || v < 0.0f || u > float(view->width) || v > float(view->height))
+        drew_everywhere_ = false;
+    }
+  }
   if (!cleared && (alpha < 256 || !covers))
     media::fill_black(out, width_, height_);
   cleared = true;
@@ -1872,6 +1885,8 @@ void Renderer::draw(const Layer &l, int64_t frame, uint8_t *out, bool &cleared, 
   }
 }
 
+std::atomic<bool> g_always_measure_coverage{false};
+
 // A clip with effects. It is drawn twice on its own, over black and over white: where the two differ, the clip does not
 // cover the pixel fully, which gives its coverage without an alpha channel anywhere else in the compositor. The picture
 // over black is the clip premultiplied around black (16 / 128), so it blurs correctly together with the coverage; then
@@ -1883,27 +1898,37 @@ void Renderer::draw_isolated(const Layer &l, int64_t frame, uint8_t *out, bool &
   const int W = width_, H = height_;
   const size_t luma = size_t(W) * size_t(H), size = media::nv12_size(W, H);
   over_black_.resize(size);
-  over_white_.resize(size);
   media::fill_black(over_black_.data(), W, H);
-  std::memset(over_white_.data(), 235, luma); // white luma; chroma stays neutral, coverage comes from luma alone
-  std::memset(over_white_.data() + luma, 128, size - luma);
   bool drawn = true;
   draw(l, frame, over_black_.data(), drawn, used, true);
-  draw(l, frame, over_white_.data(), drawn, used, true);
-  // Coverage 0..255 per luma pixel: 235 - 16 = 219 is the full difference between the backgrounds.
+  // A clip that covers the whole canvas has coverage 255 everywhere: the second drawing, the difference, the coverage's own blur and the
+  // masking of a colour change would all come to nothing, and are left out (the result is the same, byte for byte).
+  bool everywhere = drew_everywhere_ && !g_always_measure_coverage.load();
   cover_.resize(luma);
-  parallel_for(H, 16, [&](int64_t first, int64_t last) {
-    for (size_t i = size_t(first) * size_t(W); i < size_t(last) * size_t(W); ++i) {
-      const int diff = int(over_white_[i]) - int(over_black_[i]);
-      cover_[i] = uint8_t(std::clamp(255 - diff * 255 / 219, 0, 255));
-    }
-  });
+  if (everywhere) {
+    std::memset(cover_.data(), 255, luma);
+  } else {
+    over_white_.resize(size);
+    std::memset(over_white_.data(), 235, luma); // white luma; chroma stays neutral, coverage comes from luma alone
+    std::memset(over_white_.data() + luma, 128, size - luma);
+    draw(l, frame, over_white_.data(), drawn, used, true);
+    // Coverage 0..255 per luma pixel: 235 - 16 = 219 is the full difference between the backgrounds.
+    parallel_for(H, 16, [&](int64_t first, int64_t last) {
+      for (size_t i = size_t(first) * size_t(W); i < size_t(last) * size_t(W); ++i) {
+        const int diff = int(over_white_[i]) - int(over_black_[i]);
+        cover_[i] = uint8_t(std::clamp(255 - diff * 255 / 219, 0, 255));
+      }
+    });
+  }
   for (const Effect &e : l.effects) {
     const std::array<float, eval::kMaxEffectParams> v = effect_values(l, e, comp_, frame);
     if (e.kind == "gaussian_blur") {
       const float sigma = v[0] * float(H) * 0.5f;
       blur_nv12(over_black_.data(), W, H, sigma, scratch_);
+      if (everywhere)
+        continue; // the coverage is 255 everywhere and stays so
       // The coverage blurs the same way as the luma plane: run it through the same passes as a one-plane picture.
+      over_white_.resize(size); // a key before this blur may have taken the coverage away from a clip that was drawn once
       std::vector<uint8_t> &tmp = over_white_; // free now
       const int r = int(std::lround((std::sqrt(1.0 + 4.0 * double(sigma) * double(sigma)) - 1.0) / 2.0));
       for (int pass = 0; r >= 1 && pass < 3; ++pass) {
@@ -1914,12 +1939,15 @@ void Renderer::draw_isolated(const Layer &l, int64_t frame, uint8_t *out, bool &
         box_vertical(tmp.data(), cover_.data(), W, H, r);
       }
     } else if (e.kind == "luma_key") {
+      everywhere = false; // a key takes coverage away
       luma_key_nv12(over_black_.data(), cover_.data(), W, H, v[0], v[1], v[2]);
     } else if (e.kind == "chroma_key") {
+      everywhere = false;
       key_nv12(over_black_.data(), cover_.data(), W, H, v[0], v[1], v[2], v[3], scratch_);
     } else { // a colour effect: apply it, then take back what it changed where the clip is not
       apply_effect(e.kind, v, over_black_.data(), W, H, scratch_, frame, lut_for(e));
-      remask_nv12(over_black_.data(), cover_.data(), W, H);
+      if (!everywhere)
+        remask_nv12(over_black_.data(), cover_.data(), W, H);
     }
   }
   if (!cleared)
@@ -1948,6 +1976,8 @@ void Renderer::draw_isolated(const Layer &l, int64_t frame, uint8_t *out, bool &
       }
   });
 }
+
+void set_always_measure_coverage(bool on) { g_always_measure_coverage.store(on); }
 
 Result<void> Renderer::render(int64_t frame, uint8_t *out) {
   ATM_PROFILE_SCOPE("render.frame");

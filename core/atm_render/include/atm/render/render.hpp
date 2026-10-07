@@ -133,6 +133,9 @@ struct Layer {
   float track_db = 0.0f;
 };
 
+// For the test that compares the two ways a clip with effects is drawn: true makes every such clip take the full way (drawn over black and over white).
+void set_always_measure_coverage(bool on);
+
 // The parameters of an effect of a layer at one frame, keyframes applied, in the order of the effect's table entry.
 struct Composition;
 std::array<float, eval::kMaxEffectParams> effect_values(const Layer &layer, const Effect &effect, const Composition &comp, int64_t frame);
@@ -205,6 +208,7 @@ private:
   std::vector<uint8_t> mix_;                          // the incoming clip of a dissolve, drawn over the same background
   std::vector<uint8_t> adjust_, scratch_;             // an adjustment layer's copy of the picture below it
   std::vector<uint8_t> over_black_, over_white_, cover_; // a clip with effects, drawn on its own (see draw_isolated)
+  bool drew_everywhere_ = false; // set by draw(): the clip it drew covers every pixel of the canvas (a picture or video that reaches past all four edges)
   std::string warning_;
   std::unordered_map<std::string, std::shared_ptr<const BakedLut>> luts_; // by path; null when the file would not load
   const BakedLut *lut_for(const Effect &e); // loads and bakes on first use; warns once when the file is missing
