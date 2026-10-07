@@ -612,6 +612,10 @@ inline std::string with_extension(std::string path, const char *extension) {
   return path + extension;
 }
 
+// The profiles of the two formats the FFmpeg of this computer writes, in the order the Export sheet lists them (the fourth is the default, HQ).
+inline const char *const kProresProfiles[] = {"proxy", "lt", "standard", "hq", "4444"};
+inline const char *const kDnxhrProfiles[] = {"lb", "sq", "hq", "hqx", "444"};
+
 inline std::string size_text(int64_t bytes) { // "370 KB", "4.2 MB", "27 MB", "1.3 GB"
   char text[32];
   if (bytes >= 995000000)

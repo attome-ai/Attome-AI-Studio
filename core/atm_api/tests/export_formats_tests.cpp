@@ -59,6 +59,9 @@ TEST_CASE("ProRes and DNxHR need the user's own FFmpeg: with none, media.codecs 
   CHECK_FALSE(started.error().hint.empty());
   CHECK_FALSE(p.engine.call("media.codecs", {{"ffmpeg_path", (p.dir / "nothing.exe").string()}})); // a path that is no file is refused
   CHECK_FALSE(p.engine.call("render.sequence", {{"project", p.path}, {"output", (p.dir / "out").string()}, {"format", "avi"}}));
+  const auto bad_profile = p.engine.call("render.sequence", {{"project", p.path}, {"output", (p.dir / "out").string()}, {"format", "prores"}, {"profile", "bogus"}}); // refused at the call, before any FFmpeg is looked for
+  REQUIRE_FALSE(bad_profile);
+  CHECK(bad_profile.error().rule == "E_PARAM");
   set_env("PATH", saved_path.c_str());
 }
 
@@ -91,19 +94,6 @@ TEST_CASE("ProRes and DNxHR are written as .mov through the FFmpeg named by ATTO
     CHECK(fs::file_size(out + ".mov") > 1000);
     CHECK_FALSE(fs::exists(out + ".mov.video.tmp.mov")); // the temporary files are gone
   }
-  // A profile it does not know fails in the job with its own message.
-  const auto bad = p.engine.call("render.sequence", {{"project", p.path}, {"output", (p.dir / "bad").string()}, {"format", "prores"}, {"profile", "bogus"}});
-  if (bad) {
-    json state;
-    for (int i = 0; i < 3000; ++i) {
-      const auto polled = p.engine.call("jobs.get", {{"job_id", bad->at("job_id")}});
-      REQUIRE(polled);
-      state = *polled;
-      if (state["state"] != "running")
-        break;
-      std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-    CHECK(state["state"] == "failed");
-  }
+  CHECK_FALSE(p.engine.call("render.sequence", {{"project", p.path}, {"output", (p.dir / "bad").string()}, {"format", "prores"}, {"profile", "bogus"}}));
   set_env("ATTOME_FFMPEG", "");
 }

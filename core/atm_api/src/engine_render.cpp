@@ -99,6 +99,14 @@ Result<json> Engine::Impl::render_sequence(const json &params) {
   if (piped) {
     settings.codec = format;
     settings.profile = params.value("profile", std::string());
+    static const std::vector<std::string> kProres = {"proxy", "lt", "standard", "hq", "4444", "4444xq"}, kDnxhr = {"lb", "sq", "hq", "hqx", "444"};
+    const auto &known = format == "prores" ? kProres : kDnxhr;
+    if (!settings.profile.empty() && std::find(known.begin(), known.end(), settings.profile) == known.end()) {
+      std::string list;
+      for (const std::string &k : known)
+        list += (list.empty() ? "" : ", ") + k;
+      return bad_param("profile", ("must be one of " + list + " for " + format).c_str());
+    }
     settings.ffmpeg = this->settings().value("ffmpeg_path", std::string());
     ATM_TRY(media::FfmpegInfo found, media::find_ffmpeg(settings.ffmpeg)); // fails now, not later in the job, when there is none
     (void)found;

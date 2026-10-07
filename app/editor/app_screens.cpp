@@ -283,10 +283,10 @@ void App::draw_export() {
     if (soft_button("export_browse", "Browse...", ImVec2(102.0f, ImGui::GetFrameHeight())))
       pending_ = [this] { ask_export_path(); };
     {
-      static const char *kExt[] = {".mp4", ".wav", ".jpg"};
+      static const char *kExt[] = {".mp4", ".wav", ".jpg", ".mov", ".mov"};
       std::string path = exp_path_;
-      if (path.size() < 4 || path.substr(path.size() - 4) != kExt[std::clamp(exp_format_, 0, 2)])
-        path += kExt[std::clamp(exp_format_, 0, 2)];
+      if (path.size() < 4 || path.substr(path.size() - 4) != kExt[std::clamp(exp_format_, 0, 4)])
+        path += kExt[std::clamp(exp_format_, 0, 4)];
       std::error_code ec;
       if (fs::exists(fs::path(std::u8string(path.begin(), path.end())), ec))
         ImGui::TextColored(ImVec4(0.89f, 0.64f, 0.23f, 1.0f), "A file with this name is there. It will be replaced.");
@@ -295,17 +295,22 @@ void App::draw_export() {
 
     section_label("WHAT");
     {
-      static const char *kFormats[] = {"Video (MP4)", "Sound only (WAV)", "One picture (JPEG)"};
-      static const char *kFormatIds[] = {"video", "sound", "picture"};
-      static const char *kExt2[] = {".mp4", ".wav", ".jpg"};
-      for (int i = 0; i < 3; ++i) {
-        if (i)
+      static const char *kFormats[] = {"Video (MP4)", "Sound only (WAV)", "One picture (JPEG)", "ProRes (MOV)", "DNxHR (MOV)"};
+      static const char *kFormatIds[] = {"video", "sound", "picture", "prores", "dnxhr"};
+      static const char *kExt2[] = {".mp4", ".wav", ".jpg", ".mov", ".mov"};
+      const int shown = exp_dnxhr_ ? 5 : exp_prores_ ? 4 : 3; // ProRes and DNxHR only where there is an FFmpeg on the computer to write them
+      for (int i = 0; i < shown; ++i) {
+        if (i % 3)
           ImGui::SameLine();
         if (soft_button((std::string("export_format_") + kFormatIds[i]).c_str(), kFormats[i], ImVec2(160.0f, 30.0f), true, exp_format_ == i)) {
+          if (exp_format_ != i)
+            exp_profile_ = i == 4 ? 2 : 3; // each format starts at its HQ: ProRes HQ, DNxHR HQ
           exp_format_ = i;
           copy_to(exp_path_, sizeof exp_path_, with_extension(exp_path_, kExt2[i]));
         }
       }
+      if (!exp_prores_ && !exp_dnxhr_)
+        ImGui::TextColored(hexv(look::fg3), "ProRes and DNxHR appear here when FFmpeg is installed on this computer.");
     }
     ImGui::Spacing();
     {
@@ -336,7 +341,7 @@ void App::draw_export() {
     for (int i = 0; i < 5; ++i) {
       int w = 0, h = 0;
       export_size(i, w, h);
-      const bool fits = w <= 4096 && h <= 2304 && w >= 16 && h >= 16; // the H.264 encoder's range
+      const bool fits = exp_format_ >= 3 ? (w <= 8192 && h <= 4608 && w >= 16 && h >= 16) : (w <= 4096 && h <= 2304 && w >= 16 && h >= 16); // the encoder's range
       if (i)
         ImGui::SameLine();
       if (soft_button((std::string("export_res_") + kRes[i]).c_str(), kRes[i], ImVec2(82.0f, 30.0f), fits, exp_res_ == i))
@@ -374,6 +379,23 @@ void App::draw_export() {
     if (ImGui::Checkbox("Include the sound", &sound))
       exp_sound_ = sound;
     ui_mark("check:export_sound");
+    } else if (exp_format_ >= 3) {
+      static const char *kProres[] = {"Proxy", "LT", "Standard", "HQ", "4444"};
+      static const char *kDnxhr[] = {"LB", "SQ", "HQ", "HQX", "444"};
+      section_label("PROFILE");
+      for (int i = 0; i < 5; ++i) {
+        if (i)
+          ImGui::SameLine();
+        const char *name = exp_format_ == 3 ? kProres[i] : kDnxhr[i];
+        if (soft_button((std::string("export_profile_") + name).c_str(), name, ImVec2(86.0f, 30.0f), true, exp_profile_ == i))
+          exp_profile_ = i;
+      }
+      ImGui::TextColored(hexv(look::fg3), "Made by the FFmpeg on this computer. Large files for editing, not for uploading.");
+      ImGui::Spacing();
+      bool sound = exp_sound_;
+      if (ImGui::Checkbox("Include the sound", &sound))
+        exp_sound_ = sound;
+      ui_mark("check:export_sound");
     } else if (exp_format_ == 1) {
       const double seconds = double((exp_range_ == 1 && (mark_in_ >= 0 || mark_out_ >= 0)) ? play_end() - play_start() : total_frames_) / fps();
       ImGui::TextColored(hexv(look::fg3), "About %s: 48 kHz stereo, not compressed.", size_text(int64_t(seconds * 192000.0)).c_str());
@@ -384,10 +406,10 @@ void App::draw_export() {
       export_sheet_ = false;
     ImGui::SameLine(ImGui::GetContentRegionAvail().x - 120.0f + ImGui::GetCursorPosX());
     if (soft_button("export_start", "Export", ImVec2(120.0f, 34.0f), exp_path_[0] != 0, true)) {
-      static const char *kExt3[] = {".mp4", ".wav", ".jpg"};
+      static const char *kExt3[] = {".mp4", ".wav", ".jpg", ".mov", ".mov"};
       std::string path = exp_path_;
-      if (path.size() < 4 || path.substr(path.size() - 4) != kExt3[std::clamp(exp_format_, 0, 2)])
-        path += kExt3[std::clamp(exp_format_, 0, 2)];
+      if (path.size() < 4 || path.substr(path.size() - 4) != kExt3[std::clamp(exp_format_, 0, 4)])
+        path += kExt3[std::clamp(exp_format_, 0, 4)];
       export_sheet_ = false;
       pending_ = [this, path] { start_export(path); };
     }

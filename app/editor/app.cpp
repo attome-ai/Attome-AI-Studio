@@ -1795,8 +1795,12 @@ void App::start_export(const std::string &path) {
   int w = 0, h = 0;
   export_size(exp_res_, w, h);
   json params = {{"project", project_path_}, {"output", path}, {"height", h}, {"bitrate", export_bitrate()}, {"audio", exp_sound_}};
-  static const char *kFormat[] = {"mp4", "wav", "jpeg"};
-  params["format"] = kFormat[std::clamp(exp_format_, 0, 2)];
+  static const char *kFormat[] = {"mp4", "wav", "jpeg", "prores", "dnxhr"};
+  params["format"] = kFormat[std::clamp(exp_format_, 0, 4)];
+  if (exp_format_ == 3)
+    params["profile"] = kProresProfiles[std::clamp(exp_profile_, 0, 4)];
+  if (exp_format_ == 4)
+    params["profile"] = kDnxhrProfiles[std::clamp(exp_profile_, 0, 4)];
   const auto at_frame = [&](int64_t f) { return std::to_string(f) + "@" + rate_.to_string(); };
   if (exp_format_ == 2) {
     params["from"] = at_frame(std::clamp<int64_t>(playhead_, 0, std::max<int64_t>(0, total_frames_ - 1)));
@@ -1908,6 +1912,13 @@ void App::ask_export() {
   if (!export_sheet_ && !export_open_) {
     load_export_choices();
     exp_format_ = 0;
+    exp_profile_ = 3;
+    json codecs; // which of the formats made by the FFmpeg of this computer it can write
+    exp_prores_ = exp_dnxhr_ = false;
+    if (rpc("media.codecs", json::object(), codecs)) {
+      exp_prores_ = codecs.value("formats", json::object()).value("prores", false);
+      exp_dnxhr_ = codecs.value("formats", json::object()).value("dnxhr", false);
+    }
     exp_range_ = (mark_in_ >= 0 || mark_out_ >= 0) ? 1 : 0; // marks were set: the part is what is meant
     if (exp_path_[0])
       copy_to(exp_path_, sizeof exp_path_, with_extension(exp_path_, ".mp4"));
@@ -1918,8 +1929,8 @@ void App::ask_export() {
 }
 
 void App::ask_export_path() {
-  static const SDL_DialogFileFilter kFilters[] = {{"MP4 video", "mp4"}, {"WAV sound", "wav"}, {"JPEG picture", "jpg;jpeg"}};
-  const SDL_DialogFileFilter *filters = &kFilters[std::clamp(exp_format_, 0, 2)];
+  static const SDL_DialogFileFilter kFilters[] = {{"MP4 video", "mp4"}, {"WAV sound", "wav"}, {"JPEG picture", "jpg;jpeg"}, {"ProRes video", "mov"}, {"DNxHR video", "mov"}};
+  const SDL_DialogFileFilter *filters = &kFilters[std::clamp(exp_format_, 0, 4)];
   const std::string start = exp_path_[0] ? std::string(exp_path_) : user_folder(SDL_FOLDER_VIDEOS) + project_name_ + ".mp4";
   SDL_ShowSaveFileDialog(
       [](void *self, const char *const *files, int) {

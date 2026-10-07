@@ -219,7 +219,9 @@ private:
   bool export_sheet_ = false;
   int exp_res_ = 2, exp_quality_ = 1;        // the chosen resolution (see draw_export) and quality: 0 small, 1 standard, 2 high
   bool exp_sound_ = true;
-  int exp_format_ = 0;                       // 0 video (MP4), 1 the sound only (WAV), 2 one picture (JPEG, the frame at the playhead)
+  int exp_format_ = 0;                       // 0 video (MP4), 1 the sound only (WAV), 2 one picture (JPEG, the frame at the playhead), 3 ProRes, 4 DNxHR (.mov)
+  bool exp_prores_ = false, exp_dnxhr_ = false; // the FFmpeg of this computer was found (media.codecs) and has the encoder: the two formats are offered
+  int exp_profile_ = 3;                      // the ProRes / DNxHR profile in the list of its format (the default is HQ)
   int exp_range_ = 0;                        // 0 the whole film, 1 from In to Out
   char exp_path_[512] = {};
   void load_export_choices();
