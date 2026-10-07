@@ -1024,14 +1024,7 @@ struct Engine::Impl {
       if (id.is_string())
         add_one(id.get<std::string>());
     std::vector<std::pair<std::string, std::string>> all_clips; // (clip, link group) of the whole project
-    if (const auto seqs = root.find("sequences"); seqs != root.end() && seqs->is_object())
-      for (auto seq = seqs->begin(); seq != seqs->end(); ++seq)
-        if (const auto tracks = seq->find("tracks"); seq->is_object() && tracks != seq->end() && tracks->is_object())
-          for (auto t = tracks->begin(); t != tracks->end(); ++t)
-            if (const auto cl = t->find("clips"); t->is_object() && cl != t->end() && cl->is_object())
-              for (auto c = cl->begin(); c != cl->end(); ++c)
-                if (c->is_object())
-                  all_clips.emplace_back(c.key(), c->value("link_group", std::string()));
+    for_each_clip(root, [&](const std::string &id, const json &c, const std::string &, const json &) { all_clips.emplace_back(id, c.value("link_group", std::string())); });
     const bool with_linked = params.value("linked", true); // false: only the clips named, not the picture or sound they are linked to
     for (size_t i = 0; with_linked && i < found.size(); ++i) // linked ones (their sound, their picture)
       if (const std::string group = found[i].clip.value("link_group", std::string()); !group.empty())
@@ -1276,23 +1269,16 @@ struct Engine::Impl {
     std::vector<std::string> matched;
     std::set<std::string> seen_groups;
     bool is_locked_any = false;
-    if (const auto seqs = root.find("sequences"); seqs != root.end() && seqs->is_object())
-      for (auto sq = seqs->begin(); sq != seqs->end(); ++sq)
-        if (const auto tracks = sq->find("tracks"); sq->is_object() && tracks != sq->end() && tracks->is_object())
-          for (auto tr = tracks->begin(); tr != tracks->end(); ++tr)
-            if (const auto cl = tr->find("clips"); tr->is_object() && cl != tr->end() && cl->is_object())
-              for (auto c = cl->begin(); c != cl->end(); ++c) {
-                if (!c->is_object())
-                  continue;
-                const json ref = c->value("media_ref", json::object());
-                if (ref.value("asset", std::string()) != asset && (path.empty() || ref.value("path", std::string()) != path))
-                  continue;
-                is_locked_any = is_locked_any || tr->value("locked", false);
-                const std::string g = c->value("link_group", std::string());
-                if (!g.empty() && !seen_groups.insert(g).second)
-                  continue; // its linked partner is deleted with it
-                matched.push_back(c.key());
-              }
+    for_each_clip(root, [&](const std::string &id, const json &c, const std::string &, const json &track) {
+      const json ref = c.value("media_ref", json::object());
+      if (ref.value("asset", std::string()) != asset && (path.empty() || ref.value("path", std::string()) != path))
+        return;
+      is_locked_any = is_locked_any || track.value("locked", false);
+      const std::string g = c.value("link_group", std::string());
+      if (!g.empty() && !seen_groups.insert(g).second)
+        return; // its linked partner is deleted with it
+      matched.push_back(id);
+    });
     if (is_locked_any)
       return fail(ErrorCode::InvalidArgument, "E_LOCKED", "A clip made from this file is on a locked track.", "Unlock the track first.");
     json removed = json::object();
@@ -1487,45 +1473,40 @@ struct Engine::Impl {
           wanted.push_back(c.get<std::string>());
     std::vector<Voice> voices;
     const json &root = pr->doc.root();
-    if (const auto seqs = root.find("sequences"); seqs != root.end() && seqs->is_object())
-      for (auto sq = seqs->begin(); sq != seqs->end(); ++sq)
-        if (const auto tracks = sq->find("tracks"); sq->is_object() && tracks != sq->end() && tracks->is_object())
-          for (auto t = tracks->begin(); t != tracks->end(); ++t)
-            if (const auto cl = t->find("clips"); t->is_object() && cl != t->end() && cl->is_object())
-              for (auto c = cl->begin(); c != cl->end(); ++c) {
-                if (!c->is_object() || (!wanted.empty() && std::find(wanted.begin(), wanted.end(), c.key()) == wanted.end()))
-                  continue;
-                const std::string node = speech_node_of(*c);
-                if (node.empty())
-                  continue;
-                Voice v;
-                v.id = c.key();
-                v.name = c->value("name", std::string());
-                v.node = node;
-                const json timing = c->value("timing", json::object());
-                v.start = seconds_of(timing, "record_in");
-                v.duration = seconds_of(timing, "duration");
-                const json media = c->value("media_ref", json::object());
-                const json settings = media["workflow"]["nodes"][node].value("settings", json::object());
-                v.has_speed = settings.contains("speed") && settings["speed"].is_number();
-                v.speed = v.has_speed ? settings["speed"].get<double>() : 1.0;
-                const std::string sel = media.value("selected", std::string());
-                v.spoken = !sel.empty() && media.contains("takes") && media["takes"].contains(sel);
-                if (v.spoken) {
-                  const json audio = media["takes"][sel].value("outputs", json::object()).value("audio", json::object());
-                  if (audio.contains("path") && audio["path"].is_string()) {
-                    fs::path file = pr->dir / to_path(audio["path"].get<std::string>());
-                    if (auto pcm = media::read_audio(to_utf8(file), 0, int64_t(600.0 * double(media::kHnsPerSecond))); pcm && !pcm->empty()) {
-                      const double peak = audio::measure(*pcm).peak;
-                      if (peak > 1e-4) {
-                        v.gain_db = std::clamp(std::round(20.0 * std::log10(target / peak) * 10.0) / 10.0, -24.0, 10.0);
-                        v.has_gain = true;
-                      }
-                    }
-                  }
-                }
-                voices.push_back(std::move(v));
+    for_each_clip(root, [&](const std::string &clip_id, const json &c, const std::string &, const json &) {
+        if (!wanted.empty() && std::find(wanted.begin(), wanted.end(), clip_id) == wanted.end())
+          return;
+        const std::string node = speech_node_of(c);
+        if (node.empty())
+          return;
+        Voice v;
+        v.id = clip_id;
+        v.name = c.value("name", std::string());
+        v.node = node;
+        const json timing = c.value("timing", json::object());
+        v.start = seconds_of(timing, "record_in");
+        v.duration = seconds_of(timing, "duration");
+        const json media = c.value("media_ref", json::object());
+        const json settings = media["workflow"]["nodes"][node].value("settings", json::object());
+        v.has_speed = settings.contains("speed") && settings["speed"].is_number();
+        v.speed = v.has_speed ? settings["speed"].get<double>() : 1.0;
+        const std::string sel = media.value("selected", std::string());
+        v.spoken = !sel.empty() && media.contains("takes") && media["takes"].contains(sel);
+        if (v.spoken) {
+          const json audio = media["takes"][sel].value("outputs", json::object()).value("audio", json::object());
+          if (audio.contains("path") && audio["path"].is_string()) {
+            fs::path file = pr->dir / to_path(audio["path"].get<std::string>());
+            if (auto pcm = media::read_audio(to_utf8(file), 0, int64_t(600.0 * double(media::kHnsPerSecond))); pcm && !pcm->empty()) {
+              const double peak = audio::measure(*pcm).peak;
+              if (peak > 1e-4) {
+                v.gain_db = std::clamp(std::round(20.0 * std::log10(target / peak) * 10.0) / 10.0, -24.0, 10.0);
+                v.has_gain = true;
               }
+            }
+          }
+        }
+        voices.push_back(std::move(v));
+    });
     if (voices.empty())
       return fail(ErrorCode::NotFound, "E_NO_VOICES", "There are no voice clips to fit.", "voice.make makes them; gen.run speaks them.");
     std::sort(voices.begin(), voices.end(), [](const Voice &a, const Voice &b) { return a.start < b.start; });
@@ -1691,12 +1672,10 @@ struct Engine::Impl {
     const std::string track_name = params.value("track", std::string("Subtitles"));
     json ops = json::array();
     const json &root = pr->doc.root();
-    std::string seq = params.value("sequence", std::string());
-    if (seq.empty() && root.contains("sequence_order") && !root["sequence_order"].empty())
-      seq = root["sequence_order"][0].get<std::string>();
+    ATM_TRY(const SequenceRef sq, sequence_of(root, params));
     std::string track;
-    if (root.contains("sequences") && root["sequences"].contains(seq) && root["sequences"][seq].contains("tracks"))
-      for (const auto &[id, t] : root["sequences"][seq]["tracks"].items())
+    if (sq.node->contains("tracks"))
+      for (const auto &[id, t] : (*sq.node)["tracks"].items())
         if (t.value("name", std::string()) == track_name && t.value("kind", std::string()) == "video")
           track = id;
     if (track.empty()) {
@@ -2634,12 +2613,9 @@ struct Engine::Impl {
       return bad_param("ops", "is required: a list of timeline ops (guide.get topic \"timeline\")");
     const json &root = pr->doc.root();
     timeline::Context ctx;
-    ctx.sequence = params.value("sequence", std::string());
-    if (ctx.sequence.empty() && root.contains("sequence_order") && !root["sequence_order"].empty())
-      ctx.sequence = root["sequence_order"][0].get<std::string>();
-    if (!root.contains("sequences") || !root["sequences"].contains(ctx.sequence))
-      return fail(ErrorCode::NotFound, "R_NO_SEQUENCE", "The project has no sequence \"" + ctx.sequence + "\".");
-    ATM_TRY(Rational rate, Rational::parse(root["sequences"][ctx.sequence].value("rate", std::string("30"))));
+    ATM_TRY(const SequenceRef sq, sequence_of(root, params));
+    ctx.sequence = sq.id;
+    ATM_TRY(Rational rate, Rational::parse(sq.node->value("rate", std::string("30"))));
     ctx.rate = rate;
     ctx.project_dir = to_utf8(pr->dir);
     ctx.probe = [this](const std::string &path) { return media_probe({{"path", path}}); };
@@ -3333,13 +3309,9 @@ struct Engine::Impl {
     const bool voice = decl && decl->does("generate_speech"); // a clip of speech: on an audio track, as long as what is said
     const json &face = instance.value("exposed", json::object()).value("inputs", json::object());
     const std::string project_ref = to_utf8(pr->dir);
-    std::string seq = params.value("sequence", std::string());
-    if (seq.empty() && root.contains("sequence_order") && !root["sequence_order"].empty())
-      seq = root["sequence_order"][0].get<std::string>();
-    const doc::NodeRef *seq_ref = pr->doc.find(seq);
-    if (!seq_ref)
-      return fail(ErrorCode::UnknownId, "P_UNKNOWN_ID", "The project has no sequence \"" + seq + "\".");
-    const json &sequence = *seq_ref->node;
+    ATM_TRY(const SequenceRef sq, sequence_of(root, params));
+    const std::string &seq = sq.id;
+    const json &sequence = *sq.node;
 
     // The size the clip is made at: the canvas's shape at about 0.9 megapixels, on the model's grid (what the Shot's Project
     // node and the run give the model). It is kept on the clip so the editor can scale the picture to cover the canvas.

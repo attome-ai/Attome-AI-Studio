@@ -333,7 +333,10 @@ void App::refresh() {
   json got;
   if (!rpc("project.get", {{"project", project_path_}, {"id", project_id_}}, got))
     return;
-  doc_ = std::move(got["object"]);
+  {
+    ATM_PROFILE_SCOPE("ui.refresh.take");
+    doc_ = std::move(got["object"]);
+  }
   revision_ = got.value("revision", uint64_t(0));
   if (!assets_listed_) { // files imported earlier and not on the timeline are still the project's media
     assets_listed_ = true;
@@ -369,6 +372,7 @@ void App::refresh() {
       if (m->is_object())
         markers_.push_back({m.key(), m->value("name", std::string()), frames_of(*m, "t", rate_)});
   std::sort(markers_.begin(), markers_.end(), [](const MarkerUi &a, const MarkerUi &b) { return a.frame < b.frame; });
+  ATM_PROFILE_SCOPE("ui.refresh.tracks");
   if (seq.contains("track_order") && seq.contains("tracks"))
     for (const json &tid : seq["track_order"]) {
       const auto tit = seq["tracks"].find(tid.get<std::string>());
@@ -565,6 +569,7 @@ void App::refresh() {
   if (mark_out_ >= 0 && mark_out_ <= mark_in_)
     mark_out_ = -1;
 
+  ATM_PROFILE_SCOPE("ui.refresh.preview");
   if (auto comp = render::compile(doc_, {}, project_path_)) {
     audio_mixer_.set_composition(*comp);
     const auto [pw, ph] = preview_size();
