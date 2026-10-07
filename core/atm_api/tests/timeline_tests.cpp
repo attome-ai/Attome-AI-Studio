@@ -993,3 +993,46 @@ TEST_CASE("timeline.edit: a video clip's own sound is mixed and keeps its speed,
   f.ok(json::array({{{"op", "detach_audio"}, {"clip", a}}}));
   CHECK(loudness("two.wav") == Catch::Approx(with_sound).margin(0.02)); // the same sound, now from its own clip, once
 }
+
+TEST_CASE("timeline.edit: speed, reverse, freeze frame, split, move and delete work on a video that carries its own sound", "[timeline][media][parity]") {
+  Fixture f;
+  const std::string file = (f.dir / "v.mp4").string();
+  write_video(file, 4);
+  const auto seconds = [](const json &t) {
+    const std::string r = t.get<std::string>();
+    const size_t slash = r.find('/');
+    return slash == std::string::npos ? std::stod(r) : std::stod(r.substr(0, slash)) / std::stod(r.substr(slash + 1));
+  };
+  const json r = f.ok(json::array({{{"op", "add_clip"}, {"id", "$new:a"}, {"path", file}, {"at", "0s"}, {"duration", "4s"}}}));
+  const std::string a = r["id_map"]["$new:a"];
+  REQUIRE(f.tracks().size() == 1);
+
+  // Speed: one clip, its sound with it; 2x makes it half as long, the pitch setting is the clip's.
+  f.ok(json::array({{{"op", "set_speed"}, {"clip", a}, {"speed", 2.0}}}));
+  CHECK(f.get(a)["timing"]["speed"] == 2.0);
+  CHECK(seconds(f.get(a)["timing"]["duration"]) == Catch::Approx(2.0).margin(0.05));
+  f.ok(json::array({{{"op", "set_speed"}, {"clip", a}, {"speed", 1.0}}}));
+  CHECK(seconds(f.get(a)["timing"]["duration"]) == Catch::Approx(4.0).margin(0.05));
+  // Reverse and back.
+  f.ok(json::array({{{"op", "set_reverse"}, {"clip", a}, {"reverse", true}}}));
+  CHECK(f.get(a)["timing"]["reverse"] == true);
+  f.ok(json::array({{{"op", "set_reverse"}, {"clip", a}, {"reverse", false}}}));
+  CHECK_FALSE(f.get(a)["timing"].contains("reverse"));
+  // Split: two clips on the one track, both with the sound.
+  const json s = f.ok(json::array({{{"op", "split"}, {"id", "$new:s"}, {"clip", a}, {"at", "1s"}}}));
+  CHECK(f.tracks().size() == 1);
+  CHECK(f.tracks()[0]["clips"] == 2);
+  const std::string second = s["id_map"]["$new:s"];
+  CHECK_FALSE(f.get(second)["media_ref"].contains("stream")); // the second part still carries its sound
+  // Freeze a frame in the second part: it is cut, a still goes in between; the sound waits (a still has none).
+  const json fz = f.ok(json::array({{{"op", "freeze_frame"}, {"id", "$new:fz"}, {"clip", second}, {"at", "2s"}, {"duration", "1s"}}}));
+  CHECK(f.tracks().size() == 1);
+  CHECK(f.tracks()[0]["clips"] == 4);
+  CHECK(f.get(fz["id_map"]["$new:fz.freeze"])["media_ref"]["type"] == "image");
+  // Move and delete take the clip with its sound: there is nothing else to take.
+  f.ok(json::array({{{"op", "move"}, {"clip", a}, {"to", "10s"}}}));
+  CHECK(seconds(f.get(a)["timing"]["record_in"]) == Catch::Approx(10.0).margin(0.001));
+  f.ok(json::array({{{"op", "delete"}, {"clip", a}}}));
+  CHECK(f.tracks()[0]["clips"] == 3);
+  CHECK(f.engine.call("project.validate", {{"project", f.project}})->at("ok") == true);
+}
