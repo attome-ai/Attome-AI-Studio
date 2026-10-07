@@ -81,6 +81,37 @@ Span span_of(const json &clip) {
   return {field("record_in"), field("duration"), field("source_in")};
 }
 
+// The op as the builder reads it: the same reads as on a json, and it remembers which fields were looked at, so a field that nothing read
+// (a misspelt option, one that does not belong to this op) can be told to the caller instead of being ignored in silence.
+class OpView {
+public:
+  explicit OpView(const json &op) : op_(op) {}
+  bool contains(const std::string &key) const { return seen(key), op_.contains(key); }
+  json::const_iterator find(const std::string &key) const { return seen(key), op_.find(key); }
+  json::const_iterator end() const { return op_.end(); }
+  template <class T> auto value(const std::string &key, const T &fallback) const { return seen(key), op_.value(key, fallback); }
+  std::string value(const std::string &key, const char *fallback) const { return seen(key), op_.value(key, fallback); }
+  const json &operator[](const std::string &key) const { return seen(key), op_.at(key); }
+  // The whole op, for one that takes its parameters from any field (an effect's: "radius": 0.02 sits on the op): every field counts as read.
+  json take_all() const {
+    for (auto it = op_.begin(); it != op_.end(); ++it)
+      seen(it.key());
+    return op_;
+  }
+  std::vector<std::string> unread() const {
+    std::vector<std::string> out;
+    for (auto it = op_.begin(); it != op_.end(); ++it)
+      if (it.key() != "op" && it.key() != "id" && !read_.count(it.key()))
+        out.push_back(it.key());
+    return out;
+  }
+
+private:
+  void seen(const std::string &key) const { read_.insert(key); }
+  const json &op_;
+  mutable std::set<std::string> read_;
+};
+
 class Builder {
 public:
   Builder(const Document &doc, const json &op, size_t index, const Context &ctx)
@@ -160,7 +191,7 @@ public:
 
 private:
   const Document &doc_;
-  const json &op_;
+  OpView op_;
   size_t index_;
   const Context &ctx_;
   Built out_;
@@ -168,6 +199,13 @@ private:
   Result<Built> wrap(Result<void> r) {
     if (!r)
       return tl::unexpected(std::move(r.error()));
+    if (const auto ignored = op_.unread(); !ignored.empty()) {
+      std::string list;
+      for (const std::string &k : ignored)
+        list += (list.empty() ? "" : ", ") + k;
+      out_.notes.push_back("ops[" + std::to_string(index_) + "] (" + op_.value("op", "?") + ") did nothing with: " + list + ". " +
+                           "Those are not options of this op, or are spelt differently (guide.get topic \"timeline\" lists the options).");
+    }
     return std::move(out_);
   }
 
@@ -2150,7 +2188,7 @@ private:
     if (def->clip_only && ref->node->value("media_ref", json::object()).value("type", std::string()) == "adjustment")
       return fail("EFFECT_UNSUPPORTED", std::string("The ") + def->title + " effect works on a clip's own picture, not on an adjustment layer.",
                   "Add it to the clip that has the picture.");
-    json src = op_; // the parameters sit on the op itself ("radius": 0.02) or in "params"
+    json src = op_.take_all(); // the parameters sit on the op itself ("radius": 0.02) or in "params"
     if (const auto p = op_.find("params"); p != op_.end() && p->is_object())
       src.update(*p);
     json value = effect_object(*def, src);

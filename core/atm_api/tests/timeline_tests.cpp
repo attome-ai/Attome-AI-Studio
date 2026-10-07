@@ -1112,3 +1112,15 @@ TEST_CASE("timeline.edit: add_clip with fit fill covers the canvas, as fit_clip 
   CHECK(f.get(a)["transform"]["scale"] == f.get(b)["transform"]["scale"]); // one way or the other: the same
   CHECK(f.fail_rule(json::array({{{"op", "add_clip"}, {"path", file}, {"at", "9s"}, {"fit", "stretch"}}})) == "E_PARAM");
 }
+
+TEST_CASE("timeline.edit: a field the op did nothing with is told in notes, and a used one is not", "[timeline][parity]") {
+  Fixture f;
+  const json fine = f.ok(json::array({{{"op", "add_text"}, {"id", "$new:a"}, {"text", "One"}, {"duration", "2s"}, {"color", "#FFFFFF"}, {"size", 0.07}}}));
+  CHECK((!fine.contains("notes") || fine["notes"].empty()));
+  const json slip = f.ok(json::array({{{"op", "add_text"}, {"text", "Two"}, {"duration", "2s"}, {"at", "3s"}, {"colour", "#FFFFFF"}, {"sizee", 0.07}}}));
+  REQUIRE(slip.contains("notes"));
+  const std::string note = slip["notes"].dump();
+  CHECK(note.find("colour") != std::string::npos);
+  CHECK(note.find("sizee") != std::string::npos);
+  CHECK(note.find("duration") == std::string::npos); // used fields are not named
+}
