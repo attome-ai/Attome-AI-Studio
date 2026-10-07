@@ -511,6 +511,7 @@ private:
   std::map<std::string, std::vector<float>> peaks_;    // the waveform of a sound file, by path: a value per 20 ms
   std::vector<std::string> media_paths_;
   std::set<std::string> opened_cards_; // "<clip id>:fade" and "<clip id>:transition": cards the user added before anything is set
+  bool assets_listed_ = false; // the project's own imported files are put in the media list once, when it is opened
   std::set<std::string> audio_only_; // media files without a picture
   char media_filter_[128] = {};
   int media_kind_ = 0; // the Media panel's filter: 0 all, 1 video, 2 audio, 3 pictures

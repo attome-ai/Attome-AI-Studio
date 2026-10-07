@@ -296,6 +296,9 @@ std::string App::timecode(int64_t frames) const {
 // ---- project mirror ------------------------------------------------------------------------------------------
 
 void App::open_project(const std::string &path) {
+  assets_listed_ = false;
+  media_paths_.clear(); // the media list belongs to the project that is open
+  audio_only_.clear();
   json info;
   RpcError error;
   if (!client_.call("project.inspect", {{"project", path}}, info, error)) {
@@ -332,6 +335,18 @@ void App::refresh() {
     return;
   doc_ = std::move(got["object"]);
   revision_ = got.value("revision", uint64_t(0));
+  if (!assets_listed_) { // files imported earlier and not on the timeline are still the project's media
+    assets_listed_ = true;
+    if (const auto as = doc_.find("assets"); as != doc_.end() && as->is_object())
+      for (const auto &[id, a] : as->items()) {
+        const std::string path = a.value("path", "");
+        if (path.empty() || std::find(media_paths_.begin(), media_paths_.end(), path) != media_paths_.end())
+          continue;
+        media_paths_.push_back(path);
+        if (!a.value("has_video", false))
+          audio_only_.insert(path);
+      }
+  }
   if (rpc("history.list", {{"project", project_path_}, {"limit", 200}}, history_))
     note_save_state(history_);
 
@@ -834,7 +849,7 @@ void App::import_files(const std::vector<std::string> &paths, const std::string 
       media_paths_.push_back(path);
     if (!has_video)
       audio_only_.insert(path);
-    if (has_video && !info.value("image", false) && total_frames_ == 0 && !canvas_set) { // a logo is no canvas
+    if (has_video && !info.value("image", false) && total_frames_ == 0 && !canvas_set && canvas_w_ == 1920 && canvas_h_ == 1080) { // a logo is no canvas; a shape that was chosen stays
       ops.push_back({{"op", "set_property"}, {"target", seq_id_}, {"path", "canvas.width"}, {"value", info.value("width", 1920)}});
       ops.push_back({{"op", "set_property"}, {"target", seq_id_}, {"path", "canvas.height"}, {"value", info.value("height", 1080)}});
       canvas_set = true;
@@ -1446,6 +1461,8 @@ App::DropPlan App::plan_drop(const std::string &payload, int row, int64_t frame)
   p.row = std::clamp(row, 0, rows);
   const TrackUi *track = p.row < rows ? &tracks_[size_t(p.row)] : nullptr;
   frame = std::max<int64_t>(0, frame);
+  if (total_frames_ == 0 && (p.kind == "media" || p.kind == "lib")) // the first clip of an empty timeline starts at the beginning, wherever it is dropped
+    frame = 0;
   const int64_t three_seconds = std::max<int64_t>(1, std::llround(3.0 * fps()));
   if (p.kind == "tr") { // a transition: it goes on the cut between two clips that touch, the nearest to the pointer
     static const std::pair<const char *, const char *> kNames[] = {{"dissolve", "Dissolve"}, {"wipe", "Wipe"}, {"push", "Push"}, {"slide", "Slide"},
@@ -7433,6 +7450,10 @@ void App::draw_timeline() {
       const float y = origin.y + ruler_h + float(i) * row_h;
       dl->AddRectFilled(ImVec2(win.x + header_w, y), ImVec2(win.x + view_w, y + row_h), i % 2 ? hex(look::bg) : hex(0x10131b));
       dl->AddLine(ImVec2(win.x + header_w, y + row_h), ImVec2(win.x + view_w, y + row_h), hex(look::line, 120));
+      ImGui::SetCursorScreenPos(ImVec2(win.x + header_w, y)); // marked for the test driver: where a drop makes the first track
+      ImGui::SetNextItemAllowOverlap();
+      ImGui::InvisibleButton(i ? "##empty_sound_lane" : "##empty_picture_lane", ImVec2(std::max(1.0f, view_w - header_w), row_h));
+      ui_mark(i ? "lane:Audio" : "lane:Video");
     }
     if (!ImGui::GetDragDropPayload()) { // the ghost of a card being dragged says it better
       const float y = origin.y + ruler_h;
