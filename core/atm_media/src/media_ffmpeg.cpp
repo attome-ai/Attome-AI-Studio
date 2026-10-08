@@ -233,6 +233,20 @@ struct VideoReader::Impl {
 
 VideoReader::~VideoReader() = default;
 
+// The FFmpeg backend does not read compressed video for another decoder yet.
+struct VideoStream::Impl {
+  std::string codec;
+  std::vector<uint8_t> header;
+};
+VideoStream::~VideoStream() = default;
+Result<std::unique_ptr<VideoStream>> VideoStream::open(const std::string &) {
+  return fail(ErrorCode::Unsupported, "M_NO_STREAM", "This build reads compressed video only with Media Foundation.");
+}
+const std::string &VideoStream::codec() const { return impl_->codec; }
+const std::vector<uint8_t> &VideoStream::sequence_header() const { return impl_->header; }
+Result<bool> VideoStream::next(Packet &) { return fail(ErrorCode::Unsupported, "M_NO_STREAM", "Not available in this build."); }
+Result<void> VideoStream::seek(int64_t) { return fail(ErrorCode::Unsupported, "M_NO_STREAM", "Not available in this build."); }
+
 Result<std::unique_ptr<VideoReader>> VideoReader::open(const std::string &path, int box_width, int box_height) {
   ATM_PROFILE_SCOPE("media.open");
   auto impl = std::make_unique<Impl>();

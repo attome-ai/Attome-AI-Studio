@@ -64,6 +64,32 @@ private:
   std::unique_ptr<Impl> impl_;
 };
 
+// The compressed video of a file, sample by sample, for a decoder of our own (Vulkan Video): the container is read, the
+// video is not decoded. H.264 samples come as Annex B (start codes), with the parameter sets of the container in
+// sequence_header(); a sample is one access unit (one picture), in decoding order.
+struct Packet {
+  std::vector<uint8_t> data;
+  int64_t pts = 0;  // presentation time, 100 ns units
+  bool key = false; // a point decoding can start from (an IDR picture)
+};
+class VideoStream {
+public:
+  static Result<std::unique_ptr<VideoStream>> open(const std::string &path);
+  ~VideoStream();
+  const std::string &codec() const;                   // "h264", "hevc", or the container's name for another
+  const std::vector<uint8_t> &sequence_header() const; // Annex B: the SPS and PPS before the first picture
+  // The next sample in decoding order; false at the end.
+  Result<bool> next(Packet &packet);
+  // Back to the last key sample at or before `time` (the next sample read is it).
+  Result<void> seek(int64_t time_hns);
+
+  struct Impl;
+
+private:
+  VideoStream() = default;
+  std::unique_ptr<Impl> impl_;
+};
+
 // A still picture (PNG, JPEG, BMP, GIF's first frame, TGA) fitted inside box_width x box_height like VideoReader
 // frames (0 = native size). Transparency is kept as an alpha plane; colours under fully transparent pixels are filled
 // from their neighbours, so scaling the picture up leaves no dark fringe.
@@ -88,6 +114,7 @@ struct EncodeSettings {
   int quality_vs_speed = 0; // 0 = fastest … 100 = best quality per bit
   // What PipeEncoder writes (the OS encoder always makes H.264): "prores" or "dnxhr", its profile ("" = hq) and the FFmpeg program to use ("" = look for one).
   std::string codec = "h264", profile, ffmpeg;
+  int b_frames = 0; // H.264: B-frames between reference frames (Windows' own encoder makes them; the GPU encoders ignore the count)
 };
 
 // An FFmpeg program found on this machine, the user's own: Attome links none and ships none. `license` is that build's: lgpl, gpl, nonfree or unknown;

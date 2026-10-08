@@ -22,6 +22,17 @@ Encoder::~Encoder() = default;
 Result<MediaInfo> probe_av(const std::string &) { return unsupported("Media decode"); }
 Result<std::unique_ptr<VideoReader>> VideoReader::open(const std::string &, int, int) { return unsupported("Media decode"); }
 Result<FrameView> VideoReader::frame_at(int64_t) { return unsupported("Media decode"); }
+
+struct VideoStream::Impl {
+  std::string codec;
+  std::vector<uint8_t> header;
+};
+VideoStream::~VideoStream() = default;
+Result<std::unique_ptr<VideoStream>> VideoStream::open(const std::string &) { return unsupported("Reading compressed video"); }
+const std::string &VideoStream::codec() const { return impl_->codec; }
+const std::vector<uint8_t> &VideoStream::sequence_header() const { return impl_->header; }
+Result<bool> VideoStream::next(Packet &) { return unsupported("Reading compressed video"); }
+Result<void> VideoStream::seek(int64_t) { return unsupported("Reading compressed video"); }
 Result<std::vector<float>> read_audio(const std::string &, int64_t, int64_t) { return unsupported("Media decode"); }
 Result<std::unique_ptr<Encoder>> Encoder::create(const EncodeSettings &) { return unsupported("Media encode"); }
 Result<void> Encoder::video(const uint8_t *, int64_t) { return unsupported("Media encode"); }

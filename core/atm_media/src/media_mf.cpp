@@ -348,6 +348,83 @@ Result<FrameView> VideoReader::frame_at(int64_t time) {
   return m.view;
 }
 
+// ---- compressed video, for a decoder of our own -----------------------------------------------------------------
+
+struct VideoStream::Impl {
+  std::string path, codec;
+  std::vector<uint8_t> header;
+  ComPtr<IMFSourceReader> reader;
+};
+
+VideoStream::~VideoStream() = default;
+
+Result<std::unique_ptr<VideoStream>> VideoStream::open(const std::string &path) {
+  ATM_PROFILE_SCOPE("stream.open");
+  ATM_TRY(ComPtr<IMFSourceReader> reader, open_reader(path, false));
+  const DWORD video = DWORD(MF_SOURCE_READER_FIRST_VIDEO_STREAM);
+  ComPtr<IMFMediaType> native;
+  HRESULT hr = reader->GetNativeMediaType(video, 0, &native);
+  if (FAILED(hr))
+    return media_error(ErrorCode::MediaDecodeFailed, "M_NO_VIDEO", "\"" + path + "\" has no video.", hr);
+  reader->SetStreamSelection(DWORD(MF_SOURCE_READER_ALL_STREAMS), FALSE);
+  reader->SetStreamSelection(video, TRUE);
+  hr = reader->SetCurrentMediaType(video, nullptr, native.Get()); // as stored: no decoder in between
+  if (FAILED(hr))
+    return open_error(path, hr);
+  GUID subtype{};
+  native->GetGUID(MF_MT_SUBTYPE, &subtype);
+  std::unique_ptr<VideoStream> out(new VideoStream);
+  out->impl_ = std::make_unique<Impl>();
+  Impl &m = *out->impl_;
+  m.path = path;
+  m.reader = std::move(reader);
+  m.codec = subtype == MFVideoFormat_H264 ? "h264" : subtype == MFVideoFormat_HEVC ? "hevc" : "other";
+  UINT32 size = 0;
+  if (SUCCEEDED(native->GetBlobSize(MF_MT_MPEG_SEQUENCE_HEADER, &size)) && size > 0) {
+    m.header.resize(size);
+    native->GetBlob(MF_MT_MPEG_SEQUENCE_HEADER, m.header.data(), size, nullptr);
+  }
+  return out;
+}
+
+const std::string &VideoStream::codec() const { return impl_->codec; }
+const std::vector<uint8_t> &VideoStream::sequence_header() const { return impl_->header; }
+
+Result<bool> VideoStream::next(Packet &packet) {
+  ATM_PROFILE_SCOPE("stream.read");
+  Impl &m = *impl_;
+  for (;;) {
+    DWORD flags = 0;
+    LONGLONG ts = 0;
+    ComPtr<IMFSample> sample;
+    const HRESULT hr = m.reader->ReadSample(DWORD(MF_SOURCE_READER_FIRST_VIDEO_STREAM), 0, nullptr, &flags, &ts, &sample);
+    if (FAILED(hr))
+      return media_error(ErrorCode::MediaDecodeFailed, "M_READ", "Reading \"" + m.path + "\" failed.", hr);
+    if (flags & MF_SOURCE_READERF_ENDOFSTREAM)
+      return false;
+    if (!sample)
+      continue;
+    ComPtr<IMFMediaBuffer> buffer;
+    if (FAILED(sample->ConvertToContiguousBuffer(&buffer)))
+      continue;
+    BYTE *data = nullptr;
+    DWORD length = 0;
+    if (FAILED(buffer->Lock(&data, nullptr, &length)))
+      continue;
+    packet.data.assign(data, data + length);
+    buffer->Unlock();
+    packet.pts = ts;
+    packet.key = MFGetAttributeUINT32(sample.Get(), MFSampleExtension_CleanPoint, FALSE) != 0;
+    return true;
+  }
+}
+
+Result<void> VideoStream::seek(int64_t time) {
+  if (const HRESULT hr = ::atm::media::seek(impl_->reader.Get(), std::max<int64_t>(0, time)); FAILED(hr))
+    return media_error(ErrorCode::MediaDecodeFailed, "M_SEEK", "Seeking in \"" + impl_->path + "\" failed.", hr);
+  return {};
+}
+
 // ---- audio ---------------------------------------------------------------------------------------------------
 
 Result<std::vector<float>> read_audio(const std::string &path, int64_t start, int64_t duration) {
@@ -479,6 +556,8 @@ Result<std::unique_ptr<Encoder>> Encoder::create(const EncodeSettings &requested
   m.settings = s;
   HRESULT hr = E_FAIL;
   for (const BOOL hardware : {TRUE, FALSE}) { // GPU encoder first, the software encoder when there is none
+    if (hardware && s.b_frames > 0)
+      continue; // the GPU encoders ignore the B-frame count
     m.writer.Reset();
     ComPtr<IMFAttributes> attrs;
     MFCreateAttributes(&attrs, 2);
@@ -496,6 +575,8 @@ Result<std::unique_ptr<Encoder>> Encoder::create(const EncodeSettings &requested
     vout->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_H264);
     vout->SetUINT32(MF_MT_AVG_BITRATE, UINT32(s.bitrate));
     vout->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+    if (s.b_frames > 0) // Baseline, the default, has no B-frames
+      vout->SetUINT32(MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Main);
     tag_bt709(vout.Get());
     MFSetAttributeSize(vout.Get(), MF_MT_FRAME_SIZE, UINT32(s.width), UINT32(s.height));
     MFSetAttributeRatio(vout.Get(), MF_MT_FRAME_RATE, UINT32(s.rate_num), UINT32(s.rate_den));
@@ -514,8 +595,10 @@ Result<std::unique_ptr<Encoder>> Encoder::create(const EncodeSettings &requested
     MFSetAttributeRatio(vin.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
     // Ask the encoder for its fastest setting; at export bitrates the quality difference is small.
     ComPtr<IMFAttributes> params;
-    MFCreateAttributes(&params, 2);
+    MFCreateAttributes(&params, 3);
     params->SetUINT32(CODECAPI_AVEncCommonQualityVsSpeed, UINT32(s.quality_vs_speed));
+    if (s.b_frames > 0)
+      params->SetUINT32(CODECAPI_AVEncMPVDefaultBPictureCount, UINT32(s.b_frames));
     params->SetUINT32(CODECAPI_AVEncMPVGOPSize, UINT32(std::max<int64_t>(1, s.rate_num / s.rate_den) * 2));
     hr = m.writer->SetInputMediaType(m.video_stream, vin.Get(), params.Get());
     if (FAILED(hr))
