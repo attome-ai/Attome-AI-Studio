@@ -2828,14 +2828,15 @@ TEST_CASE("render: with a GPU, clips and adjustment layers with effects come out
                       {"fx_5", fx("film_grain", {{"strength", 0.4}, {"size", 2.0}})},
                       {"fx_6", fx("lut", {{"file", cube}, {"strength", 0.8}})}};
   // canvas, clip transform, clip effects, adjustment layer effects (null: none)
-  const auto frame_of = [&](int cw, int ch, const json &transform, const json &clip_fx, const json &adjust_fx, atm::gpu::Context *device, int64_t *runs) {
+  const auto frame_of = [&](int cw, int ch, const json &transform, const json &clip_fx, const json &adjust_fx, atm::gpu::Context *device, int64_t *runs,
+                            double adjust_amount = 1.0) {
     json clips = {{"clp_a", {{"timing", {{"record_in", "0"}, {"duration", "1"}, {"source_in", "0"}}}, {"media_ref", {{"type", "file"}, {"path", video}, {"stream", "video"}}},
                              {"transform", transform}, {"effects", clip_fx}}}};
     json tracks = {{"trk_a", {{"clips", clips}}}};
     json order = json::array({"trk_a"});
     if (!adjust_fx.is_null()) {
       tracks["trk_fx"] = {{"clips", {{"clp_fx", {{"timing", {{"record_in", "0"}, {"duration", "1"}, {"source_in", "0"}}}, {"media_ref", {{"type", "adjustment"}}},
-                                                  {"effects", adjust_fx}, {"transform", {{"opacity", 1.0}}}}}}}};
+                                                  {"effects", adjust_fx}, {"transform", {{"opacity", adjust_amount}}}}}}}};
       order.push_back("trk_fx");
     }
     const json doc = {{"sequences", {{"seq_1", {{"rate", "30"}, {"canvas", {{"width", cw}, {"height", ch}}}, {"track_order", order}, {"tracks", tracks}}}}}, {"sequence_order", {"seq_1"}}};
@@ -2869,6 +2870,8 @@ TEST_CASE("render: with a GPU, clips and adjustment layers with effects come out
   // An adjustment layer over everything.
   const json plain = {{"opacity", 1.0}};
   CHECK(frame_of(320, 240, plain, json::object(), chain, nullptr, nullptr) == frame_of(320, 240, plain, json::object(), chain, gpu->get(), &runs));
+  CHECK(runs == 1);
+  CHECK(frame_of(320, 240, plain, json::object(), chain, nullptr, nullptr, 0.6) == frame_of(320, 240, plain, json::object(), chain, gpu->get(), &runs, 0.6));
   CHECK(runs == 1);
   // Clips that do not fill the frame (their soft edges carried by their coverage): half size, moved and turned, and over a
   // clip below (so a wrong edge would show), each effect alone and the whole chain.

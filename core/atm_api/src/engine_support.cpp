@@ -167,10 +167,22 @@ void run_extract(const std::shared_ptr<Job> &job, render::Composition comp, std:
 
 // An image sequence: each frame of the range as a numbered PNG in `dir` (name_000000.png, numbered by the frame of the sequence). One thread renders
 // and writes, a frame at a time; the job can be cancelled between frames.
-std::unique_ptr<gpu::Context> job_gpu(Job &job, int device) {
-  std::unique_ptr<gpu::Context> ctx;
+GpuLease job_gpu(Job &job, int device, const std::shared_ptr<GpuPool> &pool) {
+  GpuLease lease;
+  lease.pool = pool;
+  lease.device = device;
+  std::unique_ptr<gpu::Context> &ctx = lease.ctx;
   std::string on = "CPU";
-  if (device >= 0) {
+  if (device >= 0 && pool) {
+    std::lock_guard lock(pool->mutex);
+    if (auto &spare = pool->spare[device]; !spare.empty()) {
+      ctx = std::move(spare.back());
+      spare.pop_back();
+    }
+  }
+  if (ctx) {
+    on = ctx->info().device;
+  } else if (device >= 0) {
     if (auto made = gpu::Context::create(device)) {
       ctx = std::move(*made);
       on = ctx->info().device;
@@ -181,11 +193,11 @@ std::unique_ptr<gpu::Context> job_gpu(Job &job, int device) {
   }
   std::lock_guard lock(job.mutex);
   job.rendered_on = on;
-  return ctx;
+  return lease;
 }
 
 void run_png_sequence(const std::shared_ptr<Job> &job, render::Composition comp, std::string dir, std::string name, int64_t first, int64_t last, int width, int height,
-                      int gpu_device) {
+                      int gpu_device, std::shared_ptr<GpuPool> pool) {
   prof::set_thread_name("atm-render-0");
   const auto finish = [&](Job::State state, const Error *error = nullptr) {
     std::lock_guard lock(job->mutex);
@@ -194,7 +206,7 @@ void run_png_sequence(const std::shared_ptr<Job> &job, render::Composition comp,
     job->seconds = std::chrono::duration<double>(Clock::now() - job->started).count();
     job->state.store(state);
   };
-  const std::unique_ptr<gpu::Context> gpu = job_gpu(*job, gpu_device);
+  const GpuLease gpu = job_gpu(*job, gpu_device, pool);
   render::Renderer renderer(std::move(comp), width, height);
   renderer.use_gpu(gpu.get());
   const int w = renderer.width() & ~1, h = renderer.height() & ~1;
@@ -242,7 +254,8 @@ Result<Sink> make_sink(const media::EncodeSettings &settings) {
 }
 } // namespace
 
-void run_export(const std::shared_ptr<Job> &job, render::Composition comp, media::EncodeSettings settings, int64_t first, int64_t last, int gpu_device) {
+void run_export(const std::shared_ptr<Job> &job, render::Composition comp, media::EncodeSettings settings, int64_t first, int64_t last, int gpu_device,
+                std::shared_ptr<GpuPool> pool) {
   prof::set_thread_name("atm-render-0");
   const auto finish = [&](Job::State state, const Error *error = nullptr) {
     std::lock_guard lock(job->mutex);
@@ -251,7 +264,7 @@ void run_export(const std::shared_ptr<Job> &job, render::Composition comp, media
     job->seconds = std::chrono::duration<double>(Clock::now() - job->started).count();
     job->state.store(state);
   };
-  const std::unique_ptr<gpu::Context> gpu = job_gpu(*job, gpu_device);
+  const GpuLease gpu = job_gpu(*job, gpu_device, pool);
   render::Renderer renderer(comp, settings.width, settings.height);
   renderer.use_gpu(gpu.get());
   settings.width = renderer.width();

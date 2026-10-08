@@ -195,18 +195,42 @@ void run_extract(const std::shared_ptr<Job> &job, render::Composition comp, std:
 
 // An image sequence: each frame of the range as a numbered PNG in `dir` (name_000000.png, numbered by the frame of the sequence). One thread renders
 // and writes, a frame at a time; the job can be cancelled between frames.
+// GPU devices that finished render jobs left behind, kept for the next job on the same device: starting one takes ~75 ms.
+// A device is used by one job at a time (each job runs on its own thread); a job takes one from here or makes one, and
+// gives it back when it ends (GpuLease).
+struct GpuPool {
+  std::mutex mutex;
+  std::map<int, std::vector<std::unique_ptr<gpu::Context>>> spare;
+};
+struct GpuLease {
+  std::shared_ptr<GpuPool> pool;
+  int device = -1;
+  std::unique_ptr<gpu::Context> ctx;
+  gpu::Context *get() const { return ctx.get(); }
+  GpuLease() = default;
+  GpuLease(GpuLease &&) = default; // a moved-from lease holds nothing and gives nothing back
+  GpuLease &operator=(GpuLease &&) = delete;
+  GpuLease(const GpuLease &) = delete;
+  ~GpuLease() {
+    if (ctx && pool) {
+      std::lock_guard lock(pool->mutex);
+      pool->spare[device].push_back(std::move(ctx));
+    }
+  }
+};
+// The GPU a render job uses, or none: `device` is an index from gpu::list_devices, -1 for the CPU. Records on the job where
+// its effects run, and why the GPU was not used when it could not be started.
+GpuLease job_gpu(Job &job, int device, const std::shared_ptr<GpuPool> &pool);
 void run_png_sequence(const std::shared_ptr<Job> &job, render::Composition comp, std::string dir, std::string name, int64_t first, int64_t last, int width, int height,
-                      int gpu_device);
+                      int gpu_device, std::shared_ptr<GpuPool> pool);
 
 
 
 // The export runs as a pipeline: this thread renders frames into a few slots while "atm-encode" converts and
 // encodes the previous ones, so the two never wait for each other. The encoder starts (hardware set-up, about half a
 // second) and the audio is mixed while the first frames render.
-void run_export(const std::shared_ptr<Job> &job, render::Composition comp, media::EncodeSettings settings, int64_t first, int64_t last, int gpu_device);
-// The GPU a render job uses (its own: a job runs on its own thread), or none: `device` is an index from gpu::list_devices, -1
-// for the CPU. Records on the job where its effects run, and why the GPU was not used when it could not be started.
-std::unique_ptr<gpu::Context> job_gpu(Job &job, int device);
+void run_export(const std::shared_ptr<Job> &job, render::Composition comp, media::EncodeSettings settings, int64_t first, int64_t last, int gpu_device,
+                std::shared_ptr<GpuPool> pool);
 
 struct Engine::Impl {
   using Handler = Result<json> (Impl::*)(const json &);
@@ -316,6 +340,7 @@ struct Engine::Impl {
   };
   // The GPU of the see.* pictures (made on the engine's own thread), kept between calls; for the device chosen now.
   std::unique_ptr<gpu::Context> still_gpu;
+  std::shared_ptr<GpuPool> gpu_pool = std::make_shared<GpuPool>(); // the render jobs' devices, kept between jobs
   int still_gpu_device = -2;
   gpu::Context *gpu_for_stills();
   // The GPU a render of `comp` uses: the device chosen now, or -1 (the CPU) when nothing in it has GPU work, so starting a

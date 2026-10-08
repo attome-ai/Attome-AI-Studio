@@ -272,7 +272,9 @@ struct Context::Impl {
     ATM_CHECK(ensure(c, size, kWork, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT));
     ATM_CHECK(ensure(d, size, kWork, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT));
     // The staging memory holds a picture and a coverage plane (at most another two thirds of a picture).
-    ATM_CHECK(ensure(upload, size * 2, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT));
+    // Cached, so a picture can be drawn straight into it (drawing reads what it wrote; uncached memory is slow to read).
+    ATM_CHECK(ensure(upload, size * 2, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                     VK_MEMORY_PROPERTY_HOST_CACHED_BIT));
     // Read back by the CPU: cached memory is many times faster to read than write-combined.
     ATM_CHECK(ensure(download, size * 2, VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                      VK_MEMORY_PROPERTY_HOST_CACHED_BIT));
@@ -585,7 +587,15 @@ Result<void> Context::blur_nv12(uint8_t *nv12, int W, int H, float sigma, Timing
   return run_effects(nv12, W, H, {blur}, timing);
 }
 
-Result<void> Context::run_effects(uint8_t *nv12, int W, int H, const std::vector<Effect> &chain, Timing *timing, uint8_t *cover) {
+uint8_t *Context::staging(int W, int H) {
+  Impl &m = *impl_;
+  const uint32_t P = (uint32_t(W) + 3u) & ~3u, uh = uint32_t(H);
+  if (!m.ensure_buffers(VkDeviceSize(P) * (uh + uh / 2), 0, 0))
+    return nullptr;
+  return static_cast<uint8_t *>(m.upload.mapped);
+}
+
+Result<void> Context::run_effects(uint8_t *nv12, int W, int H, const std::vector<Effect> &chain, Timing *timing, uint8_t *cover, uint8_t *result) {
   ATM_PROFILE_SCOPE("gpu.effects");
   Impl &m = *impl_;
   const auto t0 = Clock::now();
@@ -619,7 +629,10 @@ Result<void> Context::run_effects(uint8_t *nv12, int W, int H, const std::vector
     if (!chain[i].table.empty())
       std::memcpy(static_cast<uint32_t *>(m.tables.mapped) + table_at[i], chain[i].table.data(), chain[i].table.size() * 4);
   auto t = Clock::now();
-  std::memcpy(m.upload.mapped, nv12, size);
+  if (nv12 != m.upload.mapped) { // drawn elsewhere: copied in
+    ATM_PROFILE_SCOPE("gpu.to_staging");
+    std::memcpy(m.upload.mapped, nv12, size);
+  }
   if (cover)
     std::memcpy(static_cast<uint8_t *>(m.upload.mapped) + size, cover, luma);
   const double upload_us = us_since(t);
@@ -711,12 +724,18 @@ Result<void> Context::run_effects(uint8_t *nv12, int W, int H, const std::vector
   si.pCommandBufferInfos = &cbi;
   VK_TRY("vkResetFences", vkResetFences(m.device, 1, &m.fence));
   VK_TRY("vkQueueSubmit2", vkQueueSubmit2(m.queue, 1, &si, m.fence));
-  VK_TRY("vkWaitForFences", vkWaitForFences(m.device, 1, &m.fence, VK_TRUE, UINT64_MAX));
+  {
+    ATM_PROFILE_SCOPE("gpu.wait");
+    VK_TRY("vkWaitForFences", vkWaitForFences(m.device, 1, &m.fence, VK_TRUE, UINT64_MAX));
+  }
   if (send_lut)
     m.lut_loaded = lut_effect->lut_id;
 
   t = Clock::now();
-  std::memcpy(nv12, m.download.mapped, size);
+  {
+    ATM_PROFILE_SCOPE("gpu.from_staging");
+    std::memcpy(result ? result : nv12, m.download.mapped, size);
+  }
   if (cover)
     std::memcpy(cover, static_cast<const uint8_t *>(m.download.mapped) + size, luma);
   const double download_us = us_since(t);

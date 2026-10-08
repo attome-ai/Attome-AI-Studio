@@ -1719,11 +1719,30 @@ void Renderer::draw(const Layer &l, int64_t frame, uint8_t *out, bool &cleared, 
       media::fill_black(out, width_, height_);
     cleared = true;
     const size_t size = media::nv12_size(width_, height_);
-    adjust_.assign(out, out + size);
-    if (!gpu_ || !run_on_gpu(l, frame, adjust_.data()))
-      for (const Effect &e : l.effects)
-        apply_effect(e.kind, effect_values(l, e, comp_, frame), adjust_.data(), width_, height_, scratch_, frame, lut_for(e));
-    put_rows(out, pitch, adjust_.data(), pitch, height_ * 3 / 2, width_, int(p.opacity * 256.0f + 0.5f));
+    const int alpha = int(p.opacity * 256.0f + 0.5f);
+    // On the GPU: the picture so far goes straight into its staging memory, and at full amount the result comes straight
+    // back into the frame (the mix by the amount would be a copy); below full it comes back beside it and is mixed.
+    if (gpu_) {
+      std::vector<gpu::Effect> chain;
+      if (gpu_chain(l, frame, chain))
+        if (uint8_t *staged = gpu_->staging(width_, height_)) {
+          std::memcpy(staged, out, size);
+          if (alpha >= 256) {
+            if (run_chain_on_gpu(chain, staged, nullptr, out))
+              return;
+          } else {
+            adjust_.resize(size);
+            if (run_chain_on_gpu(chain, staged, nullptr, adjust_.data())) {
+              put_rows(out, pitch, adjust_.data(), pitch, height_ * 3 / 2, width_, alpha);
+              return;
+            }
+          }
+        }
+    }
+    adjust_.assign(out, out + size); // the CPU (the GPU stopped, or an effect has no GPU version: the frame is as it was)
+    for (const Effect &e : l.effects)
+      apply_effect(e.kind, effect_values(l, e, comp_, frame), adjust_.data(), width_, height_, scratch_, frame, lut_for(e));
+    put_rows(out, pitch, adjust_.data(), pitch, height_ * 3 / 2, width_, alpha);
     return;
   }
   if (l.is_text) {
@@ -1936,9 +1955,14 @@ void Renderer::draw_isolated(const Layer &l, int64_t frame, uint8_t *out, bool &
   const int W = width_, H = height_;
   const size_t luma = size_t(W) * size_t(H), size = media::nv12_size(W, H);
   over_black_.resize(size);
-  media::fill_black(over_black_.data(), W, H);
+  // When every effect has a GPU version, the clip is drawn straight into the GPU's staging memory: no copy on the way in.
+  std::vector<gpu::Effect> chain;
+  const bool on_gpu = gpu_ && gpu_chain(l, frame, chain);
+  uint8_t *staged = on_gpu ? gpu_->staging(W, H) : nullptr;
+  uint8_t *clip = staged ? staged : over_black_.data(); // the clip drawn on its own, over black
+  media::fill_black(clip, W, H);
   bool drawn = true;
-  draw(l, frame, over_black_.data(), drawn, used, true);
+  draw(l, frame, clip, drawn, used, true);
   // A clip that covers the whole canvas has coverage 255 everywhere: the second drawing, the difference, the coverage's own blur and the
   // masking of a colour change would all come to nothing, and are left out (the result is the same, byte for byte).
   bool everywhere = drew_everywhere_ && !g_always_measure_coverage.load();
@@ -1953,14 +1977,22 @@ void Renderer::draw_isolated(const Layer &l, int64_t frame, uint8_t *out, bool &
     // Coverage 0..255 per luma pixel: 235 - 16 = 219 is the full difference between the backgrounds.
     parallel_for(H, 16, [&](int64_t first, int64_t last) {
       for (size_t i = size_t(first) * size_t(W); i < size_t(last) * size_t(W); ++i) {
-        const int diff = int(over_white_[i]) - int(over_black_[i]);
+        const int diff = int(over_white_[i]) - int(clip[i]);
         cover_[i] = uint8_t(std::clamp(255 - diff * 255 / 219, 0, 255));
       }
     });
   }
   // Effects that all have a GPU version: the whole chain on the GPU (the same bytes). A clip that fills the frame needs no
-  // coverage; any other clip takes its coverage along, and gets it back blurred.
-  const bool done_on_gpu = gpu_ && run_on_gpu(l, frame, over_black_.data(), everywhere ? nullptr : cover_.data());
+  // coverage; any other clip takes its coverage along, and gets it back blurred. A clip that covers the frame at full
+  // opacity comes back straight into the frame (it is all that shows there).
+  const int full = int(std::lround(opacity * 255.0f));
+  if (on_gpu && everywhere && full == 255 && run_chain_on_gpu(chain, clip, nullptr, out)) {
+    cleared = true;
+    return;
+  }
+  const bool done_on_gpu = on_gpu && run_chain_on_gpu(chain, clip, everywhere ? nullptr : cover_.data(), over_black_.data());
+  if (!done_on_gpu && clip != over_black_.data())
+    std::memcpy(over_black_.data(), clip, size); // the GPU stopped: the CPU goes on from the drawn clip
   for (const Effect &e : l.effects) {
     if (done_on_gpu)
       break;
@@ -2096,8 +2128,14 @@ bool Renderer::run_on_gpu(const Layer &l, int64_t frame, uint8_t *nv12, uint8_t 
   std::vector<gpu::Effect> chain;
   if (!gpu_chain(l, frame, chain))
     return false;
+  return run_chain_on_gpu(chain, nv12, cover, nullptr);
+}
+
+bool Renderer::run_chain_on_gpu(const std::vector<gpu::Effect> &chain, uint8_t *nv12, uint8_t *cover, uint8_t *result) {
+  if (!gpu_)
+    return false;
   ATM_PROFILE_SCOPE("composite.gpu_effects");
-  if (auto ran = gpu_->run_effects(nv12, width_, height_, chain, nullptr, cover); !ran) {
+  if (auto ran = gpu_->run_effects(nv12, width_, height_, chain, nullptr, cover, result); !ran) {
     if (warning_.empty())
       warning_ = "The GPU stopped (" + ran.error().message + "): the rest is made on the CPU.";
     gpu_ = nullptr; // the CPU from now on; the picture was not changed by a failed run

@@ -77,7 +77,11 @@ public:
   // this its coverage: a blur blurs the coverage too, and after each colour effect the change is scaled back by it, as the
   // CPU does; the coverage comes back as well.
   Result<void> run_effects(uint8_t *nv12, int width, int height, const std::vector<Effect> &chain, Timing *timing = nullptr,
-                           uint8_t *cover = nullptr);
+                           uint8_t *cover = nullptr, uint8_t *result = nullptr);
+  // The memory the next run_effects reads its picture from (packed NV12, width x height), mapped for the CPU and cached:
+  // a picture drawn straight into it (and passed as run_effects' nv12) is not copied on its way in. `result` (when given)
+  // is where the picture comes back to, instead of nv12. Null when the buffers cannot be made.
+  uint8_t *staging(int width, int height);
 
   struct Impl;
 

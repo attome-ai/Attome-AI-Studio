@@ -70,7 +70,7 @@ Result<json> Engine::Impl::render_sequence(const json &params) {
     jobs[job->id] = job;
     const std::string name = to_utf8(folder.filename());
     const int device = gpu_device_for(comp);
-    job->thread = std::thread(run_png_sequence, job, std::move(comp), to_utf8(folder), name, first, last, w, h, device);
+    job->thread = std::thread(run_png_sequence, job, std::move(comp), to_utf8(folder), name, first, last, w, h, device, gpu_pool);
     return json{{"job_id", job->id}, {"output", job->output}, {"frames", last - first}, {"format", format}, {"first_frame", first},
                 {"pattern", name + "_%06d.png"}, {"width", w & ~1}, {"height", h & ~1}};
   }
@@ -130,7 +130,7 @@ Result<json> Engine::Impl::render_sequence(const json &params) {
   job->units_total.store(last - first);
   const json device = render_device_now();
   const int gpu_device = gpu_device_for(comp);
-  job->thread = std::thread(run_export, job, std::move(comp), settings, first, last, gpu_device);
+  job->thread = std::thread(run_export, job, std::move(comp), settings, first, last, gpu_device, gpu_pool);
   json answer{{"job_id", job->id}, {"output", job->output}, {"frames", job->units_total.load()},
               {"width", settings.width & ~1}, {"height", settings.height & ~1}};
   answer["render_device"] = device; // the device chosen; jobs.get says where the effects really ran (rendered_on)
