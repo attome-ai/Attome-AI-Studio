@@ -2889,3 +2889,35 @@ TEST_CASE("render: with a GPU, clips and adjustment layers with effects come out
   std::error_code ec;
   fs::remove_all(dir, ec);
 }
+
+TEST_CASE("render: a frame does not depend on what its buffer held before (the clears that are skipped are not needed)", "[media]") {
+  const fs::path dir = fs::temp_directory_path() / atm::new_id("attome-noclear");
+  fs::create_directories(dir);
+  const std::string video = (dir / "v.mp4").string();
+  write_clip(video, 320, 240, 30);
+  const json blur = {{"fx_1", {{"effect", "attome.gaussian_blur@1.0.0"}, {"params", {{"radius", 0.02}}}}}};
+  const auto frame_into = [&](const json &transform, const json &effects, uint8_t fill) {
+    json clip = {{"timing", {{"record_in", "0"}, {"duration", "1"}, {"source_in", "0"}}}, {"media_ref", {{"type", "file"}, {"path", video}, {"stream", "video"}}},
+                 {"transform", transform}};
+    if (!effects.is_null())
+      clip["effects"] = effects;
+    const json doc = {{"sequences", {{"seq_1", {{"rate", "30"}, {"canvas", {{"width", 240}, {"height", 320}}}, {"track_order", {"trk_a"}}, {"tracks", {{"trk_a", {{"clips", {{"clp_a", clip}}}}}}}}}}},
+                      {"sequence_order", {"seq_1"}}};
+    auto comp = atm::render::compile(doc);
+    REQUIRE(comp);
+    atm::render::Renderer renderer(*comp, 240, 320);
+    std::vector<uint8_t> nv12(media::nv12_size(240, 320), fill);
+    REQUIRE(renderer.render(3, nv12.data()));
+    return nv12;
+  };
+  // A 4:3 picture on a 3:4 canvas: scaled up to fill it (the usual 16:9-on-9:16 case), at full and part opacity, with and
+  // without effects; then one that does not fill it (the frame must be cleared).
+  for (const json &transform : {json{{"scale", {1.8, 1.8}}, {"opacity", 1.0}}, json{{"scale", {1.8, 1.8}}, {"opacity", 0.6}}, json{{"scale", {0.5, 0.5}}, {"opacity", 1.0}},
+                                json{{"scale", {1.8, 1.8}}, {"rotation", 5.0}, {"opacity", 1.0}}})
+    for (const json &effects : {json(), blur}) {
+      INFO(transform.dump() << " " << effects.dump());
+      CHECK(frame_into(transform, effects, 0x00) == frame_into(transform, effects, 0x77));
+    }
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}

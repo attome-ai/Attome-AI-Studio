@@ -1907,7 +1907,9 @@ void Renderer::draw(const Layer &l, int64_t frame, uint8_t *out, bool &cleared, 
         drew_everywhere_ = false;
     }
   }
-  if (!cleared && (alpha < 256 || !covers))
+  // No clear when this picture writes every pixel at full opacity: unmoved and the canvas size, or scaled (not turned)
+  // so that it reaches past all four corners (the transform path then writes the whole frame without reading it).
+  if (!cleared && (alpha < 256 || !(covers || (drew_everywhere_ && !pl.rotated))))
     media::fill_black(out, width_, height_);
   cleared = true;
   if (plain) {
@@ -1982,10 +1984,31 @@ void Renderer::draw_isolated(const Layer &l, int64_t frame, uint8_t *out, bool &
         remask_nv12(over_black_.data(), cover_.data(), W, H);
     }
   }
+  const int o = int(std::lround(opacity * 255.0f)); // 0..255
+  // A clip that covers the whole frame (its coverage is 255 everywhere, no key took any away): at full opacity the mix is
+  // exactly the clip, so it is copied; below full, the mix without the coverage is the same arithmetic with the 255s taken
+  // out ((below - k) * (255 - o) + (clip - k) * o) / 255, exactly equal to the general one below (both truncate 255x / 255^2).
+  if (everywhere && o == 255) {
+    std::memcpy(out, over_black_.data(), size); // nothing below shows: no need to clear it first
+    cleared = true;
+    return;
+  }
   if (!cleared)
     media::fill_black(out, W, H);
   cleared = true;
-  const int o = int(std::lround(opacity * 255.0f)); // 0..255
+  if (everywhere) {
+    const auto blend = [o](int below, int clip, int k) { return uint8_t(std::clamp(k + ((below - k) * (255 - o) + (clip - k) * o) / 255, 0, 255)); };
+    parallel_for(H + H / 2, 16, [&](int64_t first, int64_t last) {
+      for (int64_t y = first; y < last; ++y) {
+        const int k = y < H ? 16 : 128; // rows below H are chroma
+        uint8_t *row = out + size_t(y) * size_t(W);
+        const uint8_t *clip = over_black_.data() + size_t(y) * size_t(W);
+        for (int x = 0; x < W; ++x)
+          row[x] = blend(row[x], clip[x], k);
+      }
+    });
+    return;
+  }
   const auto mix = [o](int below, int clip, int cover, int k) {
     const int keep = 255 * 255 - cover * o; // (1 - coverage * opacity), in 255ths squared
     return uint8_t(std::clamp(k + ((below - k) * keep + (clip - k) * o * 255) / (255 * 255), 0, 255));
