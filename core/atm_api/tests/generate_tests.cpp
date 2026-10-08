@@ -1183,7 +1183,7 @@ TEST_CASE("render.devices: Automatic leaves the GPU to a running generation; the
   Film f;
   const json before = ok(*f.engine, "render.devices", json::object());
   CHECK(before["choice"] == "auto");
-  CHECK(before["rendered_on"] == "CPU"); // the renderer's GPU path is not built yet: it says so
+  CHECK(before["note"].get<std::string>().find("CPU") != std::string::npos); // says what is on the GPU so far and what is not
   CHECK(before["in_use"]["reason"].get<std::string>().find("generation") == std::string::npos);
 
   // While a generation runs, Automatic renders on the CPU and says why.

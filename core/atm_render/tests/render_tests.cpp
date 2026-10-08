@@ -14,6 +14,7 @@
 
 #include "atm/api/engine.hpp"
 #include "atm/base/id.hpp"
+#include "atm/gpu/gpu.hpp"
 #include "atm/render/render.hpp"
 
 using atm::api::json;
@@ -2793,6 +2794,71 @@ TEST_CASE("render: a clip that fills the canvas takes the short way through its 
   // A clip that does not cover the canvas (half size) is not changed by this: it still has soft edges over black.
   const auto half = frame_of(json{{"scale", {0.5, 0.5}}}, json{{"fx_1", {{"effect", "attome.gaussian_blur@1.0.0"}, {"params", {{"radius", 0.05}}}}}}, false);
   CHECK(half[size_t(5) * 320 + 5] == 16); // the corner is black
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}
+
+TEST_CASE("render: with a GPU, clips and adjustment layers with effects come out byte for byte as on the CPU", "[media][gpu]") {
+  auto gpu = atm::gpu::Context::create();
+  if (!gpu)
+    SKIP("no GPU path here");
+  const fs::path dir = fs::temp_directory_path() / atm::new_id("attome-gpufx");
+  fs::create_directories(dir);
+  const std::string video = (dir / "v.mp4").string();
+  write_clip(video, 320, 240, 30);
+  const auto fx = [](const char *kind, json params) { return json{{"effect", std::string("attome.") + kind + "@1.0.0"}, {"params", std::move(params)}}; };
+  const json chain = {{"fx_1", fx("gaussian_blur", {{"radius", 0.03}})},
+                      {"fx_2", fx("sharpen", {{"amount", 0.8}, {"radius", 0.01}})},
+                      {"fx_3", fx("color_grade", {{"brightness", 0.05}, {"contrast", 0.3}, {"saturation", 1.4}})},
+                      {"fx_4", fx("vignette", {{"strength", 0.6}, {"radius", 0.4}, {"softness", 0.5}})},
+                      {"fx_5", fx("film_grain", {{"strength", 0.4}, {"size", 2.0}})}};
+  // canvas, clip transform, clip effects, adjustment layer effects (null: none)
+  const auto frame_of = [&](int cw, int ch, const json &transform, const json &clip_fx, const json &adjust_fx, atm::gpu::Context *device, int64_t *runs) {
+    json clips = {{"clp_a", {{"timing", {{"record_in", "0"}, {"duration", "1"}, {"source_in", "0"}}}, {"media_ref", {{"type", "file"}, {"path", video}, {"stream", "video"}}},
+                             {"transform", transform}, {"effects", clip_fx}}}};
+    json tracks = {{"trk_a", {{"clips", clips}}}};
+    json order = json::array({"trk_a"});
+    if (!adjust_fx.is_null()) {
+      tracks["trk_fx"] = {{"clips", {{"clp_fx", {{"timing", {{"record_in", "0"}, {"duration", "1"}, {"source_in", "0"}}}, {"media_ref", {{"type", "adjustment"}}},
+                                                  {"effects", adjust_fx}, {"transform", {{"opacity", 1.0}}}}}}}};
+      order.push_back("trk_fx");
+    }
+    const json doc = {{"sequences", {{"seq_1", {{"rate", "30"}, {"canvas", {{"width", cw}, {"height", ch}}}, {"track_order", order}, {"tracks", tracks}}}}}, {"sequence_order", {"seq_1"}}};
+    auto comp = atm::render::compile(doc);
+    REQUIRE(comp);
+    atm::render::Renderer renderer(*comp, cw, ch);
+    renderer.use_gpu(device);
+    std::vector<uint8_t> nv12(media::nv12_size(cw, ch));
+    REQUIRE(renderer.render(7, nv12.data()));
+    CHECK(renderer.take_warning().empty());
+    if (runs)
+      *runs = renderer.gpu_runs();
+    return nv12;
+  };
+  int64_t runs = 0;
+  // The whole chain on a clip that fills the frame, at the clip's size and at an odd size (rows padded on the GPU).
+  for (const auto &[cw, ch] : {std::pair{320, 240}, std::pair{322, 182}}) {
+    INFO(cw << "x" << ch);
+    const json fill = {{"scale", {1.4, 1.4}}, {"opacity", 1.0}};
+    const auto cpu = frame_of(cw, ch, fill, chain, nullptr, nullptr, nullptr);
+    const auto on_gpu = frame_of(cw, ch, fill, chain, nullptr, gpu->get(), &runs);
+    CHECK(runs == 1);
+    CHECK(cpu == on_gpu);
+    // Each effect alone too, so a difference names its effect.
+    for (const auto &[id, one] : chain.items()) {
+      INFO(id);
+      const json single = {{id, one}};
+      CHECK(frame_of(cw, ch, fill, single, nullptr, nullptr, nullptr) == frame_of(cw, ch, fill, single, nullptr, gpu->get(), nullptr));
+    }
+  }
+  // An adjustment layer over everything.
+  const json plain = {{"opacity", 1.0}};
+  CHECK(frame_of(320, 240, plain, json::object(), chain, nullptr, nullptr) == frame_of(320, 240, plain, json::object(), chain, gpu->get(), &runs));
+  CHECK(runs == 1);
+  // A clip that does not fill the frame, and a chain with a LUT, stay on the CPU (and are still the same).
+  const json half = {{"scale", {0.5, 0.5}}, {"opacity", 1.0}};
+  CHECK(frame_of(320, 240, half, chain, nullptr, nullptr, nullptr) == frame_of(320, 240, half, chain, nullptr, gpu->get(), &runs));
+  CHECK(runs == 0);
   std::error_code ec;
   fs::remove_all(dir, ec);
 }

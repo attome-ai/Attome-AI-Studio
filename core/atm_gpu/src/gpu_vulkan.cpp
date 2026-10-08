@@ -28,6 +28,9 @@ const uint32_t kBoxSpirv[] = { // one pass along columns (or rows) with a runnin
 const uint32_t kRowsSpirv[] = { // the three horizontal passes of a row at once, in shared memory
 #include "box_rows.spv.inc"
 };
+const uint32_t kPixelsSpirv[] = { // the per-pixel effects (grade tables, vignette, grain, sharpen's mix)
+#include "pixels.spv.inc"
+};
 constexpr uint32_t kMaxRowBytes = 8192; // box_rows.comp holds a row of up to this many bytes in shared memory
 
 using Clock = std::chrono::steady_clock;
@@ -63,6 +66,13 @@ uint32_t magic_for(int r) {
   const uint64_t w = uint64_t(2 * r + 1);
   return w < 4096 ? uint32_t(((uint64_t(1) << 32) + w - 1) / w) : 0u;
 }
+
+// The push constants of pixels.comp, in its order.
+struct PixelsPass {
+  uint32_t kind, width, height, stride;
+  float f0;
+  uint32_t u0, u1, chroma_x, table_at;
+};
 
 // The push constants of box.comp, in its order.
 struct Pass {
@@ -172,21 +182,25 @@ struct Context::Impl {
   VkQueryPool queries = VK_NULL_HANDLE;
   VkDescriptorSetLayout set_layout = VK_NULL_HANDLE;
   VkPipelineLayout layout = VK_NULL_HANDLE;
-  VkShaderModule shader = VK_NULL_HANDLE, rows_shader = VK_NULL_HANDLE;
-  VkPipeline box = VK_NULL_HANDLE;
+  VkShaderModule shader = VK_NULL_HANDLE, rows_shader = VK_NULL_HANDLE, pixels_shader = VK_NULL_HANDLE;
+  VkPipeline box = VK_NULL_HANDLE, pixels = VK_NULL_HANDLE;
   std::map<uint64_t, VkPipeline> rows; // box_rows.comp by the row capacity and chunk it was made for
   uint32_t shared_limit = 0; // bytes of shared memory a workgroup can have
   VkDescriptorPool descriptors = VK_NULL_HANDLE;
-  VkDescriptorSet a_to_b = VK_NULL_HANDLE, b_to_a = VK_NULL_HANDLE;
-  Buffer a, b, upload, download;
+  // The sets of the four bindings (source, destination, tables, aux): A and B are the picture and its spare, C a third
+  // picture (sharpen's blurred copy), T the effects' numbers. Every set has T and C in bindings 2 and 3.
+  VkDescriptorSet a_to_b = VK_NULL_HANDLE, b_to_a = VK_NULL_HANDLE, c_to_b = VK_NULL_HANDLE, b_to_c = VK_NULL_HANDLE;
+  Buffer a, b, c, upload, download, tables;
 
   ~Impl() {
     if (device) {
       vkDeviceWaitIdle(device);
-      for (Buffer *buf : {&a, &b, &upload, &download})
+      for (Buffer *buf : {&a, &b, &c, &upload, &download, &tables})
         release(*buf);
       vkDestroyDescriptorPool(device, descriptors, nullptr);
       vkDestroyPipeline(device, box, nullptr);
+      vkDestroyPipeline(device, pixels, nullptr);
+      vkDestroyShaderModule(device, pixels_shader, nullptr);
       for (const auto &[cap, pipeline] : rows)
         vkDestroyPipeline(device, pipeline, nullptr);
       vkDestroyShaderModule(device, shader, nullptr);
@@ -245,20 +259,24 @@ struct Context::Impl {
     return {};
   }
 
-  Result<void> ensure_buffers(VkDeviceSize size) {
-    const bool grew = !a.buffer || a.size < size;
+  Result<void> ensure_buffers(VkDeviceSize size, VkDeviceSize table_bytes) {
+    const bool grew = !a.buffer || a.size < size || !tables.buffer || tables.size < table_bytes;
     constexpr VkBufferUsageFlags kWork = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
     ATM_CHECK(ensure(a, size, kWork, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT));
     ATM_CHECK(ensure(b, size, kWork, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT));
+    ATM_CHECK(ensure(c, size, kWork, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT));
     ATM_CHECK(ensure(upload, size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT));
     // Read back by the CPU: cached memory is many times faster to read than write-combined.
     ATM_CHECK(ensure(download, size, VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                      VK_MEMORY_PROPERTY_HOST_CACHED_BIT));
+    // The effects' numbers: small, written by the CPU before each submit, read by the shaders.
+    ATM_CHECK(ensure(tables, std::max<VkDeviceSize>(table_bytes, 64 * 1024), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT));
     if (grew) { // the descriptor sets point at the new buffers
       const auto point = [&](VkDescriptorSet set, const Buffer &from, const Buffer &to) {
-        VkDescriptorBufferInfo infos[2] = {{from.buffer, 0, VK_WHOLE_SIZE}, {to.buffer, 0, VK_WHOLE_SIZE}};
-        VkWriteDescriptorSet writes[2]{};
-        for (uint32_t i = 0; i < 2; ++i) {
+        VkDescriptorBufferInfo infos[4] = {{from.buffer, 0, VK_WHOLE_SIZE}, {to.buffer, 0, VK_WHOLE_SIZE}, {tables.buffer, 0, VK_WHOLE_SIZE}, {c.buffer, 0, VK_WHOLE_SIZE}};
+        VkWriteDescriptorSet writes[4]{};
+        for (uint32_t i = 0; i < 4; ++i) {
           writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
           writes[i].dstSet = set;
           writes[i].dstBinding = i;
@@ -266,10 +284,12 @@ struct Context::Impl {
           writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
           writes[i].pBufferInfo = &infos[i];
         }
-        vkUpdateDescriptorSets(device, 2, writes, 0, nullptr);
+        vkUpdateDescriptorSets(device, 4, writes, 0, nullptr);
       };
       point(a_to_b, a, b);
       point(b_to_a, b, a);
+      point(c_to_b, c, b);
+      point(b_to_c, b, c);
     }
     return {};
   }
@@ -362,18 +382,18 @@ struct Context::Impl {
       VK_TRY("vkCreateQueryPool", vkCreateQueryPool(device, &qpi, nullptr, &queries));
     }
 
-    VkDescriptorSetLayoutBinding bindings[2]{};
-    for (uint32_t i = 0; i < 2; ++i) {
+    VkDescriptorSetLayoutBinding bindings[4]{};
+    for (uint32_t i = 0; i < 4; ++i) {
       bindings[i].binding = i;
       bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
       bindings[i].descriptorCount = 1;
       bindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
     }
     VkDescriptorSetLayoutCreateInfo li{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    li.bindingCount = 2;
+    li.bindingCount = 4;
     li.pBindings = bindings;
     VK_TRY("vkCreateDescriptorSetLayout", vkCreateDescriptorSetLayout(device, &li, nullptr, &set_layout));
-    VkPushConstantRange range{VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(Pass)};
+    VkPushConstantRange range{VK_SHADER_STAGE_COMPUTE_BIT, 0, 64}; // the largest block (pixels.comp) and room
     VkPipelineLayoutCreateInfo pli{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
     pli.setLayoutCount = 1;
     pli.pSetLayouts = &set_layout;
@@ -394,23 +414,30 @@ struct Context::Impl {
     smi.codeSize = sizeof kRowsSpirv;
     smi.pCode = kRowsSpirv;
     VK_TRY("vkCreateShaderModule", vkCreateShaderModule(device, &smi, nullptr, &rows_shader));
+    smi.codeSize = sizeof kPixelsSpirv;
+    smi.pCode = kPixelsSpirv;
+    VK_TRY("vkCreateShaderModule", vkCreateShaderModule(device, &smi, nullptr, &pixels_shader));
+    cpi.stage.module = pixels_shader;
+    VK_TRY("vkCreateComputePipelines", vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &cpi, nullptr, &pixels));
 
 
-    VkDescriptorPoolSize sizes{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4};
+    VkDescriptorPoolSize sizes{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 16};
     VkDescriptorPoolCreateInfo dpi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-    dpi.maxSets = 2;
+    dpi.maxSets = 4;
     dpi.poolSizeCount = 1;
     dpi.pPoolSizes = &sizes;
     VK_TRY("vkCreateDescriptorPool", vkCreateDescriptorPool(device, &dpi, nullptr, &descriptors));
-    VkDescriptorSetLayout two[2] = {set_layout, set_layout};
-    VkDescriptorSet sets[2];
+    VkDescriptorSetLayout four[4] = {set_layout, set_layout, set_layout, set_layout};
+    VkDescriptorSet sets[4];
     VkDescriptorSetAllocateInfo dai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
     dai.descriptorPool = descriptors;
-    dai.descriptorSetCount = 2;
-    dai.pSetLayouts = two;
+    dai.descriptorSetCount = 4;
+    dai.pSetLayouts = four;
     VK_TRY("vkAllocateDescriptorSets", vkAllocateDescriptorSets(device, &dai, sets));
     a_to_b = sets[0];
     b_to_a = sets[1];
+    c_to_b = sets[2];
+    b_to_c = sets[3];
     return {};
   }
 
@@ -456,6 +483,53 @@ struct Context::Impl {
     vkCmdDispatch(cmd, (across + 63) / 64, (along + p.seg - 1) / p.seg, 1);
   }
 
+  void compute_to_compute() {
+    barrier(VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT,
+            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_COPY_BIT,
+            VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT | VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT);
+  }
+
+  // The blur of the picture in buffer X, back into X: the three row passes X -> B in one dispatch, then the three column
+  // passes B -> X -> B -> X. `xb` and `bx` are the sets X -> B and B -> X; a plane with radius 0 is left alone.
+  void record_blur(VkDescriptorSet xb, VkDescriptorSet bx, uint32_t W, uint32_t H, uint32_t P, int ry, int rc, VkPipeline rows_luma, VkPipeline rows_chroma,
+                   uint32_t shift, bool mark = false) {
+    const uint32_t chroma_at = P * H;
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, layout, 0, 1, &xb, 0, nullptr);
+    const auto rows_pass = [&](VkPipeline pipeline, const RowsPass &p, uint32_t count) {
+      vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+      vkCmdPushConstants(cmd, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);
+      vkCmdDispatch(cmd, count, 1, 1);
+    };
+    if (ry >= 1)
+      rows_pass(rows_luma, {0, P, W, 1, ry, shift, magic_for(ry)}, H);
+    if (rc >= 1)
+      rows_pass(rows_chroma, {chroma_at, P, W, 2, rc, shift, magic_for(rc)}, H / 2);
+    compute_to_compute();
+    if (mark && timestamps)
+      vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, queries, 4);
+    // A stretch is the window's width (at least 16 rows): enough invocations to fill the GPU, and the window's first sum
+    // costs no more than the stretch.
+    const auto seg = [](int r) { return uint32_t(std::max(16, 2 * r + 1)); };
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, box);
+    for (int pass = 0; pass < 3; ++pass) {
+      vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, layout, 0, 1, pass == 1 ? &xb : &bx, 0, nullptr);
+      if (ry >= 1)
+        dispatch({0, H, P, P / 4, 1, ry, seg(ry), 1});
+      if (rc >= 1)
+        dispatch({chroma_at, H / 2, P, P / 4, 1, rc, seg(rc), 1});
+      compute_to_compute();
+    }
+  }
+
+  void record_pixels(const PixelsPass &p, uint32_t P, uint32_t H) {
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pixels);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, layout, 0, 1, &a_to_b, 0, nullptr);
+    vkCmdPushConstants(cmd, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);
+    const uint32_t words = (P / 4) * (H + H / 2);
+    vkCmdDispatch(cmd, (words + 255) / 256, 1, 1);
+    compute_to_compute();
+  }
+
   // The copies between the caller's packed picture (rows `W` bytes apart) and the device's (rows `P` apart, P >= W, a
   // multiple of 4): one copy when they are the same, one per row when the rows are padded.
   std::vector<VkBufferCopy> regions;
@@ -488,24 +562,40 @@ Context::~Context() = default;
 const Info &Context::info() const { return impl_->info; }
 
 Result<void> Context::blur_nv12(uint8_t *nv12, int W, int H, float sigma, Timing *timing) {
-  ATM_PROFILE_SCOPE("gpu.blur");
+  Effect blur;
+  blur.kind = Effect::Kind::blur;
+  blur.sigma = sigma;
+  return run_effects(nv12, W, H, {blur}, timing);
+}
+
+Result<void> Context::run_effects(uint8_t *nv12, int W, int H, const std::vector<Effect> &chain, Timing *timing) {
+  ATM_PROFILE_SCOPE("gpu.effects");
   Impl &m = *impl_;
   const auto t0 = Clock::now();
   const size_t luma = size_t(W) * size_t(H), size = luma + luma / 2;
-  const int ry = box_radius(sigma), rc = box_radius(sigma * 0.5f);
-  if (ry < 1 && rc < 1)
+  if (chain.empty())
     return {};
   if (uint32_t(W) > kMaxRowBytes)
-    return fail(ErrorCode::EncoderUnavailable, "G_TOO_WIDE", "The GPU blur takes pictures up to " + std::to_string(kMaxRowBytes) + " pixels wide.");
+    return fail(ErrorCode::EncoderUnavailable, "G_TOO_WIDE", "The GPU effects take pictures up to " + std::to_string(kMaxRowBytes) + " pixels wide.");
   const uint32_t P = (uint32_t(W) + 3u) & ~3u; // rows on the device: whole 4-byte words
-  const uint32_t uh = uint32_t(H), chroma_at = P * uh;
-  ATM_CHECK(m.ensure_buffers(VkDeviceSize(P) * (uh + uh / 2)));
+  const uint32_t uw = uint32_t(W), uh = uint32_t(H);
+  // The effects' numbers, one after another in the tables buffer.
+  std::vector<uint32_t> table_at(chain.size(), 0);
+  size_t table_words = 0;
+  for (size_t i = 0; i < chain.size(); ++i) {
+    table_at[i] = uint32_t(table_words);
+    table_words += chain[i].table.size();
+  }
+  ATM_CHECK(m.ensure_buffers(VkDeviceSize(P) * (uh + uh / 2), table_words * 4));
+  for (size_t i = 0; i < chain.size(); ++i)
+    if (!chain[i].table.empty())
+      std::memcpy(static_cast<uint32_t *>(m.tables.mapped) + table_at[i], chain[i].table.data(), chain[i].table.size() * 4);
   auto t = Clock::now();
   std::memcpy(m.upload.mapped, nv12, size);
   const double upload_us = us_since(t);
 
   uint32_t shift = 2; // bytes per invocation of the row passes: a power of two, at least a word
-  while ((256u << shift) < uint32_t(W))
+  while ((256u << shift) < uw)
     ++shift;
   // The pipelines before recording: a failure leaves nothing half-recorded.
   ATM_TRY(VkPipeline rows_luma, m.rows_pipeline((P + 511u) & ~511u, 1u << shift, 1));
@@ -520,48 +610,43 @@ Result<void> Context::blur_nv12(uint8_t *nv12, int W, int H, float sigma, Timing
   }
   const auto &in = m.copies(W, H, P, true);
   vkCmdCopyBuffer(m.cmd, m.upload.buffer, m.a.buffer, uint32_t(in.size()), in.data());
-  m.barrier(VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
+  m.compute_to_compute();
   if (m.timestamps)
     vkCmdWriteTimestamp2(m.cmd, VK_PIPELINE_STAGE_2_COPY_BIT, m.queries, 1);
-  // The three horizontal passes at once, A -> B: a workgroup per row, the row in shared memory.
-  const uint32_t uw = uint32_t(W);
-  vkCmdBindDescriptorSets(m.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m.layout, 0, 1, &m.a_to_b, 0, nullptr);
-  const auto rows_pass = [&](const RowsPass &p, uint32_t count) {
-    vkCmdPushConstants(m.cmd, m.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);
-    vkCmdDispatch(m.cmd, count, 1, 1);
-  };
-  if (ry >= 1) {
-    vkCmdBindPipeline(m.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, rows_luma);
-    rows_pass({0, P, uw, 1, ry, shift, magic_for(ry)}, uh);
+  bool marked = false; // the "rows" timestamp: after the first blur's row passes
+  for (size_t i = 0; i < chain.size(); ++i) {
+    const Effect &e = chain[i];
+    switch (e.kind) {
+    case Effect::Kind::blur:
+      m.record_blur(m.a_to_b, m.b_to_a, uw, uh, P, box_radius(e.sigma), box_radius(e.sigma * 0.5f), rows_luma, rows_chroma, shift, !marked);
+      marked = true;
+      break;
+    case Effect::Kind::sharpen: { // the luma of A, blurred in C, then A moves away from it
+      const int r = box_radius(e.sigma);
+      const VkBufferCopy luma_plane{0, 0, VkDeviceSize(P) * uh};
+      vkCmdCopyBuffer(m.cmd, m.a.buffer, m.c.buffer, 1, &luma_plane);
+      m.compute_to_compute();
+      if (r >= 1) // with no blur the mix still clamps the luma to 16..235, as the CPU's does
+        m.record_blur(m.c_to_b, m.b_to_c, uw, uh, P, r, 0, rows_luma, rows_chroma, shift);
+      m.record_pixels({3, uw, uh, P, e.amount, 0, 0, 0, 0}, P, uh);
+      break;
+    }
+    case Effect::Kind::table:
+      m.record_pixels({0, uw, uh, P, 0.0f, 0, 0, 0, table_at[i]}, P, uh);
+      break;
+    case Effect::Kind::vignette:
+      m.record_pixels({1, uw, uh, P, 0.0f, 0, 0, 1025u + uw + uh, table_at[i]}, P, uh);
+      break;
+    case Effect::Kind::grain:
+      m.record_pixels({2, uw, uh, P, e.amount, std::max<uint32_t>(1, e.cell), e.seed, 0, 0}, P, uh);
+      break;
+    }
   }
-  if (rc >= 1) {
-    vkCmdBindPipeline(m.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, rows_chroma);
-    rows_pass({chroma_at, P, uw, 2, rc, shift, magic_for(rc)}, uh / 2);
-  }
-  const auto compute_to_compute = [&] {
-    m.barrier(VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-              VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
-  };
-  compute_to_compute();
-  if (m.timestamps)
-    vkCmdWriteTimestamp2(m.cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, m.queries, 4);
-  // The three vertical passes, B -> A -> B -> A: an invocation per word column and stretch of rows, a running sum down it.
-  // A stretch is the window's width (at least 16 rows): enough invocations to fill the GPU, and the window's first sum
-  // costs no more than the stretch.
-  const auto seg = [](int r) { return uint32_t(std::max(16, 2 * r + 1)); };
-  vkCmdBindPipeline(m.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m.box);
-  for (int pass = 0; pass < 3; ++pass) {
-    vkCmdBindDescriptorSets(m.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m.layout, 0, 1, pass == 1 ? &m.a_to_b : &m.b_to_a, 0, nullptr);
-    if (ry >= 1)
-      m.dispatch({0, uh, P, P / 4, 1, ry, seg(ry), 1});
-    if (rc >= 1)
-      m.dispatch({chroma_at, uh / 2, P, P / 4, 1, rc, seg(rc), 1});
-    compute_to_compute();
-  }
-  m.barrier(VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
-  // A plane without a blur (radius 0) was not touched: it is still in A as it came, so the copy back is whole.
-  if (m.timestamps)
+  if (m.timestamps) {
+    if (!marked)
+      vkCmdWriteTimestamp2(m.cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, m.queries, 4);
     vkCmdWriteTimestamp2(m.cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, m.queries, 2);
+  }
   const auto &out = m.copies(W, H, P, false);
   vkCmdCopyBuffer(m.cmd, m.a.buffer, m.download.buffer, uint32_t(out.size()), out.data());
   m.barrier(VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_HOST_BIT, VK_ACCESS_2_HOST_READ_BIT);

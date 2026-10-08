@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "atm/base/error.hpp"
 
@@ -40,6 +41,19 @@ struct Timing {
   double rows_us = 0.0, columns_us = 0.0; // the compute, split: the horizontal passes and the vertical ones
 };
 
+// One effect of a chain run on the GPU (Context::run_effects). The numbers that must match the CPU exactly come from the
+// renderer, made by the same code its CPU path uses: the GPU only applies them.
+struct Effect {
+  enum class Kind { blur, sharpen, table, vignette, grain };
+  Kind kind = Kind::blur;
+  float sigma = 0.0f;          // blur, sharpen: the blur's sigma in pixels
+  float amount = 0.0f;         // sharpen: the amount; grain: the amplitude (strength * 48)
+  uint32_t cell = 1, seed = 0; // grain: the size of a grain in pixels, the frame's seed
+  // table: 512 words, the new byte of each luma value (0..255) then of each chroma value;
+  // vignette: floats as their bits: the mask (1025), x terms (width), y terms (height), chroma x (width / 2), chroma y (height / 2).
+  std::vector<uint32_t> table;
+};
+
 class Context {
 public:
   // A Vulkan 1.3 device (with synchronization2): the discrete GPU when there is one. ATTOME_GPU=off refuses (the CPU
@@ -52,6 +66,10 @@ public:
   // The renderer's blur of a packed NV12 picture, in place: three box passes each way on the luma (radius from `sigma`)
   // and on the chroma (radius from sigma / 2), integer arithmetic, edges clamped. The same bytes as render::blur_picture.
   Result<void> blur_nv12(uint8_t *nv12, int width, int height, float sigma, Timing *timing = nullptr);
+
+  // A chain of effects on a packed NV12 picture, in place: the picture goes to the GPU once, every effect runs there in
+  // order, and it comes back once.
+  Result<void> run_effects(uint8_t *nv12, int width, int height, const std::vector<Effect> &chain, Timing *timing = nullptr);
 
   struct Impl;
 

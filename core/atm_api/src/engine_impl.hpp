@@ -117,6 +117,7 @@ struct Job {
   std::mutex mutex; // guards error, warning, seconds
   Error error;
   std::string warning;
+  std::string rendered_on; // a render: the device its effects ran on ("CPU" or a GPU's name); guarded by `mutex`
   double seconds = 0.0;
   json result; // what the job made, when it is more than one file (a generation: how each clip ended); guarded by `mutex`
   Clock::time_point started = Clock::now();
@@ -194,14 +195,18 @@ void run_extract(const std::shared_ptr<Job> &job, render::Composition comp, std:
 
 // An image sequence: each frame of the range as a numbered PNG in `dir` (name_000000.png, numbered by the frame of the sequence). One thread renders
 // and writes, a frame at a time; the job can be cancelled between frames.
-void run_png_sequence(const std::shared_ptr<Job> &job, render::Composition comp, std::string dir, std::string name, int64_t first, int64_t last, int width, int height);
+void run_png_sequence(const std::shared_ptr<Job> &job, render::Composition comp, std::string dir, std::string name, int64_t first, int64_t last, int width, int height,
+                      int gpu_device);
 
 
 
 // The export runs as a pipeline: this thread renders frames into a few slots while "atm-encode" converts and
 // encodes the previous ones, so the two never wait for each other. The encoder starts (hardware set-up, about half a
 // second) and the audio is mixed while the first frames render.
-void run_export(const std::shared_ptr<Job> &job, render::Composition comp, media::EncodeSettings settings, int64_t first, int64_t last);
+void run_export(const std::shared_ptr<Job> &job, render::Composition comp, media::EncodeSettings settings, int64_t first, int64_t last, int gpu_device);
+// The GPU a render job uses (its own: a job runs on its own thread), or none: `device` is an index from gpu::list_devices, -1
+// for the CPU. Records on the job where its effects run, and why the GPU was not used when it could not be started.
+std::unique_ptr<gpu::Context> job_gpu(Job &job, int device);
 
 struct Engine::Impl {
   using Handler = Result<json> (Impl::*)(const json &);
@@ -309,7 +314,14 @@ struct Engine::Impl {
     std::string path;
     int64_t frame = 0;
   };
-  static Result<std::vector<std::vector<uint8_t>>> render_stills(render::Composition comp, const std::vector<int64_t> &frames,
+  // The GPU of the see.* pictures (made on the engine's own thread), kept between calls; for the device chosen now.
+  std::unique_ptr<gpu::Context> still_gpu;
+  int still_gpu_device = -2;
+  gpu::Context *gpu_for_stills();
+  // The GPU a render of `comp` uses: the device chosen now, or -1 (the CPU) when nothing in it has GPU work, so starting a
+  // device costs nothing to a film without effects.
+  int gpu_device_for(const render::Composition &comp);
+  Result<std::vector<std::vector<uint8_t>>> render_stills(render::Composition comp, const std::vector<int64_t> &frames,
                                                                  int width, int height, std::string *warning);
   Result<std::pair<render::Composition, fs::path>> see_setup(Project &pr, const json &params);
   static json time_of(int64_t frame, const render::Composition &comp);

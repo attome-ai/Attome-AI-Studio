@@ -66,6 +66,8 @@ Result<json> Engine::Impl::jobs_get(const json &params) {
     out["warning"] = job->warning;
   if (!job->detail.empty())
     out["detail"] = job->detail;
+  if (!job->rendered_on.empty())
+    out["rendered_on"] = job->rendered_on; // where the effects of a render ran
   if (!job->node.empty())
     out["node"] = {{"id", job->node}, {"at", job->node_at}, {"of", job->node_of}};
   if (!job->result.is_null())

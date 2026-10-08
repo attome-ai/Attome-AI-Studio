@@ -17,6 +17,7 @@
 #include "atm/base/error.hpp"
 #include "atm/eval/effects.hpp"
 #include "atm/eval/keyframes.hpp"
+#include "atm/gpu/gpu.hpp"
 #include "atm/media/media.hpp"
 
 namespace atm::render {
@@ -189,6 +190,11 @@ public:
   void set_text(const std::string &clip_id, const std::string &text);
   // Another version of the same composition (a value being dragged): the decoders and the stills that are open stay open, so it is cheap.
   void replace_composition(Composition composition); // the words of a text clip, while they are typed (its timed words are not shown)
+  // Runs the effects it can on this GPU (not owned; nullptr: the CPU only): a clip with effects that fills the frame, and an
+  // adjustment layer, when every effect of it has a GPU version. The bytes are the same as the CPU's. A GPU failure turns
+  // the GPU off for this renderer (the CPU goes on) and is reported by take_warning().
+  void use_gpu(gpu::Context *gpu) { gpu_ = gpu; }
+  int64_t gpu_runs() const { return gpu_runs_; } // how many effect chains the GPU has run
 
 private:
   Composition comp_;
@@ -212,6 +218,11 @@ private:
   std::vector<uint8_t> mix_;                          // the incoming clip of a dissolve, drawn over the same background
   std::vector<uint8_t> adjust_, scratch_;             // an adjustment layer's copy of the picture below it
   std::vector<uint8_t> over_black_, over_white_, cover_; // a clip with effects, drawn on its own (see draw_isolated)
+  gpu::Context *gpu_ = nullptr;
+  int64_t gpu_runs_ = 0;
+  // The effects of a layer as a GPU chain (false: one of them has no GPU version), and running it.
+  bool gpu_chain(const Layer &l, int64_t frame, std::vector<gpu::Effect> &chain) const;
+  bool run_on_gpu(const Layer &l, int64_t frame, uint8_t *nv12);
   bool drew_everywhere_ = false; // set by draw(): the clip it drew covers every pixel of the canvas (a picture or video that reaches past all four edges)
   std::string warning_;
   std::unordered_map<std::string, std::shared_ptr<const BakedLut>> luts_; // by path; null when the file would not load

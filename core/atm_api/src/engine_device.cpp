@@ -22,10 +22,23 @@ const std::vector<gpu::Device> &Engine::Impl::gpus(bool refresh) {
   return *gpu_list;
 }
 
-json Engine::Impl::render_device_now() {
-  json now = device_in_use(gpus(), render_choice());
-  now["rendered_on"] = "CPU"; // until the renderer's GPU path is built
-  return now;
+json Engine::Impl::render_device_now() { return device_in_use(gpus(), render_choice()); }
+
+int Engine::Impl::gpu_device_for(const render::Composition &comp) {
+  const bool effects = std::any_of(comp.layers.begin(), comp.layers.end(), [](const render::Layer &l) { return !l.effects.empty(); });
+  return effects ? render_device_now().value("index", -1) : -1;
+}
+
+gpu::Context *Engine::Impl::gpu_for_stills() {
+  const int device = render_device_now().value("index", -1);
+  if (device != still_gpu_device) {
+    still_gpu.reset();
+    still_gpu_device = device;
+    if (device >= 0)
+      if (auto made = gpu::Context::create(device))
+        still_gpu = std::move(*made);
+  }
+  return still_gpu.get();
 }
 
 json Engine::Impl::render_choice() const {
@@ -135,9 +148,9 @@ Result<json> Engine::Impl::render_devices(const json &params) {
   }
   const json choice = render_choice();
   json out = {{"choice", choice.is_object() ? json(choice.value("name", std::string())) : choice}, {"devices", std::move(list)}, {"in_use", device_in_use(devices, choice)}};
-  // Honest about today: the device is chosen, but the renderer itself still runs on the CPU until its GPU path is built.
-  out["rendered_on"] = "CPU";
-  out["note"] = "The renderer's GPU path is being built: today every frame is still made on the CPU, and in_use is the device it will use.";
+  // Honest about today: only part of the picture is made on the GPU so far.
+  out["note"] = "On the GPU today: the effects of a clip that fills the frame, and of an adjustment layer, when each of them has a GPU version (blur, "
+                "sharpen, colour grade, vignette, film grain). Everything else is made on the CPU for now.";
   return out;
 }
 

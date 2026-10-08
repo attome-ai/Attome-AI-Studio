@@ -1,0 +1,105 @@
+#version 450
+// The per-pixel effects, in place on the picture (binding 0), one invocation per 4-byte word. Their numbers come from the
+// renderer as tables (binding 2), made by the same code its CPU path uses, and the arithmetic below is written in the CPU's
+// order with `precise` (no fused multiply-add), so both give the same bytes.
+//   kind 0 table:    data[0..255] new luma byte for each old one, data[256..511] the chroma's (a colour grade)
+//   kind 1 vignette: data = mask[1025] (floats), then x and y terms for the luma (W, H) and the chroma (W/2, H/2)
+//   kind 2 grain:    hash noise on the luma; f0 = amplitude, u0 = cell size, u1 = the frame's seed
+//   kind 3 sharpen:  luma + amount * (luma - blurred luma), the blurred luma in binding 3; f0 = amount
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 0) buffer Data { uint data[]; };
+layout(std430, set = 0, binding = 2) readonly buffer Tables { uint table[]; };
+layout(std430, set = 0, binding = 3) readonly buffer Aux { uint aux[]; };
+
+layout(push_constant) uniform Pixels {
+  uint kind;
+  uint width;   // picture bytes per row
+  uint height;  // luma rows
+  uint stride;  // bytes per row on the device (a multiple of 4)
+  float f0;
+  uint u0, u1;
+  uint chroma_x; // vignette: where the tables of the chroma start (after mask, luma x, luma y), from table_at
+  uint table_at; // where this effect's numbers start in the tables
+} pc;
+
+int byte_of(uint word, uint q) { return int((word >> (q * 8u)) & 0xFFu); }
+
+float tablef(uint i) { return uintBitsToFloat(table[pc.table_at + i]); }
+
+// The vignette's mask at squared distance d2 (the CPU's `at`).
+float vignette_mask(float d2) {
+  precise float scaled = d2 * 1024.0;
+  precise float rounded = scaled + 0.5;
+  return tablef(uint(clamp(int(rounded), 0, 1024)));
+}
+
+void main() {
+  const uint words_per_row = pc.stride >> 2;
+  const uint rows = pc.height + pc.height / 2u;
+  const uint id = gl_GlobalInvocationID.x;
+  const uint y = id / words_per_row, wx = id - y * words_per_row;
+  if (y >= rows || wx * 4u >= pc.width)
+    return;
+  const bool luma = y < pc.height;
+  if (pc.kind == 2u && !luma)
+    return; // grain: luma only
+  if (pc.kind == 3u && !luma)
+    return; // sharpen: luma only
+  const uint word = data[id];
+  uint out_word = 0u;
+  for (uint q = 0u; q < 4u; ++q) {
+    const uint x = wx * 4u + q;
+    int v = byte_of(word, q);
+    if (x < pc.width) {
+      if (pc.kind == 0u) {
+        v = int(table[pc.table_at + (luma ? 0u : 256u) + uint(v)]);
+      } else if (pc.kind == 1u) {
+        if (luma) {
+          precise float d2 = tablef(1025u + x) + tablef(1025u + pc.width + y);
+          const float m = vignette_mask(d2);
+          precise float scaled = (float(v) - 16.0) * m;
+          precise float rounded = scaled + 0.5;
+          v = 16 + int(rounded);
+        } else {
+          const uint cy = y - pc.height, cx = x >> 1;
+          precise float d2 = tablef(pc.chroma_x + cx) + tablef(pc.chroma_x + pc.width / 2u + cy);
+          const float m = vignette_mask(d2);
+          precise float scaled = (float(v) - 128.0) * m;
+          precise float moved = 128.0 + scaled;
+          precise float rounded = moved + 0.5;
+          v = clamp(int(rounded), 0, 255);
+        }
+      } else if (pc.kind == 2u) {
+        const uint cell = pc.u0;
+        uint h = ((x / cell) * 73856093u) ^ ((y / cell) * 19349663u) ^ pc.u1;
+        h ^= h >> 16;
+        h *= 0x85EBCA6Bu;
+        h ^= h >> 13;
+        h *= 0xC2B2AE35u;
+        h ^= h >> 16;
+        precise float a = float(h & 0xFFFFu) + float(h >> 16);
+        precise float b = a - 65535.0;
+        precise float n = b * (1.0 / 65536.0);
+        precise float l = (float(v) - 16.0) * (1.0 / 219.0);
+        precise float k = (0.65 * 4.0) * l; // the CPU's 0.65f * 4.0f * l (times 4 is exact, so folding it changes nothing)
+        precise float weight = 0.35 + k * (1.0 - l);
+        precise float na = n * pc.f0;
+        precise float add = na * weight;
+        precise float sum = float(v) + add;
+        precise float rounded = sum + 0.5;
+        v = clamp(int(rounded), 16, 235);
+      } else if (pc.kind == 3u) {
+        const int soft = byte_of(aux[id], q);
+        precise float d = float(v) - float(soft);
+        precise float ad = pc.f0 * d;
+        precise float sum = float(v) + ad;
+        precise float rounded = sum + 0.5;
+        v = clamp(int(rounded), 16, 235);
+      }
+    }
+    out_word |= uint(v & 0xFF) << (q * 8u);
+  }
+  data[id] = out_word;
+}

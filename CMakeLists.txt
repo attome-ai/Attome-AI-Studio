@@ -119,7 +119,6 @@ if(ATM_MEDIA_BACKEND_RESOLVED STREQUAL "ffmpeg")
   target_link_libraries(atm_media PRIVATE ${FFMPEG_LIBRARIES})
   target_compile_definitions(atm_media PUBLIC ATM_MEDIA_FFMPEG=1)
 endif()
-atm_module(atm_render DEPS atm_media atm_eval)
 # The GPU path (M10, ADR-009): Vulkan compute, built when the Vulkan SDK is there (VULKAN_SDK); without it the CPU renderer does the work.
 # Shaders are compiled to SPIR-V with glslc at build time and built into the library as numbers.
 set(ATM_GPU "auto" CACHE STRING "GPU path: auto (on when the Vulkan SDK is found), on or off")
@@ -148,6 +147,8 @@ if(NOT ATM_GPU STREQUAL "off")
     message(STATUS "Attome GPU path: none (no Vulkan SDK)")
   endif()
 endif()
+# The renderer: the CPU path, and the GPU path through atm_gpu when a device is handed to it (Renderer::use_gpu).
+atm_module(atm_render DEPS atm_media atm_eval atm_gpu)
 # Skills: how-to guides for agents, built into the program. Every file below core/atm_skills/skills is embedded as bytes in a source
 # generated here (at configure time; a change to a file re-runs configure).
 atm_module(atm_skills DEPS atm_base)

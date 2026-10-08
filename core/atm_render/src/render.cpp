@@ -920,15 +920,21 @@ float smooth01(float x) {
 
 // Brightness and contrast act on the video-range luma (16..235) around mid grey, saturation scales the chroma around
 // 128. Both are table lookups, one per byte value, so the cost is one pass over the picture.
-void grade_nv12(uint8_t *nv12, int W, int H, float brightness, float contrast, float saturation) {
-  ATM_PROFILE_SCOPE("effect.color_grade");
-  uint8_t luma_lut[256], chroma_lut[256];
+// The colour grade as two tables: the new luma byte for each old one, and the new chroma byte. The CPU and the GPU both
+// apply these, so they agree to the byte.
+void grade_tables(float brightness, float contrast, float saturation, uint8_t luma_lut[256], uint8_t chroma_lut[256]) {
   const float gain = 1.0f + contrast;
   for (int i = 0; i < 256; ++i) {
     const float l = (float(i) - 16.0f) / 219.0f;
     luma_lut[i] = uint8_t(std::lround(16.0f + 219.0f * std::clamp((l - 0.5f) * gain + 0.5f + brightness, 0.0f, 1.0f)));
     chroma_lut[i] = uint8_t(std::lround(std::clamp(128.0f + (float(i) - 128.0f) * saturation, 16.0f, 240.0f)));
   }
+}
+
+void grade_nv12(uint8_t *nv12, int W, int H, float brightness, float contrast, float saturation) {
+  ATM_PROFILE_SCOPE("effect.color_grade");
+  uint8_t luma_lut[256], chroma_lut[256];
+  grade_tables(brightness, contrast, saturation, luma_lut, chroma_lut);
   parallel_for(H + H / 2, 16, [&](int64_t first, int64_t last) {
     for (int64_t y = first; y < last; ++y) {
       uint8_t *row = nv12 + size_t(y) * size_t(W);
@@ -943,23 +949,39 @@ void grade_nv12(uint8_t *nv12, int W, int H, float brightness, float contrast, f
 // picture's shape), nothing changes inside `radius`, and the full `strength` is reached `softness` further out. Luma
 // (above 16) and chroma (around 128) scale by the same factor, which is what multiplying RGB by it does, so the
 // corners go to black, not to a dark tint.
+// The vignette's numbers, shared by the CPU and the GPU: the mask by squared distance (N + 1 steps), and the squared
+// distance terms of each luma column and row and each chroma column and row.
+struct VignetteTables {
+  static constexpr int N = 1024;
+  std::vector<float> mask, dx2, dy2, cx2, cy2;
+};
+VignetteTables vignette_tables(int W, int H, float strength, float radius, float softness) {
+  constexpr int N = VignetteTables::N;
+  VignetteTables t;
+  t.mask.resize(N + 1);
+  for (int i = 0; i <= N; ++i)
+    t.mask[size_t(i)] = 1.0f - strength * smooth01((std::sqrt(float(i) / float(N)) - radius) / softness);
+  t.dx2.resize(size_t(W));
+  t.dy2.resize(size_t(H));
+  t.cx2.resize(size_t(W / 2));
+  t.cy2.resize(size_t(H / 2));
+  for (int x = 0; x < W; ++x)
+    t.dx2[size_t(x)] = std::pow((float(x) + 0.5f) / float(W) * 2.0f - 1.0f, 2.0f) * 0.5f;
+  for (int y = 0; y < H; ++y)
+    t.dy2[size_t(y)] = std::pow((float(y) + 0.5f) / float(H) * 2.0f - 1.0f, 2.0f) * 0.5f;
+  for (int x = 0; x < W / 2; ++x)
+    t.cx2[size_t(x)] = std::pow(float(2 * x + 1) / float(W) * 2.0f - 1.0f, 2.0f) * 0.5f;
+  for (int y = 0; y < H / 2; ++y)
+    t.cy2[size_t(y)] = std::pow(float(2 * y + 1) / float(H) * 2.0f - 1.0f, 2.0f) * 0.5f;
+  return t;
+}
+
 void vignette_nv12(uint8_t *nv12, int W, int H, float strength, float radius, float softness) {
   ATM_PROFILE_SCOPE("effect.vignette");
-  constexpr int N = 1024;
-  float mask[N + 1];
-  for (int i = 0; i <= N; ++i)
-    mask[i] = 1.0f - strength * smooth01((std::sqrt(float(i) / float(N)) - radius) / softness);
-  std::vector<float> dx2(static_cast<size_t>(W)), dy2(static_cast<size_t>(H)), cx2(static_cast<size_t>(W / 2)),
-      cy2(static_cast<size_t>(H / 2));
-  for (int x = 0; x < W; ++x)
-    dx2[size_t(x)] = std::pow((float(x) + 0.5f) / float(W) * 2.0f - 1.0f, 2.0f) * 0.5f;
-  for (int y = 0; y < H; ++y)
-    dy2[size_t(y)] = std::pow((float(y) + 0.5f) / float(H) * 2.0f - 1.0f, 2.0f) * 0.5f;
-  for (int x = 0; x < W / 2; ++x)
-    cx2[size_t(x)] = std::pow(float(2 * x + 1) / float(W) * 2.0f - 1.0f, 2.0f) * 0.5f;
-  for (int y = 0; y < H / 2; ++y)
-    cy2[size_t(y)] = std::pow(float(2 * y + 1) / float(H) * 2.0f - 1.0f, 2.0f) * 0.5f;
-  const auto at = [&](float d2) { return mask[std::clamp(int(d2 * float(N) + 0.5f), 0, N)]; };
+  constexpr int N = VignetteTables::N;
+  const VignetteTables tables = vignette_tables(W, H, strength, radius, softness);
+  const std::vector<float> &mask = tables.mask, &dx2 = tables.dx2, &dy2 = tables.dy2, &cx2 = tables.cx2, &cy2 = tables.cy2;
+  const auto at = [&](float d2) { return mask[size_t(std::clamp(int(d2 * float(N) + 0.5f), 0, N))]; };
   parallel_for(H, 16, [&](int64_t first, int64_t last) {
     for (int64_t y = first; y < last; ++y) {
       uint8_t *row = nv12 + size_t(y) * size_t(W);
@@ -1347,11 +1369,16 @@ void sharpen_nv12(uint8_t *nv12, int W, int H, float amount, float sigma, std::v
 // a hash of the grain's cell and the frame, not a random generator), so an export repeats exactly. A grain is a square
 // cell of `size` pixels; the noise is triangular (the mean of two uniform values) and strongest in the midtones, where
 // real grain shows most. A full `strength` is about 48 levels of the 219 of the video range.
+// The grain's numbers, shared by the CPU and the GPU: a grain's size in pixels, the noise's amplitude, the frame's seed.
+int grain_cell(float size) { return std::max(1, int(std::lround(size))); }
+float grain_amp(float strength) { return strength * 48.0f; }
+uint32_t grain_seed(int64_t frame) { return uint32_t(frame) * 0x9E3779B1u + 0x7F4A7C15u; }
+
 void grain_nv12(uint8_t *nv12, int W, int H, float strength, float size, int64_t frame) {
   ATM_PROFILE_SCOPE("effect.film_grain");
-  const int cell = std::max(1, int(std::lround(size)));
-  const float amp = strength * 48.0f;
-  const uint32_t seed = uint32_t(frame) * 0x9E3779B1u + 0x7F4A7C15u;
+  const int cell = grain_cell(size);
+  const float amp = grain_amp(strength);
+  const uint32_t seed = grain_seed(frame);
   parallel_for(H, 16, [&](int64_t first, int64_t last) {
     for (int64_t y = first; y < last; ++y) {
       uint8_t *row = nv12 + size_t(y) * size_t(W);
@@ -1690,8 +1717,9 @@ void Renderer::draw(const Layer &l, int64_t frame, uint8_t *out, bool &cleared, 
     cleared = true;
     const size_t size = media::nv12_size(width_, height_);
     adjust_.assign(out, out + size);
-    for (const Effect &e : l.effects)
-      apply_effect(e.kind, effect_values(l, e, comp_, frame), adjust_.data(), width_, height_, scratch_, frame, lut_for(e));
+    if (!gpu_ || !run_on_gpu(l, frame, adjust_.data()))
+      for (const Effect &e : l.effects)
+        apply_effect(e.kind, effect_values(l, e, comp_, frame), adjust_.data(), width_, height_, scratch_, frame, lut_for(e));
     put_rows(out, pitch, adjust_.data(), pitch, height_ * 3 / 2, width_, int(p.opacity * 256.0f + 0.5f));
     return;
   }
@@ -1910,6 +1938,10 @@ void Renderer::draw_isolated(const Layer &l, int64_t frame, uint8_t *out, bool &
   // masking of a colour change would all come to nothing, and are left out (the result is the same, byte for byte).
   bool everywhere = drew_everywhere_ && !g_always_measure_coverage.load();
   cover_.resize(luma);
+  // A clip that fills the frame, with effects that all have a GPU version: the whole chain on the GPU (the same bytes).
+  bool done_on_gpu = false;
+  if (everywhere && gpu_)
+    done_on_gpu = run_on_gpu(l, frame, over_black_.data());
   if (everywhere) {
     std::memset(cover_.data(), 255, luma);
   } else {
@@ -1926,6 +1958,8 @@ void Renderer::draw_isolated(const Layer &l, int64_t frame, uint8_t *out, bool &
     });
   }
   for (const Effect &e : l.effects) {
+    if (done_on_gpu)
+      break;
     const std::array<float, eval::kMaxEffectParams> v = effect_values(l, e, comp_, frame);
     if (e.kind == "gaussian_blur") {
       const float sigma = v[0] * float(H) * 0.5f;
@@ -1983,6 +2017,67 @@ void Renderer::draw_isolated(const Layer &l, int64_t frame, uint8_t *out, bool &
 }
 
 void set_always_measure_coverage(bool on) { g_always_measure_coverage.store(on); }
+
+// The effects of a layer as GPU effects, with their numbers made by the CPU path's own code. False when one of them has
+// no GPU version yet (a LUT, a key): then the whole layer stays on the CPU.
+bool Renderer::gpu_chain(const Layer &l, int64_t frame, std::vector<gpu::Effect> &chain) const {
+  const int W = width_, H = height_;
+  chain.clear();
+  for (const Effect &e : l.effects) {
+    const std::array<float, eval::kMaxEffectParams> v = effect_values(l, e, comp_, frame);
+    gpu::Effect g;
+    if (e.kind == "gaussian_blur") {
+      g.kind = gpu::Effect::Kind::blur;
+      g.sigma = v[0] * float(H) * 0.5f;
+    } else if (e.kind == "sharpen") {
+      g.kind = gpu::Effect::Kind::sharpen;
+      g.amount = v[0];
+      g.sigma = v[1] * float(H) * 0.5f;
+    } else if (e.kind == "color_grade") {
+      g.kind = gpu::Effect::Kind::table;
+      uint8_t luma_lut[256], chroma_lut[256];
+      grade_tables(v[0], v[1], v[2], luma_lut, chroma_lut);
+      g.table.resize(512);
+      for (int i = 0; i < 256; ++i) {
+        g.table[size_t(i)] = luma_lut[i];
+        g.table[size_t(256 + i)] = chroma_lut[i];
+      }
+    } else if (e.kind == "vignette") {
+      g.kind = gpu::Effect::Kind::vignette;
+      const VignetteTables t = vignette_tables(W, H, v[0], v[1], v[2]);
+      for (const std::vector<float> *part : {&t.mask, &t.dx2, &t.dy2, &t.cx2, &t.cy2})
+        for (const float f : *part) {
+          uint32_t bits;
+          std::memcpy(&bits, &f, 4);
+          g.table.push_back(bits);
+        }
+    } else if (e.kind == "film_grain") {
+      g.kind = gpu::Effect::Kind::grain;
+      g.amount = grain_amp(v[0]);
+      g.cell = uint32_t(grain_cell(v[1] * float(H) / 1080.0f));
+      g.seed = grain_seed(frame);
+    } else {
+      return false;
+    }
+    chain.push_back(std::move(g));
+  }
+  return !chain.empty();
+}
+
+bool Renderer::run_on_gpu(const Layer &l, int64_t frame, uint8_t *nv12) {
+  std::vector<gpu::Effect> chain;
+  if (!gpu_chain(l, frame, chain))
+    return false;
+  ATM_PROFILE_SCOPE("composite.gpu_effects");
+  if (auto ran = gpu_->run_effects(nv12, width_, height_, chain); !ran) {
+    if (warning_.empty())
+      warning_ = "The GPU stopped (" + ran.error().message + "): the rest is made on the CPU.";
+    gpu_ = nullptr; // the CPU from now on; the picture was not changed by a failed run
+    return false;
+  }
+  ++gpu_runs_;
+  return true;
+}
 
 void blur_picture(uint8_t *nv12, int width, int height, float sigma) {
   std::vector<uint8_t> tmp;
