@@ -1,0 +1,56 @@
+#version 450
+// A decoded picture (binding 0, packed NV12) drawn into the frame (binding 1) with bilinear sampling and an opacity, one
+// plane per dispatch and one invocation per 4-byte word of the frame. Where every column and row of the rectangle samples
+// comes from the renderer as taps (binding 2), made by the code its CPU drawing uses; the arithmetic below is the CPU's
+// integer arithmetic, so both give the same bytes.
+//   a tap: i0 (bits 0-15), the weight of the second sample (bits 16-24, 0..256), i1 - i0 (bit 25)
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer Source { uint src[]; };
+layout(std430, set = 0, binding = 1) buffer Frame { uint frame[]; };
+layout(std430, set = 0, binding = 2) readonly buffer Taps { uint taps[]; };
+
+layout(push_constant) uniform Draw {
+  uint frame_at;   // where the plane starts in the frame (bytes)
+  uint stride;     // bytes per row of the frame (a multiple of 4)
+  uint x0, x1;     // the bytes of a row written: [x0, x1)
+  uint y0, y1;     // the rows written
+  uint src_at;     // where the plane starts in the source (bytes)
+  uint src_pitch;  // bytes per row of the source
+  uint channels;   // 1: luma; 2: chroma (U and V interleaved, a tap per pair)
+  uint x_taps, y_taps; // where the column and row taps start
+  uint alpha;      // 0..256
+} pc;
+
+int src_byte(uint i) { return int((src[i >> 2] >> ((i & 3u) * 8u)) & 0xFFu); }
+
+void main() {
+  const uint word = pc.x0 / 4u + gl_GlobalInvocationID.x;
+  const uint y = pc.y0 + gl_GlobalInvocationID.y;
+  if (word * 4u >= pc.x1 || y >= pc.y1)
+    return;
+  const uint ty = taps[pc.y_taps + (y - pc.y0)];
+  const uint row0 = pc.src_at + (ty & 0xFFFFu) * pc.src_pitch, row1 = row0 + (ty >> 25) * pc.src_pitch;
+  const int wy = int((ty >> 16) & 0x1FFu);
+  const int a = int(pc.alpha);
+  const uint at = (pc.frame_at + y * pc.stride) / 4u + word;
+  uint out_word = frame[at];
+  for (uint q = 0u; q < 4u; ++q) {
+    const uint b = word * 4u + q;
+    if (b < pc.x0 || b >= pc.x1)
+      continue;
+    const uint c = b - pc.x0;
+    const uint tx = taps[pc.x_taps + c / pc.channels];
+    const uint k = c % pc.channels;
+    const uint i0 = (tx & 0xFFFFu) * pc.channels + k, i1 = i0 + (tx >> 25) * pc.channels;
+    const int wx = int((tx >> 16) & 0x1FFu);
+    const int top = (src_byte(row0 + i0) * (256 - wx) + src_byte(row0 + i1) * wx) >> 8;
+    const int bottom = (src_byte(row1 + i0) * (256 - wx) + src_byte(row1 + i1) * wx) >> 8;
+    const int s = (top * (256 - wy) + bottom * wy) >> 8;
+    const int d = int((out_word >> (q * 8u)) & 0xFFu);
+    const uint v = uint((s * a + d * (256 - a)) >> 8);
+    out_word = (out_word & ~(0xFFu << (q * 8u))) | (v << (q * 8u));
+  }
+  frame[at] = out_word;
+}

@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iterator>
+#include <tuple>
 #include <vector>
 
 extern "C" {
@@ -259,11 +260,8 @@ Result<std::unique_ptr<VideoReader>> VideoReader::open(const std::string &path, 
   ATM_TRY(Codec dec, open_decoder(impl->in->streams[impl->stream], path));
   impl->dec = std::move(dec);
   int w = impl->dec->width, h = impl->dec->height;
-  if (box_width > 0 && box_height > 0 && w > 0 && h > 0) { // fit inside the box, keep the aspect ratio
-    const double scale = std::min(double(box_width) / w, double(box_height) / h);
-    w = std::min(box_width, even(int(std::lround(w * scale))));
-    h = std::min(box_height, even(int(std::lround(h * scale))));
-  }
+  if (box_width > 0 && box_height > 0 && w > 0 && h > 0) // fit inside the box, keep the aspect ratio
+    std::tie(w, h) = fit_inside(w, h, box_width, box_height);
   impl->width = even(w);
   impl->height = even(h);
   impl->nv12.resize(nv12_size(impl->width, impl->height));
@@ -274,7 +272,7 @@ Result<std::unique_ptr<VideoReader>> VideoReader::open(const std::string &path, 
 
 Result<FrameView> VideoReader::frame_at(int64_t time) {
   Impl &m = *impl_;
-  time = std::max<int64_t>(0, time);
+  time = std::max<int64_t>(0, time) + kFrameTimeSlack;
   // Seek when the time is behind the held frame or far ahead of it; otherwise decode forward.
   if (!m.have_cur || time < m.cur_pts || time > m.cur_pts + 2 * kHnsPerSecond) {
     const bool restart = !m.have_cur && !m.have_pending && !m.eof && time < kHnsPerSecond / 2; // a fresh reader near 0

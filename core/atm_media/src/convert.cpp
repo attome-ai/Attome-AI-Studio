@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 
 #include "atm/base/parallel.hpp"
@@ -6,6 +7,12 @@
 #include "atm/media/media.hpp"
 
 namespace atm::media {
+
+std::pair<int, int> fit_inside(int w, int h, int box_width, int box_height) {
+  const auto even = [](int v) { return std::max(2, v & ~1); };
+  const double scale = std::min(double(box_width) / w, double(box_height) / h);
+  return {std::min(box_width, even(int(std::lround(w * scale)))), std::min(box_height, even(int(std::lround(h * scale))))};
+}
 
 // BT.709 limited range in 8-bit fixed point. Chroma is the mean of each 2 x 2 block.
 void bgrx_to_nv12(const uint8_t *bgrx, int width, int height, uint8_t *nv12) {

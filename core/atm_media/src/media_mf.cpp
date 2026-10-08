@@ -258,9 +258,9 @@ Result<std::unique_ptr<VideoReader>> VideoReader::open(const std::string &path, 
     reader = std::move(gpu_reader);
   }
   if (box_width > 0 && box_height > 0 && w > 0 && h > 0) { // fit inside the box, keep the aspect ratio
-    const double scale = std::min(double(box_width) / w, double(box_height) / h);
-    w = UINT32(std::min(box_width, even(int(std::lround(w * scale)))));
-    h = UINT32(std::min(box_height, even(int(std::lround(h * scale)))));
+    const auto [fw, fh] = fit_inside(int(w), int(h), box_width, box_height);
+    w = UINT32(fw);
+    h = UINT32(fh);
   }
   reader->SetStreamSelection(DWORD(MF_SOURCE_READER_ALL_STREAMS), FALSE);
   reader->SetStreamSelection(DWORD(MF_SOURCE_READER_FIRST_VIDEO_STREAM), TRUE);
@@ -285,7 +285,7 @@ Result<std::unique_ptr<VideoReader>> VideoReader::open(const std::string &path, 
 
 Result<FrameView> VideoReader::frame_at(int64_t time) {
   Impl &m = *impl_;
-  time = std::max<int64_t>(0, time);
+  time = std::max<int64_t>(0, time) + kFrameTimeSlack;
   // Seek when the time is behind the held frame or far ahead of it; otherwise decode forward.
   if (!m.cur || time < m.cur_pts || time > m.cur_pts + 2 * kHnsPerSecond) {
     const bool restart = !m.cur && !m.pending && !m.eof && time < kHnsPerSecond / 2; // a fresh reader near 0

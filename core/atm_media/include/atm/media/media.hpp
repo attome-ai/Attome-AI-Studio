@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "atm/base/error.hpp"
@@ -20,6 +21,9 @@ namespace atm::media {
 
 inline constexpr int kAudioRate = 48000; // every audio buffer here is 48 kHz stereo float, interleaved
 inline constexpr int64_t kHnsPerSecond = 10'000'000;
+// Frame times are whole 100 ns units, rounded either way (frame 2 at 30 fps is 666666 or 666667): a frame is taken as
+// shown at a time up to this much before its own.
+inline constexpr int64_t kFrameTimeSlack = kHnsPerSecond / 1000;
 
 struct MediaInfo {
   bool has_video = false, has_audio = false;
@@ -48,6 +52,9 @@ inline size_t nv12_size(int width, int height) { return size_t(width) * size_t(h
 void bgrx_to_nv12(const uint8_t *bgrx, int width, int height, uint8_t *nv12); // both packed
 void nv12_to_bgrx(const uint8_t *nv12, int width, int height, uint8_t *bgrx);
 void fill_black(uint8_t *nv12, int width, int height);
+
+// The size VideoReader reads a w x h video at to fit inside box_width x box_height: the aspect kept, even sizes.
+std::pair<int, int> fit_inside(int w, int h, int box_width, int box_height);
 
 class VideoReader {
 public:

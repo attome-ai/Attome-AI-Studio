@@ -343,8 +343,8 @@ struct Engine::Impl {
   std::shared_ptr<GpuPool> gpu_pool = std::make_shared<GpuPool>(); // the render jobs' devices, kept between jobs
   int still_gpu_device = -2;
   gpu::Context *gpu_for_stills();
-  // The GPU a render of `comp` uses: the device chosen now, or -1 (the CPU) when nothing in it has GPU work, so starting a
-  // device costs nothing to a film without effects.
+  // The GPU a render of `comp` uses: the device chosen now, or -1 (the CPU) when nothing in it has GPU work (effects, or
+  // video clips, which the GPU decodes and draws), so starting a device costs nothing to a film of titles and stills.
   int gpu_device_for(const render::Composition &comp);
   Result<std::vector<std::vector<uint8_t>>> render_stills(render::Composition comp, const std::vector<int64_t> &frames,
                                                                  int width, int height, std::string *warning);

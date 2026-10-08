@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "atm/base/profiler.hpp"
+#include "atm/gpu/video.hpp"
 #include "vulkan_shared.hpp"
 
 namespace atm::gpu {
@@ -29,6 +30,9 @@ const uint32_t kRowsSpirv[] = { // the three horizontal passes of a row at once,
 };
 const uint32_t kPixelsSpirv[] = { // the per-pixel effects (grade tables, vignette, grain, sharpen's mix)
 #include "pixels.spv.inc"
+};
+const uint32_t kDrawSpirv[] = { // a decoded picture drawn into a frame
+#include "draw.spv.inc"
 };
 constexpr uint32_t kMaxRowBytes = 8192; // box_rows.comp holds a row of up to this many bytes in shared memory
 
@@ -53,6 +57,11 @@ struct PixelsPass {
   uint32_t kind, width, height, stride;
   float f0;
   uint32_t u0, u1, chroma_x, table_at;
+};
+
+// The push constants of draw.comp, in its order.
+struct DrawPass {
+  uint32_t frame_at, stride, x0, x1, y0, y1, src_at, src_pitch, channels, x_taps, y_taps, alpha;
 };
 
 // The push constants of box.comp, in its order.
@@ -192,6 +201,36 @@ Result<void> Vulkan::ensure(Buffer &buf, VkDeviceSize size, VkBufferUsageFlags u
   return {};
 }
 
+Result<void> Vulkan::submit(VkQueue on, VkCommandBuffer cmd) {
+  VkSemaphoreSubmitInfo after{VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO}, done{VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO};
+  after.semaphore = done.semaphore = timeline;
+  after.value = submitted;
+  done.value = submitted + 1;
+  after.stageMask = done.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+  VkCommandBufferSubmitInfo cbi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};
+  cbi.commandBuffer = cmd;
+  VkSubmitInfo2 si{VK_STRUCTURE_TYPE_SUBMIT_INFO_2};
+  si.waitSemaphoreInfoCount = 1;
+  si.pWaitSemaphoreInfos = &after;
+  si.commandBufferInfoCount = 1;
+  si.pCommandBufferInfos = &cbi;
+  si.signalSemaphoreInfoCount = 1;
+  si.pSignalSemaphoreInfos = &done;
+  VK_TRY("vkQueueSubmit2", vkQueueSubmit2(on, 1, &si, VK_NULL_HANDLE));
+  ++submitted;
+  return {};
+}
+
+Result<void> Vulkan::wait(uint64_t value) {
+  ATM_PROFILE_SCOPE("gpu.wait");
+  VkSemaphoreWaitInfo wi{VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO};
+  wi.semaphoreCount = 1;
+  wi.pSemaphores = &timeline;
+  wi.pValues = &value;
+  VK_TRY("vkWaitSemaphores", vkWaitSemaphores(device, &wi, 5'000'000'000ull));
+  return {};
+}
+
 void Vulkan::release(Buffer &buf) {
   if (buf.mapped)
     vkUnmapMemory(device, buf.memory);
@@ -221,12 +260,11 @@ struct Context::Impl : Vulkan {
   bool timestamps = false;
   VkCommandPool pool = VK_NULL_HANDLE;
   VkCommandBuffer cmd = VK_NULL_HANDLE;
-  VkFence fence = VK_NULL_HANDLE;
   VkQueryPool queries = VK_NULL_HANDLE;
   VkDescriptorSetLayout set_layout = VK_NULL_HANDLE;
   VkPipelineLayout layout = VK_NULL_HANDLE;
-  VkShaderModule shader = VK_NULL_HANDLE, rows_shader = VK_NULL_HANDLE, pixels_shader = VK_NULL_HANDLE;
-  VkPipeline box = VK_NULL_HANDLE, pixels = VK_NULL_HANDLE;
+  VkShaderModule shader = VK_NULL_HANDLE, rows_shader = VK_NULL_HANDLE, pixels_shader = VK_NULL_HANDLE, draw_shader = VK_NULL_HANDLE;
+  VkPipeline box = VK_NULL_HANDLE, pixels = VK_NULL_HANDLE, draw = VK_NULL_HANDLE;
   std::map<uint64_t, VkPipeline> rows; // box_rows.comp by the row capacity and chunk it was made for
   uint32_t shared_limit = 0; // bytes of shared memory a workgroup can have
   VkDescriptorPool descriptors = VK_NULL_HANDLE;
@@ -237,16 +275,27 @@ struct Context::Impl : Vulkan {
   Buffer a, b, c, d, upload, download, tables;
   Buffer lut, lut_stage; // a LUT kept in the GPU's memory (binding 4), and the host memory it is sent from
   uint64_t lut_loaded = 0; // the id of the LUT in `lut` (0: none)
+  // A frame drawn on the GPU (begin_frame .. end_frame): its size, and the pictures to draw, recorded at the end.
+  struct FrameDraw {
+    PictureImage picture;
+    PictureDraw draw;
+  };
+  int frame_w = 0, frame_h = 0;
+  std::vector<FrameDraw> frame_draws;
+  Buffer pictures, taps;   // the pictures copied out of the decoder's images; the taps of their drawing
+  VkDescriptorSet draw_set = VK_NULL_HANDLE; // pictures -> A, with the taps
 
   ~Impl() {
     if (device) {
       vkDeviceWaitIdle(device);
-      for (Buffer *buf : {&a, &b, &c, &d, &upload, &download, &tables, &lut, &lut_stage})
+      for (Buffer *buf : {&a, &b, &c, &d, &upload, &download, &tables, &lut, &lut_stage, &pictures, &taps})
         release(*buf);
       vkDestroyDescriptorPool(device, descriptors, nullptr);
       vkDestroyPipeline(device, box, nullptr);
       vkDestroyPipeline(device, pixels, nullptr);
+      vkDestroyPipeline(device, draw, nullptr);
       vkDestroyShaderModule(device, pixels_shader, nullptr);
+      vkDestroyShaderModule(device, draw_shader, nullptr);
       for (const auto &[cap, pipeline] : rows)
         vkDestroyPipeline(device, pipeline, nullptr);
       vkDestroyShaderModule(device, shader, nullptr);
@@ -254,7 +303,7 @@ struct Context::Impl : Vulkan {
       vkDestroyPipelineLayout(device, layout, nullptr);
       vkDestroyDescriptorSetLayout(device, set_layout, nullptr);
       vkDestroyQueryPool(device, queries, nullptr);
-      vkDestroyFence(device, fence, nullptr);
+      vkDestroySemaphore(device, timeline, nullptr);
       vkDestroyCommandPool(device, pool, nullptr);
       vkDestroyDevice(device, nullptr);
     }
@@ -404,8 +453,11 @@ struct Context::Impl : Vulkan {
     cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
     cai.commandBufferCount = 1;
     VK_TRY("vkAllocateCommandBuffers", vkAllocateCommandBuffers(device, &cai, &cmd));
-    VkFenceCreateInfo fi{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-    VK_TRY("vkCreateFence", vkCreateFence(device, &fi, nullptr, &fence));
+    VkSemaphoreTypeCreateInfo type{VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO};
+    type.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+    VkSemaphoreCreateInfo sci{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+    sci.pNext = &type;
+    VK_TRY("vkCreateSemaphore", vkCreateSemaphore(device, &sci, nullptr, &timeline));
     if (timestamps) {
       VkQueryPoolCreateInfo qpi{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
       qpi.queryType = VK_QUERY_TYPE_TIMESTAMP;
@@ -450,20 +502,25 @@ struct Context::Impl : Vulkan {
     VK_TRY("vkCreateShaderModule", vkCreateShaderModule(device, &smi, nullptr, &pixels_shader));
     cpi.stage.module = pixels_shader;
     VK_TRY("vkCreateComputePipelines", vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &cpi, nullptr, &pixels));
+    smi.codeSize = sizeof kDrawSpirv;
+    smi.pCode = kDrawSpirv;
+    VK_TRY("vkCreateShaderModule", vkCreateShaderModule(device, &smi, nullptr, &draw_shader));
+    cpi.stage.module = draw_shader;
+    VK_TRY("vkCreateComputePipelines", vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &cpi, nullptr, &draw));
 
 
-    VkDescriptorPoolSize sizes{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 36};
+    VkDescriptorPoolSize sizes{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 42};
     VkDescriptorPoolCreateInfo dpi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-    dpi.maxSets = 6;
+    dpi.maxSets = 7;
     dpi.poolSizeCount = 1;
     dpi.pPoolSizes = &sizes;
     VK_TRY("vkCreateDescriptorPool", vkCreateDescriptorPool(device, &dpi, nullptr, &descriptors));
-    VkDescriptorSetLayout six[6] = {set_layout, set_layout, set_layout, set_layout, set_layout, set_layout};
-    VkDescriptorSet sets[6];
+    VkDescriptorSetLayout seven[7] = {set_layout, set_layout, set_layout, set_layout, set_layout, set_layout, set_layout};
+    VkDescriptorSet sets[7];
     VkDescriptorSetAllocateInfo dai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
     dai.descriptorPool = descriptors;
-    dai.descriptorSetCount = 6;
-    dai.pSetLayouts = six;
+    dai.descriptorSetCount = 7;
+    dai.pSetLayouts = seven;
     VK_TRY("vkAllocateDescriptorSets", vkAllocateDescriptorSets(device, &dai, sets));
     a_to_b = sets[0];
     b_to_a = sets[1];
@@ -471,6 +528,7 @@ struct Context::Impl : Vulkan {
     b_to_c = sets[3];
     d_to_b = sets[4];
     b_to_d = sets[5];
+    draw_set = sets[6];
     return {};
   }
 
@@ -603,6 +661,102 @@ Result<void> Context::blur_nv12(uint8_t *nv12, int W, int H, float sigma, Timing
   return run_effects(nv12, W, H, {blur}, timing);
 }
 
+void Context::begin_frame(int width, int height) {
+  impl_->frame_w = width;
+  impl_->frame_h = height;
+  impl_->frame_draws.clear();
+}
+
+void Context::draw_picture(const VideoDecoder &decoder, const Picture &picture, PictureDraw draw) {
+  impl_->frame_draws.push_back({picture_image(*decoder.impl_, picture.slot), std::move(draw)});
+}
+
+Result<void> Context::end_frame(uint8_t *nv12) {
+  ATM_PROFILE_SCOPE("gpu.frame");
+  Impl &m = *impl_;
+  const int W = m.frame_w, H = m.frame_h;
+  const uint32_t P = (uint32_t(W) + 3u) & ~3u, uh = uint32_t(H);
+  const VkDeviceSize luma = VkDeviceSize(P) * uh, size = luma + luma / 2;
+  ATM_CHECK(m.ensure_buffers(size, 0, 0));
+  // Every picture gets its own place in `pictures` (rows of a multiple of 4 bytes), every draw its taps in `taps`.
+  std::vector<VkDeviceSize> picture_at;
+  std::vector<uint32_t> taps_at;
+  VkDeviceSize picture_bytes = 4;
+  size_t tap_words = 1;
+  for (const Impl::FrameDraw &f : m.frame_draws) {
+    const uint32_t pitch = (uint32_t(f.picture.width) + 3u) & ~3u;
+    picture_at.push_back(picture_bytes);
+    picture_bytes += VkDeviceSize(pitch) * VkDeviceSize(f.picture.height + f.picture.height / 2);
+    taps_at.push_back(uint32_t(tap_words));
+    tap_words += f.draw.luma_x.size() + f.draw.luma_y.size() + f.draw.chroma_x.size() + f.draw.chroma_y.size();
+  }
+  constexpr VkBufferUsageFlags kWork = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+  ATM_CHECK(m.ensure(m.pictures, picture_bytes, kWork, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT));
+  ATM_CHECK(m.ensure(m.taps, VkDeviceSize(tap_words) * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT));
+  {
+    VkDescriptorBufferInfo infos[3] = {{m.pictures.buffer, 0, VK_WHOLE_SIZE}, {m.a.buffer, 0, VK_WHOLE_SIZE}, {m.taps.buffer, 0, VK_WHOLE_SIZE}};
+    VkWriteDescriptorSet writes[3]{};
+    for (uint32_t i = 0; i < 3; ++i) {
+      writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+      writes[i].dstSet = m.draw_set;
+      writes[i].dstBinding = i;
+      writes[i].descriptorCount = 1;
+      writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+      writes[i].pBufferInfo = &infos[i];
+    }
+    vkUpdateDescriptorSets(m.device, 3, writes, 0, nullptr);
+  }
+  auto *tap_out = static_cast<uint32_t *>(m.taps.mapped);
+  for (size_t i = 0; i < m.frame_draws.size(); ++i) {
+    uint32_t *t = tap_out + taps_at[i];
+    for (const std::vector<uint32_t> *part : {&m.frame_draws[i].draw.luma_x, &m.frame_draws[i].draw.luma_y, &m.frame_draws[i].draw.chroma_x, &m.frame_draws[i].draw.chroma_y}) {
+      std::memcpy(t, part->data(), part->size() * 4);
+      t += part->size();
+    }
+  }
+
+  VK_TRY("vkResetCommandBuffer", vkResetCommandBuffer(m.cmd, 0));
+  VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+  bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+  VK_TRY("vkBeginCommandBuffer", vkBeginCommandBuffer(m.cmd, &bi));
+  vkCmdFillBuffer(m.cmd, m.a.buffer, 0, luma, 0x10101010u); // black: luma 16, chroma 128
+  vkCmdFillBuffer(m.cmd, m.a.buffer, luma, luma / 2, 0x80808080u);
+  for (size_t i = 0; i < m.frame_draws.size(); ++i)
+    record_picture_copy(m.cmd, m.frame_draws[i].picture, m.pictures.buffer, picture_at[i], (uint32_t(m.frame_draws[i].picture.width) + 3u) & ~3u);
+  m.compute_to_compute();
+  vkCmdBindPipeline(m.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m.draw);
+  vkCmdBindDescriptorSets(m.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m.layout, 0, 1, &m.draw_set, 0, nullptr);
+  for (size_t i = 0; i < m.frame_draws.size(); ++i) { // in order: each blends over what is drawn before it
+    const PictureImage &pic = m.frame_draws[i].picture;
+    const PictureDraw &d = m.frame_draws[i].draw;
+    const uint32_t pitch = (uint32_t(pic.width) + 3u) & ~3u;
+    const uint32_t at = taps_at[i], ly = at + uint32_t(d.luma_x.size()), cx = ly + uint32_t(d.luma_y.size()), cy = cx + uint32_t(d.chroma_x.size());
+    const auto plane = [&](const DrawPass &p) {
+      if (p.x1 <= p.x0 || p.y1 <= p.y0)
+        return;
+      vkCmdPushConstants(m.cmd, m.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);
+      const uint32_t words = (p.x1 + 3u) / 4u - p.x0 / 4u;
+      vkCmdDispatch(m.cmd, (words + 63u) / 64u, p.y1 - p.y0, 1);
+    };
+    plane({0, P, uint32_t(d.x0), uint32_t(d.x1), uint32_t(d.y0), uint32_t(d.y1), uint32_t(picture_at[i]), pitch, 1, at, ly, uint32_t(d.alpha)});
+    plane({uint32_t(luma), P, uint32_t(2 * d.cx0), uint32_t(2 * d.cx1), uint32_t(d.cy0), uint32_t(d.cy1),
+           uint32_t(picture_at[i] + VkDeviceSize(pitch) * VkDeviceSize(pic.height)), pitch, 2, cx, cy, uint32_t(d.alpha)});
+    m.compute_to_compute();
+  }
+  const auto &out = m.copies(W, H + H / 2, P, false);
+  vkCmdCopyBuffer(m.cmd, m.a.buffer, m.download.buffer, uint32_t(out.size()), out.data());
+  m.barrier(VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_HOST_BIT, VK_ACCESS_2_HOST_READ_BIT);
+  VK_TRY("vkEndCommandBuffer", vkEndCommandBuffer(m.cmd));
+  ATM_CHECK(m.submit(m.queue, m.cmd));
+  ATM_CHECK(m.wait(m.submitted));
+  {
+    ATM_PROFILE_SCOPE("gpu.from_staging");
+    std::memcpy(nv12, m.download.mapped, size_t(W) * size_t(H) * 3 / 2);
+  }
+  m.frame_draws.clear();
+  return {};
+}
+
 uint8_t *Context::staging(int W, int H) {
   Impl &m = *impl_;
   const uint32_t P = (uint32_t(W) + 3u) & ~3u, uh = uint32_t(H);
@@ -733,17 +887,8 @@ Result<void> Context::run_effects(uint8_t *nv12, int W, int H, const std::vector
     vkCmdWriteTimestamp2(m.cmd, VK_PIPELINE_STAGE_2_COPY_BIT, m.queries, 3);
   VK_TRY("vkEndCommandBuffer", vkEndCommandBuffer(m.cmd));
 
-  VkCommandBufferSubmitInfo cbi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};
-  cbi.commandBuffer = m.cmd;
-  VkSubmitInfo2 si{VK_STRUCTURE_TYPE_SUBMIT_INFO_2};
-  si.commandBufferInfoCount = 1;
-  si.pCommandBufferInfos = &cbi;
-  VK_TRY("vkResetFences", vkResetFences(m.device, 1, &m.fence));
-  VK_TRY("vkQueueSubmit2", vkQueueSubmit2(m.queue, 1, &si, m.fence));
-  {
-    ATM_PROFILE_SCOPE("gpu.wait");
-    VK_TRY("vkWaitForFences", vkWaitForFences(m.device, 1, &m.fence, VK_TRUE, UINT64_MAX));
-  }
+  ATM_CHECK(m.submit(m.queue, m.cmd));
+  ATM_CHECK(m.wait(m.submitted));
   if (send_lut)
     m.lut_loaded = lut_effect->lut_id;
 

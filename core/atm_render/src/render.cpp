@@ -12,6 +12,7 @@
 #include "atm/base/profiler.hpp"
 #include "atm/base/rational.hpp"
 #include "atm/eval/lut.hpp"
+#include "atm/gpu/video.hpp"
 
 #if defined(_M_X64) || defined(__x86_64__)
 #include <emmintrin.h>
@@ -199,6 +200,73 @@ void draw_rotated(uint8_t *out, int W, int H, const media::FrameView &v, const P
   });
 }
 
+// Where the samples of an upright picture come from (draw_transformed's own path, and the GPU's drawing of it): a tap is
+// the two samples a pixel mixes, as indices, and the 8-bit weight of the second.
+struct Tap {
+  int i0, i1, w;
+};
+Tap tap(float coord, int size) {
+  const float c = std::clamp(coord, 0.0f, float(size - 1));
+  const int i = int(c);
+  return Tap{i, std::min(i + 1, size - 1), int((c - float(i)) * 256.0f)};
+}
+
+// The rectangles an upright picture of vw x vh writes (luma pixels; chroma U/V pairs and rows), with the crop cut at whole
+// pixels, and the taps of their columns and rows. False when none of it is on the canvas.
+struct Upright {
+  int ix0 = 0, ix1 = 0, iy0 = 0, iy1 = 0, cx0 = 0, cx1 = 0, cy0 = 0, cy1 = 0;
+  std::vector<Tap> xs, ys, cxs, cys;
+};
+bool upright(const Placement &pl, int W, int H, int vw, int vh, Upright &u) {
+  const float sx = pl.sx, sy = pl.sy;
+  const float fx0 = pl.px - pl.ax * sx, fy0 = pl.py - pl.ay * sy; // where the picture's top-left corner lands
+  u.ix0 = std::max(0, int(std::ceil(fx0 + pl.u0 * sx)));
+  u.ix1 = std::min(W, int(std::floor(fx0 + pl.u1 * sx)));
+  u.iy0 = std::max(0, int(std::ceil(fy0 + pl.v0 * sy)));
+  u.iy1 = std::min(H, int(std::floor(fy0 + pl.v1 * sy)));
+  if (u.ix1 <= u.ix0 || u.iy1 <= u.iy0)
+    return false;
+  const float inv_x = 1.0f / sx, inv_y = 1.0f / sy;
+  u.xs.resize(size_t(u.ix1 - u.ix0));
+  for (int x = u.ix0; x < u.ix1; ++x)
+    u.xs[size_t(x - u.ix0)] = tap((float(x) + 0.5f - fx0) * inv_x - 0.5f, vw);
+  u.ys.resize(size_t(u.iy1 - u.iy0));
+  for (int y = u.iy0; y < u.iy1; ++y)
+    u.ys[size_t(y - u.iy0)] = tap((float(y) + 0.5f - fy0) * inv_y - 0.5f, vh);
+  // Chroma: one U/V pair per 2 x 2 destination pixels, sampled from the half-size source plane.
+  const int cw = vw / 2, ch = vh / 2;
+  u.cx0 = u.ix0 / 2;
+  u.cx1 = (u.ix1 + 1) / 2;
+  u.cy0 = u.iy0 / 2;
+  u.cy1 = (u.iy1 + 1) / 2;
+  u.cxs.resize(size_t(u.cx1 - u.cx0));
+  for (int c = u.cx0; c < u.cx1; ++c)
+    u.cxs[size_t(c - u.cx0)] = tap(((float(2 * c) + 1.0f - fx0) * inv_x) * 0.5f - 0.5f, cw);
+  u.cys.resize(size_t(u.cy1 - u.cy0));
+  for (int c = u.cy0; c < u.cy1; ++c)
+    u.cys[size_t(c - u.cy0)] = tap(((float(2 * c) + 1.0f - fy0) * inv_y) * 0.5f - 0.5f, ch);
+  return true;
+}
+
+// The plain copy of a picture of w x h (no larger than the canvas) centred on the canvas, as an upright drawing: what
+// put_rows does on the CPU.
+Upright centred(int W, int H, int w, int h) {
+  Upright u;
+  const int x0 = ((W - w) / 2) & ~1, y0 = ((H - h) / 2) & ~1; // chroma is shared by 2 x 2 pixels
+  u.ix0 = x0;
+  u.ix1 = x0 + w;
+  u.iy0 = y0;
+  u.iy1 = y0 + h;
+  u.cx0 = x0 / 2;
+  u.cx1 = (x0 + w) / 2;
+  u.cy0 = y0 / 2;
+  u.cy1 = y0 / 2 + h / 2;
+  for (auto [list, n] : {std::pair{&u.xs, w}, std::pair{&u.ys, h}, std::pair{&u.cxs, w / 2}, std::pair{&u.cys, h / 2}})
+    for (int i = 0; i < n; ++i)
+      list->push_back({i, i, 0});
+  return u;
+}
+
 // Draws the NV12 picture `v` into the NV12 canvas `out` as `pl` places it, blending with `alpha` (0..256). Bilinear
 // sampling; the part outside the canvas is cut off. Rows run in parallel. A turned or transparent picture goes to
 // draw_rotated; an upright opaque one keeps this simpler path, with its crop cut at whole pixels.
@@ -207,32 +275,16 @@ void draw_transformed(uint8_t *out, int W, int H, const media::FrameView &v, con
     draw_rotated(out, W, H, v, pl, alpha);
     return;
   }
-  const float sx = pl.sx, sy = pl.sy;
-  const float fx0 = pl.px - pl.ax * sx, fy0 = pl.py - pl.ay * sy; // where the picture's top-left corner lands
-  const int ix0 = std::max(0, int(std::ceil(fx0 + pl.u0 * sx))), ix1 = std::min(W, int(std::floor(fx0 + pl.u1 * sx)));
-  const int iy0 = std::max(0, int(std::ceil(fy0 + pl.v0 * sy))), iy1 = std::min(H, int(std::floor(fy0 + pl.v1 * sy)));
-  if (ix1 <= ix0 || iy1 <= iy0)
+  Upright u;
+  if (!upright(pl, W, H, v.width, v.height, u))
     return;
-  const float inv_x = 1.0f / sx, inv_y = 1.0f / sy;
-
-  // Source position of one destination coordinate, as an index and an 8-bit weight of the next sample.
-  struct Tap {
-    int i0, i1, w;
-  };
-  const auto tap = [](float coord, int size) {
-    const float c = std::clamp(coord, 0.0f, float(size - 1));
-    const int i = int(c);
-    return Tap{i, std::min(i + 1, size - 1), int((c - float(i)) * 256.0f)};
-  };
-  std::vector<Tap> xs(size_t(ix1 - ix0));
-  for (int x = ix0; x < ix1; ++x)
-    xs[size_t(x - ix0)] = tap((float(x) + 0.5f - fx0) * inv_x - 0.5f, v.width);
-
+  const int ix0 = u.ix0, ix1 = u.ix1, iy0 = u.iy0, iy1 = u.iy1;
+  const std::vector<Tap> &xs = u.xs;
   uint8_t *out_y = out, *out_uv = out + size_t(W) * size_t(H);
   parallel_for(iy1 - iy0, 8, [&](int64_t first, int64_t last) {
     for (int64_t r = first; r < last; ++r) {
       const int y = iy0 + int(r);
-      const Tap ty = tap((float(y) + 0.5f - fy0) * inv_y - 0.5f, v.height);
+      const Tap &ty = u.ys[size_t(r)];
       const uint8_t *r0 = v.y + std::ptrdiff_t(v.y_pitch) * ty.i0, *r1 = v.y + std::ptrdiff_t(v.y_pitch) * ty.i1;
       uint8_t *dst = out_y + size_t(y) * size_t(W);
       for (int x = ix0; x < ix1; ++x) {
@@ -245,16 +297,12 @@ void draw_transformed(uint8_t *out, int W, int H, const media::FrameView &v, con
     }
   });
 
-  // Chroma: one U/V pair per 2 x 2 destination pixels, sampled from the half-size source plane.
-  const int cw = v.width / 2, ch = v.height / 2;
-  const int cx0 = ix0 / 2, cx1 = (ix1 + 1) / 2, cy0 = iy0 / 2, cy1 = (iy1 + 1) / 2;
-  std::vector<Tap> cxs(size_t(cx1 - cx0));
-  for (int c = cx0; c < cx1; ++c)
-    cxs[size_t(c - cx0)] = tap(((float(2 * c) + 1.0f - fx0) * inv_x) * 0.5f - 0.5f, cw);
+  const int cx0 = u.cx0, cx1 = u.cx1, cy0 = u.cy0, cy1 = u.cy1;
+  const std::vector<Tap> &cxs = u.cxs;
   parallel_for(cy1 - cy0, 8, [&](int64_t first, int64_t last) {
     for (int64_t r = first; r < last; ++r) {
       const int c = cy0 + int(r);
-      const Tap ty = tap(((float(2 * c) + 1.0f - fy0) * inv_y) * 0.5f - 0.5f, ch);
+      const Tap &ty = u.cys[size_t(r)];
       const uint8_t *r0 = v.uv + std::ptrdiff_t(v.uv_pitch) * ty.i0, *r1 = v.uv + std::ptrdiff_t(v.uv_pitch) * ty.i1;
       uint8_t *dst = out_uv + size_t(c) * size_t(W);
       for (int x = cx0; x < cx1; ++x) {
@@ -2136,12 +2184,192 @@ bool Renderer::run_chain_on_gpu(const std::vector<gpu::Effect> &chain, uint8_t *
     return false;
   ATM_PROFILE_SCOPE("composite.gpu_effects");
   if (auto ran = gpu_->run_effects(nv12, width_, height_, chain, nullptr, cover, result); !ran) {
-    if (warning_.empty())
-      warning_ = "The GPU stopped (" + ran.error().message + "): the rest is made on the CPU.";
-    gpu_ = nullptr; // the CPU from now on; the picture was not changed by a failed run
+    stop_gpu(ran.error().message); // the picture was not changed by a failed run
     return false;
   }
   ++gpu_runs_;
+  return true;
+}
+
+void Renderer::use_gpu(gpu::Context *gpu) {
+  if (gpu != gpu_)
+    gpu_readers_.clear(); // their decoders are on the device being let go
+  gpu_ = gpu;
+}
+
+void Renderer::stop_gpu(const std::string &why) {
+  if (warning_.empty())
+    warning_ = "The GPU stopped (" + why + "): the rest is made on the CPU.";
+  use_gpu(nullptr); // the CPU from now on
+}
+
+// A clip decoded by the GPU (Vulkan Video): the picture on screen at a time stays on the GPU, found by the rule of
+// VideoReader::frame_at (the last picture at or before the time; seek when the time is behind it or far ahead).
+struct Renderer::GpuReader {
+  std::unique_ptr<media::VideoStream> stream;
+  std::unique_ptr<gpu::VideoDecoder> decoder;
+  media::Packet packet;
+  gpu::Picture cur, pending; // the picture on screen, and the one after it
+  bool have_cur = false, have_pending = false;
+  bool stream_done = false, eof = false; // every sample read; every picture taken
+
+  static Result<std::unique_ptr<GpuReader>> open(gpu::Context &gpu, const std::string &path) {
+    auto r = std::make_unique<GpuReader>();
+    ATM_TRY(auto stream, media::VideoStream::open(path));
+    if (stream->codec() != "h264")
+      return fail(ErrorCode::GpuUnsupported, "G_NO_VIDEO_DECODE", "The GPU decodes H.264 only.");
+    ATM_TRY(auto decoder, gpu::VideoDecoder::create(gpu, stream->sequence_header()));
+    r->stream = std::move(stream);
+    r->decoder = std::move(decoder);
+    return r;
+  }
+
+  void drop(gpu::Picture &p, bool &have) {
+    if (have)
+      decoder->release(p);
+    have = false;
+  }
+
+  Result<void> read_next() {
+    for (;;) {
+      ATM_TRY(const bool got, decoder->next(pending));
+      if (got) {
+        have_pending = true;
+        return {};
+      }
+      if (stream_done) {
+        eof = true;
+        return {};
+      }
+      ATM_TRY(const bool more, stream->next(packet));
+      if (!more) {
+        decoder->flush();
+        stream_done = true;
+        continue;
+      }
+      ATM_CHECK(decoder->decode(packet.data, packet.pts));
+    }
+  }
+
+  Result<const gpu::Picture *> frame_at(int64_t time) {
+    time = std::max<int64_t>(0, time) + media::kFrameTimeSlack;
+    if (!have_cur || time < cur.pts || time > cur.pts + 2 * media::kHnsPerSecond) {
+      const bool restart = !have_cur && !have_pending && !eof && time < media::kHnsPerSecond / 2; // a fresh reader near 0
+      if (!restart) {
+        ATM_PROFILE_SCOPE("decode.seek");
+        drop(cur, have_cur);
+        drop(pending, have_pending);
+        decoder->flush();
+        for (gpu::Picture p; decoder->next(p).value_or(false);)
+          decoder->release(p);
+        ATM_CHECK(stream->seek(time));
+        stream_done = eof = false;
+      }
+    }
+    for (;;) {
+      if (have_pending) {
+        if (pending.pts > time && have_cur)
+          break; // `cur` is the picture on screen at `time`
+        drop(cur, have_cur);
+        cur = pending;
+        have_cur = true;
+        have_pending = false;
+        if (cur.pts > time)
+          break; // the stream starts after `time`: show its first picture
+      } else if (eof) {
+        break; // hold the last picture
+      } else {
+        ATM_CHECK(read_next());
+      }
+    }
+    if (!have_cur)
+      return fail(ErrorCode::MediaDecodeFailed, "M_NO_FRAME", "The clip has no frame at this time.");
+    return &cur;
+  }
+};
+
+bool Renderer::render_on_gpu(int64_t frame, uint8_t *out) {
+  if (!gpu_)
+    return false;
+  // First what needs no decoding: every picture of the frame must be a video clip drawn upright, with no effect and no transition.
+  std::vector<const Layer *> shown;
+  std::vector<Pose> poses;
+  for (const Layer &l : comp_.layers) {
+    if (!l.video || frame < l.start_frame || frame >= l.start_frame + l.frames)
+      continue;
+    if (l.is_text || l.is_image || l.is_adjustment || !l.effects.empty() || l.reverse || failed_.count(l.clip_id) || gpu_failed_.count(l.clip_id))
+      return false;
+    if ((l.mix_with >= 0 && l.mixing_at(frame)) || (l.mixed_by >= 0 && comp_.layers[size_t(l.mixed_by)].mixing_at(frame)))
+      return false;
+    const Pose p = pose_at(l, comp_, frame);
+    if (std::fmod(double(p.xf.rotation), 360.0) != 0.0) // turned: Placement::rotated
+      return false;
+    shown.push_back(&l);
+    poses.push_back(p);
+  }
+  struct Draw {
+    GpuReader *reader;
+    const gpu::Picture *picture;
+    gpu::PictureDraw draw;
+  };
+  std::vector<Draw> draws;
+  for (size_t i = 0; i < shown.size(); ++i) {
+    const Layer *l = shown[i];
+    const Pose &p = poses[i];
+    if (p.opacity <= 0.0f)
+      continue;
+    auto it = gpu_readers_.find(l->clip_id);
+    if (it == gpu_readers_.end()) {
+      auto reader = GpuReader::open(*gpu_, l->path);
+      // A picture the CPU reader would scale to fit the canvas stays with the CPU, which scales it.
+      if (!reader || media::fit_inside((*reader)->decoder->width(), (*reader)->decoder->height(), width_, height_) !=
+                         std::pair{(*reader)->decoder->width(), (*reader)->decoder->height()}) {
+        gpu_failed_[l->clip_id] = true;
+        return false;
+      }
+      it = gpu_readers_.emplace(l->clip_id, std::move(*reader)).first;
+    }
+    GpuReader &reader = *it->second;
+    const int vw = reader.decoder->width(), vh = reader.decoder->height();
+    const Transform &xf = p.xf;
+    const Placement pl(xf, width_, height_, float(vw), float(vh));
+    const bool plain = xf.scale_x == 1.0f && xf.scale_y == 1.0f && xf.pos_x == 0.5f && xf.pos_y == 0.5f && xf.anchor_x == 0.5f && xf.anchor_y == 0.5f &&
+                       !xf.cropped();
+    Upright u;
+    if (plain)
+      u = centred(width_, height_, std::min(vw, width_), std::min(vh, height_));
+    else if (!upright(pl, width_, height_, vw, vh, u))
+      continue;
+    int64_t t = l->source_in_hns + comp_.frame_hns(frame - l->start_frame);
+    if (l->speed != 1.0)
+      t = int64_t(double(t) * l->speed);
+    auto picture = reader.frame_at(t);
+    if (!picture) {
+      gpu_failed_[l->clip_id] = true; // the CPU reader takes the clip, and reports what is wrong with it
+      gpu_readers_.erase(it);
+      return false;
+    }
+    const auto pack = [](const std::vector<Tap> &taps) {
+      std::vector<uint32_t> out(taps.size());
+      for (size_t i = 0; i < taps.size(); ++i)
+        out[i] = uint32_t(taps[i].i0) | uint32_t(taps[i].w) << 16 | uint32_t(taps[i].i1 - taps[i].i0) << 25;
+      return out;
+    };
+    gpu::PictureDraw d{u.ix0, u.ix1, u.iy0, u.iy1, u.cx0, u.cx1, u.cy0, u.cy1, pack(u.xs), pack(u.ys), pack(u.cxs), pack(u.cys),
+                       int(p.opacity * 256.0f + 0.5f)};
+    draws.push_back({&reader, *picture, std::move(d)});
+  }
+  ATM_PROFILE_SCOPE("composite.gpu_frame");
+  gpu_->begin_frame(width_, height_);
+  for (Draw &d : draws)
+    gpu_->draw_picture(*d.reader->decoder, *d.picture, std::move(d.draw));
+  if (auto made = gpu_->end_frame(out); !made) {
+    stop_gpu(made.error().message);
+    return false;
+  }
+  ++gpu_runs_;
+  if (gpu_readers_.size() > 6) // keep the decoders of this frame, close the rest
+    std::erase_if(gpu_readers_, [&](const auto &entry) { return std::none_of(shown.begin(), shown.end(), [&](const Layer *l) { return l->clip_id == entry.first; }); });
   return true;
 }
 
@@ -2152,6 +2380,8 @@ void blur_picture(uint8_t *nv12, int width, int height, float sigma) {
 
 Result<void> Renderer::render(int64_t frame, uint8_t *out) {
   ATM_PROFILE_SCOPE("render.frame");
+  if (render_on_gpu(frame, out))
+    return {};
   bool cleared = false;
   std::vector<const std::string *> used;
   for (const Layer &l : comp_.layers) {

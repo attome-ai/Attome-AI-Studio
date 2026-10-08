@@ -9,12 +9,13 @@
 // The pictures live in an image of many layers, one layer per DPB slot: a slot is the picture decoded into it, kept while
 // it is a reference or not shown yet. Where the decoder's references and its output pictures coincide (NVIDIA), that one
 // image serves both; where they are apart (AMD), a second image of as many layers takes the output, and slot k is layer k
-// of both. The decode queue and the compute queue (which reads pictures out) take turns on one timeline semaphore.
+// of both. The decode queue and the compute queue take turns on the device's timeline (Vulkan::submit).
 
 #include "atm/gpu/video.hpp"
 
 #include <algorithm>
 #include <cstring>
+#include <limits>
 #include <map>
 #include <optional>
 #include <tuple>
@@ -28,7 +29,6 @@ namespace atm::gpu {
 namespace h264 = media::h264;
 namespace {
 
-constexpr uint64_t kWaitNs = 2'000'000'000; // GPU work that has not finished in 2 s is stuck: fail rather than wait forever
 constexpr uint32_t kMaxSlots = 17;          // 16 references and the picture being decoded
 
 tl::unexpected<Error> cannot(const std::string &why) {
@@ -118,14 +118,15 @@ struct Layers {
 // A DPB slot: the picture decoded into a layer of the image, as a reference and as a picture to show.
 struct Slot {
   bool reference = false, long_term = false;
-  bool waiting = false; // decoded, not read out yet
-  bool ready = false;   // may be read out: no picture shown before it can still come
+  bool waiting = false; // decoded, not given out yet
+  bool ready = false;   // may be given out: no picture shown before it can still come
+  bool held = false;    // given out (next), not released yet
   int frame_num = 0, long_term_idx = 0;
   h264::Poc poc;        // as a reference
   int64_t period = 0;   // pictures from one IDR (or operation 5) to the next show in the order of their counts
   int order = 0;
   int64_t pts = 0;
-  bool used() const { return reference || waiting; }
+  bool used() const { return reference || waiting || held; }
 };
 
 } // namespace
@@ -158,18 +159,19 @@ struct VideoDecoder::Impl {
   Buffer bitstream, download;
   VkCommandPool video_pool = VK_NULL_HANDLE, copy_pool = VK_NULL_HANDLE;
   VkCommandBuffer video_cmd = VK_NULL_HANDLE, copy_cmd = VK_NULL_HANDLE;
-  VkSemaphore timeline = VK_NULL_HANDLE;
-  uint64_t submitted = 0; // the timeline's value once the last work sent has finished
   bool started = false;   // the session was reset and the image laid out
   std::vector<Slot> slots;
   int64_t period = 0;
   int max_long_term_idx = -1; // -1: no long-term indices
+  // At the start and after a flush (a seek), decoding begins at an intra picture: what comes before it refers to pictures
+  // never decoded and is skipped, and so are the pictures that show before a non-IDR start (an open GOP's leading pictures).
+  bool need_key = true;
+  int leading_below = std::numeric_limits<int>::min();
 
   explicit Impl(Vulkan &v) : vk(v) {}
 
   ~Impl() {
-    if (timeline)
-      (void)wait(submitted);
+    (void)vk.wait(vk.submitted);
     if (parameters)
       fn.destroy_parameters(vk.device, parameters, nullptr);
     if (session)
@@ -183,40 +185,8 @@ struct VideoDecoder::Impl {
     }
     vk.release(bitstream);
     vk.release(download);
-    vkDestroySemaphore(vk.device, timeline, nullptr);
     vkDestroyCommandPool(vk.device, video_pool, nullptr);
     vkDestroyCommandPool(vk.device, copy_pool, nullptr);
-  }
-
-  Result<void> wait(uint64_t value) {
-    VkSemaphoreWaitInfo wi{VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO};
-    wi.semaphoreCount = 1;
-    wi.pSemaphores = &timeline;
-    wi.pValues = &value;
-    ATM_PROFILE_SCOPE("video.wait");
-    VK_TRY("vkWaitSemaphores", vkWaitSemaphores(vk.device, &wi, kWaitNs));
-    return {};
-  }
-
-  // Sends a recorded command buffer to `queue`, after all the work sent before it, and moves the timeline on.
-  Result<void> submit(VkQueue queue, VkCommandBuffer cmd) {
-    VkSemaphoreSubmitInfo after{VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO}, done{VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO};
-    after.semaphore = done.semaphore = timeline;
-    after.value = submitted;
-    done.value = submitted + 1;
-    after.stageMask = done.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
-    VkCommandBufferSubmitInfo cbi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};
-    cbi.commandBuffer = cmd;
-    VkSubmitInfo2 si{VK_STRUCTURE_TYPE_SUBMIT_INFO_2};
-    si.waitSemaphoreInfoCount = 1;
-    si.pWaitSemaphoreInfos = &after;
-    si.commandBufferInfoCount = 1;
-    si.pCommandBufferInfos = &cbi;
-    si.signalSemaphoreInfoCount = 1;
-    si.pSignalSemaphoreInfos = &done;
-    VK_TRY("vkQueueSubmit2", vkQueueSubmit2(queue, 1, &si, VK_NULL_HANDLE));
-    ++submitted;
-    return {};
   }
 
   // The SPS and PPS units of `data`, kept by id; a set that changed marks the session parameters for remaking.
@@ -401,17 +371,12 @@ struct VideoDecoder::Impl {
     VK_TRY("vkAllocateCommandBuffers", vkAllocateCommandBuffers(vk.device, &cai, &video_cmd));
     cai.commandPool = copy_pool;
     VK_TRY("vkAllocateCommandBuffers", vkAllocateCommandBuffers(vk.device, &cai, &copy_cmd));
-    VkSemaphoreTypeCreateInfo type{VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO};
-    type.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
-    VkSemaphoreCreateInfo sci{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
-    sci.pNext = &type;
-    VK_TRY("vkCreateSemaphore", vkCreateSemaphore(vk.device, &sci, nullptr, &timeline));
     return {};
   }
 
   // The session parameters, remade with every parameter set known (after the work that uses the old ones).
   Result<void> make_parameters() {
-    ATM_CHECK(wait(submitted));
+    ATM_CHECK(vk.wait(vk.submitted));
     for (const h264::Sps &s : sps)
       if (s.coded_width() > int(coded.width) || s.coded_height() > int(coded.height) || !h264::gpu_unsupported(s).empty())
         return cannot("the stream changes to pictures the session was not made for");
@@ -635,6 +600,18 @@ struct VideoDecoder::Impl {
       return cannot("it has field pictures");
     const h264::Poc poc = counter.next(s, *h);
     const bool mmco5 = std::any_of(h->mmco.begin(), h->mmco.end(), [](const h264::Mmco &m) { return m.op == 5; });
+    const bool intra = h->type() == 2 || h->type() == 4;
+    if (h->idr() || mmco5)
+      leading_below = std::numeric_limits<int>::min();
+    if (need_key) {
+      if (!intra)
+        return {};
+      need_key = false;
+      if (!h->idr())
+        leading_below = poc.frame();
+    } else if (!intra && poc.frame() < leading_below) {
+      return {};
+    }
     if (h->idr() || mmco5) // nothing before it shows after it
       show_all();
     const auto free_slot = std::find_if(slots.begin(), slots.end(), [](const Slot &x) { return !x.used(); });
@@ -648,7 +625,7 @@ struct VideoDecoder::Impl {
       size += 3 + nal.bytes.size();
     const VkDeviceSize align = std::max<VkDeviceSize>(1, caps.minBitstreamBufferSizeAlignment);
     const VkDeviceSize range = (VkDeviceSize(size) + align - 1) / align * align;
-    ATM_CHECK(wait(submitted)); // the last decode has read the buffer, and its commands are done
+    ATM_CHECK(vk.wait(vk.submitted)); // the last decode has read the buffer, and its commands are done
     ATM_CHECK(vk.ensure(bitstream, range, VK_BUFFER_USAGE_VIDEO_DECODE_SRC_BIT_KHR, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, 0,
                         &profiles));
     std::vector<uint32_t> offsets;
@@ -700,7 +677,7 @@ struct VideoDecoder::Impl {
     bound.back().slotIndex = -1; // not a reference yet
 
     StdVideoDecodeH264PictureInfo std_picture{};
-    std_picture.flags.is_intra = h->type() == 2 || h->type() == 4;
+    std_picture.flags.is_intra = intra;
     std_picture.flags.IdrPicFlag = h->idr();
     std_picture.flags.is_reference = h->reference();
     std_picture.seq_parameter_set_id = uint8_t(s.id);
@@ -760,7 +737,7 @@ struct VideoDecoder::Impl {
     VkVideoEndCodingInfoKHR end{VK_STRUCTURE_TYPE_VIDEO_END_CODING_INFO_KHR};
     fn.end(video_cmd, &end);
     VK_TRY("vkEndCommandBuffer", vkEndCommandBuffer(video_cmd));
-    ATM_CHECK(submit(vk.video_queue, video_cmd));
+    ATM_CHECK(vk.submit(vk.video_queue, video_cmd));
     started = true;
 
     // The picture's place among the references and the pictures to show.
@@ -780,15 +757,21 @@ struct VideoDecoder::Impl {
     return {};
   }
 
-  Result<bool> next(uint8_t *nv12, int64_t *pts) {
+  Result<bool> next(Picture &picture) {
     Slot *best = nullptr;
     for (Slot &s : slots)
       if (s.ready && (!best || std::tie(s.period, s.order) < std::tie(best->period, best->order)))
         best = &s;
     if (!best)
       return false;
+    best->waiting = best->ready = false;
+    best->held = true;
+    picture = {best->pts, int(best - slots.data())};
+    return true;
+  }
+
+  Result<void> read(const Picture &picture, uint8_t *nv12) {
     ATM_PROFILE_SCOPE("video.read");
-    const uint32_t layer = uint32_t(best - slots.data());
     const VkDeviceSize luma = VkDeviceSize(width) * VkDeviceSize(height);
     ATM_CHECK(vk.ensure(download, luma + luma / 2, VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                         VK_MEMORY_PROPERTY_HOST_CACHED_BIT));
@@ -796,33 +779,7 @@ struct VideoDecoder::Impl {
     VkCommandBufferBeginInfo cbi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     cbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     VK_TRY("vkBeginCommandBuffer", vkBeginCommandBuffer(copy_cmd, &cbi));
-    const auto layout = [&](VkImageLayout from, VkImageLayout to, VkPipelineStageFlags2 src, VkPipelineStageFlags2 dst, VkAccessFlags2 dst_access) {
-      VkImageMemoryBarrier2 ib{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
-      ib.srcStageMask = src;
-      ib.dstStageMask = dst;
-      ib.dstAccessMask = dst_access;
-      ib.oldLayout = from;
-      ib.newLayout = to;
-      ib.srcQueueFamilyIndex = ib.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-      ib.image = shown().image;
-      ib.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, layer, 1};
-      VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
-      dep.imageMemoryBarrierCount = 1;
-      dep.pImageMemoryBarriers = &ib;
-      vkCmdPipelineBarrier2(copy_cmd, &dep);
-    };
-    layout(output_layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_2_COPY_BIT,
-           VK_ACCESS_2_TRANSFER_READ_BIT);
-    VkBufferImageCopy planes[2]{};
-    planes[0].imageSubresource = {VK_IMAGE_ASPECT_PLANE_0_BIT, 0, layer, 1};
-    planes[0].imageOffset = {crop_x, crop_y, 0};
-    planes[0].imageExtent = {uint32_t(width), uint32_t(height), 1};
-    planes[1].bufferOffset = luma;
-    planes[1].imageSubresource = {VK_IMAGE_ASPECT_PLANE_1_BIT, 0, layer, 1};
-    planes[1].imageOffset = {crop_x / 2, crop_y / 2, 0};
-    planes[1].imageExtent = {uint32_t(width / 2), uint32_t(height / 2), 1};
-    vkCmdCopyImageToBuffer(copy_cmd, shown().image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, download.buffer, 2, planes);
-    layout(VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, output_layout, VK_PIPELINE_STAGE_2_COPY_BIT, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, 0);
+    record_picture_copy(copy_cmd, picture_image(*this, picture.slot), download.buffer, 0, uint32_t(width));
     VkMemoryBarrier2 mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
     mb.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
     mb.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
@@ -833,12 +790,10 @@ struct VideoDecoder::Impl {
     dep.pMemoryBarriers = &mb;
     vkCmdPipelineBarrier2(copy_cmd, &dep);
     VK_TRY("vkEndCommandBuffer", vkEndCommandBuffer(copy_cmd));
-    ATM_CHECK(submit(vk.queue, copy_cmd));
-    ATM_CHECK(wait(submitted));
+    ATM_CHECK(vk.submit(vk.queue, copy_cmd));
+    ATM_CHECK(vk.wait(vk.submitted));
     std::memcpy(nv12, download.mapped, size_t(luma + luma / 2));
-    *pts = best->pts;
-    best->waiting = best->ready = false;
-    return true;
+    return {};
   }
 
   void flush() {
@@ -846,8 +801,45 @@ struct VideoDecoder::Impl {
     for (Slot &s : slots)
       s.reference = false;
     counter = h264::PocCounter{};
+    need_key = true;
   }
 };
+
+PictureImage picture_image(const VideoDecoder::Impl &d, int slot) {
+  return {d.shown().image, uint32_t(slot), d.output_layout, d.crop_x, d.crop_y, d.width, d.height};
+}
+
+void record_picture_copy(VkCommandBuffer cmd, const PictureImage &p, VkBuffer dst, VkDeviceSize offset, uint32_t pitch) {
+  const auto layout = [&](VkImageLayout from, VkImageLayout to, VkPipelineStageFlags2 src, VkPipelineStageFlags2 dst_stage, VkAccessFlags2 dst_access) {
+    VkImageMemoryBarrier2 ib{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
+    ib.srcStageMask = src;
+    ib.dstStageMask = dst_stage;
+    ib.dstAccessMask = dst_access;
+    ib.oldLayout = from;
+    ib.newLayout = to;
+    ib.srcQueueFamilyIndex = ib.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    ib.image = p.image;
+    ib.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, p.layer, 1};
+    VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+    dep.imageMemoryBarrierCount = 1;
+    dep.pImageMemoryBarriers = &ib;
+    vkCmdPipelineBarrier2(cmd, &dep);
+  };
+  layout(p.layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+  VkBufferImageCopy planes[2]{};
+  planes[0].bufferOffset = offset;
+  planes[0].bufferRowLength = pitch; // in texels: a byte each for the luma, two for the chroma
+  planes[0].imageSubresource = {VK_IMAGE_ASPECT_PLANE_0_BIT, 0, p.layer, 1};
+  planes[0].imageOffset = {p.x, p.y, 0};
+  planes[0].imageExtent = {uint32_t(p.width), uint32_t(p.height), 1};
+  planes[1].bufferOffset = offset + VkDeviceSize(pitch) * VkDeviceSize(p.height);
+  planes[1].bufferRowLength = pitch / 2;
+  planes[1].imageSubresource = {VK_IMAGE_ASPECT_PLANE_1_BIT, 0, p.layer, 1};
+  planes[1].imageOffset = {p.x / 2, p.y / 2, 0};
+  planes[1].imageExtent = {uint32_t(p.width / 2), uint32_t(p.height / 2), 1};
+  vkCmdCopyImageToBuffer(cmd, p.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst, 2, planes);
+  layout(VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, p.layout, VK_PIPELINE_STAGE_2_COPY_BIT, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, 0);
+}
 
 VideoDecoder::~VideoDecoder() = default;
 
@@ -869,7 +861,9 @@ Result<std::unique_ptr<VideoDecoder>> VideoDecoder::create(Context &gpu, std::sp
 int VideoDecoder::width() const { return impl_->width; }
 int VideoDecoder::height() const { return impl_->height; }
 Result<void> VideoDecoder::decode(std::span<const uint8_t> access_unit, int64_t pts) { return impl_->decode(access_unit, pts); }
-Result<bool> VideoDecoder::next(uint8_t *nv12, int64_t *pts) { return impl_->next(nv12, pts); }
+Result<bool> VideoDecoder::next(Picture &picture) { return impl_->next(picture); }
+void VideoDecoder::release(const Picture &picture) { impl_->slots[size_t(picture.slot)].held = false; }
+Result<void> VideoDecoder::read(const Picture &picture, uint8_t *nv12) { return impl_->read(picture, nv12); }
 void VideoDecoder::flush() { impl_->flush(); }
 
 } // namespace atm::gpu

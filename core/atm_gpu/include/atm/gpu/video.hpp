@@ -25,17 +25,21 @@ public:
   int height() const;
 
   // One access unit (the NAL units of one picture, Annex B), in decoding order, with its presentation time. Parameter
-  // sets in it are taken too. Read the pictures that are ready (next) before the next call.
+  // sets in it are taken too. Take the pictures that are ready (next) before the next call.
   Result<void> decode(std::span<const uint8_t> access_unit, int64_t pts);
-  // The next picture in the order they are shown, packed NV12 (width() x height()) into `nv12`; false when none is ready
-  // yet. A picture is ready once no picture shown before it can still come (or after flush).
-  Result<bool> next(uint8_t *nv12, int64_t *pts);
+  // The next picture in the order they are shown; false when none is ready yet. A picture is ready once no picture shown
+  // before it can still come (or after flush). It stays until release(): Context::draw_picture draws it.
+  Result<bool> next(Picture &picture);
+  void release(const Picture &picture);
+  // A picture copied to the CPU, packed NV12 (width() x height()).
+  Result<void> read(const Picture &picture, uint8_t *nv12);
   // The end of the stream, or a seek: every picture held becomes ready, and decoding starts again at a key picture.
   void flush();
 
   struct Impl;
 
 private:
+  friend class Context; // draws its pictures
   VideoDecoder() = default;
   std::unique_ptr<Impl> impl_;
 };

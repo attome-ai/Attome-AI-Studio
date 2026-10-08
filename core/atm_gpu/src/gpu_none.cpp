@@ -25,6 +25,9 @@ const Info &Context::info() const { return impl_->info; }
 
 Result<void> Context::blur_nv12(uint8_t *, int, int, float, Timing *) { return fail(ErrorCode::EncoderUnavailable, "G_NOT_BUILT", "This build has no GPU path."); }
 uint8_t *Context::staging(int, int) { return nullptr; }
+void Context::begin_frame(int, int) {}
+void Context::draw_picture(const VideoDecoder &, const Picture &, PictureDraw) {}
+Result<void> Context::end_frame(uint8_t *) { return fail(ErrorCode::EncoderUnavailable, "G_NOT_BUILT", "This build has no GPU path."); }
 Result<void> Context::run_effects(uint8_t *, int, int, const std::vector<Effect> &, Timing *, uint8_t *, uint8_t *) {
   return fail(ErrorCode::EncoderUnavailable, "G_NOT_BUILT", "This build has no GPU path.");
 }
@@ -38,7 +41,9 @@ Result<std::unique_ptr<VideoDecoder>> VideoDecoder::create(Context &, std::span<
 int VideoDecoder::width() const { return 0; }
 int VideoDecoder::height() const { return 0; }
 Result<void> VideoDecoder::decode(std::span<const uint8_t>, int64_t) { return {}; }
-Result<bool> VideoDecoder::next(uint8_t *, int64_t *) { return false; }
+Result<bool> VideoDecoder::next(Picture &) { return false; }
+void VideoDecoder::release(const Picture &) {}
+Result<void> VideoDecoder::read(const Picture &, uint8_t *) { return {}; }
 void VideoDecoder::flush() {}
 
 } // namespace atm::gpu

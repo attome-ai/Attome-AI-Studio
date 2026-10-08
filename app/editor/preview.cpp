@@ -110,8 +110,8 @@ bool Preview::take(std::vector<uint8_t> &bgrx, int &width, int &height, int64_t 
 
 void Preview::run() {
   prof::set_thread_name("ui-preview");
+  std::unique_ptr<gpu::Context> gpu; // before the renderer, which may hold decoders on it: it goes after it
   std::unique_ptr<render::Renderer> renderer;
-  std::unique_ptr<gpu::Context> gpu;
   int gpu_device = -1; // the device `gpu` was made for
   std::vector<uint8_t> buffer;
   for (;;) {

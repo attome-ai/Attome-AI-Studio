@@ -1,5 +1,5 @@
-# UI test: the Monitor's effects run on the GPU chosen in Settings, and the Monitor says so; with the CPU chosen they do not.
-#  - a clip that fills the frame with a blur and a colour grade: with Automatic (a graphics card here) the header says "effects on <GPU>"
+# UI test: the Monitor's frames are made on the GPU chosen in Settings, and the Monitor says so; with the CPU chosen they are not.
+#  - a clip that fills the frame with a blur and a colour grade: with Automatic (a graphics card here) the header says "drawn on <GPU>"
 #  - Settings > the processor only: the header no longer says it, and the picture is the same
 # Skipped (passes) where no GPU can render. Virtual input only (uitest.psm1). Needs a build. Exit code 0 = pass.
 #   .\tools\uitest\ux_monitor_gpu.ps1
@@ -47,5 +47,5 @@ $run = Invoke-EditorScript -Project $proj -TimeoutSeconds 200 -Script @(
 $failed = @($run.Errors | Where-Object { $_ })
 $env:ATTOME_SETTINGS = $null
 if ($failed.Count) { $failed | ForEach-Object { Write-Output "FAIL: $_" }; exit 1 }
-Write-Output "PASS: the Monitor's effects run on the GPU chosen in Settings, and on the CPU when the processor is chosen (captures in $work)"
+Write-Output "PASS: the Monitor's frames are made on the GPU chosen in Settings, and on the CPU when the processor is chosen (captures in $work)"
 exit 0

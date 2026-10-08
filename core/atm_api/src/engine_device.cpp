@@ -25,8 +25,10 @@ const std::vector<gpu::Device> &Engine::Impl::gpus(bool refresh) {
 json Engine::Impl::render_device_now() { return device_in_use(gpus(), render_choice()); }
 
 int Engine::Impl::gpu_device_for(const render::Composition &comp) {
-  const bool effects = std::any_of(comp.layers.begin(), comp.layers.end(), [](const render::Layer &l) { return !l.effects.empty(); });
-  return effects ? render_device_now().value("index", -1) : -1;
+  const bool work = std::any_of(comp.layers.begin(), comp.layers.end(), [](const render::Layer &l) {
+    return !l.effects.empty() || (l.video && !l.is_text && !l.is_image && !l.is_adjustment);
+  });
+  return work ? render_device_now().value("index", -1) : -1;
 }
 
 gpu::Context *Engine::Impl::gpu_for_stills() {

@@ -61,6 +61,22 @@ struct Effect {
 
 class VideoDecoder;
 
+// A picture a VideoDecoder decoded, kept in the GPU's memory until the decoder releases it.
+struct Picture {
+  int64_t pts = 0;
+  int slot = -1;
+};
+
+// Where a picture lands in a frame drawn on the GPU (Context::draw_picture), worked out by the renderer as its CPU drawing
+// does: for each plane the rectangle written (luma pixels; chroma U/V pairs and rows) and, for each of its columns and
+// rows, a tap: the two picture samples and the weight of the second (i0 | weight << 16 | (i1 - i0) << 25, weight 0..256).
+struct PictureDraw {
+  int x0 = 0, x1 = 0, y0 = 0, y1 = 0;
+  int cx0 = 0, cx1 = 0, cy0 = 0, cy1 = 0;
+  std::vector<uint32_t> luma_x, luma_y, chroma_x, chroma_y;
+  int alpha = 256; // opacity, 0..256
+};
+
 class Context {
 public:
   // A Vulkan 1.3 device (with synchronization2): the discrete GPU when there is one. ATTOME_GPU=off refuses (the CPU
@@ -85,6 +101,12 @@ public:
   // a picture drawn straight into it (and passed as run_effects' nv12) is not copied on its way in. `result` (when given)
   // is where the picture comes back to, instead of nv12. Null when the buffers cannot be made.
   uint8_t *staging(int width, int height);
+
+  // A frame drawn on the GPU: begun black, decoded pictures drawn into it in order, then made in one go and read back
+  // into `nv12` (packed NV12) by end_frame. The pictures must stay held (not released) until end_frame has returned.
+  void begin_frame(int width, int height);
+  void draw_picture(const VideoDecoder &decoder, const Picture &picture, PictureDraw draw);
+  Result<void> end_frame(uint8_t *nv12);
 
   struct Impl;
 

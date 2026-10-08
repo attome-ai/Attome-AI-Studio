@@ -367,7 +367,7 @@ int bench_decode() {
       auto reader = atm::media::VideoReader::open(clip, 0, 0);
       const auto t0 = Clock::now();
       for (int f = 0; reader && f < frames; ++f)
-        (void)(*reader)->frame_at(int64_t(f) * atm::media::kHnsPerSecond / 30 + atm::media::kHnsPerSecond / 120);
+        (void)(*reader)->frame_at(int64_t(f) * atm::media::kHnsPerSecond / 30);
       std::printf("  %-52s %12.0f fps\n", (std::to_string(h) + "p, Media Foundation").c_str(), frames / (ms_since(t0) / 1000.0));
     }
     if (!gpu)
@@ -382,18 +382,22 @@ int bench_decode() {
     }
     std::vector<uint8_t> picture(atm::media::nv12_size(w, h));
     int shown = 0;
-    int64_t pts = 0;
+    const auto drain = [&] {
+      atm::gpu::Picture p;
+      while ((*decoder)->next(p).value_or(false)) {
+        shown += (*decoder)->read(p, picture.data()) ? 1 : 0;
+        (*decoder)->release(p);
+      }
+    };
     atm::media::Packet packet;
     const auto t0 = Clock::now();
     while ((*stream)->next(packet).value_or(false)) {
       if (!(*decoder)->decode(packet.data, packet.pts))
         break;
-      while ((*decoder)->next(picture.data(), &pts).value_or(false))
-        ++shown;
+      drain();
     }
     (*decoder)->flush();
-    while ((*decoder)->next(picture.data(), &pts).value_or(false))
-      ++shown;
+    drain();
     std::printf("  %-52s %12.0f fps (%d frames)\n", (std::to_string(h) + "p, GPU, read back to the CPU").c_str(), shown / (ms_since(t0) / 1000.0), shown);
   }
   std::printf("\nZone profile of the decoding\n%s", atm::prof::format_report(atm::prof::snapshot()).c_str());

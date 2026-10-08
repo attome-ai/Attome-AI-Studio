@@ -190,11 +190,13 @@ public:
   void set_text(const std::string &clip_id, const std::string &text);
   // Another version of the same composition (a value being dragged): the decoders and the stills that are open stay open, so it is cheap.
   void replace_composition(Composition composition); // the words of a text clip, while they are typed (its timed words are not shown)
-  // Runs the effects it can on this GPU (not owned; nullptr: the CPU only): a clip with effects that fills the frame, and an
-  // adjustment layer, when every effect of it has a GPU version. The bytes are the same as the CPU's. A GPU failure turns
-  // the GPU off for this renderer (the CPU goes on) and is reported by take_warning().
-  void use_gpu(gpu::Context *gpu) { gpu_ = gpu; }
-  int64_t gpu_runs() const { return gpu_runs_; } // how many effect chains the GPU has run
+  // Uses this GPU (not owned; nullptr: the CPU only; it must outlive the renderer or be taken away first). Effects: a clip
+  // with effects, and an adjustment layer, when every effect of it has a GPU version. Whole frames: when every picture in
+  // the frame is a video the GPU decodes (H.264), drawn upright without effects or transitions, the frame is decoded and
+  // drawn on the GPU. The bytes are the same as the CPU's. A GPU failure turns the GPU off for this renderer (the CPU
+  // goes on) and is reported by take_warning().
+  void use_gpu(gpu::Context *gpu);
+  int64_t gpu_runs() const { return gpu_runs_; } // how many times the GPU has worked (an effect chain or a whole frame)
 
 private:
   Composition comp_;
@@ -220,6 +222,11 @@ private:
   std::vector<uint8_t> over_black_, over_white_, cover_; // a clip with effects, drawn on its own (see draw_isolated)
   gpu::Context *gpu_ = nullptr;
   int64_t gpu_runs_ = 0;
+  struct GpuReader; // a clip decoded by the GPU (render.cpp)
+  std::unordered_map<std::string, std::unique_ptr<GpuReader>> gpu_readers_; // by clip ID
+  std::unordered_map<std::string, bool> gpu_failed_; // clips the GPU does not decode (another codec, or a size it would have to scale)
+  bool render_on_gpu(int64_t frame, uint8_t *out); // false: the frame is left to the CPU
+  void stop_gpu(const std::string &why);
   // The effects of a layer as a GPU chain (false: one of them has no GPU version), and running it.
   bool gpu_chain(const Layer &l, int64_t frame, std::vector<gpu::Effect> &chain); // not const: a LUT is loaded on first use
   bool run_on_gpu(const Layer &l, int64_t frame, uint8_t *nv12, uint8_t *cover = nullptr);
