@@ -482,6 +482,81 @@ void App::draw_export() {
   ImGui::EndPopup();
 }
 
+void App::open_settings() {
+  json answer;
+  if (rpc("render.devices", json::object(), answer))
+    devices_ = std::move(answer);
+  settings_open_ = true;
+}
+
+// The Settings window. Render: Automatic, each GPU of this computer, or the CPU only; what Automatic picks now and why.
+void App::draw_settings() {
+  if (!settings_open_)
+    return;
+  ImGuiViewport *vp = ImGui::GetMainViewport();
+  ImGui::SetNextWindowPos(vp->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+  ImGui::SetNextWindowSize(ImVec2(620.0f * s_, 0.0f));
+  ImGui::PushStyleColor(ImGuiCol_WindowBg, hexv(look::panel));
+  ImGui::PushStyleColor(ImGuiCol_Border, hexv(look::line2));
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 16.0f);
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(24.0f, 20.0f));
+  const bool open = ImGui::Begin("Settings", &settings_open_, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoDocking);
+  ImGui::PopStyleVar(2);
+  ImGui::PopStyleColor(2);
+  if (open) {
+    ui_mark("window:settings");
+    section_label("RENDER ON");
+    const json devices = devices_.value("devices", json::array());
+    const json choice = devices_.value("choice", json("auto"));
+    const json in_use = devices_.value("in_use", json::object());
+    const auto choose = [&](const json &device) {
+      json answer;
+      if (rpc("render.set_device", {{"device", device}}, answer))
+        devices_ = std::move(answer);
+    };
+    const float wide = ImGui::GetContentRegionAvail().x;
+    // Automatic first: what it picks now is said under it.
+    if (soft_button("render_auto", "Automatic", ImVec2(wide, 34.0f), true, choice == "auto"))
+      choose("auto");
+    if (choice == "auto")
+      ImGui::TextColored(hexv(look::fg3), "Now: %s, %s.", in_use.value("device", "CPU").c_str(), in_use.value("reason", "").c_str());
+    for (const json &d : devices) {
+      const std::string name = d.value("name", "");
+      const bool usable = d.value("usable", false);
+      char label[200]; // a graphics card has memory of its own; a GPU built into the processor shares the computer's
+      if (d.value("discrete", false))
+        std::snprintf(label, sizeof label, "%s   (graphics card, %llu GB)", name.c_str(), static_cast<unsigned long long>((d.value("memory_mb", uint64_t(0)) + 512) / 1024));
+      else
+        std::snprintf(label, sizeof label, "%s   (%s)", name.c_str(), d.value("integrated", false) ? "built into the processor" : "GPU");
+      if (soft_button(("render_gpu_" + std::to_string(d.value("index", 0))).c_str(), label, ImVec2(wide, 34.0f), usable, choice == name))
+        choose(name);
+      if (!usable)
+        ImGui::TextColored(hexv(look::fg3), "Cannot render: %s.", d.value("why_not", "").c_str());
+      else if (d.contains("check") && d["check"].value("ok", false))
+        ImGui::TextColored(hexv(look::fg3), "Timing check: %.1f ms, the CPU %.1f ms.", d["check"].value("gpu_ms", 0.0), d["check"].value("cpu_ms", 0.0));
+    }
+    if (soft_button("render_cpu", "The processor (CPU) only", ImVec2(wide, 34.0f), true, choice == "cpu"))
+      choose("cpu");
+    ImGui::Spacing();
+    ImGui::PushTextWrapPos(0.0f);
+    if (choice != "auto")
+      ImGui::TextColored(hexv(look::fg3), "In use: %s, %s.", in_use.value("device", "CPU").c_str(), in_use.value("reason", "").c_str());
+    ImGui::TextColored(hexv(look::fg3), "Automatic uses the graphics card, and the processor while an AI generation is running, so the generation has the card to itself. "
+                                         "The renderer's GPU path is still being built: until then every frame is made on the processor.");
+    ImGui::PopTextWrapPos();
+    ImGui::Spacing();
+    if (soft_button("render_check", "Measure again", ImVec2(150.0f, 32.0f))) {
+      json answer;
+      if (rpc("render.devices", {{"check", true}}, answer))
+        devices_ = std::move(answer);
+    }
+    ImGui::SameLine(ImGui::GetContentRegionAvail().x - 110.0f + ImGui::GetCursorPosX());
+    if (soft_button("settings_close", "Close", ImVec2(110.0f, 32.0f), true, true) || ImGui::IsKeyPressed(ImGuiKey_Escape, false))
+      settings_open_ = false;
+  }
+  ImGui::End();
+}
+
 void App::draw_shortcuts_sheet() {
   if (!shortcuts_open_)
     return;
@@ -511,7 +586,7 @@ void App::draw_shortcuts_sheet() {
         {"Clips", {{"Click, Ctrl+click, Shift+click", "Select one, add or remove one, a range on the track"}, {"Drag on empty space", "A box that selects what it touches"},
                    {"Ctrl+A", "Select all clips"}, {"S", "Split at the playhead"}, {"Delete or Backspace", "Delete the selected clips"}, {"Click on empty space", "Select nothing"},
                    {"Ctrl+C / X / V", "Copy, cut, paste at the playhead"}, {"Ctrl+D", "Duplicate after the clips"}, {"Esc", "Select nothing"}, {"Right click", "The menu of a clip or of the empty timeline"}}},
-        {"Project", {{"Ctrl+Z / Ctrl+Y", "Undo, redo (Ctrl+Shift+Z also redoes)"}, {"Ctrl+S", "Save now"}, {"Ctrl+I", "Import media"}, {"Ctrl+E", "Export"}, {"F1", "This list"}}},
+        {"Project", {{"Ctrl+Z / Ctrl+Y", "Undo, redo (Ctrl+Shift+Z also redoes)"}, {"Ctrl+S", "Save now"}, {"Ctrl+I", "Import media"}, {"Ctrl+E", "Export"}, {"Ctrl+,", "Settings: where rendering runs"}, {"F1", "This list"}}},
         {"Timeline", {{"Shift+Z", "Fit the whole film in the window"}, {"+ / -", "Zoom in or out"}, {"Ctrl+mouse wheel", "Zoom about the pointer"}, {"M", "A marker at the playhead (again: remove it)"}, {"N", "Snapping on or off"}, {"Alt while dragging", "The opposite of the Snap switch, for one drag"}, {"Ctrl+plus / minus / 0", "Make the whole editor larger, smaller, or 100 %"}}},
         {"Workflows", {{"Double click", "Open the workflow of a clip; a search to add a node on the canvas"}, {"Ctrl+C / V / D", "Copy, paste, duplicate nodes"}, {"Ctrl+A", "Select all nodes"},
                        {"Delete", "Delete the selected node or link"}, {"Shift+drag", "A box that selects nodes"}, {"Esc", "Clear the selection, then leave the canvas"}}}};

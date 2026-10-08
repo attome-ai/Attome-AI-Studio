@@ -21,6 +21,7 @@
 #include <filesystem>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <span>
 #include <thread>
@@ -31,6 +32,7 @@
 #include "atm/base/profiler.hpp"
 #include "atm/base/time.hpp"
 #include "atm/doc/document.hpp"
+#include "atm/gpu/gpu.hpp"
 #include "atm/gen/library.hpp"
 #include "atm/skills/skills.hpp"
 #include "atm/gen/models.hpp"
@@ -334,6 +336,18 @@ struct Engine::Impl {
   void apply_finished();
   fs::path settings_path() const;
   json settings() const;
+  // Where rendering runs (engine_device.cpp): the choice ("auto", "cpu" or a GPU's {name, vendor_id, device_id}), the GPUs here
+  // (listed once, again on render.devices), and the timing checks of this run.
+  json chosen_render_device;
+  json device_checks = json::object();
+  std::optional<std::vector<gpu::Device>> gpu_list;
+  const std::vector<gpu::Device> &gpus(bool refresh = false);
+  json render_choice() const;
+  json device_check(const gpu::Device &d, bool fresh);
+  json device_in_use(const std::vector<gpu::Device> &devices, const json &choice);
+  json render_device_now(); // what renders now and why, for the answers of render.sequence and see.*
+  Result<json> render_devices(const json &params);
+  Result<json> render_set_device(const json &params);
   std::string saved_ffmpeg; // the FFmpeg path chosen this run (when there is no settings file to keep it in)
   Result<json> media_codecs(const json &params);
   void set_comfyui(const std::string &address);

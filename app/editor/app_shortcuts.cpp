@@ -139,6 +139,8 @@ void App::shortcuts() {
     ask_import();
   if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_E, false))
     ask_export();
+  if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Comma, false))
+    open_settings();
   if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow, true))
     seek(playhead_ - (io.KeyShift ? int64_t(std::llround(fps())) : 1)); // Shift: a second
   if (ImGui::IsKeyPressed(ImGuiKey_RightArrow, true))

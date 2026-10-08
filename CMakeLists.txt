@@ -179,7 +179,7 @@ std::span<const File> files() { return std::span<const File>(kFiles, sizeof(kFil
 ")
 file(COPY_FILE ${ATM_SKILLS_CPP}.tmp ${ATM_SKILLS_CPP} ONLY_IF_DIFFERENT)
 target_sources(atm_skills PRIVATE ${ATM_SKILLS_CPP})
-atm_module(atm_api DEPS atm_patch atm_storage atm_render atm_models atm_skills)
+atm_module(atm_api DEPS atm_patch atm_storage atm_render atm_models atm_skills atm_gpu)
 
 add_executable(attomed core/daemon/main.cpp)
 target_link_libraries(attomed PRIVATE atm_api CLI11::CLI11 atm_options)

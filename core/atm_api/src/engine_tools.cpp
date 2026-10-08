@@ -262,6 +262,16 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
        "words":{"type":"array","items":{"type":"object","properties":{"at":{"type":"number"},"say":{"type":"string"},"color":{"type":"string"},"y":{"type":"number"}},"required":["at","say"]}},
        "seconds":{"type":"number"},"size":{"type":"number"},"keys":{"type":"array"},"shadow":{"type":"object"}},"required":["project","words"]})",
      &Impl::text_pop},
+    {"render.devices", "core", false,
+     "Where rendering runs: every GPU here (name, driver, discrete or integrated, memory, whether it can render and why not), the choice (auto, cpu, or a "
+     "GPU's name) and in_use: the device that renders now and why. Automatic takes the discrete GPU; an integrated one only when a timing check shows it "
+     "beats the CPU; and the CPU while a generation is running (the GPU is left to it). check: true measures every GPU again (a 1080p blur on the GPU "
+     "and on the CPU). Note: the renderer's GPU path is being built, so today rendered_on is still CPU.",
+     R"({"type":"object","properties":{"check":{"type":"boolean"}}})", &Impl::render_devices},
+    {"render.set_device", "core", true,
+     "Choose where rendering runs: \"auto\" (the default), \"cpu\", or a GPU by its name or index from render.devices. Remembered in the user's settings. "
+     "Returns what render.devices returns.",
+     R"({"type":"object","properties":{"device":{"type":["string","integer"]}},"required":["device"]})", &Impl::render_set_device},
     {"media.codecs", "core", false,
      "The formats this machine can write: mp4 (H.264, the operating system's encoder), wav, jpeg, png_sequence, and prores and dnxhr, which are written by an FFmpeg program of your own "
      "(Attome ships none: it looks on the PATH, in ATTOME_FFMPEG and at the saved ffmpeg_path). With ffmpeg_path that program is remembered (\"\" forgets it). The answer says which "

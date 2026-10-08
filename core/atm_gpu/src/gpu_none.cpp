@@ -13,7 +13,9 @@ struct Context::Impl {
   Info info;
 };
 
-Result<std::unique_ptr<Context>> Context::create() {
+std::vector<Device> list_devices() { return {}; }
+
+Result<std::unique_ptr<Context>> Context::create(int) {
   return fail(ErrorCode::EncoderUnavailable, "G_NOT_BUILT", "This build has no GPU path (it was built without the Vulkan SDK).");
 }
 

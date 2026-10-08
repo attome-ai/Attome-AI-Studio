@@ -1178,3 +1178,40 @@ TEST_CASE("script.scenes makes the Variables and the picture clips of a planned 
   std::error_code ec;
   fs::remove_all(dir, ec);
 }
+
+TEST_CASE("render.devices: Automatic leaves the GPU to a running generation; the choice is kept and can be the CPU or a named GPU", "[gen][device]") {
+  Film f;
+  const json before = ok(*f.engine, "render.devices", json::object());
+  CHECK(before["choice"] == "auto");
+  CHECK(before["rendered_on"] == "CPU"); // the renderer's GPU path is not built yet: it says so
+  CHECK(before["in_use"]["reason"].get<std::string>().find("generation") == std::string::npos);
+
+  // While a generation runs, Automatic renders on the CPU and says why.
+  f.mock->step_delay_ms = 150;
+  const json started = f.run();
+  const json during = ok(*f.engine, "render.devices", json::object());
+  CHECK(during["in_use"]["device"] == "CPU");
+  CHECK(during["in_use"]["reason"].get<std::string>().find("generation") != std::string::npos);
+  ok(*f.engine, "jobs.cancel", {{"job_id", started["job_id"]}});
+  f.wait(started);
+  f.mock->step_delay_ms = 0;
+  CHECK(ok(*f.engine, "render.devices", json::object())["in_use"]["reason"].get<std::string>().find("generation") == std::string::npos);
+
+  // The CPU, by choice; then back to Automatic.
+  const json cpu = ok(*f.engine, "render.set_device", {{"device", "cpu"}});
+  CHECK(cpu["choice"] == "cpu");
+  CHECK(cpu["in_use"]["device"] == "CPU");
+  CHECK(cpu["in_use"]["reason"] == "you chose the CPU");
+  CHECK(ok(*f.engine, "render.set_device", {{"device", "auto"}})["choice"] == "auto");
+  // A GPU by name: used, and kept even while a generation runs (the user asked for it).
+  for (const json &d : before["devices"])
+    if (d["usable"] == true) {
+      const json named = ok(*f.engine, "render.set_device", {{"device", d["name"]}});
+      CHECK(named["choice"] == d["name"]);
+      CHECK(named["in_use"]["device"] == d["name"]);
+      break;
+    }
+  CHECK(err(*f.engine, "render.set_device", {{"device", "No Such GPU 9000"}}).rule == "E_NO_DEVICE");
+  CHECK(err(*f.engine, "render.set_device", json::object()).rule == "E_PARAM");
+  ok(*f.engine, "render.set_device", {{"device", "auto"}});
+}

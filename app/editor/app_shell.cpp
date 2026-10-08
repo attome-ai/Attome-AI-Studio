@@ -204,6 +204,7 @@ void App::frame(double dt) {
     draw_profiler();
   draw_export();
   draw_shortcuts_sheet();
+  draw_settings();
   draw_monitor_full();
   draw_toasts();
   static int frames_open = 0; // the bottom panel opens on the Timeline tab, once its windows exist
@@ -370,6 +371,9 @@ void App::draw_menu() {
         ask_import();
       if (ImGui::MenuItem("Export video...", "Ctrl+E", false, open))
         ask_export();
+      ImGui::Separator();
+      if (menu_item("Settings...", "Ctrl+,"))
+        open_settings();
       ImGui::Separator();
       if (ImGui::MenuItem("Quit"))
         quit_ = true;

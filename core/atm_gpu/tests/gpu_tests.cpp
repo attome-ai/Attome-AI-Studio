@@ -83,6 +83,8 @@ TEST_CASE("gpu: blur timing at 4K against the CPU (printed, not checked)", "[gpu
     sum.upload_us += t.upload_us;
     sum.gpu_copy_us += t.gpu_copy_us;
     sum.compute_us += t.compute_us;
+    sum.rows_us += t.rows_us;
+    sum.columns_us += t.columns_us;
     sum.download_us += t.download_us;
     sum.total_us += t.total_us;
   }
@@ -90,7 +92,7 @@ TEST_CASE("gpu: blur timing at 4K against the CPU (printed, not checked)", "[gpu
   for (int i = 0; i < 5; ++i)
     atm::render::blur_picture(frame.data(), W, H, sigma);
   const double cpu_us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - c0).count() / 5.0;
-  std::printf("[gpu] %s: 4K blur sigma %.1f: total %.0f us (into staging %.0f, GPU copies %.0f, GPU compute %.0f, out of staging %.0f); CPU %.0f us\n",
-              gpu->info().device.c_str(), double(sigma), sum.total_us / kRuns, sum.upload_us / kRuns, sum.gpu_copy_us / kRuns, sum.compute_us / kRuns,
+  std::printf("[gpu] %s: 4K blur sigma %.1f: total %.0f us (into staging %.0f, GPU copies %.0f, GPU compute %.0f [rows %.0f, columns %.0f], out of staging %.0f); CPU %.0f us\n",
+              gpu->info().device.c_str(), double(sigma), sum.total_us / kRuns, sum.upload_us / kRuns, sum.gpu_copy_us / kRuns, sum.compute_us / kRuns, sum.rows_us / kRuns, sum.columns_us / kRuns,
               sum.download_us / kRuns, cpu_us);
 }

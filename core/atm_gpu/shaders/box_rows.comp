@@ -1,0 +1,157 @@
+#version 450
+// The three horizontal box passes of the blur, all at once: one workgroup takes one row of a plane, holds it in shared
+// memory, and runs the passes there, so the row is read from and written to device memory once (coalesced: neighbouring
+// invocations take neighbouring words). Each pass is a prefix sum of the row, then every output is a difference of two
+// prefix sums: the same integer (sum + w / 2) / w as the CPU's box_line, edges clamped, for any radius.
+//
+// Bytes of a row are "elements" e; a plane with interleaved channels (U and V) has channel e % ch of sample e / ch.
+// The shared array holds the values, then in place the exclusive prefix sum of each channel (indexed the same way).
+
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer Src { uint src[]; };
+layout(std430, set = 0, binding = 1) writeonly buffer Dst { uint dst[]; };
+
+layout(push_constant) uniform Pass {
+  uint offset; // the plane's first byte (a multiple of 4)
+  uint stride; // bytes from one row to the next (a multiple of 4)
+  uint bytes;  // bytes of a row that are picture (the width)
+  uint ch;     // interleaved channels: 1 luma, 2 chroma
+  int r;       // box radius
+  uint shift;  // log2 of the bytes per invocation (a power of two, at least 4; chunk * 256 >= bytes)
+  uint magic;  // ceil(2^32 / (2r + 1)) when 2r + 1 < 4096: the division by the window as an exact multiply; 0: divide
+} pc;
+
+// The row in shared memory, sized for the picture (a specialisation constant): a smaller workgroup leaves room for more of them
+// on each multiprocessor, so their waits overlap.
+layout(constant_id = 0) const uint kRowCap = 8192u;
+// Bytes per invocation, a power of two (also a specialisation constant): the loops over a chunk have a known length, so
+// they unroll and the chunk's outputs stay in registers.
+layout(constant_id = 1) const uint kChunk = 16u;
+// Interleaved channels: 1 for the luma, 2 for the chroma (U and V); a constant, so the per-byte choices fold away.
+layout(constant_id = 2) const uint kCh = 1u;
+// Element e is kept at e + e / chunk: each invocation's run of `chunk` elements starts one bank further on, so 32
+// invocations walking their runs side by side touch 32 different banks (chunk + 1 is odd), not two.
+shared int row[kRowCap + kRowCap / 4u + 4u];
+uint at(uint e) { return e + e / kChunk; }
+
+// (x + w / 2) / w for the box's w, with the multiply when it is exact for every sum a row can have.
+int divide(int x, int w) {
+  if (pc.magic == 0u)
+    return x / w;
+  uint hi, lo;
+  umulExtended(uint(x), pc.magic, hi, lo);
+  return int(hi);
+}
+shared int group_sum[64];  // per subgroup and channel: the sum of its chunks, then where they start (subgroups of 16 or more)
+shared int edge[4];       // per channel: the first and the last sample
+shared int grand[2];      // per channel: the sum of the whole row
+shared int chunk_start[512]; // per invocation and channel: the sum of everything before its chunk
+
+void main() {
+  const uint t = gl_LocalInvocationID.x;
+  const uint base = (pc.offset + gl_WorkGroupID.x * pc.stride) >> 2; // the row's first word
+  const uint words = (pc.bytes + 3u) >> 2;
+  const uint ch = kCh;
+  const int n = int(pc.bytes / ch); // samples per channel
+  const int r = pc.r, w = 2 * r + 1;
+
+  // Load: word by word, neighbouring invocations on neighbouring words.
+  for (uint i = t; i < words; i += 256u) {
+    const uint v = src[base + i];
+    for (uint q = 0u; q < 4u; ++q)
+      if (i * 4u + q < pc.bytes)
+        row[at(i * 4u + q)] = int((v >> (q * 8u)) & 0xFFu);
+  }
+  barrier();
+
+  const uint e0 = t * kChunk, e1 = min(pc.bytes, e0 + kChunk); // e0 >= e1: this invocation has no bytes
+  int outv[kChunk]; // the chunk's outputs
+  for (int pass = 0; pass < 3; ++pass) {
+    if (t < ch) {
+      edge[t * 2u] = row[at(t)];
+      edge[t * 2u + 1u] = row[at(uint(n - 1) * ch + t)];
+    }
+    barrier(); // the edges are read before the prefix sums overwrite them
+    // 1. Each invocation: the exclusive prefix of its chunk, per channel, and the chunk's totals.
+    int run0 = 0, run1 = 0;
+    for (uint j = 0u; j < kChunk; ++j) {
+      const uint e = e0 + j;
+      if (e >= e1)
+        break;
+      const uint k = at(e);
+      const int v = row[k];
+      if (ch == 1u || (e & 1u) == 0u) {
+        row[k] = run0;
+        run0 += v;
+      } else {
+        row[k] = run1;
+        run1 += v;
+      }
+    }
+    // 2. Where each chunk starts: a prefix sum of the chunk totals across the workgroup, done by the subgroups in
+    // parallel (each scans its own, then the first scans the subgroups' sums), not one invocation after another.
+    const int before0 = subgroupExclusiveAdd(run0), before1 = subgroupExclusiveAdd(run1);
+    if (gl_SubgroupInvocationID == gl_SubgroupSize - 1u) {
+      group_sum[gl_SubgroupID * 2u] = before0 + run0;
+      group_sum[gl_SubgroupID * 2u + 1u] = before1 + run1;
+    }
+    barrier();
+    if (gl_SubgroupID == 0u) {
+      const bool real = gl_SubgroupInvocationID < gl_NumSubgroups;
+      const int s0 = real ? group_sum[gl_SubgroupInvocationID * 2u] : 0, s1 = real ? group_sum[gl_SubgroupInvocationID * 2u + 1u] : 0;
+      const int at0 = subgroupExclusiveAdd(s0), at1 = subgroupExclusiveAdd(s1);
+      const int all0 = subgroupAdd(s0), all1 = subgroupAdd(s1);
+      if (real) {
+        group_sum[gl_SubgroupInvocationID * 2u] = at0;
+        group_sum[gl_SubgroupInvocationID * 2u + 1u] = at1;
+      }
+      if (gl_SubgroupInvocationID == 0u) {
+        grand[0] = all0;
+        grand[1] = all1;
+      }
+    }
+    barrier();
+    // The row now holds each chunk's own prefix; the sum before the chunk is kept apart and added where it is read.
+    chunk_start[t * 2u] = group_sum[gl_SubgroupID * 2u] + before0;
+    chunk_start[t * 2u + 1u] = group_sum[gl_SubgroupID * 2u + 1u] + before1;
+    barrier();
+    // 3. The outputs: P(k), the sum of the first k samples of the channel, is the row's value plus its chunk's start.
+    for (uint j = 0u; j < kChunk; ++j) {
+      const uint e = e0 + j;
+      if (e >= e1)
+        break;
+      const uint c = e & (ch - 1u); // ch is 1 or 2
+      const int i = int(e >> (ch - 1u));
+      const int lo = i - r, hi = i + r;
+      const int a = max(lo, 0), b = min(hi, n - 1) + 1; // the samples inside the row: [a, b)
+      const uint ea = uint(a) * ch + c, eb = uint(b) * ch + c;
+      const int pa = row[at(ea)] + chunk_start[(ea / kChunk) * 2u + c];
+      const int pb = b >= n ? grand[c] : row[at(eb)] + chunk_start[(eb / kChunk) * 2u + c];
+      int sum = pb - pa;
+      if (lo < 0)
+        sum += -lo * edge[c * 2u];
+      if (hi > n - 1)
+        sum += (hi - (n - 1)) * edge[c * 2u + 1u];
+      outv[j] = divide(sum + w / 2, w);
+    }
+    barrier();
+    if (pass < 2) {
+      for (uint j = 0u; j < kChunk; ++j)
+        if (e0 + j < e1)
+          row[at(e0 + j)] = outv[j];
+      barrier();
+    }
+  }
+  // Store: each invocation writes the words of its own chunk (chunks start on words).
+  for (uint j = 0u; j < kChunk; j += 4u)
+    if (e0 + j < e1) {
+      uint word = 0u;
+      for (uint q = 0u; q < 4u; ++q)
+        if (e0 + j + q < e1)
+          word |= uint(outv[j + q]) << (q * 8u);
+      dst[base + ((e0 + j) >> 2)] = word;
+    }
+}

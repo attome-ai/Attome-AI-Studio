@@ -370,6 +370,11 @@ private:
   char new_name_[128] = "My Short";       // the welcome page's new project: its name, shape (0 9:16, 1 16:9, 2 1:1) and frame rate (0 24, 1 30, 2 60)
   int new_shape_ = 0, new_rate_ = 1;
   bool shortcuts_open_ = false;          // the Keyboard shortcuts sheet
+  // File > Settings (Ctrl+,): the window for the user's settings. It starts with Render: where rendering runs (render.devices).
+  bool settings_open_ = false;
+  json devices_;                         // the answer of render.devices, read when the window opens and after a change
+  void open_settings();
+  void draw_settings();
   int safe_mode_ = 0;                    // the Monitor's guides: 0 off, 1 Shorts / Reels / TikTok, 2 title safe
   bool loop_ = false;                    // playback starts again at the end
   float ui_scale_ = 1.0f;                // interface size (View menu, Ctrl+plus/minus), kept in the preferences

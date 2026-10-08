@@ -870,7 +870,7 @@ void box_vertical(const uint8_t *src, uint8_t *dst, int width, int rows, int r) 
   });
 }
 
-// Gaussian blur of a packed NV12 picture in place, as three box passes each way (close to a Gaussian of `sigma`
+// Gaussian blur of a packed NV12 picture in place, as three box passes each way (all horizontal ones, then all vertical ones) (close to a Gaussian of `sigma`
 // pixels). The chroma plane has half the resolution, so it gets half the sigma, per channel (U and V interleave).
 void blur_nv12(uint8_t *nv12, int W, int H, float sigma, std::vector<uint8_t> &tmp, bool luma_only = false) {
   ATM_PROFILE_SCOPE("effect.blur");
@@ -886,22 +886,27 @@ void blur_nv12(uint8_t *nv12, int W, int H, float sigma, std::vector<uint8_t> &t
     if (pl.r < 1)
       continue;
     const bool chroma = p == 1;
-    for (int pass = 0; pass < 3; ++pass) {
-      // Horizontal: data -> spare. Luma is one channel; chroma is two channels two bytes apart.
-      parallel_for(pl.rows, 16, [&](int64_t first, int64_t last) {
-        for (int64_t y = first; y < last; ++y) {
-          const uint8_t *src = pl.data + size_t(y) * size_t(pl.width);
-          uint8_t *dst = pl.spare + size_t(y) * size_t(pl.width);
-          if (chroma) {
-            box_line(src, dst, pl.width / 2, 2, pl.r);
-            box_line(src + 1, dst + 1, pl.width / 2, 2, pl.r);
-          } else {
-            box_line(src, dst, pl.width, 1, pl.r);
-          }
+    // The three horizontal passes first, a row at a time while it is in the cache (data -> spare), then the three vertical
+    // ones (spare -> data -> spare -> data). The GPU path does the same, in the same order, so the bytes are the same.
+    parallel_for(pl.rows, 16, [&](int64_t first, int64_t last) {
+      std::vector<uint8_t> a(size_t(pl.width)), b(size_t(pl.width));
+      const auto line = [&](const uint8_t *src, uint8_t *dst) {
+        if (chroma) {
+          box_line(src, dst, pl.width / 2, 2, pl.r);
+          box_line(src + 1, dst + 1, pl.width / 2, 2, pl.r);
+        } else {
+          box_line(src, dst, pl.width, 1, pl.r);
         }
-      });
-      box_vertical(pl.spare, pl.data, pl.width, pl.rows, pl.r); // vertical: spare -> data
-    }
+      };
+      for (int64_t y = first; y < last; ++y) {
+        line(pl.data + size_t(y) * size_t(pl.width), a.data());
+        line(a.data(), b.data());
+        line(b.data(), pl.spare + size_t(y) * size_t(pl.width));
+      }
+    });
+    box_vertical(pl.spare, pl.data, pl.width, pl.rows, pl.r);
+    box_vertical(pl.data, pl.spare, pl.width, pl.rows, pl.r);
+    box_vertical(pl.spare, pl.data, pl.width, pl.rows, pl.r);
   }
 }
 
