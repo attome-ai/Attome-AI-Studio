@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
@@ -138,6 +139,47 @@ TEST_CASE("gpu video: a frame of video clips decoded and drawn on the GPU is the
     big.xf.scale_y = 1.3f;
     big.xf.pos_x = 0.45f;
     cases.push_back({"a clip larger than the canvas", {big}});
+  }
+  // Effects: on a clip that fills the frame, on a smaller half-transparent one (drawn on its own, with its coverage), and
+  // on an adjustment layer over both, at part and at full amount.
+  const auto effect = [](const char *kind, std::initializer_list<float> v, const std::string &file = {}) {
+    atm::render::Effect e;
+    e.id = std::string("fx_") + kind;
+    e.kind = kind;
+    e.file = file;
+    std::copy(v.begin(), v.end(), e.v);
+    return e;
+  };
+  const std::string cube = (dir / "warm.cube").string();
+  {
+    std::string t = "LUT_3D_SIZE 3\n";
+    for (int bl = 0; bl < 3; ++bl)
+      for (int g = 0; g < 3; ++g)
+        for (int r = 0; r < 3; ++r)
+          t += std::to_string(std::min(1.0, r / 2.0 * 1.1)) + " " + std::to_string(g / 2.0 * 0.95) + " " + std::to_string(bl / 2.0 * 0.8 + 0.05) + "\n";
+    std::ofstream(cube) << t;
+  }
+  {
+    atm::render::Layer full = layer("clp_a", a, 0);
+    full.effects = {effect("gaussian_blur", {0.02f}), effect("color_grade", {0.05f, 0.3f, 1.4f}), effect("vignette", {0.6f, 0.4f, 0.5f})};
+    cases.push_back({"a clip that fills the frame, with effects", {full}});
+  }
+  {
+    atm::render::Layer small = layer("clp_b", b, 3);
+    small.xf.scale_x = small.xf.scale_y = 0.6f;
+    small.xf.pos_x = 0.4f;
+    small.opacity = 0.7f;
+    small.effects = {effect("gaussian_blur", {0.015f}), effect("sharpen", {0.8f, 0.01f}), effect("film_grain", {0.4f, 2.0f}), effect("lut", {0.8f}, cube)};
+    atm::render::Layer adjust;
+    adjust.clip_id = "clp_fx";
+    adjust.is_adjustment = true;
+    adjust.frames = adjust.clip_end_frame = 45;
+    adjust.opacity = 0.6f;
+    adjust.effects = {effect("color_grade", {-0.05f, 0.2f, 0.6f}), effect("gaussian_blur", {0.01f})};
+    cases.push_back({"a clip with effects over another, under an adjustment layer", {layer("clp_a", a, 0), small, adjust}});
+    adjust.opacity = 1.0f;
+    adjust.effects = {effect("vignette", {0.8f, 0.3f, 0.4f})};
+    cases.push_back({"an adjustment layer at full amount", {layer("clp_a", a, 0), adjust}});
   }
   {
     atm::render::Layer turned = layer("clp_b", b, 0);

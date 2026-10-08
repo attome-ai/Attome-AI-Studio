@@ -284,25 +284,42 @@ std::string test_clip(const fs::path &dir, int width, int height, int seconds) {
 }
 
 // Exports `seconds` of a two-track sequence (a full-length bottom track, a half-transparent clip above it for the
-// middle third) and returns the speed as a multiple of real time.
-double export_scene(Engine &engine, const fs::path &dir, const std::string &clip, int width, int height, int seconds) {
+// middle third) and returns the speed as a multiple of real time. With `effects`, the bottom clips have a blur, a colour
+// grade and a vignette, and an adjustment layer grades everything at half amount.
+double export_scene(Engine &engine, const fs::path &dir, const std::string &clip, int width, int height, int seconds, bool effects = false) {
   const std::string project = (dir / ("Export" + std::to_string(height) + ".attome")).string();
   std::error_code ec;
   fs::remove_all(project, ec);
   const std::string seq =
       must(engine, "project.create", {{"path", project}, {"canvas", {{"width", width}, {"height", height}}}})["sequence"];
-  const auto clip_at = [&](int in, int dur, double opacity) {
-    return json{{"name", "c"},
-                {"timing", {{"record_in", std::to_string(in) + "s"}, {"duration", std::to_string(dur) + "s"}, {"source_in", "0"}}},
-                {"media_ref", {{"type", "file"}, {"path", clip}}},
-                {"transform", {{"opacity", opacity}}}};
+  const auto fx = [](const char *name, json params) { return json{{"effect", name}, {"enabled", true}, {"params", std::move(params)}}; };
+  const auto clip_at = [&](int in, int dur, double opacity, bool with_effects = false) {
+    json c{{"name", "c"},
+           {"timing", {{"record_in", std::to_string(in) + "s"}, {"duration", std::to_string(dur) + "s"}, {"source_in", "0"}}},
+           {"media_ref", {{"type", "file"}, {"path", clip}}},
+           {"transform", {{"opacity", opacity}}}};
+    if (with_effects)
+      c["effects"] = {{"fx_1", fx("attome.gaussian_blur@1.0.0", {{"radius", 0.01}})},
+                      {"fx_2", fx("attome.color_grade@1.0.0", {{"contrast", 0.2}, {"saturation", 1.3}})},
+                      {"fx_3", fx("attome.vignette@1.0.0", {{"strength", 0.5}})}};
+    return c;
   };
   json ops = json::array({{{"op", "add"}, {"path", seq + "/tracks/$new:v1"}, {"value", {{"kind", "video"}, {"name", "V1"}}}},
                           {{"op", "add"}, {"path", seq + "/tracks/$new:v2"}, {"value", {{"kind", "video"}, {"name", "V2"}}}}});
   const int part = seconds / 3;
   for (int t = 0; t < seconds; t += part) // the bottom track is cut every `part` seconds, as edited footage is
-    ops.push_back({{"op", "add"}, {"path", "$new:v1/clips/$new:a" + std::to_string(t)}, {"value", clip_at(t, part, 1.0)}});
+    ops.push_back({{"op", "add"}, {"path", "$new:v1/clips/$new:a" + std::to_string(t)}, {"value", clip_at(t, part, 1.0, effects)}});
   ops.push_back({{"op", "add"}, {"path", "$new:v2/clips/$new:b"}, {"value", clip_at(part, part, 0.5)}});
+  if (effects) {
+    ops.push_back({{"op", "add"}, {"path", seq + "/tracks/$new:v3"}, {"value", {{"kind", "video"}, {"name", "V3"}}}});
+    ops.push_back({{"op", "add"},
+                   {"path", "$new:v3/clips/$new:fx"},
+                   {"value", {{"name", "grade"},
+                              {"timing", {{"record_in", "0s"}, {"duration", std::to_string(seconds) + "s"}, {"source_in", "0"}}},
+                              {"media_ref", {{"type", "adjustment"}}},
+                              {"transform", {{"opacity", 0.5}}},
+                              {"effects", {{"fx_1", fx("attome.color_grade@1.0.0", {{"brightness", 0.05}, {"saturation", 0.8}})}}}}}});
+  }
   must(engine, "project.patch", {{"project", project}, {"patch", {{"ops", ops}}}});
 
   const auto t0 = Clock::now();
@@ -346,6 +363,8 @@ int bench_export() {
   std::printf("  %-52s %12.2f x real time   target >= 4\n", "1080p30, 60 s, 2 tracks", x1080);
   const double x2160 = export_scene(engine, dir, uhd, 3840, 2160, 30);
   std::printf("  %-52s %12.2f x real time   target >= 1.5\n", "2160p30, 30 s, 2 tracks", x2160);
+  const double fx2160 = export_scene(engine, dir, uhd, 3840, 2160, 30, true);
+  std::printf("  %-52s %12.2f x real time   target >= 1\n", "2160p30, 30 s, effects and an adjustment layer", fx2160);
   std::printf("\nZone profile of the exports\n%s", atm::prof::format_report(atm::prof::snapshot()).c_str());
   return 0;
 }

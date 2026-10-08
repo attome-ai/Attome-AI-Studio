@@ -248,6 +248,20 @@ bool upright(const Placement &pl, int W, int H, int vw, int vh, Upright &u) {
   return true;
 }
 
+// Whether an opaque picture of vw x vh placed by `pl` covers the whole canvas: uncropped, and the four corners of the
+// canvas fall on it.
+bool reaches_corners(const Placement &pl, const Transform &xf, int W, int H, int vw, int vh) {
+  if (xf.cropped() || xf.scale_x <= 0.0f || xf.scale_y <= 0.0f)
+    return false;
+  for (const auto &[x, y] : {std::pair{0.0f, 0.0f}, std::pair{float(W), 0.0f}, std::pair{0.0f, float(H)}, std::pair{float(W), float(H)}}) {
+    float u = 0.0f, v = 0.0f;
+    pl.source(x, y, u, v);
+    if (u < 0.0f || v < 0.0f || u > float(vw) || v > float(vh))
+      return false;
+  }
+  return true;
+}
+
 // The plain copy of a picture of w x h (no larger than the canvas) centred on the canvas, as an upright drawing: what
 // put_rows does on the CPU.
 Upright centred(int W, int H, int w, int h) {
@@ -1965,15 +1979,7 @@ void Renderer::draw(const Layer &l, int64_t frame, uint8_t *out, bool &cleared, 
   const bool plain = xf.scale_x == 1.0f && xf.scale_y == 1.0f && xf.pos_x == 0.5f && xf.pos_y == 0.5f &&
                      xf.anchor_x == 0.5f && xf.anchor_y == 0.5f && !pl.rotated && !xf.cropped() && !view->alpha;
   const bool covers = plain ? (w >= width_ && h >= height_) : false;
-  if (!view->alpha && !xf.cropped() && xf.scale_x > 0.0f && xf.scale_y > 0.0f) { // do the four corners of the canvas fall on the picture?
-    drew_everywhere_ = true;
-    for (const auto &[x, y] : {std::pair{0.0f, 0.0f}, std::pair{float(width_), 0.0f}, std::pair{0.0f, float(height_)}, std::pair{float(width_), float(height_)}}) {
-      float u = 0.0f, v = 0.0f;
-      pl.source(x, y, u, v);
-      if (u < 0.0f || v < 0.0f || u > float(view->width) || v > float(view->height))
-        drew_everywhere_ = false;
-    }
-  }
+  drew_everywhere_ = !view->alpha && reaches_corners(pl, xf, width_, height_, view->width, view->height);
   // No clear when this picture writes every pixel at full opacity: unmoved and the canvas size, or scaled (not turned)
   // so that it reaches past all four corners (the transform path then writes the whole frame without reading it).
   if (!cleared && (alpha < 256 || !(covers || (drew_everywhere_ && !pl.rotated))))
@@ -2172,13 +2178,6 @@ bool Renderer::gpu_chain(const Layer &l, int64_t frame, std::vector<gpu::Effect>
   return !chain.empty();
 }
 
-bool Renderer::run_on_gpu(const Layer &l, int64_t frame, uint8_t *nv12, uint8_t *cover) {
-  std::vector<gpu::Effect> chain;
-  if (!gpu_chain(l, frame, chain))
-    return false;
-  return run_chain_on_gpu(chain, nv12, cover, nullptr);
-}
-
 bool Renderer::run_chain_on_gpu(const std::vector<gpu::Effect> &chain, uint8_t *nv12, uint8_t *cover, uint8_t *result) {
   if (!gpu_)
     return false;
@@ -2291,33 +2290,51 @@ struct Renderer::GpuReader {
 bool Renderer::render_on_gpu(int64_t frame, uint8_t *out) {
   if (!gpu_)
     return false;
-  // First what needs no decoding: every picture of the frame must be a video clip drawn upright, with no effect and no transition.
-  std::vector<const Layer *> shown;
-  std::vector<Pose> poses;
+  // First what needs no decoding: every layer of the frame must be a video clip drawn upright, or an adjustment layer,
+  // with effects that all have a GPU version (one LUT in the frame at most), and no transition.
+  struct Shown {
+    const Layer *layer;
+    Pose pose;
+    std::vector<gpu::Effect> chain;
+  };
+  std::vector<Shown> shown;
+  uint64_t lut_id = 0;
   for (const Layer &l : comp_.layers) {
     if (!l.video || frame < l.start_frame || frame >= l.start_frame + l.frames)
       continue;
-    if (l.is_text || l.is_image || l.is_adjustment || !l.effects.empty() || l.reverse || failed_.count(l.clip_id) || gpu_failed_.count(l.clip_id))
+    if (l.is_text || l.is_image || l.reverse || failed_.count(l.clip_id) || gpu_failed_.count(l.clip_id))
       return false;
     if ((l.mix_with >= 0 && l.mixing_at(frame)) || (l.mixed_by >= 0 && comp_.layers[size_t(l.mixed_by)].mixing_at(frame)))
       return false;
-    const Pose p = pose_at(l, comp_, frame);
-    if (std::fmod(double(p.xf.rotation), 360.0) != 0.0) // turned: Placement::rotated
+    Shown s{&l, pose_at(l, comp_, frame), {}};
+    if (s.pose.opacity <= 0.0f || (l.is_adjustment && l.effects.empty()))
+      continue; // nothing to draw
+    if (!l.is_adjustment && std::fmod(double(s.pose.xf.rotation), 360.0) != 0.0) // turned: Placement::rotated
       return false;
-    shown.push_back(&l);
-    poses.push_back(p);
+    if (!l.effects.empty() && !gpu_chain(l, frame, s.chain))
+      return false;
+    for (const gpu::Effect &e : s.chain)
+      if (e.kind == gpu::Effect::Kind::lut) {
+        if (lut_id && lut_id != e.lut_id)
+          return false;
+        lut_id = e.lut_id;
+      }
+    shown.push_back(std::move(s));
   }
-  struct Draw {
-    GpuReader *reader;
-    const gpu::Picture *picture;
-    gpu::PictureDraw draw;
+  const auto pack = [](const std::vector<Tap> &taps) {
+    std::vector<uint32_t> packed(taps.size());
+    for (size_t i = 0; i < taps.size(); ++i)
+      packed[i] = uint32_t(taps[i].i0) | uint32_t(taps[i].w) << 16 | uint32_t(taps[i].i1 - taps[i].i0) << 25;
+    return packed;
   };
-  std::vector<Draw> draws;
-  for (size_t i = 0; i < shown.size(); ++i) {
-    const Layer *l = shown[i];
-    const Pose &p = poses[i];
-    if (p.opacity <= 0.0f)
+  gpu_->begin_frame(width_, height_);
+  for (Shown &s : shown) {
+    const Layer *l = s.layer;
+    const Pose &p = s.pose;
+    if (l->is_adjustment) {
+      gpu_->adjust(std::move(s.chain), int(p.opacity * 256.0f + 0.5f));
       continue;
+    }
     auto it = gpu_readers_.find(l->clip_id);
     if (it == gpu_readers_.end()) {
       auto reader = GpuReader::open(*gpu_, l->path);
@@ -2339,7 +2356,7 @@ bool Renderer::render_on_gpu(int64_t frame, uint8_t *out) {
     if (plain)
       u = centred(width_, height_, std::min(vw, width_), std::min(vh, height_));
     else if (!upright(pl, width_, height_, vw, vh, u))
-      continue;
+      continue; // off the canvas: nothing of it shows (with effects too: its coverage is 0 everywhere)
     int64_t t = l->source_in_hns + comp_.frame_hns(frame - l->start_frame);
     if (l->speed != 1.0)
       t = int64_t(double(t) * l->speed);
@@ -2349,27 +2366,23 @@ bool Renderer::render_on_gpu(int64_t frame, uint8_t *out) {
       gpu_readers_.erase(it);
       return false;
     }
-    const auto pack = [](const std::vector<Tap> &taps) {
-      std::vector<uint32_t> out(taps.size());
-      for (size_t i = 0; i < taps.size(); ++i)
-        out[i] = uint32_t(taps[i].i0) | uint32_t(taps[i].w) << 16 | uint32_t(taps[i].i1 - taps[i].i0) << 25;
-      return out;
-    };
     gpu::PictureDraw d{u.ix0, u.ix1, u.iy0, u.iy1, u.cx0, u.cx1, u.cy0, u.cy1, pack(u.xs), pack(u.ys), pack(u.cxs), pack(u.cys),
                        int(p.opacity * 256.0f + 0.5f)};
-    draws.push_back({&reader, *picture, std::move(d)});
+    if (s.chain.empty()) {
+      gpu_->draw_picture(*reader.decoder, **picture, std::move(d));
+    } else { // drawn on its own at full opacity, then put over the frame (draw_isolated)
+      const bool everywhere = reaches_corners(pl, xf, width_, height_, vw, vh) && !g_always_measure_coverage.load();
+      gpu_->draw_clip(*reader.decoder, **picture, std::move(d), std::move(s.chain), everywhere, int(std::lround(p.opacity * 255.0f)));
+    }
   }
   ATM_PROFILE_SCOPE("composite.gpu_frame");
-  gpu_->begin_frame(width_, height_);
-  for (Draw &d : draws)
-    gpu_->draw_picture(*d.reader->decoder, *d.picture, std::move(d.draw));
   if (auto made = gpu_->end_frame(out); !made) {
     stop_gpu(made.error().message);
     return false;
   }
   ++gpu_runs_;
   if (gpu_readers_.size() > 6) // keep the decoders of this frame, close the rest
-    std::erase_if(gpu_readers_, [&](const auto &entry) { return std::none_of(shown.begin(), shown.end(), [&](const Layer *l) { return l->clip_id == entry.first; }); });
+    std::erase_if(gpu_readers_, [&](const auto &entry) { return std::none_of(shown.begin(), shown.end(), [&](const Shown &s) { return s.layer->clip_id == entry.first; }); });
   return true;
 }
 

@@ -102,10 +102,18 @@ public:
   // is where the picture comes back to, instead of nv12. Null when the buffers cannot be made.
   uint8_t *staging(int width, int height);
 
-  // A frame drawn on the GPU: begun black, decoded pictures drawn into it in order, then made in one go and read back
-  // into `nv12` (packed NV12) by end_frame. The pictures must stay held (not released) until end_frame has returned.
+  // A frame drawn on the GPU: begun black, then what is put on it in order, made in one go and read back into `nv12`
+  // (packed NV12) by end_frame. The pictures must stay held (not released) until end_frame has returned; a frame holds
+  // one LUT at most.
   void begin_frame(int width, int height);
+  // A decoded picture drawn over the frame.
   void draw_picture(const VideoDecoder &decoder, const Picture &picture, PictureDraw draw);
+  // A clip with effects, as the renderer draws it: on its own over black (`draw` at full opacity), and over white for its
+  // coverage unless it covers the whole frame (`everywhere`); its chain run as run_effects does with that coverage; then
+  // put over the frame with `opacity` (0..255) through the coverage.
+  void draw_clip(const VideoDecoder &decoder, const Picture &picture, PictureDraw draw, std::vector<Effect> chain, bool everywhere, int opacity);
+  // An adjustment layer: its chain run on the frame so far, mixed with it by `amount` (0..256).
+  void adjust(std::vector<Effect> chain, int amount);
   Result<void> end_frame(uint8_t *nv12);
 
   struct Impl;

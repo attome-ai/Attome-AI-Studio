@@ -1,0 +1,70 @@
+#version 450
+// The frame-level mixes of a frame drawn on the GPU, one invocation per 4-byte word, in the CPU renderer's integer
+// arithmetic (draw_isolated, the adjustment layer's put_rows), so both give the same bytes.
+//   kind 0 coverage: a clip drawn on its own over black (binding 0) and over white (binding 3) gives its coverage, 0..255
+//                    per luma pixel, into binding 5: 255 - (white - black) * 255 / 219
+//   kind 1 amount:   an adjustment layer's changed picture (binding 0) mixed into the frame (binding 1) by `amount`, 0..256
+//   kind 2 over:     a clip that covers the frame (binding 0) over it with opacity `amount`, 0..255, around black (16 / 128)
+//   kind 3 cover:    a clip (binding 0) over the frame through its coverage (binding 5) and opacity `amount`, 0..255; the
+//                    chroma takes the rounded mean coverage of its 2 x 2 luma pixels
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer Clip { uint clip[]; };
+layout(std430, set = 0, binding = 1) buffer Frame { uint frame[]; };
+layout(std430, set = 0, binding = 3) readonly buffer White { uint white[]; };
+layout(std430, set = 0, binding = 5) buffer Cover { uint cover[]; };
+
+layout(push_constant) uniform Mix {
+  uint kind;
+  uint width;  // bytes per row of a picture
+  uint height; // luma rows
+  uint stride; // bytes per row on the device (a multiple of 4)
+  uint amount;
+} pc;
+
+int byte_of(uint word, uint q) { return int((word >> (q * 8u)) & 0xFFu); }
+int cover_at(uint i) { return byte_of(cover[i >> 2], i & 3u); }
+
+void main() {
+  const uint words_per_row = pc.stride >> 2;
+  const uint id = gl_GlobalInvocationID.x;
+  const uint row = id / words_per_row;
+  const uint rows = pc.kind == 0u ? pc.height : pc.height + pc.height / 2u;
+  if (row >= rows)
+    return;
+  const uint first = (id % words_per_row) * 4u; // the row's byte of the word's first byte
+  const bool chroma = row >= pc.height;
+  const int k = chroma ? 128 : 16;
+  const int o = int(pc.amount);
+  const uint c = clip[id];
+  uint out_word = pc.kind == 0u ? cover[id] : frame[id];
+  for (uint q = 0u; q < 4u; ++q) {
+    if (first + q >= pc.width)
+      break;
+    const int s = byte_of(c, q), d = byte_of(out_word, q);
+    int v;
+    if (pc.kind == 0u) {
+      v = clamp(255 - (byte_of(white[id], q) - s) * 255 / 219, 0, 255);
+    } else if (pc.kind == 1u) {
+      v = (s * o + d * (256 - o)) >> 8;
+    } else if (pc.kind == 2u) {
+      v = clamp(k + ((d - k) * (255 - o) + (s - k) * o) / 255, 0, 255);
+    } else {
+      int cv;
+      if (!chroma) {
+        cv = cover_at(row * pc.stride + first + q);
+      } else { // the 2 x 2 luma pixels of this U/V pair
+        const uint at = (row - pc.height) * 2u * pc.stride + ((first + q) & ~1u);
+        cv = (cover_at(at) + cover_at(at + 1u) + cover_at(at + pc.stride) + cover_at(at + pc.stride + 1u) + 2) / 4;
+      }
+      const int keep = 255 * 255 - cv * o; // (1 - coverage * opacity), in 255ths squared
+      v = clamp(k + ((d - k) * keep + (s - k) * o * 255) / (255 * 255), 0, 255);
+    }
+    out_word = (out_word & ~(0xFFu << (q * 8u))) | (uint(v) << (q * 8u));
+  }
+  if (pc.kind == 0u)
+    cover[id] = out_word;
+  else
+    frame[id] = out_word;
+}
