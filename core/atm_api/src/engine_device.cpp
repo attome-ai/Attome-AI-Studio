@@ -149,8 +149,8 @@ Result<json> Engine::Impl::render_devices(const json &params) {
   const json choice = render_choice();
   json out = {{"choice", choice.is_object() ? json(choice.value("name", std::string())) : choice}, {"devices", std::move(list)}, {"in_use", device_in_use(devices, choice)}};
   // Honest about today: only part of the picture is made on the GPU so far.
-  out["note"] = "On the GPU today: the effects of a clip that fills the frame, and of an adjustment layer, when each of them has a GPU version (blur, "
-                "sharpen, colour grade, vignette, film grain). Everything else is made on the CPU for now.";
+  out["note"] = "On the GPU today: the effects of clips and adjustment layers (blur, sharpen, colour grade, vignette, film grain, LUT). A clip "
+                "with a key keeps its effects on the CPU, and drawing the layers themselves (transforms, transitions, text) is still done on the CPU.";
   return out;
 }
 

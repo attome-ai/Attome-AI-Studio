@@ -2807,11 +2807,26 @@ TEST_CASE("render: with a GPU, clips and adjustment layers with effects come out
   const std::string video = (dir / "v.mp4").string();
   write_clip(video, 320, 240, 30);
   const auto fx = [](const char *kind, json params) { return json{{"effect", std::string("attome.") + kind + "@1.0.0"}, {"params", std::move(params)}}; };
+  // A look as a .cube: a warm, contrasty curve, 9 points a side (not a grid the table falls on).
+  const std::string cube = (dir / "look.cube").string();
+  {
+    std::string t = "LUT_3D_SIZE 9\n";
+    for (int b = 0; b < 9; ++b)
+      for (int g = 0; g < 9; ++g)
+        for (int r = 0; r < 9; ++r) {
+          const auto curve = [](double x) { return std::clamp(0.5 + (x - 0.5) * 1.3, 0.0, 1.0); };
+          char line[96];
+          std::snprintf(line, sizeof line, "%.6f %.6f %.6f\n", curve(r / 8.0) * 0.97 + 0.03, curve(g / 8.0), curve(b / 8.0) * 0.9);
+          t += line;
+        }
+    std::ofstream(cube) << t;
+  }
   const json chain = {{"fx_1", fx("gaussian_blur", {{"radius", 0.03}})},
                       {"fx_2", fx("sharpen", {{"amount", 0.8}, {"radius", 0.01}})},
                       {"fx_3", fx("color_grade", {{"brightness", 0.05}, {"contrast", 0.3}, {"saturation", 1.4}})},
                       {"fx_4", fx("vignette", {{"strength", 0.6}, {"radius", 0.4}, {"softness", 0.5}})},
-                      {"fx_5", fx("film_grain", {{"strength", 0.4}, {"size", 2.0}})}};
+                      {"fx_5", fx("film_grain", {{"strength", 0.4}, {"size", 2.0}})},
+                      {"fx_6", fx("lut", {{"file", cube}, {"strength", 0.8}})}};
   // canvas, clip transform, clip effects, adjustment layer effects (null: none)
   const auto frame_of = [&](int cw, int ch, const json &transform, const json &clip_fx, const json &adjust_fx, atm::gpu::Context *device, int64_t *runs) {
     json clips = {{"clp_a", {{"timing", {{"record_in", "0"}, {"duration", "1"}, {"source_in", "0"}}}, {"media_ref", {{"type", "file"}, {"path", video}, {"stream", "video"}}},
@@ -2855,9 +2870,21 @@ TEST_CASE("render: with a GPU, clips and adjustment layers with effects come out
   const json plain = {{"opacity", 1.0}};
   CHECK(frame_of(320, 240, plain, json::object(), chain, nullptr, nullptr) == frame_of(320, 240, plain, json::object(), chain, gpu->get(), &runs));
   CHECK(runs == 1);
-  // A clip that does not fill the frame, and a chain with a LUT, stay on the CPU (and are still the same).
-  const json half = {{"scale", {0.5, 0.5}}, {"opacity", 1.0}};
-  CHECK(frame_of(320, 240, half, chain, nullptr, nullptr, nullptr) == frame_of(320, 240, half, chain, nullptr, gpu->get(), &runs));
+  // Clips that do not fill the frame (their soft edges carried by their coverage): half size, moved and turned, and over a
+  // clip below (so a wrong edge would show), each effect alone and the whole chain.
+  for (const json &part : {json{{"scale", {0.5, 0.5}}, {"opacity", 1.0}}, json{{"scale", {0.6, 0.6}}, {"position", {0.3, 0.6}}, {"rotation", 12.0}, {"opacity", 0.8}}}) {
+    INFO(part.dump());
+    CHECK(frame_of(320, 240, part, chain, nullptr, nullptr, nullptr) == frame_of(320, 240, part, chain, nullptr, gpu->get(), &runs));
+    CHECK(runs == 1);
+    for (const auto &[id, one] : chain.items()) {
+      INFO(id);
+      const json single = {{id, one}};
+      CHECK(frame_of(322, 182, part, single, nullptr, nullptr, nullptr) == frame_of(322, 182, part, single, nullptr, gpu->get(), nullptr));
+    }
+  }
+  // A key has no GPU version yet: that clip stays on the CPU.
+  const json keyed = {{"fx_k", fx("luma_key", {{"level", 0.0}, {"tolerance", 0.2}})}};
+  CHECK(frame_of(320, 240, {{"opacity", 1.0}}, keyed, nullptr, nullptr, nullptr) == frame_of(320, 240, {{"opacity", 1.0}}, keyed, nullptr, gpu->get(), &runs));
   CHECK(runs == 0);
   std::error_code ec;
   fs::remove_all(dir, ec);

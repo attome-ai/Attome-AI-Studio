@@ -6,12 +6,19 @@
 //   kind 1 vignette: data = mask[1025] (floats), then x and y terms for the luma (W, H) and the chroma (W/2, H/2)
 //   kind 2 grain:    hash noise on the luma; f0 = amplitude, u0 = cell size, u1 = the frame's seed
 //   kind 3 sharpen:  luma + amount * (luma - blurred luma), the blurred luma in binding 3; f0 = amount
+//   kind 5 remask:   a clip drawn on its own is premultiplied around black (16 / 128); after a colour effect the change is
+//                    scaled by the clip's coverage (binding 5, a luma-sized plane), integer arithmetic like the CPU's
+//   kind 4 lut:      a 3D table of video-range YUV (binding 4, 33^3 nodes, Y fastest), trilinear, mixed by f0 = strength.
+//                    It works on 2 x 2 blocks (a pixel's luma looks up with the block's chroma, the chroma with the block's
+//                    mean luma), so an invocation takes one chroma word (two blocks) and the two luma words above it.
 
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
 layout(std430, set = 0, binding = 0) buffer Data { uint data[]; };
 layout(std430, set = 0, binding = 2) readonly buffer Tables { uint table[]; };
 layout(std430, set = 0, binding = 3) readonly buffer Aux { uint aux[]; };
+layout(std430, set = 0, binding = 4) readonly buffer Lut { float lut[]; };
+layout(std430, set = 0, binding = 5) readonly buffer Cover { uint cover[]; };
 
 layout(push_constant) uniform Pixels {
   uint kind;
@@ -35,7 +42,119 @@ float vignette_mask(float d2) {
   return tablef(uint(clamp(int(rounded), 0, 1024)));
 }
 
+// The CPU's lookup (lut_nv12): the node cell holding (y, u, v), trilinear, in its order.
+const int kGrid = 33;
+vec3 lut_lookup(float y, float u, float v) {
+  const float top = float(kGrid - 1);
+  precise float py = clamp((y - 16.0) * (32.0 / 219.0), 0.0, top);
+  precise float pu = clamp((u - 16.0) * (32.0 / 224.0), 0.0, top);
+  precise float pv = clamp((v - 16.0) * (32.0 / 224.0), 0.0, top);
+  const int y0 = min(int(py), kGrid - 2), u0 = min(int(pu), kGrid - 2), v0 = min(int(pv), kGrid - 2);
+  precise float ty = py - float(y0), tu = pu - float(u0), tv = pv - float(v0);
+  const uint n = uint(((v0 * kGrid + u0) * kGrid + y0) * 3);
+  const uint sy = 3u, su = uint(kGrid * 3), sv = uint(kGrid * kGrid * 3);
+  vec3 out_v;
+  for (uint c = 0u; c < 3u; ++c) {
+    precise float c00 = lut[n + c] + (lut[n + sy + c] - lut[n + c]) * ty;
+    precise float c10 = lut[n + su + c] + (lut[n + su + sy + c] - lut[n + su + c]) * ty;
+    precise float c01 = lut[n + sv + c] + (lut[n + sv + sy + c] - lut[n + sv + c]) * ty;
+    precise float c11 = lut[n + sv + su + c] + (lut[n + sv + su + sy + c] - lut[n + sv + su + c]) * ty;
+    precise float near0 = c00 + (c10 - c00) * tu;
+    precise float far0 = c01 + (c11 - c01) * tu;
+    precise float o = near0 + (far0 - near0) * tv;
+    out_v[c] = o;
+  }
+  return out_v;
+}
+
+int mixed(float was, float to, int lo, int hi) {
+  precise float d = to - was;
+  precise float ds = d * pc.f0;
+  precise float sum = was + ds;
+  precise float rounded = sum + 0.5;
+  return clamp(int(rounded), lo, hi);
+}
+
+void lut_blocks() {
+  const uint words_per_row = pc.stride >> 2;
+  const uint id = gl_GlobalInvocationID.x;
+  const uint cy = id / words_per_row, wx = id - cy * words_per_row;
+  if (cy >= pc.height / 2u || wx * 4u >= pc.width)
+    return;
+  const uint chroma_word = (pc.height + cy) * words_per_row + wx;
+  const uint row0 = (2u * cy) * words_per_row + wx, row1 = row0 + words_per_row;
+  const uint cw = data[chroma_word], l0 = data[row0], l1 = data[row1];
+  uint out_c = cw, out0 = l0, out1 = l1;
+  for (uint b = 0u; b < 2u; ++b) { // the two blocks of the word: bytes 2b, 2b + 1
+    if (wx * 4u + 2u * b + 1u >= pc.width)
+      break;
+    const float u = float(byte_of(cw, 2u * b)), v = float(byte_of(cw, 2u * b + 1u));
+    const float ys[4] = float[4](float(byte_of(l0, 2u * b)), float(byte_of(l0, 2u * b + 1u)), float(byte_of(l1, 2u * b)), float(byte_of(l1, 2u * b + 1u)));
+    precise float sum = 0.0;
+    int outs[4];
+    for (uint k = 0u; k < 4u; ++k) {
+      sum = sum + ys[k];
+      const vec3 o = lut_lookup(ys[k], u, v);
+      outs[k] = mixed(ys[k], o.x, 16, 235);
+    }
+    precise float mean = sum * 0.25;
+    const vec3 o = lut_lookup(mean, u, v);
+    const int nu = mixed(u, o.y, 16, 240), nv = mixed(v, o.z, 16, 240);
+    const uint shift0 = (2u * b) * 8u, shift1 = (2u * b + 1u) * 8u;
+    out0 = (out0 & ~(0xFFu << shift0) & ~(0xFFu << shift1)) | (uint(outs[0]) << shift0) | (uint(outs[1]) << shift1);
+    out1 = (out1 & ~(0xFFu << shift0) & ~(0xFFu << shift1)) | (uint(outs[2]) << shift0) | (uint(outs[3]) << shift1);
+    out_c = (out_c & ~(0xFFu << shift0) & ~(0xFFu << shift1)) | (uint(nu) << shift0) | (uint(nv) << shift1);
+  }
+  data[row0] = out0;
+  data[row1] = out1;
+  data[chroma_word] = out_c;
+}
+
+// The CPU's remask_nv12, word by word: a luma byte by its own coverage, a chroma pair by the mean of its 2 x 2 block's.
+void remask() {
+  const uint words_per_row = pc.stride >> 2;
+  const uint id = gl_GlobalInvocationID.x;
+  const uint y = id / words_per_row, wx = id - y * words_per_row;
+  if (y >= pc.height + pc.height / 2u || wx * 4u >= pc.width)
+    return;
+  const uint word = data[id];
+  uint out_word = word;
+  if (y < pc.height) {
+    const uint cw = cover[id];
+    for (uint q = 0u; q < 4u; ++q) {
+      if (wx * 4u + q >= pc.width)
+        break;
+      const int v = byte_of(word, q), c = byte_of(cw, q);
+      const int nv = 16 + ((v - 16) * c + (v >= 16 ? 127 : -127)) / 255;
+      out_word = (out_word & ~(0xFFu << (q * 8u))) | (uint(nv & 0xFF) << (q * 8u));
+    }
+  } else {
+    const uint cy = y - pc.height;
+    const uint c0 = cover[(2u * cy) * words_per_row + wx], c1 = cover[(2u * cy + 1u) * words_per_row + wx];
+    for (uint b = 0u; b < 2u; ++b) {
+      if (wx * 4u + 2u * b + 1u >= pc.width)
+        break;
+      const int c = (byte_of(c0, 2u * b) + byte_of(c0, 2u * b + 1u) + byte_of(c1, 2u * b) + byte_of(c1, 2u * b + 1u) + 2) / 4;
+      for (uint k = 0u; k < 2u; ++k) {
+        const uint q = 2u * b + k;
+        const int v = byte_of(word, q);
+        const int nv = 128 + ((v - 128) * c + (v >= 128 ? 127 : -127)) / 255;
+        out_word = (out_word & ~(0xFFu << (q * 8u))) | (uint(nv & 0xFF) << (q * 8u));
+      }
+    }
+  }
+  data[id] = out_word;
+}
+
 void main() {
+  if (pc.kind == 4u) {
+    lut_blocks();
+    return;
+  }
+  if (pc.kind == 5u) {
+    remask();
+    return;
+  }
   const uint words_per_row = pc.stride >> 2;
   const uint rows = pc.height + pc.height / 2u;
   const uint id = gl_GlobalInvocationID.x;

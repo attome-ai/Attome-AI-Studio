@@ -25,6 +25,7 @@ namespace atm::render {
 struct BakedLut {
   static constexpr int kGrid = 33;
   std::vector<float> yuv; // kGrid^3 triples, Y fastest, then U, then V (all in 0..255 video-range code values)
+  uint64_t id = 0;        // a number of its own, so a GPU knows when the table it holds is another one
 };
 
 namespace {
@@ -1417,7 +1418,9 @@ void rgb_to_yuv(const float rgb[3], float &y, float &u, float &v) {
 std::shared_ptr<const BakedLut> bake_lut(const eval::Lut &lut) {
   ATM_PROFILE_SCOPE("effect.lut.bake");
   constexpr int N = BakedLut::kGrid;
+  static std::atomic<uint64_t> next_id{1};
   auto baked = std::make_shared<BakedLut>();
+  baked->id = next_id.fetch_add(1);
   baked->yuv.resize(size_t(N) * N * N * 3);
   for (int iv = 0; iv < N; ++iv)
     for (int iu = 0; iu < N; ++iu)
@@ -1938,10 +1941,6 @@ void Renderer::draw_isolated(const Layer &l, int64_t frame, uint8_t *out, bool &
   // masking of a colour change would all come to nothing, and are left out (the result is the same, byte for byte).
   bool everywhere = drew_everywhere_ && !g_always_measure_coverage.load();
   cover_.resize(luma);
-  // A clip that fills the frame, with effects that all have a GPU version: the whole chain on the GPU (the same bytes).
-  bool done_on_gpu = false;
-  if (everywhere && gpu_)
-    done_on_gpu = run_on_gpu(l, frame, over_black_.data());
   if (everywhere) {
     std::memset(cover_.data(), 255, luma);
   } else {
@@ -1957,6 +1956,9 @@ void Renderer::draw_isolated(const Layer &l, int64_t frame, uint8_t *out, bool &
       }
     });
   }
+  // Effects that all have a GPU version: the whole chain on the GPU (the same bytes). A clip that fills the frame needs no
+  // coverage; any other clip takes its coverage along, and gets it back blurred.
+  const bool done_on_gpu = gpu_ && run_on_gpu(l, frame, over_black_.data(), everywhere ? nullptr : cover_.data());
   for (const Effect &e : l.effects) {
     if (done_on_gpu)
       break;
@@ -1966,17 +1968,8 @@ void Renderer::draw_isolated(const Layer &l, int64_t frame, uint8_t *out, bool &
       blur_nv12(over_black_.data(), W, H, sigma, scratch_);
       if (everywhere)
         continue; // the coverage is 255 everywhere and stays so
-      // The coverage blurs the same way as the luma plane: run it through the same passes as a one-plane picture.
-      over_white_.resize(size); // a key before this blur may have taken the coverage away from a clip that was drawn once
-      std::vector<uint8_t> &tmp = over_white_; // free now
-      const int r = int(std::lround((std::sqrt(1.0 + 4.0 * double(sigma) * double(sigma)) - 1.0) / 2.0));
-      for (int pass = 0; r >= 1 && pass < 3; ++pass) {
-        parallel_for(H, 16, [&](int64_t first, int64_t last) {
-          for (int64_t y = first; y < last; ++y)
-            box_line(cover_.data() + size_t(y) * size_t(W), tmp.data() + size_t(y) * size_t(W), W, 1, r);
-        });
-        box_vertical(tmp.data(), cover_.data(), W, H, r);
-      }
+      // The coverage blurs the same way as the luma plane (the same passes, in the same order, as the GPU does too).
+      blur_nv12(cover_.data(), W, H, sigma, scratch_, true);
     } else if (e.kind == "luma_key") {
       everywhere = false; // a key takes coverage away
       luma_key_nv12(over_black_.data(), cover_.data(), W, H, v[0], v[1], v[2]);
@@ -2020,7 +2013,7 @@ void set_always_measure_coverage(bool on) { g_always_measure_coverage.store(on);
 
 // The effects of a layer as GPU effects, with their numbers made by the CPU path's own code. False when one of them has
 // no GPU version yet (a LUT, a key): then the whole layer stays on the CPU.
-bool Renderer::gpu_chain(const Layer &l, int64_t frame, std::vector<gpu::Effect> &chain) const {
+bool Renderer::gpu_chain(const Layer &l, int64_t frame, std::vector<gpu::Effect> &chain) {
   const int W = width_, H = height_;
   chain.clear();
   for (const Effect &e : l.effects) {
@@ -2051,6 +2044,18 @@ bool Renderer::gpu_chain(const Layer &l, int64_t frame, std::vector<gpu::Effect>
           std::memcpy(&bits, &f, 4);
           g.table.push_back(bits);
         }
+    } else if (e.kind == "lut") {
+      const BakedLut *baked = lut_for(e);
+      if (!baked)
+        return false; // a table that would not load: the CPU path leaves the picture alone and warns
+      g.kind = gpu::Effect::Kind::lut;
+      g.amount = v[0];
+      g.lut = baked->yuv.data();
+      g.lut_floats = baked->yuv.size();
+      g.lut_id = baked->id;
+      for (const gpu::Effect &other : chain)
+        if (other.kind == gpu::Effect::Kind::lut && other.lut_id != g.lut_id)
+          return false; // two different tables in one chain: the CPU does it
     } else if (e.kind == "film_grain") {
       g.kind = gpu::Effect::Kind::grain;
       g.amount = grain_amp(v[0]);
@@ -2064,12 +2069,12 @@ bool Renderer::gpu_chain(const Layer &l, int64_t frame, std::vector<gpu::Effect>
   return !chain.empty();
 }
 
-bool Renderer::run_on_gpu(const Layer &l, int64_t frame, uint8_t *nv12) {
+bool Renderer::run_on_gpu(const Layer &l, int64_t frame, uint8_t *nv12, uint8_t *cover) {
   std::vector<gpu::Effect> chain;
   if (!gpu_chain(l, frame, chain))
     return false;
   ATM_PROFILE_SCOPE("composite.gpu_effects");
-  if (auto ran = gpu_->run_effects(nv12, width_, height_, chain); !ran) {
+  if (auto ran = gpu_->run_effects(nv12, width_, height_, chain, nullptr, cover); !ran) {
     if (warning_.empty())
       warning_ = "The GPU stopped (" + ran.error().message + "): the rest is made on the CPU.";
     gpu_ = nullptr; // the CPU from now on; the picture was not changed by a failed run

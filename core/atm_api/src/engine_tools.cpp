@@ -266,8 +266,8 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
      "Where rendering runs: every GPU here (name, driver, discrete or integrated, memory, whether it can render and why not), the choice (auto, cpu, or a "
      "GPU's name) and in_use: the device that renders now and why. Automatic takes the discrete GPU; an integrated one only when a timing check shows it "
      "beats the CPU; and the CPU while a generation is running (the GPU is left to it). check: true measures every GPU again (a 1080p blur on the GPU "
-     "and on the CPU). Today the GPU makes the effects (blur, sharpen, grade, vignette, grain) of clips that fill the frame and of adjustment layers; "
-     "the rest is made on the CPU. jobs.get of an export says rendered_on.",
+     "and on the CPU). Today the GPU makes the effects (blur, sharpen, grade, vignette, grain, LUT) of clips and adjustment layers; keys and the "
+     "drawing of the layers are still made on the CPU. jobs.get of an export says rendered_on.",
      R"({"type":"object","properties":{"check":{"type":"boolean"},"refresh":{"type":"boolean","description":"false: the GPUs listed before, without asking Vulkan again"}}})", &Impl::render_devices},
     {"render.set_device", "core", true,
      "Choose where rendering runs: \"auto\" (the default), \"cpu\", or a GPU by its name or index from render.devices. Remembered in the user's settings. "

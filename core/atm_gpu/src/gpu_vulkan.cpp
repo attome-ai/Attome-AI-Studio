@@ -190,12 +190,15 @@ struct Context::Impl {
   // The sets of the four bindings (source, destination, tables, aux): A and B are the picture and its spare, C a third
   // picture (sharpen's blurred copy), T the effects' numbers. Every set has T and C in bindings 2 and 3.
   VkDescriptorSet a_to_b = VK_NULL_HANDLE, b_to_a = VK_NULL_HANDLE, c_to_b = VK_NULL_HANDLE, b_to_c = VK_NULL_HANDLE;
-  Buffer a, b, c, upload, download, tables;
+  VkDescriptorSet d_to_b = VK_NULL_HANDLE, b_to_d = VK_NULL_HANDLE; // D: a clip's coverage (binding 5 of every set)
+  Buffer a, b, c, d, upload, download, tables;
+  Buffer lut, lut_stage; // a LUT kept in the GPU's memory (binding 4), and the host memory it is sent from
+  uint64_t lut_loaded = 0; // the id of the LUT in `lut` (0: none)
 
   ~Impl() {
     if (device) {
       vkDeviceWaitIdle(device);
-      for (Buffer *buf : {&a, &b, &c, &upload, &download, &tables})
+      for (Buffer *buf : {&a, &b, &c, &d, &upload, &download, &tables, &lut, &lut_stage})
         release(*buf);
       vkDestroyDescriptorPool(device, descriptors, nullptr);
       vkDestroyPipeline(device, box, nullptr);
@@ -259,24 +262,33 @@ struct Context::Impl {
     return {};
   }
 
-  Result<void> ensure_buffers(VkDeviceSize size, VkDeviceSize table_bytes) {
-    const bool grew = !a.buffer || a.size < size || !tables.buffer || tables.size < table_bytes;
+  Result<void> ensure_buffers(VkDeviceSize size, VkDeviceSize table_bytes, VkDeviceSize lut_bytes) {
+    const bool grew = !a.buffer || a.size < size || !tables.buffer || tables.size < table_bytes || !lut.buffer || lut.size < lut_bytes;
+    if (lut.buffer && lut.size < lut_bytes)
+      lut_loaded = 0; // a new buffer holds nothing yet
     constexpr VkBufferUsageFlags kWork = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
     ATM_CHECK(ensure(a, size, kWork, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT));
     ATM_CHECK(ensure(b, size, kWork, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT));
     ATM_CHECK(ensure(c, size, kWork, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT));
-    ATM_CHECK(ensure(upload, size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT));
+    ATM_CHECK(ensure(d, size, kWork, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT));
+    // The staging memory holds a picture and a coverage plane (at most another two thirds of a picture).
+    ATM_CHECK(ensure(upload, size * 2, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT));
     // Read back by the CPU: cached memory is many times faster to read than write-combined.
-    ATM_CHECK(ensure(download, size, VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+    ATM_CHECK(ensure(download, size * 2, VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                      VK_MEMORY_PROPERTY_HOST_CACHED_BIT));
     // The effects' numbers: small, written by the CPU before each submit, read by the shaders.
     ATM_CHECK(ensure(tables, std::max<VkDeviceSize>(table_bytes, 64 * 1024), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT));
+    ATM_CHECK(ensure(lut, std::max<VkDeviceSize>(lut_bytes, 256), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                     VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT));
+    ATM_CHECK(ensure(lut_stage, std::max<VkDeviceSize>(lut_bytes, 256), VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT));
     if (grew) { // the descriptor sets point at the new buffers
       const auto point = [&](VkDescriptorSet set, const Buffer &from, const Buffer &to) {
-        VkDescriptorBufferInfo infos[4] = {{from.buffer, 0, VK_WHOLE_SIZE}, {to.buffer, 0, VK_WHOLE_SIZE}, {tables.buffer, 0, VK_WHOLE_SIZE}, {c.buffer, 0, VK_WHOLE_SIZE}};
-        VkWriteDescriptorSet writes[4]{};
-        for (uint32_t i = 0; i < 4; ++i) {
+        VkDescriptorBufferInfo infos[6] = {{from.buffer, 0, VK_WHOLE_SIZE}, {to.buffer, 0, VK_WHOLE_SIZE}, {tables.buffer, 0, VK_WHOLE_SIZE},
+                                           {c.buffer, 0, VK_WHOLE_SIZE}, {lut.buffer, 0, VK_WHOLE_SIZE}, {d.buffer, 0, VK_WHOLE_SIZE}};
+        VkWriteDescriptorSet writes[6]{};
+        for (uint32_t i = 0; i < 6; ++i) {
           writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
           writes[i].dstSet = set;
           writes[i].dstBinding = i;
@@ -284,12 +296,14 @@ struct Context::Impl {
           writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
           writes[i].pBufferInfo = &infos[i];
         }
-        vkUpdateDescriptorSets(device, 4, writes, 0, nullptr);
+        vkUpdateDescriptorSets(device, 6, writes, 0, nullptr);
       };
       point(a_to_b, a, b);
       point(b_to_a, b, a);
       point(c_to_b, c, b);
       point(b_to_c, b, c);
+      point(d_to_b, d, b);
+      point(b_to_d, b, d);
     }
     return {};
   }
@@ -306,12 +320,12 @@ struct Context::Impl {
         wanted = std::atoi(pick);
     int best = -1, best_score = -1;
     for (size_t i = 0; i < devices.size(); ++i) {
-      const Device d = describe(devices[i], int(i));
-      if (wanted >= 0 && int(i) == wanted && !d.usable)
-        return fail(ErrorCode::EncoderUnavailable, "G_DEVICE_UNUSABLE", d.name + " cannot render: " + d.why_not + ".");
-      if (!d.usable)
+      const Device found = describe(devices[i], int(i));
+      if (wanted >= 0 && int(i) == wanted && !found.usable)
+        return fail(ErrorCode::EncoderUnavailable, "G_DEVICE_UNUSABLE", found.name + " cannot render: " + found.why_not + ".");
+      if (!found.usable)
         continue;
-      const int score = wanted >= 0 ? (int(i) == wanted ? 10 : 0) : d.discrete ? 3 : d.integrated ? 2 : 1;
+      const int score = wanted >= 0 ? (int(i) == wanted ? 10 : 0) : found.discrete ? 3 : found.integrated ? 2 : 1;
       if (score > best_score) {
         best = int(i);
         best_score = score;
@@ -382,15 +396,15 @@ struct Context::Impl {
       VK_TRY("vkCreateQueryPool", vkCreateQueryPool(device, &qpi, nullptr, &queries));
     }
 
-    VkDescriptorSetLayoutBinding bindings[4]{};
-    for (uint32_t i = 0; i < 4; ++i) {
+    VkDescriptorSetLayoutBinding bindings[6]{};
+    for (uint32_t i = 0; i < 6; ++i) {
       bindings[i].binding = i;
       bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
       bindings[i].descriptorCount = 1;
       bindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
     }
     VkDescriptorSetLayoutCreateInfo li{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    li.bindingCount = 4;
+    li.bindingCount = 6;
     li.pBindings = bindings;
     VK_TRY("vkCreateDescriptorSetLayout", vkCreateDescriptorSetLayout(device, &li, nullptr, &set_layout));
     VkPushConstantRange range{VK_SHADER_STAGE_COMPUTE_BIT, 0, 64}; // the largest block (pixels.comp) and room
@@ -421,23 +435,25 @@ struct Context::Impl {
     VK_TRY("vkCreateComputePipelines", vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &cpi, nullptr, &pixels));
 
 
-    VkDescriptorPoolSize sizes{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 16};
+    VkDescriptorPoolSize sizes{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 36};
     VkDescriptorPoolCreateInfo dpi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-    dpi.maxSets = 4;
+    dpi.maxSets = 6;
     dpi.poolSizeCount = 1;
     dpi.pPoolSizes = &sizes;
     VK_TRY("vkCreateDescriptorPool", vkCreateDescriptorPool(device, &dpi, nullptr, &descriptors));
-    VkDescriptorSetLayout four[4] = {set_layout, set_layout, set_layout, set_layout};
-    VkDescriptorSet sets[4];
+    VkDescriptorSetLayout six[6] = {set_layout, set_layout, set_layout, set_layout, set_layout, set_layout};
+    VkDescriptorSet sets[6];
     VkDescriptorSetAllocateInfo dai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
     dai.descriptorPool = descriptors;
-    dai.descriptorSetCount = 4;
-    dai.pSetLayouts = four;
+    dai.descriptorSetCount = 6;
+    dai.pSetLayouts = six;
     VK_TRY("vkAllocateDescriptorSets", vkAllocateDescriptorSets(device, &dai, sets));
     a_to_b = sets[0];
     b_to_a = sets[1];
     c_to_b = sets[2];
     b_to_c = sets[3];
+    d_to_b = sets[4];
+    b_to_d = sets[5];
     return {};
   }
 
@@ -525,7 +541,7 @@ struct Context::Impl {
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pixels);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, layout, 0, 1, &a_to_b, 0, nullptr);
     vkCmdPushConstants(cmd, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);
-    const uint32_t words = (P / 4) * (H + H / 2);
+    const uint32_t words = (P / 4) * (p.kind == 4 ? H / 2 : H + H / 2); // a LUT: one invocation per chroma word
     vkCmdDispatch(cmd, (words + 255) / 256, 1, 1);
     compute_to_compute();
   }
@@ -533,15 +549,16 @@ struct Context::Impl {
   // The copies between the caller's packed picture (rows `W` bytes apart) and the device's (rows `P` apart, P >= W, a
   // multiple of 4): one copy when they are the same, one per row when the rows are padded.
   std::vector<VkBufferCopy> regions;
-  const std::vector<VkBufferCopy> &copies(int W, int H, uint32_t P, bool to_device) {
+  // `count` rows (a picture: H + H / 2; a coverage plane: H); `staged` is where they start in the staging memory.
+  const std::vector<VkBufferCopy> &copies(int W, int count, uint32_t P, bool to_device, VkDeviceSize staged = 0) {
     regions.clear();
-    const VkDeviceSize luma = VkDeviceSize(W) * VkDeviceSize(H);
     if (P == uint32_t(W)) {
-      regions.push_back({0, 0, luma + luma / 2});
+      const VkDeviceSize all = VkDeviceSize(W) * VkDeviceSize(count);
+      regions.push_back({to_device ? staged : 0, to_device ? 0 : staged, all});
       return regions;
     }
-    for (int y = 0; y < H + H / 2; ++y) {
-      const VkDeviceSize packed = VkDeviceSize(y) * VkDeviceSize(W), padded = VkDeviceSize(y) * P;
+    for (int y = 0; y < count; ++y) {
+      const VkDeviceSize packed = staged + VkDeviceSize(y) * VkDeviceSize(W), padded = VkDeviceSize(y) * P;
       regions.push_back({to_device ? packed : padded, to_device ? padded : packed, VkDeviceSize(W)});
     }
     return regions;
@@ -568,7 +585,7 @@ Result<void> Context::blur_nv12(uint8_t *nv12, int W, int H, float sigma, Timing
   return run_effects(nv12, W, H, {blur}, timing);
 }
 
-Result<void> Context::run_effects(uint8_t *nv12, int W, int H, const std::vector<Effect> &chain, Timing *timing) {
+Result<void> Context::run_effects(uint8_t *nv12, int W, int H, const std::vector<Effect> &chain, Timing *timing, uint8_t *cover) {
   ATM_PROFILE_SCOPE("gpu.effects");
   Impl &m = *impl_;
   const auto t0 = Clock::now();
@@ -586,12 +603,25 @@ Result<void> Context::run_effects(uint8_t *nv12, int W, int H, const std::vector
     table_at[i] = uint32_t(table_words);
     table_words += chain[i].table.size();
   }
-  ATM_CHECK(m.ensure_buffers(VkDeviceSize(P) * (uh + uh / 2), table_words * 4));
+  // The LUT of the chain (one at most), sent to the GPU's memory when it is not the one there already.
+  const Effect *lut_effect = nullptr;
+  for (const Effect &e : chain)
+    if (e.kind == Effect::Kind::lut) {
+      if (lut_effect && lut_effect->lut_id != e.lut_id)
+        return fail(ErrorCode::EncoderUnavailable, "G_TWO_LUTS", "A chain of GPU effects holds one LUT at most.");
+      lut_effect = &e;
+    }
+  ATM_CHECK(m.ensure_buffers(VkDeviceSize(P) * (uh + uh / 2), table_words * 4, lut_effect ? lut_effect->lut_floats * 4 : 0));
+  const bool send_lut = lut_effect && lut_effect->lut_id != m.lut_loaded;
+  if (send_lut)
+    std::memcpy(m.lut_stage.mapped, lut_effect->lut, lut_effect->lut_floats * 4);
   for (size_t i = 0; i < chain.size(); ++i)
     if (!chain[i].table.empty())
       std::memcpy(static_cast<uint32_t *>(m.tables.mapped) + table_at[i], chain[i].table.data(), chain[i].table.size() * 4);
   auto t = Clock::now();
   std::memcpy(m.upload.mapped, nv12, size);
+  if (cover)
+    std::memcpy(static_cast<uint8_t *>(m.upload.mapped) + size, cover, luma);
   const double upload_us = us_since(t);
 
   uint32_t shift = 2; // bytes per invocation of the row passes: a power of two, at least a word
@@ -608,8 +638,16 @@ Result<void> Context::run_effects(uint8_t *nv12, int W, int H, const std::vector
     vkCmdResetQueryPool(m.cmd, m.queries, 0, 5);
     vkCmdWriteTimestamp2(m.cmd, VK_PIPELINE_STAGE_2_NONE, m.queries, 0);
   }
-  const auto &in = m.copies(W, H, P, true);
+  const auto &in = m.copies(W, H + H / 2, P, true);
   vkCmdCopyBuffer(m.cmd, m.upload.buffer, m.a.buffer, uint32_t(in.size()), in.data());
+  if (cover) {
+    const auto &in_cover = m.copies(W, H, P, true, size);
+    vkCmdCopyBuffer(m.cmd, m.upload.buffer, m.d.buffer, uint32_t(in_cover.size()), in_cover.data());
+  }
+  if (send_lut) {
+    const VkBufferCopy whole{0, 0, VkDeviceSize(lut_effect->lut_floats) * 4};
+    vkCmdCopyBuffer(m.cmd, m.lut_stage.buffer, m.lut.buffer, 1, &whole);
+  }
   m.compute_to_compute();
   if (m.timestamps)
     vkCmdWriteTimestamp2(m.cmd, VK_PIPELINE_STAGE_2_COPY_BIT, m.queries, 1);
@@ -620,6 +658,8 @@ Result<void> Context::run_effects(uint8_t *nv12, int W, int H, const std::vector
     case Effect::Kind::blur:
       m.record_blur(m.a_to_b, m.b_to_a, uw, uh, P, box_radius(e.sigma), box_radius(e.sigma * 0.5f), rows_luma, rows_chroma, shift, !marked);
       marked = true;
+      if (cover) // the coverage blurs as the luma does, so the clip's edge fades into what is below it
+        m.record_blur(m.d_to_b, m.b_to_d, uw, uh, P, box_radius(e.sigma), 0, rows_luma, rows_chroma, shift);
       break;
     case Effect::Kind::sharpen: { // the luma of A, blurred in C, then A moves away from it
       const int r = box_radius(e.sigma);
@@ -640,15 +680,25 @@ Result<void> Context::run_effects(uint8_t *nv12, int W, int H, const std::vector
     case Effect::Kind::grain:
       m.record_pixels({2, uw, uh, P, e.amount, std::max<uint32_t>(1, e.cell), e.seed, 0, 0}, P, uh);
       break;
+    case Effect::Kind::lut:
+      if (e.amount > 0.0f) // strength 0 leaves the picture alone, as on the CPU
+        m.record_pixels({4, uw, uh, P, e.amount, 0, 0, 0, 0}, P, uh);
+      break;
     }
+    if (cover && e.kind != Effect::Kind::blur) // a colour effect: what it changed where the clip is not, taken back
+      m.record_pixels({5, uw, uh, P, 0.0f, 0, 0, 0, 0}, P, uh);
   }
   if (m.timestamps) {
     if (!marked)
       vkCmdWriteTimestamp2(m.cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, m.queries, 4);
     vkCmdWriteTimestamp2(m.cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, m.queries, 2);
   }
-  const auto &out = m.copies(W, H, P, false);
+  const auto &out = m.copies(W, H + H / 2, P, false);
   vkCmdCopyBuffer(m.cmd, m.a.buffer, m.download.buffer, uint32_t(out.size()), out.data());
+  if (cover) {
+    const auto &out_cover = m.copies(W, H, P, false, size);
+    vkCmdCopyBuffer(m.cmd, m.d.buffer, m.download.buffer, uint32_t(out_cover.size()), out_cover.data());
+  }
   m.barrier(VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_HOST_BIT, VK_ACCESS_2_HOST_READ_BIT);
   if (m.timestamps)
     vkCmdWriteTimestamp2(m.cmd, VK_PIPELINE_STAGE_2_COPY_BIT, m.queries, 3);
@@ -662,9 +712,13 @@ Result<void> Context::run_effects(uint8_t *nv12, int W, int H, const std::vector
   VK_TRY("vkResetFences", vkResetFences(m.device, 1, &m.fence));
   VK_TRY("vkQueueSubmit2", vkQueueSubmit2(m.queue, 1, &si, m.fence));
   VK_TRY("vkWaitForFences", vkWaitForFences(m.device, 1, &m.fence, VK_TRUE, UINT64_MAX));
+  if (send_lut)
+    m.lut_loaded = lut_effect->lut_id;
 
   t = Clock::now();
   std::memcpy(nv12, m.download.mapped, size);
+  if (cover)
+    std::memcpy(cover, static_cast<const uint8_t *>(m.download.mapped) + size, luma);
   const double download_us = us_since(t);
   if (timing) {
     timing->upload_us = upload_us;

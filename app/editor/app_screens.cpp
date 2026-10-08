@@ -542,8 +542,8 @@ void App::draw_settings() {
     if (choice != "auto")
       ImGui::TextColored(hexv(look::fg3), "In use: %s, %s.", in_use.value("device", "CPU").c_str(), in_use.value("reason", "").c_str());
     ImGui::TextColored(hexv(look::fg3), "Automatic uses the graphics card, and the processor while an AI generation is running, so the generation has the card to itself. "
-                                         "On the graphics card so far: blur, sharpen, colour grade, vignette and film grain on clips that fill the frame and on effect layers. "
-                                         "The rest of the picture is still made on the processor.");
+                                         "On the graphics card so far: the effects of clips and effect layers (blur, sharpen, colour grade, vignette, film grain, LUT). "
+                                         "Keys, and drawing the layers themselves, are still done on the processor.");
     ImGui::PopTextWrapPos();
     ImGui::Spacing();
     if (soft_button("render_check", "Measure again", ImVec2(150.0f, 32.0f))) {

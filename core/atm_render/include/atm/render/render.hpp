@@ -221,8 +221,8 @@ private:
   gpu::Context *gpu_ = nullptr;
   int64_t gpu_runs_ = 0;
   // The effects of a layer as a GPU chain (false: one of them has no GPU version), and running it.
-  bool gpu_chain(const Layer &l, int64_t frame, std::vector<gpu::Effect> &chain) const;
-  bool run_on_gpu(const Layer &l, int64_t frame, uint8_t *nv12);
+  bool gpu_chain(const Layer &l, int64_t frame, std::vector<gpu::Effect> &chain); // not const: a LUT is loaded on first use
+  bool run_on_gpu(const Layer &l, int64_t frame, uint8_t *nv12, uint8_t *cover = nullptr);
   bool drew_everywhere_ = false; // set by draw(): the clip it drew covers every pixel of the canvas (a picture or video that reaches past all four edges)
   std::string warning_;
   std::unordered_map<std::string, std::shared_ptr<const BakedLut>> luts_; // by path; null when the file would not load
