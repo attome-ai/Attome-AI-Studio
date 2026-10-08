@@ -15,9 +15,8 @@
 #include <map>
 #include <vector>
 
-#include <vulkan/vulkan.h>
-
 #include "atm/base/profiler.hpp"
+#include "vulkan_shared.hpp"
 
 namespace atm::gpu {
 namespace {
@@ -35,24 +34,6 @@ constexpr uint32_t kMaxRowBytes = 8192; // box_rows.comp holds a row of up to th
 
 using Clock = std::chrono::steady_clock;
 double us_since(Clock::time_point t0) { return std::chrono::duration<double, std::micro>(Clock::now() - t0).count(); }
-
-tl::unexpected<Error> vk_fail(const char *what, VkResult r) {
-  return fail(ErrorCode::EncoderUnavailable, "G_VULKAN", std::string("Vulkan: ") + what + " failed (" + std::to_string(int(r)) + ").", {},
-              "The GPU path is not used; the CPU renderer does the work. Updating the graphics driver may help.");
-}
-
-#define VK_TRY(what, call)                                                                                                                 \
-  do {                                                                                                                                     \
-    if (const VkResult vk_result_ = (call); vk_result_ != VK_SUCCESS)                                                                      \
-      return vk_fail(what, vk_result_);                                                                                                    \
-  } while (0)
-
-struct Buffer {
-  VkBuffer buffer = VK_NULL_HANDLE;
-  VkDeviceMemory memory = VK_NULL_HANDLE;
-  VkDeviceSize size = 0;
-  void *mapped = nullptr;
-};
 
 // The push constants of box_rows.comp, in its order.
 struct RowsPass {
@@ -149,7 +130,75 @@ Device describe(VkPhysicalDevice physical, int index) {
   return d;
 }
 
+// The queue family that decodes H.264, when the video extensions are there too (Vulkan Video); -1 when not.
+int h264_decode_family(VkPhysicalDevice physical) {
+  uint32_t count = 0;
+  vkEnumerateDeviceExtensionProperties(physical, nullptr, &count, nullptr);
+  std::vector<VkExtensionProperties> extensions(count);
+  vkEnumerateDeviceExtensionProperties(physical, nullptr, &count, extensions.data());
+  for (const char *needed : {VK_KHR_VIDEO_QUEUE_EXTENSION_NAME, VK_KHR_VIDEO_DECODE_QUEUE_EXTENSION_NAME, VK_KHR_VIDEO_DECODE_H264_EXTENSION_NAME})
+    if (std::none_of(extensions.begin(), extensions.end(), [&](const VkExtensionProperties &e) { return std::strcmp(e.extensionName, needed) == 0; }))
+      return -1;
+  vkGetPhysicalDeviceQueueFamilyProperties2(physical, &count, nullptr);
+  std::vector<VkQueueFamilyVideoPropertiesKHR> video(count, {VK_STRUCTURE_TYPE_QUEUE_FAMILY_VIDEO_PROPERTIES_KHR});
+  std::vector<VkQueueFamilyProperties2> families(count, {VK_STRUCTURE_TYPE_QUEUE_FAMILY_PROPERTIES_2});
+  for (uint32_t i = 0; i < count; ++i)
+    families[i].pNext = &video[i];
+  vkGetPhysicalDeviceQueueFamilyProperties2(physical, &count, families.data());
+  for (uint32_t i = 0; i < count; ++i)
+    if ((families[i].queueFamilyProperties.queueFlags & VK_QUEUE_VIDEO_DECODE_BIT_KHR) && (video[i].videoCodecOperations & VK_VIDEO_CODEC_OPERATION_DECODE_H264_BIT_KHR))
+      return int(i);
+  return -1;
+}
+
 } // namespace
+
+tl::unexpected<Error> vk_fail(const char *what, VkResult r) {
+  return fail(ErrorCode::EncoderUnavailable, "G_VULKAN", std::string("Vulkan: ") + what + " failed (" + std::to_string(int(r)) + ").", {},
+              "The GPU path is not used; the CPU renderer does the work. Updating the graphics driver may help.");
+}
+
+int Vulkan::memory_type(uint32_t bits, VkMemoryPropertyFlags want, VkMemoryPropertyFlags nice) const {
+  for (const VkMemoryPropertyFlags flags : {want | nice, want})
+    for (uint32_t i = 0; i < memory_props.memoryTypeCount; ++i)
+      if ((bits & (1u << i)) && (memory_props.memoryTypes[i].propertyFlags & flags) == flags)
+        return int(i);
+  return -1;
+}
+
+Result<void> Vulkan::ensure(Buffer &buf, VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags want, VkMemoryPropertyFlags nice, const void *next) {
+  if (buf.buffer && buf.size >= size)
+    return {};
+  release(buf);
+  VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+  bi.pNext = next;
+  bi.size = size;
+  bi.usage = usage;
+  bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+  VK_TRY("vkCreateBuffer", vkCreateBuffer(device, &bi, nullptr, &buf.buffer));
+  VkMemoryRequirements req;
+  vkGetBufferMemoryRequirements(device, buf.buffer, &req);
+  const int type = memory_type(req.memoryTypeBits, want, nice);
+  if (type < 0)
+    return fail(ErrorCode::EncoderUnavailable, "G_MEMORY", "Vulkan: no memory of the kind a buffer needs.");
+  VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+  ai.allocationSize = req.size;
+  ai.memoryTypeIndex = uint32_t(type);
+  VK_TRY("vkAllocateMemory", vkAllocateMemory(device, &ai, nullptr, &buf.memory));
+  VK_TRY("vkBindBufferMemory", vkBindBufferMemory(device, buf.buffer, buf.memory, 0));
+  buf.size = size;
+  if (want & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)
+    VK_TRY("vkMapMemory", vkMapMemory(device, buf.memory, 0, VK_WHOLE_SIZE, 0, &buf.mapped));
+  return {};
+}
+
+void Vulkan::release(Buffer &buf) {
+  if (buf.mapped)
+    vkUnmapMemory(device, buf.memory);
+  vkDestroyBuffer(device, buf.buffer, nullptr);
+  vkFreeMemory(device, buf.memory, nullptr);
+  buf = Buffer{};
+}
 
 std::vector<Device> list_devices() {
   ATM_PROFILE_SCOPE("gpu.list");
@@ -166,14 +215,8 @@ std::vector<Device> list_devices() {
 
 int box_radius(float sigma) { return int(std::lround((std::sqrt(1.0 + 4.0 * double(sigma) * double(sigma)) - 1.0) / 2.0)); }
 
-struct Context::Impl {
+struct Context::Impl : Vulkan {
   Info info;
-  VkInstance instance = VK_NULL_HANDLE;
-  VkPhysicalDevice physical = VK_NULL_HANDLE;
-  VkDevice device = VK_NULL_HANDLE;
-  VkQueue queue = VK_NULL_HANDLE;
-  uint32_t family = 0;
-  VkPhysicalDeviceMemoryProperties memory_props{};
   float timestamp_ns = 1.0f; // nanoseconds per timestamp tick
   bool timestamps = false;
   VkCommandPool pool = VK_NULL_HANDLE;
@@ -217,49 +260,6 @@ struct Context::Impl {
     }
     if (instance)
       vkDestroyInstance(instance, nullptr);
-  }
-
-  void release(Buffer &buf) {
-    if (buf.mapped)
-      vkUnmapMemory(device, buf.memory);
-    vkDestroyBuffer(device, buf.buffer, nullptr);
-    vkFreeMemory(device, buf.memory, nullptr);
-    buf = Buffer{};
-  }
-
-  // The first memory type that `bits` allows with all of `want`; with `nice` too when there is one.
-  int memory_type(uint32_t bits, VkMemoryPropertyFlags want, VkMemoryPropertyFlags nice = 0) const {
-    for (const VkMemoryPropertyFlags flags : {want | nice, want})
-      for (uint32_t i = 0; i < memory_props.memoryTypeCount; ++i)
-        if ((bits & (1u << i)) && (memory_props.memoryTypes[i].propertyFlags & flags) == flags)
-          return int(i);
-    return -1;
-  }
-
-  // A buffer of at least `size` bytes; one that is already big enough is kept.
-  Result<void> ensure(Buffer &buf, VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags want, VkMemoryPropertyFlags nice = 0) {
-    if (buf.buffer && buf.size >= size)
-      return {};
-    release(buf);
-    VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-    bi.size = size;
-    bi.usage = usage;
-    bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    VK_TRY("vkCreateBuffer", vkCreateBuffer(device, &bi, nullptr, &buf.buffer));
-    VkMemoryRequirements req;
-    vkGetBufferMemoryRequirements(device, buf.buffer, &req);
-    const int type = memory_type(req.memoryTypeBits, want, nice);
-    if (type < 0)
-      return fail(ErrorCode::EncoderUnavailable, "G_MEMORY", "Vulkan: no memory of the kind a buffer needs.");
-    VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-    ai.allocationSize = req.size;
-    ai.memoryTypeIndex = uint32_t(type);
-    VK_TRY("vkAllocateMemory", vkAllocateMemory(device, &ai, nullptr, &buf.memory));
-    VK_TRY("vkBindBufferMemory", vkBindBufferMemory(device, buf.buffer, buf.memory, 0));
-    buf.size = size;
-    if (want & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)
-      VK_TRY("vkMapMemory", vkMapMemory(device, buf.memory, 0, VK_WHOLE_SIZE, 0, &buf.mapped));
-    return {};
   }
 
   Result<void> ensure_buffers(VkDeviceSize size, VkDeviceSize table_bytes, VkDeviceSize lut_bytes) {
@@ -366,19 +366,34 @@ struct Context::Impl {
     if (!found)
       return fail(ErrorCode::EncoderUnavailable, "G_NO_QUEUE", "The GPU has no compute queue.");
 
+    // A video decode queue too, when there is one (a family of its own on the GPUs seen so far).
+    video_family = h264_decode_family(physical);
+    if (video_family == int(family))
+      video_family = -1; // one queue of the family is made, and decoding would need a second
     const float priority = 1.0f;
-    VkDeviceQueueCreateInfo qi{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
-    qi.queueFamilyIndex = family;
-    qi.queueCount = 1;
-    qi.pQueuePriorities = &priority;
+    VkDeviceQueueCreateInfo qi[2]{{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO}, {VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO}};
+    qi[0].queueFamilyIndex = family;
+    qi[1].queueFamilyIndex = uint32_t(video_family);
+    for (VkDeviceQueueCreateInfo &q : qi) {
+      q.queueCount = 1;
+      q.pQueuePriorities = &priority;
+    }
+    const char *video_extensions[] = {VK_KHR_VIDEO_QUEUE_EXTENSION_NAME, VK_KHR_VIDEO_DECODE_QUEUE_EXTENSION_NAME, VK_KHR_VIDEO_DECODE_H264_EXTENSION_NAME};
+    VkPhysicalDeviceVulkan12Features on12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
+    on12.timelineSemaphore = VK_TRUE; // the decoder orders its work on two queues with one (every 1.3 device has it)
     VkPhysicalDeviceVulkan13Features on13{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
+    on13.pNext = &on12;
     on13.synchronization2 = VK_TRUE; // the barriers and timestamps below are the synchronization2 kind
     VkDeviceCreateInfo di{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
     di.pNext = &on13;
-    di.queueCreateInfoCount = 1;
-    di.pQueueCreateInfos = &qi;
+    di.queueCreateInfoCount = video_family >= 0 ? 2 : 1;
+    di.pQueueCreateInfos = qi;
+    di.enabledExtensionCount = video_family >= 0 ? 3 : 0;
+    di.ppEnabledExtensionNames = video_extensions;
     VK_TRY("vkCreateDevice", vkCreateDevice(physical, &di, nullptr, &device));
     vkGetDeviceQueue(device, family, 0, &queue);
+    if (video_family >= 0)
+      vkGetDeviceQueue(device, uint32_t(video_family), 0, &video_queue);
 
     VkCommandPoolCreateInfo pi{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
     pi.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
@@ -579,6 +594,7 @@ Result<std::unique_ptr<Context>> Context::create(int device) {
 
 Context::~Context() = default;
 const Info &Context::info() const { return impl_->info; }
+Vulkan &vulkan_of(Context::Impl &impl) { return impl; }
 
 Result<void> Context::blur_nv12(uint8_t *nv12, int W, int H, float sigma, Timing *timing) {
   Effect blur;

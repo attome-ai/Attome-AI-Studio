@@ -2,6 +2,7 @@
 // Built without the Vulkan SDK: there is no GPU path, and the CPU renderer does all the work (ADR-009).
 
 #include "atm/gpu/gpu.hpp"
+#include "atm/gpu/video.hpp"
 
 #include <cmath>
 
@@ -27,6 +28,18 @@ uint8_t *Context::staging(int, int) { return nullptr; }
 Result<void> Context::run_effects(uint8_t *, int, int, const std::vector<Effect> &, Timing *, uint8_t *, uint8_t *) {
   return fail(ErrorCode::EncoderUnavailable, "G_NOT_BUILT", "This build has no GPU path.");
 }
+
+// No decoder is ever made, so the others are never called.
+struct VideoDecoder::Impl {};
+VideoDecoder::~VideoDecoder() = default;
+Result<std::unique_ptr<VideoDecoder>> VideoDecoder::create(Context &, std::span<const uint8_t>) {
+  return fail(ErrorCode::GpuUnsupported, "G_NOT_BUILT", "This build has no GPU path.");
+}
+int VideoDecoder::width() const { return 0; }
+int VideoDecoder::height() const { return 0; }
+Result<void> VideoDecoder::decode(std::span<const uint8_t>, int64_t) { return {}; }
+Result<bool> VideoDecoder::next(uint8_t *, int64_t *) { return false; }
+void VideoDecoder::flush() {}
 
 } // namespace atm::gpu
 

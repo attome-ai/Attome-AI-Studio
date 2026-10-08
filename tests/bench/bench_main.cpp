@@ -3,6 +3,7 @@
 //
 //   atm_bench [--clips 10000] [--patches 2000]
 //   atm_bench --export          only the export scenes of F1 §7.5 (writes test clips first)
+//   atm_bench --decode          decoding speed: Media Foundation against the GPU's decoder (Vulkan Video)
 
 #include <algorithm>
 #include <chrono>
@@ -13,6 +14,7 @@
 #include <fstream>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <vector>
 
 #include "atm/api/engine.hpp"
@@ -20,6 +22,8 @@
 #include "atm/base/id.hpp"
 #include "atm/base/profiler.hpp"
 #include "atm/base/rational.hpp"
+#include "atm/gpu/gpu.hpp"
+#include "atm/gpu/video.hpp"
 #include "atm/media/media.hpp"
 #include "atm/render/render.hpp"
 
@@ -346,6 +350,56 @@ int bench_export() {
   return 0;
 }
 
+// Every frame of the export test clips decoded, by Media Foundation (as the renderer reads them now) and by the GPU's
+// decoder with each picture read back to the CPU, in frames per second.
+int bench_decode() {
+  const fs::path dir = fs::temp_directory_path() / "attome-bench-export"; // the export bench's clips, kept between runs
+  fs::create_directories(dir);
+  std::printf("Decoding (frames per second, every frame of the clip)\n");
+  auto gpu = atm::gpu::Context::create();
+  if (gpu)
+    std::printf("  GPU: %s\n", (*gpu)->info().device.c_str());
+  atm::prof::reset();
+  for (const auto &[w, h, seconds] : {std::tuple{1920, 1080, 20}, std::tuple{3840, 2160, 10}}) {
+    const std::string clip = test_clip(dir, w, h, seconds);
+    const int frames = seconds * 30;
+    {
+      auto reader = atm::media::VideoReader::open(clip, 0, 0);
+      const auto t0 = Clock::now();
+      for (int f = 0; reader && f < frames; ++f)
+        (void)(*reader)->frame_at(int64_t(f) * atm::media::kHnsPerSecond / 30 + atm::media::kHnsPerSecond / 120);
+      std::printf("  %-52s %12.0f fps\n", (std::to_string(h) + "p, Media Foundation").c_str(), frames / (ms_since(t0) / 1000.0));
+    }
+    if (!gpu)
+      continue;
+    auto stream = atm::media::VideoStream::open(clip);
+    if (!stream)
+      continue;
+    auto decoder = atm::gpu::VideoDecoder::create(**gpu, (*stream)->sequence_header());
+    if (!decoder) {
+      std::printf("  GPU decoder: %s\n", decoder.error().message.c_str());
+      continue;
+    }
+    std::vector<uint8_t> picture(atm::media::nv12_size(w, h));
+    int shown = 0;
+    int64_t pts = 0;
+    atm::media::Packet packet;
+    const auto t0 = Clock::now();
+    while ((*stream)->next(packet).value_or(false)) {
+      if (!(*decoder)->decode(packet.data, packet.pts))
+        break;
+      while ((*decoder)->next(picture.data(), &pts).value_or(false))
+        ++shown;
+    }
+    (*decoder)->flush();
+    while ((*decoder)->next(picture.data(), &pts).value_or(false))
+      ++shown;
+    std::printf("  %-52s %12.0f fps (%d frames)\n", (std::to_string(h) + "p, GPU, read back to the CPU").c_str(), shown / (ms_since(t0) / 1000.0), shown);
+  }
+  std::printf("\nZone profile of the decoding\n%s", atm::prof::format_report(atm::prof::snapshot()).c_str());
+  return 0;
+}
+
 // One 10 s clip exported plain, reversed, and at 2x with the pitch kept (the sound is stretched): how much slower than plain each is.
 int bench_modes() {
   const fs::path dir = fs::temp_directory_path() / "attome-bench-export";
@@ -394,6 +448,9 @@ int main(int argc, char **argv) {
     } else if (!std::strcmp(argv[i], "--export")) {
       atm::prof::set_thread_name("atm-bench");
       return bench_export();
+    } else if (!std::strcmp(argv[i], "--decode")) {
+      atm::prof::set_thread_name("atm-bench");
+      return bench_decode();
     }
   for (int i = 1; i + 1 < argc; i += 2) {
     if (!std::strcmp(argv[i], "--clips"))

@@ -431,7 +431,7 @@ std::string gpu_unsupported(const Sps &sps) {
   return {};
 }
 
-int PocCounter::next(const Sps &sps, const SliceHeader &h) {
+Poc PocCounter::next(const Sps &sps, const SliceHeader &h) {
   const bool mmco5 = std::any_of(h.mmco.begin(), h.mmco.end(), [](const Mmco &m) { return m.op == 5; });
   int top = 0, bottom = 0;
   if (sps.pic_order_cnt_type == 0) {
@@ -492,8 +492,7 @@ int PocCounter::next(const Sps &sps, const SliceHeader &h) {
     prev_frame_num_ = h.frame_num;
     prev_had_mmco5_ = mmco5;
   }
-  const int poc = std::min(top, bottom);
-  return mmco5 ? 0 : poc; // a picture that resets the counts orders as 0 among those that follow
+  return {top, bottom};
 }
 
 } // namespace atm::media::h264

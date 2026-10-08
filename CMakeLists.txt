@@ -123,7 +123,7 @@ endif()
 # Shaders are compiled to SPIR-V with glslc at build time and built into the library as numbers.
 set(ATM_GPU "auto" CACHE STRING "GPU path: auto (on when the Vulkan SDK is found), on or off")
 set_property(CACHE ATM_GPU PROPERTY STRINGS auto on off)
-atm_module(atm_gpu DEPS atm_base)
+atm_module(atm_gpu DEPS atm_base atm_media)
 if(NOT ATM_GPU STREQUAL "off")
   find_package(Vulkan COMPONENTS glslc)
   if(Vulkan_FOUND AND Vulkan_glslc_FOUND)

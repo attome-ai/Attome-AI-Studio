@@ -109,11 +109,18 @@ std::optional<SliceHeader> parse_slice_header(const Nal &nal, const std::vector<
 // size.
 std::string gpu_unsupported(const Sps &sps);
 
+// The order counts of a frame's two fields (equal for a progressive frame); the frame orders by the smaller.
+struct Poc {
+  int top = 0, bottom = 0;
+  int frame() const { return top < bottom ? top : bottom; }
+};
+
 // The picture order count of each frame (8.2.1), kept across frames: give it every frame's first slice in decoding order.
 class PocCounter {
 public:
-  // The frame's order count (frames only: the smaller of top and bottom, which are equal for a progressive frame).
-  int next(const Sps &sps, const SliceHeader &slice);
+  // The counts the frame is decoded with. A frame with memory_management_control_operation 5 counts as 0 afterwards (its
+  // counts minus the smaller one), and orders before every frame that follows, as after an IDR.
+  Poc next(const Sps &sps, const SliceHeader &slice);
 
 private:
   int prev_poc_msb_ = 0, prev_poc_lsb_ = 0;   // type 0

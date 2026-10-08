@@ -59,11 +59,14 @@ struct Effect {
   uint64_t lut_id = 0;
 };
 
+class VideoDecoder;
+
 class Context {
 public:
   // A Vulkan 1.3 device (with synchronization2): the discrete GPU when there is one. ATTOME_GPU=off refuses (the CPU
   // path is used); ATTOME_GPU_DEVICE=<n> picks the n-th device Vulkan lists.
   // `device` is an index from list_devices(); -1 takes the discrete GPU first (ATTOME_GPU_DEVICE overrides that).
+  // When the GPU decodes H.264 through Vulkan Video, the device gets that queue too (VideoDecoder, video.hpp).
   static Result<std::unique_ptr<Context>> create(int device = -1);
   ~Context();
   const Info &info() const;
@@ -86,6 +89,7 @@ public:
   struct Impl;
 
 private:
+  friend class VideoDecoder; // decodes on the same device
   Context() = default;
   std::unique_ptr<Impl> impl_;
 };
