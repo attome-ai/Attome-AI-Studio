@@ -317,6 +317,7 @@ private:
   std::string pref_dir_;
   Client client_;
   Preview preview_;
+  double next_device_poll_ = 0.0; // when to ask the daemon again which device the Monitor's effects run on
   AudioMixer audio_mixer_;
   AudioOut audio_out_;
 

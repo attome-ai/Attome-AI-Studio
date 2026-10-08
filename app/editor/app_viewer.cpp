@@ -66,8 +66,12 @@ void App::draw_viewer() {
   ImGui::PushFont(g_fonts.bold, 15.0f);
   ImGui::TextUnformatted("Monitor");
   ImGui::PopFont();
-  char info[96];
-  std::snprintf(info, sizeof info, "%d x %d  -  %s fps", canvas_w_, canvas_h_, rate_.to_string().c_str());
+  char info[192];
+  // The device the effects of the frame on show ran on, when it was a GPU ("on the CPU" is the rule, so it is not said).
+  const std::string on_gpu = preview_.gpu_name();
+  if (!on_gpu.empty())
+    ui_mark("monitor:gpu"); // a UI test can see that the frame on show was made with the GPU
+  std::snprintf(info, sizeof info, "%d x %d  -  %s fps%s%s", canvas_w_, canvas_h_, rate_.to_string().c_str(), on_gpu.empty() ? "" : "  -  effects on ", on_gpu.c_str());
   {
     // View controls on the right of the header: guides for the platforms' own buttons, loop, full screen. Then the size.
     float x = width - 14.0f;

@@ -268,7 +268,7 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
      "beats the CPU; and the CPU while a generation is running (the GPU is left to it). check: true measures every GPU again (a 1080p blur on the GPU "
      "and on the CPU). Today the GPU makes the effects (blur, sharpen, grade, vignette, grain) of clips that fill the frame and of adjustment layers; "
      "the rest is made on the CPU. jobs.get of an export says rendered_on.",
-     R"({"type":"object","properties":{"check":{"type":"boolean"}}})", &Impl::render_devices},
+     R"({"type":"object","properties":{"check":{"type":"boolean"},"refresh":{"type":"boolean","description":"false: the GPUs listed before, without asking Vulkan again"}}})", &Impl::render_devices},
     {"render.set_device", "core", true,
      "Choose where rendering runs: \"auto\" (the default), \"cpu\", or a GPU by its name or index from render.devices. Remembered in the user's settings. "
      "Returns what render.devices returns.",

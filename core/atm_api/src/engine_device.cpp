@@ -132,7 +132,7 @@ json Engine::Impl::device_in_use(const std::vector<gpu::Device> &devices, const 
 
 Result<json> Engine::Impl::render_devices(const json &params) {
   ATM_PROFILE_SCOPE("api.render_devices");
-  const std::vector<gpu::Device> &devices = gpus(true);
+  const std::vector<gpu::Device> &devices = gpus(params.value("refresh", true)); // refresh false: the list made before (asked often)
   const bool fresh = params.value("check", false);
   json list = json::array();
   for (const gpu::Device &d : devices) {

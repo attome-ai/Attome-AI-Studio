@@ -33,6 +33,11 @@ public:
   void set_text_style(const std::string &clip_id, float size, uint32_t color);
   void set_text(const std::string &clip_id, const std::string &text);
   void show_composition(render::Composition composition); // a version of the film while a value is dragged (the decoders stay open)
+  // The GPU the Monitor's effects run on: an index from gpu::list_devices, -1 for the CPU (what the daemon's render.devices
+  // says is in use). The device is made on the worker thread, which owns it.
+  void set_gpu_device(int device);
+  // Where the last frame's effects ran: "" when it had none on the GPU, else the GPU's name.
+  std::string gpu_name() const;
 
   // Hands over the newest finished NV12 picture when there is one the caller has not seen. Returns false otherwise.
   bool take(std::vector<uint8_t> &nv12, int &width, int &height, int64_t &frame, std::string &warning);
@@ -54,6 +59,8 @@ private:
   std::vector<std::function<void(render::Renderer &)>> live_; // unsaved edits, applied in order before the next frame
   void live(std::function<void(render::Renderer &)> edit);
   std::map<std::string, std::pair<int, int>> extents_;
+  int gpu_wanted_ = -1;    // guarded by mutex_
+  std::string gpu_used_;   // guarded by extent_mutex_
   // Finished.
   std::vector<uint8_t> done_;
   int done_width_ = 0, done_height_ = 0;

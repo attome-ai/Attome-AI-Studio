@@ -73,6 +73,22 @@ void Preview::set_text_style(const std::string &clip_id, float size, uint32_t co
   live([clip_id, size, color](render::Renderer &r) { r.set_text_style(clip_id, size, color); });
 }
 
+void Preview::set_gpu_device(int device) {
+  {
+    std::lock_guard lock(mutex_);
+    if (device == gpu_wanted_)
+      return;
+    gpu_wanted_ = device;
+    dirty_ = true;
+  }
+  wake_.notify_all();
+}
+
+std::string Preview::gpu_name() const {
+  std::lock_guard lock(extent_mutex_);
+  return gpu_used_;
+}
+
 std::pair<int, int> Preview::extent(const std::string &clip_id) const {
   std::lock_guard lock(extent_mutex_);
   const auto it = extents_.find(clip_id);
@@ -95,9 +111,12 @@ bool Preview::take(std::vector<uint8_t> &bgrx, int &width, int &height, int64_t 
 void Preview::run() {
   prof::set_thread_name("ui-preview");
   std::unique_ptr<render::Renderer> renderer;
+  std::unique_ptr<gpu::Context> gpu;
+  int gpu_device = -1; // the device `gpu` was made for
   std::vector<uint8_t> buffer;
   for (;;) {
     int64_t frame = -1;
+    int want_gpu = -1;
     {
       std::unique_lock lock(mutex_);
       wake_.wait(lock, [&] { return stop_ || dirty_; });
@@ -114,12 +133,25 @@ void Preview::run() {
           edit(*renderer);
       live_.clear();
       frame = wanted_;
+      want_gpu = gpu_wanted_;
     }
+    if (want_gpu != gpu_device) { // a device made (or let go) here, outside the lock: it takes a moment
+      if (renderer)
+        renderer->use_gpu(nullptr);
+      gpu.reset();
+      gpu_device = want_gpu;
+      if (want_gpu >= 0)
+        if (auto made = gpu::Context::create(want_gpu))
+          gpu = std::move(*made);
+    }
+    if (renderer)
+      renderer->use_gpu(gpu.get());
     if (!renderer || frame < 0)
       continue;
     ATM_PROFILE_FRAME();
     const auto t0 = std::chrono::steady_clock::now();
     buffer.resize(media::nv12_size(renderer->width(), renderer->height()));
+    const int64_t runs_before = renderer->gpu_runs();
     const auto rendered = renderer->render(frame, buffer.data());
     std::string warning = rendered ? renderer->take_warning() : rendered.error().message;
     {
@@ -127,6 +159,7 @@ void Preview::run() {
       for (const render::Layer &l : renderer->composition().layers)
         if (l.is_text)
           extents_[l.clip_id] = renderer->text_extent(l.clip_id);
+      gpu_used_ = renderer->gpu_runs() > runs_before && gpu ? gpu->info().device : std::string();
     }
     const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     std::lock_guard lock(mutex_);

@@ -608,6 +608,13 @@ void App::poll(double now) {
       gen_job_.clear();
     }
   }
+  if (now >= next_device_poll_) { // where the Monitor's effects run: the Settings choice, and the CPU while a generation runs
+    next_device_poll_ = now + 1.0;
+    json devices;
+    RpcError device_error;
+    if (client_.call("render.devices", {{"refresh", false}}, devices, device_error))
+      preview_.set_gpu_device(devices.value("in_use", json::object()).value("index", -1));
+  }
   if (project_path_.empty() || now < next_poll_)
     return;
   next_poll_ = now + 0.3;
