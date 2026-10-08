@@ -285,8 +285,10 @@ std::string test_clip(const fs::path &dir, int width, int height, int seconds) {
 
 // Exports `seconds` of a two-track sequence (a full-length bottom track, a half-transparent clip above it for the
 // middle third) and returns the speed as a multiple of real time. With `effects`, the bottom clips have a blur, a colour
-// grade and a vignette, and an adjustment layer grades everything at half amount.
-double export_scene(Engine &engine, const fs::path &dir, const std::string &clip, int width, int height, int seconds, bool effects = false) {
+// grade and a vignette, and an adjustment layer grades everything at half amount. With `titles`, captions pop in word by
+// word (two a second, outlined) under a boxed title, as in a short.
+double export_scene(Engine &engine, const fs::path &dir, const std::string &clip, int width, int height, int seconds, bool effects = false,
+                    bool titles = false) {
   const std::string project = (dir / ("Export" + std::to_string(height) + ".attome")).string();
   std::error_code ec;
   fs::remove_all(project, ec);
@@ -310,6 +312,26 @@ double export_scene(Engine &engine, const fs::path &dir, const std::string &clip
   for (int t = 0; t < seconds; t += part) // the bottom track is cut every `part` seconds, as edited footage is
     ops.push_back({{"op", "add"}, {"path", "$new:v1/clips/$new:a" + std::to_string(t)}, {"value", clip_at(t, part, 1.0, effects)}});
   ops.push_back({{"op", "add"}, {"path", "$new:v2/clips/$new:b"}, {"value", clip_at(part, part, 0.5)}});
+  if (titles) {
+    json words = json::array();
+    for (int w = 0; w < seconds * 2; ++w)
+      words.push_back({{"text", "word" + std::to_string(w)}, {"at", std::to_string(w) + "/2"}});
+    const auto text_clip = [&](json content) {
+      return json{{"name", "t"},
+                  {"timing", {{"record_in", "0s"}, {"duration", std::to_string(seconds) + "s"}, {"source_in", "0"}}},
+                  {"media_ref", {{"type", "text"}}},
+                  {"content", std::move(content)}};
+    };
+    json captions = text_clip({{"text", "captions"}, {"size", 0.08}, {"color", "#ffffff"}, {"bold", true}, {"word_pop", 1.0},
+                               {"outline", {{"color", "#000000"}, {"width", 0.1}}}, {"words", words}});
+    captions["transform"] = {{"position", {0.5, 0.75}}};
+    json title = text_clip({{"text", "A title over the footage"}, {"size", 0.06}, {"color", "#ffd020"}, {"background", {{"color", "#202060"}, {"opacity", 0.6}}}});
+    title["transform"] = {{"position", {0.5, 0.15}}};
+    ops.push_back({{"op", "add"}, {"path", seq + "/tracks/$new:v4"}, {"value", {{"kind", "video"}, {"name", "Titles"}}}});
+    ops.push_back({{"op", "add"}, {"path", seq + "/tracks/$new:v5"}, {"value", {{"kind", "video"}, {"name", "Captions"}}}});
+    ops.push_back({{"op", "add"}, {"path", "$new:v4/clips/$new:title"}, {"value", title}});
+    ops.push_back({{"op", "add"}, {"path", "$new:v5/clips/$new:captions"}, {"value", captions}});
+  }
   if (effects) {
     ops.push_back({{"op", "add"}, {"path", seq + "/tracks/$new:v3"}, {"value", {{"kind", "video"}, {"name", "V3"}}}});
     ops.push_back({{"op", "add"},
@@ -365,6 +387,8 @@ int bench_export() {
   std::printf("  %-52s %12.2f x real time   target >= 1.5\n", "2160p30, 30 s, 2 tracks", x2160);
   const double fx2160 = export_scene(engine, dir, uhd, 3840, 2160, 30, true);
   std::printf("  %-52s %12.2f x real time   target >= 1\n", "2160p30, 30 s, effects and an adjustment layer", fx2160);
+  const double titled = export_scene(engine, dir, hd, 1920, 1080, 60, false, true);
+  std::printf("  %-52s %12.2f x real time   target >= 4\n", "1080p30, 60 s, 2 tracks, a title and captions", titled);
   std::printf("\nZone profile of the exports\n%s", atm::prof::format_report(atm::prof::snapshot()).c_str());
   return 0;
 }

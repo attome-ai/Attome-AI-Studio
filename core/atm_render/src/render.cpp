@@ -74,14 +74,17 @@ void put_rows(uint8_t *dst, size_t dst_pitch, const uint8_t *src, size_t src_pit
 // Where a picture of w x h pixels lands on the output (ADR-021 Transform): its anchor at (px, py), scaled by (sx, sy)
 // and turned around the anchor. Only the crop rectangle [u0, u1) x [v0, v1) of the picture is drawn. Picture
 // coordinates have pixel edges at whole numbers, as do output coordinates.
+// Every point is worked out on its own, with multiplications and additions only (the scale's reciprocal is taken once):
+// the GPU's drawing does the same arithmetic and gets the same pixels.
 struct Placement {
   float px, py, sx, sy, cos_r = 1.0f, sin_r = 0.0f, ax, ay, u0, v0, u1, v1;
+  float inv_sx, inv_sy;
   bool rotated = false;
 
   Placement(const Transform &t, int W, int H, float w, float h)
       : px(t.pos_x * float(W)), py(t.pos_y * float(H)), sx(t.scale_x), sy(t.scale_y), ax(t.anchor_x * w),
         ay(t.anchor_y * h), u0(t.crop_left * w), v0(t.crop_top * h), u1((1.0f - t.crop_right) * w),
-        v1((1.0f - t.crop_bottom) * h) {
+        v1((1.0f - t.crop_bottom) * h), inv_sx(1.0f / t.scale_x), inv_sy(1.0f / t.scale_y) {
     const double turn = std::fmod(double(t.rotation), 360.0);
     if (turn != 0.0) {
       rotated = true;
@@ -93,8 +96,8 @@ struct Placement {
   // The picture point under an output point.
   void source(float x, float y, float &u, float &v) const {
     const float dx = x - px, dy = y - py;
-    u = (dx * cos_r + dy * sin_r) / sx + ax;
-    v = (dy * cos_r - dx * sin_r) / sy + ay;
+    u = (dx * cos_r + dy * sin_r) * inv_sx + ax;
+    v = (dy * cos_r - dx * sin_r) * inv_sy + ay;
   }
   // The output point of a picture point.
   void output(float u, float v, float &x, float &y) const {
@@ -142,27 +145,26 @@ int sample(const uint8_t *plane, int pitch, int w, int h, int channels, int k, f
   return (top * (256 - wy) + bottom * wy) >> 8;
 }
 
-// A turned or transparent picture: every output pixel looks up its picture point (stepping along the row), samples it
-// bilinearly and blends by `alpha` times the edge coverage times the picture's own opacity, when it has one.
+// A turned or transparent picture: every output pixel looks up its picture point, samples it bilinearly and blends by
+// `alpha` times the edge coverage times the picture's own opacity, when it has one.
 void draw_rotated(uint8_t *out, int W, int H, const media::FrameView &v, const Placement &pl, int alpha) {
   int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
   if (!pl.box(W, H, x0, y0, x1, y1))
     return;
-  const float du = pl.cos_r / pl.sx, dv = -pl.sin_r / pl.sy; // picture step per output pixel along a row
   uint8_t *out_y = out, *out_uv = out + size_t(W) * size_t(H);
   parallel_for(y1 - y0, 8, [&](int64_t first, int64_t last) {
     for (int64_t r = first; r < last; ++r) {
       const int y = y0 + int(r);
-      float u = 0.0f, vv = 0.0f;
-      pl.source(float(x0) + 0.5f, float(y) + 0.5f, u, vv);
       uint8_t *dst = out_y + size_t(y) * size_t(W);
-      for (int x = x0; x < x1; ++x, u += du, vv += dv) {
+      for (int x = x0; x < x1; ++x) {
+        float u = 0.0f, vv = 0.0f;
+        pl.source(float(x) + 0.5f, float(y) + 0.5f, u, vv);
         const float cover = pl.coverage(u, vv);
         if (cover <= 0.0f)
           continue;
         float opacity = cover;
         if (v.alpha)
-          opacity *= float(sample(v.alpha, v.alpha_pitch, v.width, v.height, 1, 0, u - 0.5f, vv - 0.5f)) / 255.0f;
+          opacity *= float(sample(v.alpha, v.alpha_pitch, v.width, v.height, 1, 0, u - 0.5f, vv - 0.5f)) * (1.0f / 255.0f); // a multiplication, as on the GPU
         const int a = int(float(alpha) * opacity + 0.5f);
         if (a <= 0)
           continue;
@@ -177,16 +179,16 @@ void draw_rotated(uint8_t *out, int W, int H, const media::FrameView &v, const P
   parallel_for(cy1 - cy0, 8, [&](int64_t first, int64_t last) {
     for (int64_t r = first; r < last; ++r) {
       const int c = cy0 + int(r);
-      float u = 0.0f, vv = 0.0f;
-      pl.source(float(2 * cx0) + 1.0f, float(2 * c) + 1.0f, u, vv);
       uint8_t *dst = out_uv + size_t(c) * size_t(W);
-      for (int x = cx0; x < cx1; ++x, u += 2.0f * du, vv += 2.0f * dv) {
+      for (int x = cx0; x < cx1; ++x) {
+        float u = 0.0f, vv = 0.0f;
+        pl.source(float(2 * x) + 1.0f, float(2 * c) + 1.0f, u, vv);
         const float cover = pl.coverage(u, vv);
         if (cover <= 0.0f)
           continue;
         float opacity = cover;
         if (v.alpha) // the opacity at the centre of the four pixels
-          opacity *= float(sample(v.alpha, v.alpha_pitch, v.width, v.height, 1, 0, u - 0.5f, vv - 0.5f)) / 255.0f;
+          opacity *= float(sample(v.alpha, v.alpha_pitch, v.width, v.height, 1, 0, u - 0.5f, vv - 0.5f)) * (1.0f / 255.0f);
         const int a = int(float(alpha) * opacity + 0.5f);
         if (a <= 0)
           continue;
@@ -259,6 +261,29 @@ bool reaches_corners(const Placement &pl, const Transform &xf, int W, int H, int
     if (u < 0.0f || v < 0.0f || u > float(vw) || v > float(vh))
       return false;
   }
+  return true;
+}
+
+// A Placement as the GPU's placed drawing (the same numbers, and the box of pixels it can touch); false when it touches
+// none of the canvas.
+bool to_placed(const Placement &pl, int W, int H, int alpha, gpu::Placed &q) {
+  if (!pl.box(W, H, q.x0, q.y0, q.x1, q.y1))
+    return false;
+  q.px = pl.px;
+  q.py = pl.py;
+  q.cos_r = pl.cos_r;
+  q.sin_r = pl.sin_r;
+  q.inv_sx = pl.inv_sx;
+  q.inv_sy = pl.inv_sy;
+  q.ax = pl.ax;
+  q.ay = pl.ay;
+  q.u0 = pl.u0;
+  q.v0 = pl.v0;
+  q.u1 = pl.u1;
+  q.v1 = pl.v1;
+  q.sx = pl.sx;
+  q.sy = pl.sy;
+  q.alpha = alpha;
   return true;
 }
 
@@ -412,7 +437,8 @@ media::TextBitmap rounded_box(int text_w, int text_h, float pad, float radius) {
 
 // Draws a coverage mask in `rgb` into the NV12 canvas as `pl` places it, turned and cropped like a picture. The colour
 // is converted to Y, U and V once.
-void draw_text(uint8_t *out, int W, int H, const media::TextBitmap &m, const Placement &pl, int alpha, uint32_t rgb) {
+// A colour 0xRRGGBB as video-range Y, U and V (the converter's own arithmetic).
+std::array<uint8_t, 3> yuv_of(uint32_t rgb) {
   uint8_t bgrx[2 * 2 * 4], yuv[6];
   for (int i = 0; i < 4; ++i) {
     bgrx[i * 4 + 0] = uint8_t(rgb & 255);
@@ -421,12 +447,19 @@ void draw_text(uint8_t *out, int W, int H, const media::TextBitmap &m, const Pla
     bgrx[i * 4 + 3] = 255;
   }
   media::bgrx_to_nv12(bgrx, 2, 2, yuv);
-  const int cy_ = yuv[0], cu = yuv[4], cv = yuv[5];
+  return {yuv[0], yuv[4], yuv[5]};
+}
 
+// Whether a mask of w x h placed by `pl` is cut by its crop (its cut edges fade).
+bool mask_cropped(const Placement &pl, int w, int h) { return pl.u0 > 0.0f || pl.v0 > 0.0f || pl.u1 < float(w) || pl.v1 < float(h); }
+
+void draw_text(uint8_t *out, int W, int H, const media::TextBitmap &m, const Placement &pl, int alpha, uint32_t rgb) {
+  const std::array<uint8_t, 3> yuv = yuv_of(rgb);
+  const int cy_ = yuv[0], cu = yuv[1], cv = yuv[2];
   int ix0 = 0, iy0 = 0, ix1 = 0, iy1 = 0;
   if (!pl.box(W, H, ix0, iy0, ix1, iy1))
     return;
-  const bool cropped = pl.u0 > 0.0f || pl.v0 > 0.0f || pl.u1 < float(m.width) || pl.v1 < float(m.height);
+  const bool cropped = mask_cropped(pl, m.width, m.height);
   // Coverage at an output position, bilinear, 0..255.
   const auto coverage = [&](float dx, float dy) {
     float u = 0.0f, v = 0.0f;
@@ -1759,6 +1792,98 @@ const BakedLut *Renderer::lut_for(const Effect &e) {
 }
 
 // Draws one layer into `out`. The black background is drawn first only when the layer does not cover it.
+std::vector<Renderer::TextPart> Renderer::text_parts(const Layer &l, int64_t frame, const Pose &p) {
+  // A caption shows the word that is on at this frame (the one that started last), popping in; a text shows all of itself.
+  std::string shown_text = l.text;
+  uint32_t shown_color = l.text_color;
+  Transform text_xf = p.xf;
+  if (!l.words.empty()) {
+    const int64_t rel = frame - l.origin_frame;
+    const Layer::Word *word = nullptr;
+    for (const Layer::Word &w : l.words)
+      if (w.start <= rel)
+        word = &w;
+    if (!word)
+      return {}; // before the first word
+    shown_text = word->text;
+    if (word->color >= 0)
+      shown_color = uint32_t(word->color);
+    if (l.word_pop > 0.0f) {
+      const float age = std::clamp(float(rel - word->start) / 5.0f, 0.0f, 1.0f), ease = 1.0f - (1.0f - age) * (1.0f - age);
+      const float k = 1.0f - 0.35f * l.word_pop * (1.0f - ease);
+      text_xf.scale_x *= k;
+      text_xf.scale_y *= k;
+    }
+  }
+  if (shown_text.empty())
+    return {};
+  const int px_size = std::max(1, int(std::lround(l.text_size * float(height_))));
+  char look[160];
+  std::snprintf(look, sizeof look, "|%.3f|%.3f,%.3f,%.3f|%.3f,%.3f", double(l.outline_width), double(l.shadow_x), double(l.shadow_y), double(l.shadow_blur),
+                double(l.box_padding), double(l.box_radius));
+  const std::string key = shown_text + "\x1f" + std::to_string(px_size) + (l.text_bold ? "b" : "n") + (l.text_italic ? "i" : "u") + std::to_string(l.text_align) + "|" +
+                          l.text_font + "|" + std::to_string(int(std::lround(l.line_spacing * 100.0f))) + std::to_string(width_) + look;
+  TextEntry &entry = text_[l.clip_id];
+  if (entry.key != key) {
+    media::TextStyle style;
+    style.bold = l.text_bold;
+    style.italic = l.text_italic;
+    style.font = l.text_font;
+    style.align = l.text_align;
+    style.line_spacing = l.line_spacing;
+    auto bitmap = media::render_text(shown_text, float(px_size), style, int(float(width_) * 0.9f));
+    if (!bitmap) {
+      if (warning_.empty())
+        warning_ = bitmap.error().message;
+      return {};
+    }
+    entry.key = key;
+    entry.bitmap = std::move(*bitmap);
+    entry.outline = l.outline_width > 0.0f ? grow_mask(entry.bitmap, int(std::lround(l.outline_width * float(px_size)))) : media::TextBitmap{};
+    entry.shadow = media::TextBitmap{};
+    if (l.shadow_opacity > 0.0f) {
+      entry.shadow = entry.bitmap;
+      const int blur = int(std::lround(l.shadow_blur * float(px_size)));
+      if (blur > 0)
+        entry.shadow = blur_mask(grow_mask(entry.bitmap, 0, blur), blur);
+    }
+    entry.box = l.box_opacity > 0.0f ? rounded_box(entry.bitmap.width, entry.bitmap.height, l.box_padding * float(px_size), l.box_radius * float(px_size))
+                                     : media::TextBitmap{};
+  }
+  if (entry.bitmap.width == 0)
+    return {};
+  // A mask's key: the clip, the text's look and which of its masks (the same key, the same pixels).
+  const auto key_of = [&](char which) { return std::hash<std::string>{}(l.clip_id + "\x1f" + entry.key + which); };
+  const int alpha = int(p.opacity * 256.0f + 0.5f);
+  std::vector<TextPart> parts;
+  if (entry.box.width > 0) // the box behind everything
+    parts.push_back({&entry.box, text_xf, int(float(alpha) * l.box_opacity), l.box_color, key_of('b')});
+  if (entry.shadow.width > 0) { // a copy shifted by a share of the text's size, in screen space
+    Transform moved = text_xf;
+    moved.pos_x += l.shadow_x * float(px_size) / float(width_);
+    moved.pos_y += l.shadow_y * float(px_size) / float(height_);
+    parts.push_back({&entry.shadow, moved, int(float(alpha) * l.shadow_opacity), l.shadow_color, key_of('s')});
+  }
+  if (entry.outline.width > 0)
+    parts.push_back({&entry.outline, text_xf, alpha, l.outline_color, key_of('o')});
+  parts.push_back({&entry.bitmap, text_xf, alpha, shown_color, key_of('t')});
+  return parts;
+}
+
+bool Renderer::still_of(const Layer &l) {
+  if (stills_.count(l.clip_id))
+    return true;
+  auto still = media::read_still(l.path, width_, height_);
+  if (!still) {
+    failed_[l.clip_id] = true;
+    if (warning_.empty())
+      warning_ = still.error().message;
+    return false;
+  }
+  stills_.emplace(l.clip_id, std::move(*still));
+  return true;
+}
+
 void Renderer::draw(const Layer &l, int64_t frame, uint8_t *out, bool &cleared, std::vector<const std::string *> &used,
                     bool raw) {
   const size_t pitch = size_t(width_); // Y and UV rows of the packed NV12 output
@@ -1808,105 +1933,24 @@ void Renderer::draw(const Layer &l, int64_t frame, uint8_t *out, bool &cleared, 
     return;
   }
   if (l.is_text) {
-    // A caption shows the word that is on at this frame (the one that started last), popping in; a text shows all of itself.
-    std::string shown_text = l.text;
-    uint32_t shown_color = l.text_color;
-    Transform text_xf = p.xf;
-    if (!l.words.empty()) {
-      const int64_t rel = frame - l.origin_frame;
-      const Layer::Word *word = nullptr;
-      for (const Layer::Word &w : l.words)
-        if (w.start <= rel)
-          word = &w;
-      if (!word)
-        return; // before the first word
-      shown_text = word->text;
-      if (word->color >= 0)
-        shown_color = uint32_t(word->color);
-      if (l.word_pop > 0.0f) {
-        const float age = std::clamp(float(rel - word->start) / 5.0f, 0.0f, 1.0f), ease = 1.0f - (1.0f - age) * (1.0f - age);
-        const float k = 1.0f - 0.35f * l.word_pop * (1.0f - ease);
-        text_xf.scale_x *= k;
-        text_xf.scale_y *= k;
-      }
-    }
-    if (shown_text.empty())
-      return;
-    const int px_size = std::max(1, int(std::lround(l.text_size * float(height_))));
-    char look[160];
-    std::snprintf(look, sizeof look, "|%.3f|%.3f,%.3f,%.3f|%.3f,%.3f", double(l.outline_width), double(l.shadow_x), double(l.shadow_y), double(l.shadow_blur),
-                  double(l.box_padding), double(l.box_radius));
-    const std::string key = shown_text + "\x1f" + std::to_string(px_size) + (l.text_bold ? "b" : "n") + (l.text_italic ? "i" : "u") + std::to_string(l.text_align) + "|" +
-                            l.text_font + "|" + std::to_string(int(std::lround(l.line_spacing * 100.0f))) + std::to_string(width_) + look;
-    TextEntry &entry = text_[l.clip_id];
-    if (entry.key != key) {
-      media::TextStyle style;
-      style.bold = l.text_bold;
-      style.italic = l.text_italic;
-      style.font = l.text_font;
-      style.align = l.text_align;
-      style.line_spacing = l.line_spacing;
-      auto bitmap = media::render_text(shown_text, float(px_size), style, int(float(width_) * 0.9f));
-      if (!bitmap) {
-        if (warning_.empty())
-          warning_ = bitmap.error().message;
-        return;
-      }
-      entry.key = key;
-      entry.bitmap = std::move(*bitmap);
-      entry.outline = l.outline_width > 0.0f ? grow_mask(entry.bitmap, int(std::lround(l.outline_width * float(px_size)))) : media::TextBitmap{};
-      entry.shadow = media::TextBitmap{};
-      if (l.shadow_opacity > 0.0f) {
-        entry.shadow = entry.bitmap;
-        const int blur = int(std::lround(l.shadow_blur * float(px_size)));
-        if (blur > 0)
-          entry.shadow = blur_mask(grow_mask(entry.bitmap, 0, blur), blur);
-      }
-      entry.box = l.box_opacity > 0.0f ? rounded_box(entry.bitmap.width, entry.bitmap.height, l.box_padding * float(px_size), l.box_radius * float(px_size))
-                                       : media::TextBitmap{};
-    }
-    if (entry.bitmap.width == 0)
+    const std::vector<TextPart> parts = text_parts(l, frame, p);
+    if (parts.empty())
       return;
     if (!cleared)
       media::fill_black(out, width_, height_);
     cleared = true;
     ATM_PROFILE_SCOPE("composite.text");
-    const int alpha = int(p.opacity * 256.0f + 0.5f);
-    if (entry.box.width > 0) { // the box behind everything
-      const Placement pl(text_xf, width_, height_, float(entry.box.width), float(entry.box.height));
-      draw_text(out, width_, height_, entry.box, pl, int(float(alpha) * l.box_opacity), l.box_color);
-    }
-    if (entry.shadow.width > 0) { // a copy shifted by a share of the text's size, in screen space
-      Transform moved = text_xf;
-      moved.pos_x += l.shadow_x * float(px_size) / float(width_);
-      moved.pos_y += l.shadow_y * float(px_size) / float(height_);
-      const Placement pl(moved, width_, height_, float(entry.shadow.width), float(entry.shadow.height));
-      draw_text(out, width_, height_, entry.shadow, pl, int(float(alpha) * l.shadow_opacity), l.shadow_color);
-    }
-    if (entry.outline.width > 0) {
-      const Placement pl(text_xf, width_, height_, float(entry.outline.width), float(entry.outline.height));
-      draw_text(out, width_, height_, entry.outline, pl, alpha, l.outline_color);
-    }
-    const Placement pl(text_xf, width_, height_, float(entry.bitmap.width), float(entry.bitmap.height));
-    draw_text(out, width_, height_, entry.bitmap, pl, alpha, shown_color);
+    for (const TextPart &part : parts)
+      draw_text(out, width_, height_, *part.mask, Placement(part.xf, width_, height_, float(part.mask->width), float(part.mask->height)), part.alpha, part.rgb);
     return;
   }
   if (failed_.count(l.clip_id))
     return;
   std::optional<media::FrameView> view;
   if (l.is_image) { // read once, fitted to this renderer's output like a video frame
-    auto it = stills_.find(l.clip_id);
-    if (it == stills_.end()) {
-      auto still = media::read_still(l.path, width_, height_);
-      if (!still) {
-        failed_[l.clip_id] = true;
-        if (warning_.empty())
-          warning_ = still.error().message;
-        return;
-      }
-      it = stills_.emplace(l.clip_id, std::move(*still)).first;
-    }
-    view = it->second.view();
+    if (!still_of(l))
+      return;
+    view = stills_.at(l.clip_id).view();
   } else {
     auto it = readers_.find(l.clip_id);
     if (it == readers_.end()) {
@@ -2290,8 +2334,8 @@ struct Renderer::GpuReader {
 bool Renderer::render_on_gpu(int64_t frame, uint8_t *out) {
   if (!gpu_)
     return false;
-  // First what needs no decoding: every layer of the frame must be a video clip drawn upright, or an adjustment layer,
-  // with effects that all have a GPU version (one LUT in the frame at most), and no transition.
+  // First what needs no decoding: every layer must be a video clip the GPU decodes, a picture, a text or an adjustment
+  // layer, with effects that all have a GPU version (one LUT in the frame at most), and no transition.
   struct Shown {
     const Layer *layer;
     Pose pose;
@@ -2302,15 +2346,13 @@ bool Renderer::render_on_gpu(int64_t frame, uint8_t *out) {
   for (const Layer &l : comp_.layers) {
     if (!l.video || frame < l.start_frame || frame >= l.start_frame + l.frames)
       continue;
-    if (l.is_text || l.is_image || l.reverse || failed_.count(l.clip_id) || gpu_failed_.count(l.clip_id))
+    if (l.reverse || failed_.count(l.clip_id) || gpu_failed_.count(l.clip_id))
       return false;
     if ((l.mix_with >= 0 && l.mixing_at(frame)) || (l.mixed_by >= 0 && comp_.layers[size_t(l.mixed_by)].mixing_at(frame)))
       return false;
     Shown s{&l, pose_at(l, comp_, frame), {}};
     if (s.pose.opacity <= 0.0f || (l.is_adjustment && l.effects.empty()))
       continue; // nothing to draw
-    if (!l.is_adjustment && std::fmod(double(s.pose.xf.rotation), 360.0) != 0.0) // turned: Placement::rotated
-      return false;
     if (!l.effects.empty() && !gpu_chain(l, frame, s.chain))
       return false;
     for (const gpu::Effect &e : s.chain)
@@ -2330,50 +2372,123 @@ bool Renderer::render_on_gpu(int64_t frame, uint8_t *out) {
   gpu_->begin_frame(width_, height_);
   for (Shown &s : shown) {
     const Layer *l = s.layer;
-    const Pose &p = s.pose;
     if (l->is_adjustment) {
-      gpu_->adjust(std::move(s.chain), int(p.opacity * 256.0f + 0.5f));
+      gpu_->adjust(std::move(s.chain), int(s.pose.opacity * 256.0f + 0.5f));
       continue;
     }
-    auto it = gpu_readers_.find(l->clip_id);
-    if (it == gpu_readers_.end()) {
-      auto reader = GpuReader::open(*gpu_, l->path);
-      // A picture the CPU reader would scale to fit the canvas stays with the CPU, which scales it.
-      if (!reader || media::fit_inside((*reader)->decoder->width(), (*reader)->decoder->height(), width_, height_) !=
-                         std::pair{(*reader)->decoder->width(), (*reader)->decoder->height()}) {
-        gpu_failed_[l->clip_id] = true;
-        return false;
+    // A layer with effects is drawn on its own at full opacity (draw_isolated), then put over the frame.
+    const bool isolated = !s.chain.empty();
+    Pose p = s.pose;
+    if (isolated)
+      p.opacity = 1.0f;
+    const int alpha = int(p.opacity * 256.0f + 0.5f), opacity = int(std::lround(s.pose.opacity * 255.0f));
+    if (l->is_text) {
+      const std::vector<TextPart> parts = text_parts(*l, frame, p);
+      if (parts.empty())
+        continue;
+      if (isolated)
+        gpu_->begin_clip(std::move(s.chain), false, opacity);
+      for (const TextPart &part : parts) {
+        const Placement pl(part.xf, width_, height_, float(part.mask->width), float(part.mask->height));
+        gpu::Placed q;
+        if (!to_placed(pl, width_, height_, part.alpha, q))
+          continue;
+        q.cropped = mask_cropped(pl, part.mask->width, part.mask->height);
+        const std::array<uint8_t, 3> yuv = yuv_of(part.rgb);
+        q.y = yuv[0];
+        q.u = yuv[1];
+        q.v = yuv[2];
+        gpu::Source mask;
+        mask.key = part.key;
+        mask.width = part.mask->width;
+        mask.height = part.mask->height;
+        mask.y = part.mask->alpha.data();
+        mask.y_pitch = part.mask->width;
+        mask.mask = true;
+        gpu_->draw_source(mask, q);
       }
-      it = gpu_readers_.emplace(l->clip_id, std::move(*reader)).first;
+      if (isolated)
+        gpu_->end_clip();
+      continue;
     }
-    GpuReader &reader = *it->second;
-    const int vw = reader.decoder->width(), vh = reader.decoder->height();
+    // A picture: a still, or a video frame the GPU decoded.
+    gpu::Source still;
+    GpuReader *reader = nullptr;
+    int vw = 0, vh = 0;
+    bool transparent = false;
+    if (l->is_image) {
+      if (!still_of(*l))
+        continue; // left out, as on the CPU (which reports it)
+      const media::FrameView v = stills_.at(l->clip_id).view();
+      still.key = std::hash<std::string>{}(l->clip_id + "\x1f" + l->path);
+      still.width = vw = v.width;
+      still.height = vh = v.height;
+      still.y = v.y;
+      still.uv = v.uv;
+      still.alpha = v.alpha;
+      still.y_pitch = v.y_pitch;
+      still.uv_pitch = v.uv_pitch;
+      still.alpha_pitch = v.alpha_pitch;
+      transparent = v.alpha != nullptr;
+    } else {
+      auto it = gpu_readers_.find(l->clip_id);
+      if (it == gpu_readers_.end()) {
+        auto opened = GpuReader::open(*gpu_, l->path);
+        // A picture the CPU reader would scale to fit the canvas stays with the CPU, which scales it.
+        if (!opened || media::fit_inside((*opened)->decoder->width(), (*opened)->decoder->height(), width_, height_) !=
+                           std::pair{(*opened)->decoder->width(), (*opened)->decoder->height()}) {
+          gpu_failed_[l->clip_id] = true;
+          return false;
+        }
+        it = gpu_readers_.emplace(l->clip_id, std::move(*opened)).first;
+      }
+      reader = it->second.get();
+      vw = reader->decoder->width();
+      vh = reader->decoder->height();
+    }
     const Transform &xf = p.xf;
     const Placement pl(xf, width_, height_, float(vw), float(vh));
-    const bool plain = xf.scale_x == 1.0f && xf.scale_y == 1.0f && xf.pos_x == 0.5f && xf.pos_y == 0.5f && xf.anchor_x == 0.5f && xf.anchor_y == 0.5f &&
-                       !xf.cropped();
+    const bool placed = pl.rotated || transparent; // draw_rotated's way; else upright (draw_transformed, or the plain copy)
+    gpu::Placed q;
     Upright u;
-    if (plain)
+    if (placed) {
+      if (!to_placed(pl, width_, height_, alpha, q))
+        continue;
+    } else if (xf.scale_x == 1.0f && xf.scale_y == 1.0f && xf.pos_x == 0.5f && xf.pos_y == 0.5f && xf.anchor_x == 0.5f && xf.anchor_y == 0.5f &&
+               !xf.cropped()) {
       u = centred(width_, height_, std::min(vw, width_), std::min(vh, height_));
-    else if (!upright(pl, width_, height_, vw, vh, u))
+    } else if (!upright(pl, width_, height_, vw, vh, u)) {
       continue; // off the canvas: nothing of it shows (with effects too: its coverage is 0 everywhere)
-    int64_t t = l->source_in_hns + comp_.frame_hns(frame - l->start_frame);
-    if (l->speed != 1.0)
-      t = int64_t(double(t) * l->speed);
-    auto picture = reader.frame_at(t);
-    if (!picture) {
-      gpu_failed_[l->clip_id] = true; // the CPU reader takes the clip, and reports what is wrong with it
-      gpu_readers_.erase(it);
-      return false;
     }
-    gpu::PictureDraw d{u.ix0, u.ix1, u.iy0, u.iy1, u.cx0, u.cx1, u.cy0, u.cy1, pack(u.xs), pack(u.ys), pack(u.cxs), pack(u.cys),
-                       int(p.opacity * 256.0f + 0.5f)};
-    if (s.chain.empty()) {
-      gpu_->draw_picture(*reader.decoder, **picture, std::move(d));
-    } else { // drawn on its own at full opacity, then put over the frame (draw_isolated)
-      const bool everywhere = reaches_corners(pl, xf, width_, height_, vw, vh) && !g_always_measure_coverage.load();
-      gpu_->draw_clip(*reader.decoder, **picture, std::move(d), std::move(s.chain), everywhere, int(std::lround(p.opacity * 255.0f)));
+    const gpu::Picture *picture = nullptr;
+    if (reader) {
+      int64_t t = l->source_in_hns + comp_.frame_hns(frame - l->start_frame);
+      if (l->speed != 1.0)
+        t = int64_t(double(t) * l->speed);
+      auto got = reader->frame_at(t);
+      if (!got) {
+        gpu_failed_[l->clip_id] = true; // the CPU reader takes the clip, and reports what is wrong with it
+        gpu_readers_.erase(l->clip_id);
+        return false;
+      }
+      picture = *got;
     }
+    if (isolated)
+      gpu_->begin_clip(std::move(s.chain), !transparent && reaches_corners(pl, xf, width_, height_, vw, vh) && !g_always_measure_coverage.load(), opacity);
+    if (placed) {
+      if (reader)
+        gpu_->draw_picture(*reader->decoder, *picture, q);
+      else
+        gpu_->draw_source(still, q);
+    } else {
+      gpu::PictureDraw d{u.ix0, u.ix1, u.iy0, u.iy1, u.cx0, u.cx1, u.cy0, u.cy1, pack(u.xs), pack(u.ys), pack(u.cxs), pack(u.cys), alpha};
+      if (reader)
+        gpu_->draw_picture(*reader->decoder, *picture, std::move(d));
+      else
+        gpu_->draw_source(still, std::move(d));
+    }
+    if (isolated)
+      gpu_->end_clip();
   }
   ATM_PROFILE_SCOPE("composite.gpu_frame");
   if (auto made = gpu_->end_frame(out); !made) {

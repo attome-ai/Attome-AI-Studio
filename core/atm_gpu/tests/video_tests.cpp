@@ -7,6 +7,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "../../atm_media/tests/test_clip.hpp"
+#include "../../atm_media/tests/test_png.hpp"
 #include "atm/gpu/gpu.hpp"
 #include "atm/gpu/video.hpp"
 #include "atm/media/media.hpp"
@@ -184,7 +185,77 @@ TEST_CASE("gpu video: a frame of video clips decoded and drawn on the GPU is the
   {
     atm::render::Layer turned = layer("clp_b", b, 0);
     turned.xf.rotation = 12.0f;
-    cases.push_back({"a turned clip over another", {layer("clp_a", a, 0), turned}, false});
+    turned.xf.scale_x = turned.xf.scale_y = 0.7f;
+    turned.xf.crop_top = 0.1f;
+    turned.opacity = 0.8f;
+    cases.push_back({"a turned, cropped clip over another", {layer("clp_a", a, 0), turned}});
+    turned.effects = {effect("gaussian_blur", {0.01f}), effect("color_grade", {0.0f, 0.2f, 1.5f})};
+    cases.push_back({"a turned clip with effects over another", {layer("clp_a", a, 0), turned}});
+  }
+  // Texts: a title with an outline, a shadow and a box, turned; captions popping in word by word; a text with a blur.
+  const auto text = [&](const std::string &id, const std::string &words) {
+    atm::render::Layer t;
+    t.clip_id = id;
+    t.is_text = true;
+    t.text = words;
+    t.text_size = 0.09f;
+    t.text_color = 0xFFD020;
+    t.frames = t.clip_end_frame = 45;
+    return t;
+  };
+  {
+    atm::render::Layer title = text("clp_t", "Attome on the GPU");
+    title.xf.pos_y = 0.7f;
+    title.xf.rotation = 8.0f;
+    title.outline_width = 0.08f;
+    title.shadow_x = title.shadow_y = 0.05f;
+    title.shadow_blur = 0.1f;
+    title.shadow_opacity = 0.7f;
+    title.box_opacity = 0.5f;
+    title.box_color = 0x202060;
+    cases.push_back({"a title with an outline, a shadow and a box, turned, over a clip", {layer("clp_a", a, 0), title}});
+    atm::render::Layer captions = text("clp_c", "");
+    captions.words = {{0, 10, "every", -1}, {10, 22, "word", 0x40FF40}, {22, 45, "pops", -1}};
+    captions.word_pop = 1.0f;
+    captions.xf.pos_y = 0.8f;
+    atm::render::Layer soft = text("clp_s", "soft");
+    soft.xf.pos_y = 0.3f;
+    soft.opacity = 0.8f;
+    soft.effects = {effect("gaussian_blur", {0.01f})};
+    cases.push_back({"captions popping in, and a text with a blur", {layer("clp_a", a, 0), captions, soft}});
+  }
+  // Pictures: a transparent one turned over a clip, an opaque one scaled.
+  {
+    const int pw = 200, ph = 120;
+    std::vector<uint8_t> rgba(size_t(pw) * ph * 4), solid(rgba.size());
+    for (int y = 0; y < ph; ++y)
+      for (int x = 0; x < pw; ++x) {
+        uint8_t *q = rgba.data() + (size_t(y) * pw + size_t(x)) * 4;
+        q[0] = uint8_t(x * 255 / pw);
+        q[1] = uint8_t(y * 2);
+        q[2] = 200;
+        q[3] = uint8_t(std::min(255, (x + y) * 2)); // fades in from the top-left corner
+        std::copy(q, q + 3, solid.data() + (size_t(y) * pw + size_t(x)) * 4);
+        solid[(size_t(y) * pw + size_t(x)) * 4 + 3] = 255;
+      }
+    const std::string see_through = (dir / "logo.png").string(), opaque = (dir / "card.png").string();
+    write_png_rgba(see_through, pw, ph, rgba);
+    write_png_rgba(opaque, pw, ph, solid);
+    atm::render::Layer logo;
+    logo.clip_id = "clp_logo";
+    logo.is_image = true;
+    logo.path = see_through;
+    logo.frames = logo.clip_end_frame = 45;
+    logo.xf.scale_x = logo.xf.scale_y = 0.4f;
+    logo.xf.rotation = -15.0f;
+    logo.xf.pos_x = 0.7f;
+    atm::render::Layer card = logo;
+    card.clip_id = "clp_card";
+    card.path = opaque;
+    card.xf.rotation = 0.0f;
+    card.xf.pos_x = 0.25f;
+    card.xf.scale_x = card.xf.scale_y = 0.3f;
+    cases.push_back({"a transparent picture turned over a clip, and an opaque one scaled", {layer("clp_a", a, 0), logo, card}});
   }
   // In order, then back and forth (the readers seek).
   std::vector<int64_t> order;

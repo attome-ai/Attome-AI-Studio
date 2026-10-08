@@ -27,7 +27,11 @@ Result<void> Context::blur_nv12(uint8_t *, int, int, float, Timing *) { return f
 uint8_t *Context::staging(int, int) { return nullptr; }
 void Context::begin_frame(int, int) {}
 void Context::draw_picture(const VideoDecoder &, const Picture &, PictureDraw) {}
-void Context::draw_clip(const VideoDecoder &, const Picture &, PictureDraw, std::vector<Effect>, bool, int) {}
+void Context::draw_picture(const VideoDecoder &, const Picture &, const Placed &) {}
+void Context::draw_source(const Source &, PictureDraw) {}
+void Context::draw_source(const Source &, const Placed &) {}
+void Context::begin_clip(std::vector<Effect>, bool, int) {}
+void Context::end_clip() {}
 void Context::adjust(std::vector<Effect>, int) {}
 Result<void> Context::end_frame(uint8_t *) { return fail(ErrorCode::EncoderUnavailable, "G_NOT_BUILT", "This build has no GPU path."); }
 Result<void> Context::run_effects(uint8_t *, int, int, const std::vector<Effect> &, Timing *, uint8_t *, uint8_t *) {

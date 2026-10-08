@@ -37,6 +37,9 @@ const uint32_t kDrawSpirv[] = { // a decoded picture drawn into a frame
 const uint32_t kMixSpirv[] = { // a frame's mixes: a clip's coverage, a clip or an adjustment layer put over the frame
 #include "mix.spv.inc"
 };
+const uint32_t kPlaceSpirv[] = { // a picture or a text mask placed anywhere on a frame
+#include "place.spv.inc"
+};
 constexpr uint32_t kMaxRowBytes = 8192; // box_rows.comp holds a row of up to this many bytes in shared memory
 
 using Clock = std::chrono::steady_clock;
@@ -65,6 +68,11 @@ struct PixelsPass {
 // The push constants of draw.comp, in its order.
 struct DrawPass {
   uint32_t frame_at, stride, x0, x1, y0, y1, src_at, src_pitch, channels, x_taps, y_taps, alpha;
+};
+
+// The push constants of place.comp, in its order.
+struct PlacePass {
+  uint32_t frame_at, stride, x0, x1, y0, y1, chroma, at;
 };
 
 // The push constants of mix.comp, in its order.
@@ -272,8 +280,8 @@ struct Context::Impl : Vulkan {
   VkDescriptorSetLayout set_layout = VK_NULL_HANDLE;
   VkPipelineLayout layout = VK_NULL_HANDLE;
   VkShaderModule shader = VK_NULL_HANDLE, rows_shader = VK_NULL_HANDLE, pixels_shader = VK_NULL_HANDLE, draw_shader = VK_NULL_HANDLE,
-                 mix_shader = VK_NULL_HANDLE;
-  VkPipeline box = VK_NULL_HANDLE, pixels = VK_NULL_HANDLE, draw = VK_NULL_HANDLE, mix = VK_NULL_HANDLE;
+                 mix_shader = VK_NULL_HANDLE, place_shader = VK_NULL_HANDLE;
+  VkPipeline box = VK_NULL_HANDLE, pixels = VK_NULL_HANDLE, draw = VK_NULL_HANDLE, mix = VK_NULL_HANDLE, place = VK_NULL_HANDLE;
   std::map<uint64_t, VkPipeline> rows; // box_rows.comp by the row capacity and chunk it was made for
   uint32_t shared_limit = 0; // bytes of shared memory a workgroup can have
   VkDescriptorPool descriptors = VK_NULL_HANDLE;
@@ -287,30 +295,48 @@ struct Context::Impl : Vulkan {
   // A frame drawn on the GPU (begin_frame .. end_frame): its size, and what is done to it in order, recorded at the end.
   // The frame is in F; a clip with effects is drawn on its own in A (and over white in B, for its coverage in D) and its
   // chain runs there as in run_effects; an adjustment layer's chain runs on a copy of the frame in A.
+  struct Drawing {
+    PictureImage picture;  // a decoded picture, or
+    uint64_t source = 0;   // a source's key (frame_sources)
+    bool upright = true;
+    PictureDraw draw;      // upright: draw.comp's taps
+    Placed placed;         // else place.comp's placement
+  };
   struct FrameOp {
-    enum class Kind { picture, clip, adjust } kind = Kind::picture;
-    PictureImage picture;
-    PictureDraw draw;
+    enum class Kind { draw, clip, adjust } kind = Kind::draw;
+    std::vector<Drawing> drawings;
     std::vector<Effect> chain;
     bool everywhere = false; // a clip: it covers the whole frame (no coverage to work out)
     int amount = 256;        // a clip's opacity (0..255), an adjustment layer's amount (0..256)
   };
   int frame_w = 0, frame_h = 0;
   std::vector<FrameOp> frame_ops;
-  Buffer frame, pictures, taps; // the frame; the pictures copied out of the decoder's images; the taps of their drawing
+  bool in_clip = false;
+  std::map<uint64_t, Source> frame_sources; // the sources of this frame, by key
+  // Sources kept in the GPU's memory between frames, in `kept` one after another; when a frame's do not fit, it is
+  // emptied and they are sent again.
+  struct Kept {
+    VkDeviceSize at = 0, bytes = 0;
+  };
+  std::map<uint64_t, Kept> kept_at;
+  VkDeviceSize kept_end = 0;
+  Buffer kept, kept_stage;
+  Buffer frame, pictures, taps; // the frame; the pictures of its drawings, one after another; their taps and placements
   VkDescriptorSet draw_sets[3] = {}; // pictures -> F, A and B, with the taps
   VkDescriptorSet mix_set = VK_NULL_HANDLE; // A, F, B and D for mix.comp
 
   ~Impl() {
     if (device) {
       vkDeviceWaitIdle(device);
-      for (Buffer *buf : {&a, &b, &c, &d, &upload, &download, &tables, &lut, &lut_stage, &frame, &pictures, &taps})
+      for (Buffer *buf : {&a, &b, &c, &d, &upload, &download, &tables, &lut, &lut_stage, &frame, &pictures, &taps, &kept, &kept_stage})
         release(*buf);
       vkDestroyDescriptorPool(device, descriptors, nullptr);
       vkDestroyPipeline(device, box, nullptr);
       vkDestroyPipeline(device, pixels, nullptr);
       vkDestroyPipeline(device, draw, nullptr);
       vkDestroyPipeline(device, mix, nullptr);
+      vkDestroyPipeline(device, place, nullptr);
+      vkDestroyShaderModule(device, place_shader, nullptr);
       vkDestroyShaderModule(device, pixels_shader, nullptr);
       vkDestroyShaderModule(device, draw_shader, nullptr);
       vkDestroyShaderModule(device, mix_shader, nullptr);
@@ -530,6 +556,11 @@ struct Context::Impl : Vulkan {
     VK_TRY("vkCreateShaderModule", vkCreateShaderModule(device, &smi, nullptr, &mix_shader));
     cpi.stage.module = mix_shader;
     VK_TRY("vkCreateComputePipelines", vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &cpi, nullptr, &mix));
+    smi.codeSize = sizeof kPlaceSpirv;
+    smi.pCode = kPlaceSpirv;
+    VK_TRY("vkCreateShaderModule", vkCreateShaderModule(device, &smi, nullptr, &place_shader));
+    cpi.stage.module = place_shader;
+    VK_TRY("vkCreateComputePipelines", vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &cpi, nullptr, &place));
 
 
     constexpr uint32_t kSets = 10;
@@ -754,25 +785,63 @@ void Context::begin_frame(int width, int height) {
   impl_->frame_w = width;
   impl_->frame_h = height;
   impl_->frame_ops.clear();
+  impl_->frame_sources.clear();
+  impl_->in_clip = false;
 }
+
+namespace {
+// The op a drawing goes into: the open clip, else a run of drawings over the frame.
+Context::Impl::FrameOp &drawing_op(Context::Impl &m) {
+  using Kind = Context::Impl::FrameOp::Kind;
+  if (!m.in_clip && (m.frame_ops.empty() || m.frame_ops.back().kind != Kind::draw))
+    m.frame_ops.emplace_back();
+  return m.frame_ops.back();
+}
+} // namespace
 
 void Context::draw_picture(const VideoDecoder &decoder, const Picture &picture, PictureDraw draw) {
-  Impl::FrameOp op;
-  op.picture = picture_image(*decoder.impl_, picture.slot);
-  op.draw = std::move(draw);
-  impl_->frame_ops.push_back(std::move(op));
+  Impl::Drawing d;
+  d.picture = picture_image(*decoder.impl_, picture.slot);
+  d.draw = std::move(draw);
+  drawing_op(*impl_).drawings.push_back(std::move(d));
 }
 
-void Context::draw_clip(const VideoDecoder &decoder, const Picture &picture, PictureDraw draw, std::vector<Effect> chain, bool everywhere, int opacity) {
+void Context::draw_picture(const VideoDecoder &decoder, const Picture &picture, const Placed &placed) {
+  Impl::Drawing d;
+  d.picture = picture_image(*decoder.impl_, picture.slot);
+  d.upright = false;
+  d.placed = placed;
+  drawing_op(*impl_).drawings.push_back(std::move(d));
+}
+
+void Context::draw_source(const Source &source, PictureDraw draw) {
+  impl_->frame_sources[source.key] = source;
+  Impl::Drawing d;
+  d.source = source.key;
+  d.draw = std::move(draw);
+  drawing_op(*impl_).drawings.push_back(std::move(d));
+}
+
+void Context::draw_source(const Source &source, const Placed &placed) {
+  impl_->frame_sources[source.key] = source;
+  Impl::Drawing d;
+  d.source = source.key;
+  d.upright = false;
+  d.placed = placed;
+  drawing_op(*impl_).drawings.push_back(std::move(d));
+}
+
+void Context::begin_clip(std::vector<Effect> chain, bool everywhere, int opacity) {
   Impl::FrameOp op;
   op.kind = Impl::FrameOp::Kind::clip;
-  op.picture = picture_image(*decoder.impl_, picture.slot);
-  op.draw = std::move(draw);
   op.chain = std::move(chain);
   op.everywhere = everywhere;
   op.amount = opacity;
   impl_->frame_ops.push_back(std::move(op));
+  impl_->in_clip = true;
 }
+
+void Context::end_clip() { impl_->in_clip = false; }
 
 void Context::adjust(std::vector<Effect> chain, int amount) {
   Impl::FrameOp op;
@@ -789,22 +858,42 @@ Result<void> Context::end_frame(uint8_t *nv12) {
   const int W = m.frame_w, H = m.frame_h;
   const uint32_t P = (uint32_t(W) + 3u) & ~3u, uw = uint32_t(W), uh = uint32_t(H);
   const VkDeviceSize luma = VkDeviceSize(P) * uh, size = luma + luma / 2;
-  // Every picture gets its own place in `pictures` (rows of a multiple of 4 bytes), every draw its taps in `taps`, every
-  // effect its numbers in `tables`; the frame's LUT (one at most) goes to the GPU's memory once.
-  std::vector<VkDeviceSize> picture_at(m.frame_ops.size(), 0);
-  std::vector<uint32_t> taps_at(m.frame_ops.size(), 0), table_at;
+  const auto pitch_of = [](int w) { return (uint32_t(w) + 3u) & ~3u; };
+  // A source's bytes, as it is kept and drawn from: the luma (or the mask), the chroma, the alpha plane, rows `pitch_of` apart.
+  const auto source_bytes = [&](const Source &s) {
+    const VkDeviceSize plane = VkDeviceSize(pitch_of(s.width)) * VkDeviceSize(s.height);
+    return plane + (s.mask ? 0 : plane / 2) + (s.alpha ? plane : 0);
+  };
+  const auto size_of = [&](const Impl::Drawing &d) { // a drawing's picture, width and height
+    if (!d.source)
+      return std::pair{d.picture.width, d.picture.height};
+    const Source &s = m.frame_sources.at(d.source);
+    return std::pair{s.width, s.height};
+  };
+  // Every drawing gets its own place in `pictures`, its taps or placement in `taps`; every effect its numbers in
+  // `tables`; the frame's LUT (one at most) goes to the GPU's memory once.
+  struct Where {
+    VkDeviceSize picture = 0;
+    uint32_t taps = 0;
+  };
+  std::vector<std::vector<Where>> where(m.frame_ops.size());
+  std::vector<uint32_t> table_at;
   std::vector<size_t> chain_at(m.frame_ops.size(), 0); // where an op's effects start in table_at
   VkDeviceSize picture_bytes = 4;
   size_t tap_words = 1, table_words = 0;
   const Effect *lut_effect = nullptr;
   bool chains = false;
+  constexpr size_t kPlacedWords = 24; // place.comp's numbers of a placement
   for (size_t i = 0; i < m.frame_ops.size(); ++i) {
     const Impl::FrameOp &op = m.frame_ops[i];
-    if (op.kind != Kind::adjust) {
-      picture_at[i] = picture_bytes;
-      picture_bytes += VkDeviceSize((uint32_t(op.picture.width) + 3u) & ~3u) * VkDeviceSize(op.picture.height + op.picture.height / 2);
-      taps_at[i] = uint32_t(tap_words);
-      tap_words += op.draw.luma_x.size() + op.draw.luma_y.size() + op.draw.chroma_x.size() + op.draw.chroma_y.size();
+    for (const Impl::Drawing &d : op.drawings) {
+      Where w;
+      w.picture = picture_bytes;
+      picture_bytes += d.source ? source_bytes(m.frame_sources.at(d.source))
+                                : VkDeviceSize(pitch_of(d.picture.width)) * VkDeviceSize(d.picture.height + d.picture.height / 2);
+      w.taps = uint32_t(tap_words);
+      tap_words += d.upright ? d.draw.luma_x.size() + d.draw.luma_y.size() + d.draw.chroma_x.size() + d.draw.chroma_y.size() : kPlacedWords;
+      where[i].push_back(w);
     }
     chain_at[i] = table_at.size();
     for (const Effect &e : op.chain) {
@@ -820,15 +909,50 @@ Result<void> Context::end_frame(uint8_t *nv12) {
   }
   if (chains && uw > kMaxRowBytes)
     return fail(ErrorCode::EncoderUnavailable, "G_TOO_WIDE", "The GPU effects take pictures up to " + std::to_string(kMaxRowBytes) + " pixels wide.");
-  ATM_CHECK(m.ensure_buffers(size, table_words * 4, lut_effect ? lut_effect->lut_floats * 4 : 0));
   constexpr VkBufferUsageFlags kWork = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+  ATM_CHECK(m.ensure_buffers(size, table_words * 4, lut_effect ? lut_effect->lut_floats * 4 : 0));
   ATM_CHECK(m.ensure(m.frame, size, kWork, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT));
   ATM_CHECK(m.ensure(m.pictures, picture_bytes, kWork, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT));
   ATM_CHECK(m.ensure(m.taps, VkDeviceSize(tap_words) * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT));
-  uint32_t shift = 0;
-  std::pair<VkPipeline, VkPipeline> rows{};
-  if (chains) {
-    ATM_TRY(rows, m.rows_for(uw, P, shift));
+  // The sources not kept yet are sent. When they do not fit after the ones kept, the store is emptied (made bigger when
+  // the frame's alone do not fit) and all of the frame's are sent again.
+  VkDeviceSize fresh = 0;
+  for (const auto &[key, s] : m.frame_sources)
+    if (!m.kept_at.count(key))
+      fresh += source_bytes(s);
+  if (m.kept_end + fresh > m.kept.size) {
+    m.kept_at.clear();
+    m.kept_end = 0;
+    fresh = 0;
+    for (const auto &[key, s] : m.frame_sources)
+      fresh += source_bytes(s);
+    ATM_CHECK(m.ensure(m.kept, std::max<VkDeviceSize>(fresh * 2, 1 << 20), kWork, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT));
+  }
+  ATM_CHECK(m.ensure(m.kept_stage, std::max<VkDeviceSize>(fresh, 4), VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT));
+  std::vector<VkBufferCopy> sends;
+  {
+    auto *stage = static_cast<uint8_t *>(m.kept_stage.mapped);
+    VkDeviceSize staged = 0;
+    for (const auto &[key, s] : m.frame_sources) {
+      if (m.kept_at.count(key))
+        continue;
+      const uint32_t pitch = pitch_of(s.width);
+      const VkDeviceSize bytes = source_bytes(s);
+      uint8_t *to = stage + staged;
+      const auto rows = [&](const uint8_t *from, int from_pitch, int count) {
+        for (int r = 0; r < count; ++r, to += pitch)
+          std::memcpy(to, from + size_t(r) * size_t(from_pitch), size_t(s.width));
+      };
+      rows(s.y, s.y_pitch, s.height);
+      if (!s.mask)
+        rows(s.uv, s.uv_pitch, s.height / 2);
+      if (s.alpha)
+        rows(s.alpha, s.alpha_pitch, s.height);
+      sends.push_back({staged, m.kept_end, bytes});
+      m.kept_at[key] = {m.kept_end, bytes};
+      m.kept_end += bytes;
+      staged += bytes;
+    }
   }
   { // the sets of the frame's own shaders point at the buffers as they are now
     const auto point = [&](VkDescriptorSet set, std::initializer_list<std::pair<uint32_t, VkBuffer>> bindings) {
@@ -853,13 +977,30 @@ Result<void> Context::end_frame(uint8_t *nv12) {
       point(m.draw_sets[t], {{0, m.pictures.buffer}, {1, targets[t]}, {2, m.taps.buffer}});
     point(m.mix_set, {{0, m.a.buffer}, {1, m.frame.buffer}, {3, m.b.buffer}, {5, m.d.buffer}});
   }
+  // The taps of upright drawings, the numbers of placed ones (place.comp's order), the effects' tables.
   auto *tap_out = static_cast<uint32_t *>(m.taps.mapped);
   for (size_t i = 0; i < m.frame_ops.size(); ++i) {
-    uint32_t *t = tap_out + taps_at[i];
-    const PictureDraw &d = m.frame_ops[i].draw;
-    for (const std::vector<uint32_t> *part : {&d.luma_x, &d.luma_y, &d.chroma_x, &d.chroma_y}) {
-      std::memcpy(t, part->data(), part->size() * 4);
-      t += part->size();
+    for (size_t j = 0; j < m.frame_ops[i].drawings.size(); ++j) {
+      const Impl::Drawing &d = m.frame_ops[i].drawings[j];
+      uint32_t *t = tap_out + where[i][j].taps;
+      if (d.upright) {
+        for (const std::vector<uint32_t> *part : {&d.draw.luma_x, &d.draw.luma_y, &d.draw.chroma_x, &d.draw.chroma_y}) {
+          std::memcpy(t, part->data(), part->size() * 4);
+          t += part->size();
+        }
+        continue;
+      }
+      const Placed &p = d.placed;
+      const Source *s = d.source ? &m.frame_sources.at(d.source) : nullptr;
+      const auto [w, h] = size_of(d);
+      const uint32_t pitch = pitch_of(w), plane = pitch * uint32_t(h), at = uint32_t(where[i][j].picture);
+      const bool mask = s && s->mask;
+      const uint32_t numbers[10] = {mask ? 1u : 0u, uint32_t(p.alpha), uint32_t(w), uint32_t(h), pitch, at, at + plane,
+                                    s && s->alpha ? at + plane + plane / 2 : 0xFFFFFFFFu, p.cropped ? 1u : 0u,
+                                    uint32_t(p.y) | uint32_t(p.u) << 8 | uint32_t(p.v) << 16};
+      std::memcpy(t, numbers, sizeof numbers);
+      const float floats[14] = {p.px, p.py, p.cos_r, p.sin_r, p.inv_sx, p.inv_sy, p.ax, p.ay, p.u0, p.v0, p.u1, p.v1, p.sx, p.sy};
+      std::memcpy(t + 10, floats, sizeof floats);
     }
     for (size_t e = 0; e < m.frame_ops[i].chain.size(); ++e) {
       const std::vector<uint32_t> &table = m.frame_ops[i].chain[e].table;
@@ -870,6 +1011,11 @@ Result<void> Context::end_frame(uint8_t *nv12) {
   const bool send_lut = lut_effect && lut_effect->lut_id != m.lut_loaded;
   if (send_lut)
     std::memcpy(m.lut_stage.mapped, lut_effect->lut, lut_effect->lut_floats * 4);
+  uint32_t shift = 0;
+  std::pair<VkPipeline, VkPipeline> rows{};
+  if (chains) {
+    ATM_TRY(rows, m.rows_for(uw, P, shift));
+  }
 
   VK_TRY("vkResetCommandBuffer", vkResetCommandBuffer(m.cmd, 0));
   VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
@@ -880,53 +1026,80 @@ Result<void> Context::end_frame(uint8_t *nv12) {
     vkCmdFillBuffer(m.cmd, buffer, luma, luma / 2, 0x80808080u);
   };
   fill(m.frame.buffer, 16); // black
-  for (size_t i = 0; i < m.frame_ops.size(); ++i)
-    if (m.frame_ops[i].kind != Kind::adjust)
-      record_picture_copy(m.cmd, m.frame_ops[i].picture, m.pictures.buffer, picture_at[i], (uint32_t(m.frame_ops[i].picture.width) + 3u) & ~3u);
+  if (!sends.empty())
+    vkCmdCopyBuffer(m.cmd, m.kept_stage.buffer, m.kept.buffer, uint32_t(sends.size()), sends.data());
   if (send_lut) {
     const VkBufferCopy whole{0, 0, VkDeviceSize(lut_effect->lut_floats) * 4};
     vkCmdCopyBuffer(m.cmd, m.lut_stage.buffer, m.lut.buffer, 1, &whole);
   }
+  m.compute_to_compute(); // the kept sources are in place before they are copied on
+  for (size_t i = 0; i < m.frame_ops.size(); ++i)
+    for (size_t j = 0; j < m.frame_ops[i].drawings.size(); ++j) {
+      const Impl::Drawing &d = m.frame_ops[i].drawings[j];
+      if (!d.source) {
+        record_picture_copy(m.cmd, d.picture, m.pictures.buffer, where[i][j].picture, pitch_of(d.picture.width));
+      } else {
+        const Impl::Kept &k = m.kept_at.at(d.source);
+        const VkBufferCopy one{k.at, where[i][j].picture, k.bytes};
+        vkCmdCopyBuffer(m.cmd, m.kept.buffer, m.pictures.buffer, 1, &one);
+      }
+    }
   m.compute_to_compute();
-  // A picture drawn into F, A or B (target 0, 1, 2) with its taps.
-  const auto draw_into = [&](size_t i, int target, int alpha) {
-    const PictureImage &pic = m.frame_ops[i].picture;
-    const PictureDraw &d = m.frame_ops[i].draw;
-    const uint32_t pitch = (uint32_t(pic.width) + 3u) & ~3u;
-    const uint32_t at = taps_at[i], ly = at + uint32_t(d.luma_x.size()), cx = ly + uint32_t(d.luma_y.size()), cy = cx + uint32_t(d.chroma_x.size());
-    vkCmdBindPipeline(m.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m.draw);
-    vkCmdBindDescriptorSets(m.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m.layout, 0, 1, &m.draw_sets[target], 0, nullptr);
-    const auto plane = [&](const DrawPass &p) {
-      if (p.x1 <= p.x0 || p.y1 <= p.y0)
-        return;
-      vkCmdPushConstants(m.cmd, m.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);
-      const uint32_t words = (p.x1 + 3u) / 4u - p.x0 / 4u;
-      vkCmdDispatch(m.cmd, (words + 63u) / 64u, p.y1 - p.y0, 1);
-    };
-    plane({0, P, uint32_t(d.x0), uint32_t(d.x1), uint32_t(d.y0), uint32_t(d.y1), uint32_t(picture_at[i]), pitch, 1, at, ly, uint32_t(alpha)});
-    plane({uint32_t(luma), P, uint32_t(2 * d.cx0), uint32_t(2 * d.cx1), uint32_t(d.cy0), uint32_t(d.cy1),
-           uint32_t(picture_at[i] + VkDeviceSize(pitch) * VkDeviceSize(pic.height)), pitch, 2, cx, cy, uint32_t(alpha)});
+  // The drawings of op i into F, A or B (target 0, 1, 2), in order: each goes over what is drawn before it.
+  const auto draw_all = [&](size_t i, int target) {
+    for (size_t j = 0; j < m.frame_ops[i].drawings.size(); ++j) {
+      const Impl::Drawing &dr = m.frame_ops[i].drawings[j];
+      const Where &at = where[i][j];
+      vkCmdBindDescriptorSets(m.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m.layout, 0, 1, &m.draw_sets[target], 0, nullptr);
+      if (dr.upright) {
+        const PictureDraw &d = dr.draw;
+        const auto [pw, ph] = size_of(dr);
+        const uint32_t pitch = pitch_of(pw);
+        const uint32_t ly = at.taps + uint32_t(d.luma_x.size()), cx = ly + uint32_t(d.luma_y.size()), cy = cx + uint32_t(d.chroma_x.size());
+        vkCmdBindPipeline(m.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m.draw);
+        const auto plane = [&](const DrawPass &p) {
+          if (p.x1 <= p.x0 || p.y1 <= p.y0)
+            return;
+          vkCmdPushConstants(m.cmd, m.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);
+          vkCmdDispatch(m.cmd, ((p.x1 + 3u) / 4u - p.x0 / 4u + 63u) / 64u, p.y1 - p.y0, 1);
+        };
+        plane({0, P, uint32_t(d.x0), uint32_t(d.x1), uint32_t(d.y0), uint32_t(d.y1), uint32_t(at.picture), pitch, 1, at.taps, ly, uint32_t(d.alpha)});
+        plane({uint32_t(luma), P, uint32_t(2 * d.cx0), uint32_t(2 * d.cx1), uint32_t(d.cy0), uint32_t(d.cy1),
+               uint32_t(at.picture + VkDeviceSize(pitch) * VkDeviceSize(ph)), pitch, 2, cx, cy, uint32_t(d.alpha)});
+      } else {
+        const Placed &p = dr.placed;
+        vkCmdBindPipeline(m.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m.place);
+        const auto plane = [&](const PlacePass &pp) {
+          if (pp.x1 <= pp.x0 || pp.y1 <= pp.y0)
+            return;
+          vkCmdPushConstants(m.cmd, m.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pp, &pp);
+          vkCmdDispatch(m.cmd, ((pp.x1 + 3u) / 4u - pp.x0 / 4u + 63u) / 64u, pp.y1 - pp.y0, 1);
+        };
+        plane({0, P, uint32_t(p.x0), uint32_t(p.x1), uint32_t(p.y0), uint32_t(p.y1), 0, at.taps});
+        // Chroma: one U/V pair per 2 x 2 pixels of the box.
+        plane({uint32_t(luma), P, uint32_t(2 * (p.x0 / 2)), uint32_t(2 * ((p.x1 + 1) / 2)), uint32_t(p.y0 / 2), uint32_t((p.y1 + 1) / 2), 1, at.taps});
+      }
+      m.compute_to_compute();
+    }
   };
   const VkBufferCopy whole_picture{0, 0, size};
   for (size_t i = 0; i < m.frame_ops.size(); ++i) { // in order: each goes over what is made before it
     const Impl::FrameOp &op = m.frame_ops[i];
     const uint32_t *op_tables = table_at.data() + chain_at[i];
     switch (op.kind) {
-    case Kind::picture:
-      draw_into(i, 0, op.draw.alpha);
-      m.compute_to_compute();
+    case Kind::draw:
+      draw_all(i, 0);
       break;
     case Kind::clip: // the renderer's draw_isolated: drawn on its own over black in A, over white in B for the coverage
       fill(m.a.buffer, 16);
       if (!op.everywhere)
         fill(m.b.buffer, 235);
       m.compute_to_compute();
-      draw_into(i, 1, 256);
-      if (!op.everywhere)
-        draw_into(i, 2, 256);
-      m.compute_to_compute();
-      if (!op.everywhere)
+      draw_all(i, 1);
+      if (!op.everywhere) {
+        draw_all(i, 2);
         m.record_mix({0, uw, uh, P, 0}, P, uh);
+      }
       m.record_chain(op.chain, op_tables, uw, uh, P, !op.everywhere, rows.first, rows.second, shift, nullptr);
       if (op.everywhere && op.amount >= 255) { // the clip is all that shows
         vkCmdCopyBuffer(m.cmd, m.a.buffer, m.frame.buffer, 1, &whole_picture);
@@ -961,6 +1134,7 @@ Result<void> Context::end_frame(uint8_t *nv12) {
     std::memcpy(nv12, m.download.mapped, size_t(W) * size_t(H) * 3 / 2);
   }
   m.frame_ops.clear();
+  m.frame_sources.clear();
   return {};
 }
 

@@ -77,6 +77,28 @@ struct PictureDraw {
   int alpha = 256; // opacity, 0..256
 };
 
+// A picture or a text mask placed anywhere (turned, cropped), worked out by the renderer as its CPU drawing does (its
+// Placement): where each output point's picture point lies, the box of output pixels it can touch, its opacity, and a
+// mask's colour. The GPU does the same arithmetic per pixel.
+struct Placed {
+  float px = 0.0f, py = 0.0f, cos_r = 1.0f, sin_r = 0.0f, inv_sx = 1.0f, inv_sy = 1.0f, ax = 0.0f, ay = 0.0f;
+  float u0 = 0.0f, v0 = 0.0f, u1 = 0.0f, v1 = 0.0f, sx = 1.0f, sy = 1.0f;
+  int x0 = 0, y0 = 0, x1 = 0, y1 = 0; // the box, in luma pixels
+  int alpha = 256;                    // 0..256
+  bool cropped = false;               // a mask: its cut edges fade
+  uint8_t y = 16, u = 128, v = 128;   // a mask's colour
+};
+
+// Pixels of the CPU's that the GPU keeps between frames by `key` (the same key always means the same pixels): a still
+// (NV12, with an alpha plane when it has one) or a text mask (`y` only: one byte of coverage per pixel).
+struct Source {
+  uint64_t key = 0;
+  int width = 0, height = 0;
+  const uint8_t *y = nullptr, *uv = nullptr, *alpha = nullptr;
+  int y_pitch = 0, uv_pitch = 0, alpha_pitch = 0;
+  bool mask = false;
+};
+
 class Context {
 public:
   // A Vulkan 1.3 device (with synchronization2): the discrete GPU when there is one. ATTOME_GPU=off refuses (the CPU
@@ -103,15 +125,19 @@ public:
   uint8_t *staging(int width, int height);
 
   // A frame drawn on the GPU: begun black, then what is put on it in order, made in one go and read back into `nv12`
-  // (packed NV12) by end_frame. The pictures must stay held (not released) until end_frame has returned; a frame holds
-  // one LUT at most.
+  // (packed NV12) by end_frame. The pictures must stay held (not released), and the sources' pixels unchanged, until
+  // end_frame has returned; a frame holds one LUT at most.
   void begin_frame(int width, int height);
-  // A decoded picture drawn over the frame.
+  // Drawings over the frame: a decoded picture upright or placed, a still or a text mask placed.
   void draw_picture(const VideoDecoder &decoder, const Picture &picture, PictureDraw draw);
-  // A clip with effects, as the renderer draws it: on its own over black (`draw` at full opacity), and over white for its
-  // coverage unless it covers the whole frame (`everywhere`); its chain run as run_effects does with that coverage; then
-  // put over the frame with `opacity` (0..255) through the coverage.
-  void draw_clip(const VideoDecoder &decoder, const Picture &picture, PictureDraw draw, std::vector<Effect> chain, bool everywhere, int opacity);
+  void draw_picture(const VideoDecoder &decoder, const Picture &picture, const Placed &placed);
+  void draw_source(const Source &source, PictureDraw draw);
+  void draw_source(const Source &source, const Placed &placed);
+  // A clip with effects, as the renderer draws it: the drawings between begin_clip and end_clip make the clip on its own
+  // (at full opacity), over black, and over white for its coverage unless it covers the whole frame (`everywhere`); its
+  // chain runs as run_effects does with that coverage; then it goes over the frame with `opacity` (0..255).
+  void begin_clip(std::vector<Effect> chain, bool everywhere, int opacity);
+  void end_clip();
   // An adjustment layer: its chain run on the frame so far, mixed with it by `amount` (0..256).
   void adjust(std::vector<Effect> chain, int amount);
   Result<void> end_frame(uint8_t *nv12);

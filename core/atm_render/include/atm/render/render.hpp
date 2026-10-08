@@ -216,7 +216,19 @@ private:
     media::TextBitmap bitmap, outline, shadow, box; // the text, its grown copy, its soft copy, and the rounded box behind it
   };
   std::unordered_map<std::string, TextEntry> text_; // by clip ID
+  // A text clip at a frame as what draws it, back to front: its box, shadow, outline and the text, each a mask placed by
+  // its own transform with its opacity (0..256) and colour, with a key that changes when the mask does. Empty when
+  // nothing shows (before a caption's first word, an empty text, a text that would not render).
+  struct TextPart {
+    const media::TextBitmap *mask;
+    Transform xf;
+    int alpha;
+    uint32_t rgb;
+    uint64_t key;
+  };
+  std::vector<TextPart> text_parts(const Layer &l, int64_t frame, const Pose &p);
   std::unordered_map<std::string, media::Still> stills_; // picture clips, read once, by clip ID
+  bool still_of(const Layer &l); // reads a picture clip's still into stills_ once; false (and a warning) when it does not read
   std::vector<uint8_t> mix_;                          // the incoming clip of a dissolve, drawn over the same background
   std::vector<uint8_t> adjust_, scratch_;             // an adjustment layer's copy of the picture below it
   std::vector<uint8_t> over_black_, over_white_, cover_; // a clip with effects, drawn on its own (see draw_isolated)
