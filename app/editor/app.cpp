@@ -1014,8 +1014,10 @@ std::vector<const ClipUi *> App::linked_of(const ClipUi &clip) const {
 }
 
 void App::delete_selected() {
-  if (selected_clip_.empty())
+  if (selected_clip_.empty()) {
+    say("Select a clip to delete it.");
     return;
+  }
   json ops = json::array();
   std::vector<std::string> ids;
   std::string locked_name;

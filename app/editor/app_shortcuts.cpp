@@ -1,27 +1,8 @@
 // The keyboard shortcuts.
 #include "app_support.hpp"
 #include <algorithm>
-#include <span>
-#include <chrono>
 #include <cmath>
-#include <numeric>
-#include <cstdio>
-#include <cstdlib>
-#include <ctime>
-#include <filesystem>
-#include <fstream>
-#include <future>
-#include <thread>
 #include <imgui.h>
-#include <imgui_internal.h>
-#include <random>
-#include "atm/base/id.hpp"
-#include "atm/base/profiler.hpp"
-#include "atm/base/time.hpp"
-#include "atm/gen/graph.hpp"
-#include "atm/gen/keys.hpp"
-#include "atm/gen/library.hpp"
-#include "uidriver.hpp"
 
 namespace atm::editor {
 

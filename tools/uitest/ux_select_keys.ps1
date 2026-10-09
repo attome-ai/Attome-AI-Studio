@@ -23,6 +23,7 @@ try {
 # Delete after a selection shows which clip the key chose.
 $run = Invoke-EditorScript -Project $proj -TimeoutSeconds 240 -Script @(
   'wait 1200'
+  'key Delete', 'wait 400', "shot $work\nothing.jpg"     # nothing selected: a line says so (W4)
   'key Home', 'key Right shift', 'wait 300'      # 1 s: under T0
   'key D', 'wait 300', "shot $work\d.jpg", 'key Delete', 'wait 600'         # T0 goes
   'key Tab', 'wait 300', 'key Tab', 'wait 300'   # nothing selected: T1 (3 s), then T2 (6 s)
