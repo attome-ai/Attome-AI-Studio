@@ -410,6 +410,7 @@ private:
   void shuttle(int dir); // J (-1) and L (1)
   float pps_ = 90.0f; // pixels per second
   float pps_drawn_ = 90.0f;      // the zoom the timeline was last drawn at: a change keeps a moment in place on screen
+  int64_t playhead_seen_ = -1; // the playhead the timeline last looked at: a move to somewhere out of view scrolls to it
   float zoom_anchor_px_ = -1.0f; // where in the lanes the wheel zoomed (pixels from their left), -1 for the playhead
   float scroll_want_ = 0.0f;     // a scroll asked for again on the next frame, once the content has its new width
   int scroll_tries_ = 0;

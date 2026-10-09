@@ -1067,8 +1067,11 @@ void App::draw_timeline() {
     dl->AddCircleFilled(ImVec2(px, origin.y + 8.0f), 7.0f, hex(look::accent));
     dl->AddCircleFilled(ImVec2(px, origin.y + 8.0f), 2.5f, hex(look::accent_ink));
   }
-  if (playing_ && (px > win.x + view_w - 40.0f || px < win.x + header_w)) // follow the playhead
-    ImGui::SetScrollX(float(double(playhead_) / rate * pps_) - 60.0f);
+  const bool moved = playhead_ != playhead_seen_;
+  playhead_seen_ = playhead_;
+  // Follow the playhead: while playing, and when a key or a button moved it out of view (a scroll by hand leaves it alone).
+  if ((playing_ || moved) && view_w - header_w > 100.0f && (px > win.x + view_w - 40.0f || px < win.x + header_w))
+    ImGui::SetScrollX(std::max(0.0f, float(double(playhead_) / rate * pps_) - (playing_ ? 60.0f : (view_w - header_w) * 0.4f)));
   if (ImGui::IsWindowHovered() && ImGui::GetIO().KeyCtrl && ImGui::GetIO().MouseWheel != 0.0f) {
     pps_ = std::clamp(pps_ * std::pow(1.15f, ImGui::GetIO().MouseWheel), 4.0f, 800.0f);
     zoom_anchor_px_ = std::max(0.0f, mouse.x - win.x - header_w); // the moment under the pointer stays under it
