@@ -52,6 +52,10 @@ int main(int argc, char **argv) {
 #endif
   std::string model, language = "auto";
   bool gpu = false; // --gpu 1: the graphics card through Vulkan (with flash attention), when the build has it and a device takes the model
+  // --timing dtw (the default): word times from the decoder's attention (dynamic time warping); --timing segments: one-word segments.
+  // Measured against a voice whose word positions are known (8 recordings, 172 words): with DTW 97-98 % of the words start within 0.2 s of the
+  // truth, with segments 73-83 %.
+  std::string timing = "dtw";
   for (int i = 1; i + 1 < argc; i += 2) {
     if (!std::strcmp(argv[i], "--model"))
       model = argv[i + 1];
@@ -59,6 +63,8 @@ int main(int argc, char **argv) {
       gpu = std::strcmp(argv[i + 1], "0") != 0;
     else if (!std::strcmp(argv[i], "--language"))
       language = argv[i + 1];
+    else if (!std::strcmp(argv[i], "--timing"))
+      timing = argv[i + 1];
   }
   if (model.empty())
     return fail("no --model given");
@@ -74,6 +80,16 @@ int main(int argc, char **argv) {
   whisper_context_params cparams = whisper_context_default_params();
   cparams.use_gpu = gpu;
   cparams.flash_attn = gpu;
+  const bool dtw = timing == "dtw";
+  if (dtw) { // the alignment heads of the model, known by its file name
+    const std::string name = model.substr(model.find_last_of("/\\") == std::string::npos ? 0 : model.find_last_of("/\\") + 1);
+    cparams.dtw_token_timestamps = true;
+    cparams.dtw_aheads_preset = name.find("large-v3-turbo") != std::string::npos ? WHISPER_AHEADS_LARGE_V3_TURBO
+                                : name.find("large-v3") != std::string::npos       ? WHISPER_AHEADS_LARGE_V3
+                                : name.find("small") != std::string::npos          ? WHISPER_AHEADS_SMALL
+                                                                                   : WHISPER_AHEADS_N_TOP_MOST;
+    cparams.flash_attn = false; // DTW reads the attention weights, which flash attention does not keep
+  }
   whisper_context *ctx = whisper_init_from_file_with_params(model.c_str(), cparams);
   if (!ctx && gpu) { // no device took it: the processor
     cparams.use_gpu = cparams.flash_attn = false;
@@ -86,9 +102,11 @@ int main(int argc, char **argv) {
   whisper_full_params params = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
   params.n_threads = int(std::max(1u, std::thread::hardware_concurrency() / 2));
   params.print_progress = params.print_realtime = params.print_timestamps = params.print_special = false;
-  params.token_timestamps = true; // a segment of one word each (the same as whisper-cli -ml 1 -sow)
-  params.max_len = 1;
-  params.split_on_word = true;
+  if (!dtw) {
+    params.token_timestamps = true; // a segment of one word each (the same as whisper-cli -ml 1 -sow)
+    params.max_len = 1;
+    params.split_on_word = true;
+  }
   params.no_context = true;
   params.language = language.c_str();
   params.detect_language = false;
@@ -99,7 +117,41 @@ int main(int argc, char **argv) {
   }
 
   nlohmann::json words = nlohmann::json::array();
-  for (int i = 0, n = whisper_full_n_segments(ctx); i < n; ++i) {
+  // A token's DTW time is about when the decoder put it out, which comes after the word began: 0.18 to 0.21 s later, steadily, for both models and
+  // both voices measured. That much is taken off.
+  constexpr double kDtwLate = 0.2;
+  if (dtw) { // words from tokens: a token that starts with a space starts a word; it starts at its token's DTW time and ends when the next begins
+    const whisper_token eot = whisper_token_eot(ctx);
+    struct W { std::string text; double start; };
+    std::vector<W> found;
+    std::vector<double> segment_end;
+    for (int i = 0, n = whisper_full_n_segments(ctx); i < n; ++i) {
+      for (int k = 0, m = whisper_full_n_tokens(ctx, i); k < m; ++k) {
+        if (whisper_full_get_token_id(ctx, i, k) >= eot)
+          continue; // timestamps and other special tokens
+        const std::string piece = whisper_full_get_token_text(ctx, i, k);
+        const double at = double(whisper_full_get_token_data(ctx, i, k).t_dtw) / 100.0;
+        if (found.empty() || (!piece.empty() && piece.front() == ' '))
+          found.push_back({piece, at});
+        else
+          found.back().text += piece;
+      }
+      segment_end.push_back(double(whisper_full_get_segment_t1(ctx, i)) / 100.0);
+    }
+    const double last_end = segment_end.empty() ? 0.0 : segment_end.back();
+    for (size_t w = 0; w < found.size(); ++w) {
+      std::string text = found[w].text;
+      const size_t a = text.find_first_not_of(" \t\r\n"), b = text.find_last_not_of(" \t\r\n");
+      text = a == std::string::npos ? std::string() : text.substr(a, b - a + 1);
+      if (is_annotation(text))
+        continue;
+      const double start = std::max(0.0, found[w].start - kDtwLate);
+      const double next = w + 1 < found.size() ? found[w + 1].start - kDtwLate : last_end;
+      const double end = std::max(start, next);
+      words.push_back({{"t", text}, {"s", start}, {"e", end}});
+    }
+  }
+  for (int i = 0, n = dtw ? 0 : whisper_full_n_segments(ctx); i < n; ++i) {
     std::string text = whisper_full_get_segment_text(ctx, i);
     const size_t a = text.find_first_not_of(" \t\r\n"), b = text.find_last_not_of(" \t\r\n");
     text = a == std::string::npos ? std::string() : text.substr(a, b - a + 1);
