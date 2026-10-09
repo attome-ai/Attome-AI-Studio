@@ -276,7 +276,7 @@ void App::add_to_library(bool with_linked, const std::string &only, const std::s
   say("\"" + result.value("name", std::string("Clip")) + "\" is in the library. Any project can use it: the Library panel on the left.");
 }
 
-void App::insert_library(const std::string &id, int64_t at, const std::string &track) {
+void App::insert_library(const std::string &id, int64_t at, const std::string &track, bool follow) {
   // The engine puts each clip of the item on a track that is free where it goes (the one it was dropped on first), or on a new one:
   // nothing already on the timeline moves and nothing overlaps.
   json params = {{"project", project_path_}, {"id", id}, {"at", frames_text(std::max<int64_t>(0, at))}};
@@ -286,6 +286,23 @@ void App::insert_library(const std::string &id, int64_t at, const std::string &t
   if (!rpc("library.insert", params, result))
     return;
   refresh();
+  if (follow) { // as a Media or Generate card: what came in is selected, and the playhead goes to its end so the next card follows it
+    std::vector<std::string> made;
+    const json ids = result.value("id_map", json::object());
+    for (auto it = ids.begin(); it != ids.end(); ++it)
+      if (it.key().rfind("$new:lib.c", 0) == 0 && it->is_string())
+        made.push_back(it->get<std::string>());
+    int64_t end = -1;
+    for (const std::string &cid : made)
+      if (const ClipUi *c = find_clip(cid))
+        end = std::max(end, c->start + c->frames);
+    if (!made.empty()) {
+      select_clips(made, false);
+      reveal_clip_ = made.front();
+    }
+    if (end >= 0)
+      seek(end);
+  }
   std::string name = "Clip";
   for (const json &item : library_items_)
     if (item.value("id", std::string()) == id)
@@ -322,7 +339,9 @@ void App::draw_library_panel() {
   std::string remove_id;
   for (const json &item : library_items_) {
     const std::string id = item.value("id", std::string()), name = item.value("name", std::string("Clip"));
-    const std::string thumb = item.value("thumb", std::string());
+    std::string thumb = item.value("picture_path", std::string()); // the clip's own file; the item's frame is canvas-shaped, with bars
+    if (thumb.empty())
+      thumb = item.value("thumb", std::string());
     if (!thumb.empty())
       thumbs_.request(thumb);
     if (column)
@@ -351,10 +370,17 @@ void App::draw_library_panel() {
     }
     ImDrawList *dl = ImGui::GetWindowDrawList();
     dl->AddRectFilled(p, ImVec2(p.x + cell, p.y + thumb_h), hex(look::bg), 8.0f);
-    if (const auto tex = thumb_tex_.find(thumb); !thumb.empty() && tex != thumb_tex_.end() && tex->second)
-      dl->AddImageRounded(ImTextureID(reinterpret_cast<intptr_t>(tex->second)), p, ImVec2(p.x + cell, p.y + thumb_h), ImVec2(0, 0), ImVec2(1, 1),
-                          IM_COL32_WHITE, 8.0f);
-    else if (!item.value("picture", false) && !item.value("sound_path", std::string()).empty()) { // sound only: its waveform, as in the Media panel
+    if (const auto tex = thumb_tex_.find(thumb); !thumb.empty() && tex != thumb_tex_.end() && tex->second) {
+      float tw = cell, th = thumb_h; // fitted inside the card, keeping its shape
+      if (SDL_GetTextureSize(tex->second, &tw, &th) && tw > 0.0f && th > 0.0f) {
+        const float fit = std::min(cell / tw, thumb_h / th);
+        tw *= fit;
+        th *= fit;
+      }
+      const ImVec2 corner(p.x + (cell - tw) * 0.5f, p.y + (thumb_h - th) * 0.5f);
+      dl->AddImageRounded(ImTextureID(reinterpret_cast<intptr_t>(tex->second)), corner, ImVec2(corner.x + tw, corner.y + th), ImVec2(0, 0),
+                          ImVec2(1, 1), IM_COL32_WHITE, 8.0f);
+    } else if (!item.value("picture", false) && !item.value("sound_path", std::string()).empty()) { // sound only: its waveform, as in the Media panel
       const std::string sound = item.value("sound_path", std::string());
       thumbs_.request_peaks(sound);
       const auto pk = peaks_.find(sound);
@@ -412,7 +438,7 @@ void App::draw_library_panel() {
     if (hovered && !ImGui::IsMouseDown(0))
       ImGui::SetTooltip("Double-click or the plus: at the playhead. Drag it onto the timeline to choose where. Right-click for more.");
     if (add_now)
-      pending_ = [this, id] { insert_library(id, playhead_); };
+      pending_ = [this, id] { insert_library(id, playhead_, {}, true); };
     ImGui::PopID();
     ImGui::EndGroup();
     column = (column + 1) % columns;

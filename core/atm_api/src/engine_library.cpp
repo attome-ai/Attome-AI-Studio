@@ -373,9 +373,13 @@ Result<json> Engine::Impl::library_list(const json &) {
                   {"clips", item->value("clips", json::array()).size()}};
     if (item->contains("thumb"))
       brief["thumb"] = to_utf8(entry.path() / item->value("thumb", std::string()));
-    for (const json &c : item->value("clips", json::array())) // the file of its sound, to draw its waveform from
+    for (const json &c : item->value("clips", json::array())) { // the file of its sound, to draw its waveform from; of its picture, to show it
+      const std::string file = c.value("clip", json::object()).value("media_ref", json::object()).value("path", std::string());
       if (c.value("audio", false) && brief.value("sound_path", std::string()).empty())
-        brief["sound_path"] = c.value("clip", json::object()).value("media_ref", json::object()).value("path", std::string());
+        brief["sound_path"] = file;
+      if (!c.value("audio", false) && !file.empty() && brief.value("picture_path", std::string()).empty())
+        brief["picture_path"] = file;
+    }
     items.push_back(std::move(brief));
   }
   std::sort(items.begin(), items.end(), [](const json &a, const json &b) { return a.value("made", std::string()) > b.value("made", std::string()); });

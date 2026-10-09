@@ -591,7 +591,7 @@ private:
   char library_name_buf_[128] = {};
   void draw_library_panel();
   void add_to_library(bool with_linked = true, const std::string &only = {}, const std::string &part = {});            // the selected clips (and, unless with_linked is false, what is linked to them) become one item
-  void insert_library(const std::string &id, int64_t at, const std::string &track = {}); // an item at `at`, its clips on tracks of their kind
+  void insert_library(const std::string &id, int64_t at, const std::string &track = {}, bool follow = false); // an item at `at`, its clips on tracks of their kind; follow: select them, playhead to their end
   char text_buf_[1024] = {};
   float text_size_ = 0.08f, text_col_[3] = {1.0f, 1.0f, 1.0f};
   bool text_bold_ = false;
