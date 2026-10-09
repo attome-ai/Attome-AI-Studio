@@ -1256,88 +1256,6 @@ void App::draw_models_panel() {
                                       "every file is checked before it is used.");
   ImGui::PopTextWrapPos();
   ImGui::Spacing();
-  const std::string dir = models_.value("models_dir", "");
-  if (!dir.empty()) {
-    section_label("FOLDER");
-    path_text(dir, hexv(look::fg2));
-    if (const int64_t room = models_.value("free_bytes", int64_t(-1)); room >= 0)
-      ImGui::TextColored(hexv(look::fg3), "%s free", gb(room).c_str());
-    if (soft_button("models_folder", "Open folder", ImVec2(0.0f, 26.0f))) {
-      std::string url = "file:///" + dir;
-      std::replace(url.begin(), url.end(), '\\', '/');
-      SDL_OpenURL(url.c_str());
-    }
-    if (!models_.value("folder_fixed", false)) { // downloads can go to another drive
-      ImGui::SameLine();
-      if (soft_button("models_move", "Change...", ImVec2(0.0f, 26.0f)))
-        ask_models_folder("move");
-    }
-    // Models that are on this computer already are used where they are.
-    if (soft_button("models_locate", "I already have models...", ImVec2(0.0f, 26.0f)))
-      ask_models_folder("locate");
-    if (!models_note_.empty() && models_note_model_.empty()) {
-      ImGui::PushTextWrapPos(0.0f);
-      ImGui::TextColored(models_note_error_ ? kError : hexv(look::fg2), "%s", models_note_.c_str());
-      ImGui::PopTextWrapPos();
-    }
-    const json folders = models_.value("folders", json::array());
-    if (!folders.empty()) {
-      ImGui::Spacing();
-      ImGui::TextColored(hexv(look::fg3), "Also used from:");
-      for (const json &f : folders) {
-        const std::string folder = f.is_string() ? f.get<std::string>() : std::string();
-        ImGui::PushID(folder.c_str());
-        path_text(folder, hexv(look::fg2));
-        if (soft_button("models_forget", "Stop using", ImVec2(0.0f, 24.0f))) { // the files stay where they are
-          json unused;
-          rpc("models.forget_folder", {{"folder", folder}}, unused);
-          next_models_poll_ = 0.0;
-          gen_models_loaded_ = false;
-          pending_ = [this] { refresh_gen_status(); };
-        }
-        ImGui::PopID();
-      }
-    }
-    ImGui::Spacing();
-  }
-  // Engines: what runs the models. For now the user's own ComfyUI, by its address.
-  if (!engines_loaded_) {
-    engines_loaded_ = true;
-    json engines;
-    if (rpc("gen.engines", json::object(), engines)) {
-      copy_to(comfy_buf_, sizeof comfy_buf_, engines.value("comfyui", std::string()));
-      for (const json &e : engines.value("engines", json::array()))
-        if (e.value("name", "") == "comfyui")
-          comfy_status_ = e;
-    }
-  }
-  section_label("COMFYUI");
-  ImGui::PushStyleColor(ImGuiCol_FrameBg, hexv(look::raised));
-  ImGui::SetNextItemWidth(-1.0f);
-  ImGui::InputTextWithHint("##comfyui", "http://127.0.0.1:8188", comfy_buf_, sizeof comfy_buf_);
-  ui_mark("field:comfyui");
-  ImGui::PopStyleColor();
-  if (soft_button("comfy_test", "Use and test", ImVec2(0.0f, 26.0f))) {
-    json set;
-    comfy_status_ = json::object();
-    if (rpc("gen.set_comfyui", {{"address", std::string(comfy_buf_)}}, set)) {
-      copy_to(comfy_buf_, sizeof comfy_buf_, set.value("comfyui", std::string()));
-      comfy_status_ = set.value("status", json{{"off", true}});
-      pending_ = [this] { refresh_gen_status(); }; // clips that waited for an engine can run now
-    }
-  }
-  ImGui::PushTextWrapPos(0.0f);
-  if (comfy_status_.value("off", false))
-    ImGui::TextColored(hexv(look::fg3), "ComfyUI is not used.");
-  else if (comfy_status_.value("reachable", false))
-    ImGui::TextColored(hexv(look::ok), "Connected: ComfyUI %s, %s", comfy_status_.value("version", "?").c_str(),
-                       comfy_status_.value("device", "").c_str());
-  else if (comfy_status_.contains("message"))
-    ImGui::TextColored(kError, "No answer. %s", comfy_status_.value("hint", "").c_str());
-  else
-    ImGui::TextColored(hexv(look::fg3), "Your own ComfyUI can run the models. Give its address.");
-  ImGui::PopTextWrapPos();
-  ImGui::Spacing();
   section_label("AVAILABLE");
   ImGui::Spacing();
   for (const json &e : models_.value("entries", json::array())) {
@@ -1383,11 +1301,26 @@ void App::draw_models_panel() {
         ImGui::TextColored(hexv(look::fg3), "%s", error["data"].value("hint", "").c_str());
     }
     ImGui::Spacing();
-    if (!e.value("notes", "").empty())
-      ImGui::TextColored(hexv(look::fg3), "%s", e.value("notes", "").c_str());
-    if (!e.value("licence", "").empty()) {
-      ImGui::Spacing();
-      ImGui::TextColored(hexv(look::fg3), "%s", e.value("licence", "").c_str());
+    if (const std::string notes = e.value("notes", ""); !notes.empty()) { // two lines; the rest is in the tip
+      const float room = std::max(40.0f, ImGui::GetContentRegionAvail().x), two = ImGui::GetTextLineHeight() * 2.0f + 1.0f;
+      std::string shown = notes;
+      bool cut = false;
+      while (ImGui::CalcTextSize(shown.c_str(), nullptr, false, room).y > two && shown.size() > 4) {
+        shown.pop_back();
+        while (!shown.empty() && (static_cast<unsigned char>(shown.back()) & 0xC0) == 0x80)
+          shown.pop_back();
+        cut = true;
+        if (const size_t sp = shown.find_last_of(' '); sp != std::string::npos && ImGui::CalcTextSize((shown + "...").c_str(), nullptr, false, room).y > two)
+          shown.resize(sp);
+      }
+      if (cut) {
+        while (!shown.empty() && (shown.back() == ' ' || shown.back() == ',' || shown.back() == ';' || shown.back() == ':'))
+          shown.pop_back();
+        shown += "...";
+      }
+      ImGui::TextColored(hexv(look::fg3), "%s", shown.c_str());
+      if (cut && ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", notes.c_str());
     }
     ImGui::PopTextWrapPos();
     ImGui::Spacing();
@@ -1407,14 +1340,20 @@ void App::draw_models_panel() {
         next_models_poll_ = 0.0;
       }
     }
-    if (!e.value("licence_url", "").empty()) {
+    if (!e.value("licence_url", "").empty() || !e.value("licence", "").empty()) { // the licence's words are in the tip; the button opens its page
       if (state != "installed")
         ImGui::SameLine();
-      if (soft_button("model_licence", "Licence", ImVec2(0.0f, 30.0f)))
+      const bool opened = soft_button("model_licence", "Licence", ImVec2(0.0f, 30.0f));
+      if (ImGui::IsItemHovered() && !e.value("licence", "").empty()) {
+        ImGui::PushTextWrapPos(360.0f);
+        ImGui::SetTooltip("%s", e.value("licence", "").c_str());
+        ImGui::PopTextWrapPos();
+      }
+      if (opened && !e.value("licence_url", "").empty())
         SDL_OpenURL(e.value("licence_url", "").c_str());
     }
     const json files = e.value("files", json::array());
-    if (ImGui::TreeNodeEx("##files", ImGuiTreeNodeFlags_SpanAvailWidth, "%zu files", files.size())) {
+    if (ImGui::TreeNodeEx("##files", ImGuiTreeNodeFlags_SpanAvailWidth, files.size() == 1 ? "1 file" : "%zu files", files.size())) {
       for (const json &f : files) {
         const std::string path = f.value("path", ""), fstate = f.value("state", "missing");
         const std::string name = path.substr(path.find_last_of('/') + 1);
@@ -1475,6 +1414,94 @@ void App::draw_models_panel() {
       ImGui::PopID();
       ImGui::Dummy(ImVec2(0.0f, 4.0f));
     }
+  }
+  // The folder and the engine are set once: a part closed until asked for, under the models.
+  ImGui::Spacing();
+  const bool settings_open = ImGui::CollapsingHeader("Folder and ComfyUI");
+  ui_mark("button:models_settings");
+  if (settings_open) {
+    const std::string dir = models_.value("models_dir", "");
+    if (!dir.empty()) {
+      section_label("FOLDER");
+      path_text(dir, hexv(look::fg2));
+      if (const int64_t room = models_.value("free_bytes", int64_t(-1)); room >= 0)
+        ImGui::TextColored(hexv(look::fg3), "%s free", gb(room).c_str());
+      if (soft_button("models_folder", "Open folder", ImVec2(0.0f, 26.0f))) {
+        std::string url = "file:///" + dir;
+        std::replace(url.begin(), url.end(), '\\', '/');
+        SDL_OpenURL(url.c_str());
+      }
+      if (!models_.value("folder_fixed", false)) { // downloads can go to another drive
+        ImGui::SameLine();
+        if (soft_button("models_move", "Change...", ImVec2(0.0f, 26.0f)))
+          ask_models_folder("move");
+      }
+      // Models that are on this computer already are used where they are.
+      if (soft_button("models_locate", "I already have models...", ImVec2(0.0f, 26.0f)))
+        ask_models_folder("locate");
+      if (!models_note_.empty() && models_note_model_.empty()) {
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::TextColored(models_note_error_ ? kError : hexv(look::fg2), "%s", models_note_.c_str());
+        ImGui::PopTextWrapPos();
+      }
+      const json folders = models_.value("folders", json::array());
+      if (!folders.empty()) {
+        ImGui::Spacing();
+        ImGui::TextColored(hexv(look::fg3), "Also used from:");
+        for (const json &f : folders) {
+          const std::string folder = f.is_string() ? f.get<std::string>() : std::string();
+          ImGui::PushID(folder.c_str());
+          path_text(folder, hexv(look::fg2));
+          if (soft_button("models_forget", "Stop using", ImVec2(0.0f, 24.0f))) { // the files stay where they are
+            json unused;
+            rpc("models.forget_folder", {{"folder", folder}}, unused);
+            next_models_poll_ = 0.0;
+            gen_models_loaded_ = false;
+            pending_ = [this] { refresh_gen_status(); };
+          }
+          ImGui::PopID();
+        }
+      }
+      ImGui::Spacing();
+    }
+    // Engines: what runs the models. For now the user's own ComfyUI, by its address.
+    if (!engines_loaded_) {
+      engines_loaded_ = true;
+      json engines;
+      if (rpc("gen.engines", json::object(), engines)) {
+        copy_to(comfy_buf_, sizeof comfy_buf_, engines.value("comfyui", std::string()));
+        for (const json &e : engines.value("engines", json::array()))
+          if (e.value("name", "") == "comfyui")
+            comfy_status_ = e;
+      }
+    }
+    section_label("COMFYUI");
+    ImGui::PushStyleColor(ImGuiCol_FrameBg, hexv(look::raised));
+    ImGui::SetNextItemWidth(-1.0f);
+    ImGui::InputTextWithHint("##comfyui", "http://127.0.0.1:8188", comfy_buf_, sizeof comfy_buf_);
+    ui_mark("field:comfyui");
+    ImGui::PopStyleColor();
+    if (soft_button("comfy_test", "Use and test", ImVec2(0.0f, 26.0f))) {
+      json set;
+      comfy_status_ = json::object();
+      if (rpc("gen.set_comfyui", {{"address", std::string(comfy_buf_)}}, set)) {
+        copy_to(comfy_buf_, sizeof comfy_buf_, set.value("comfyui", std::string()));
+        comfy_status_ = set.value("status", json{{"off", true}});
+        pending_ = [this] { refresh_gen_status(); }; // clips that waited for an engine can run now
+      }
+    }
+    ImGui::PushTextWrapPos(0.0f);
+    if (comfy_status_.value("off", false))
+      ImGui::TextColored(hexv(look::fg3), "ComfyUI is not used.");
+    else if (comfy_status_.value("reachable", false))
+      ImGui::TextColored(hexv(look::ok), "Connected: ComfyUI %s, %s", comfy_status_.value("version", "?").c_str(),
+                         comfy_status_.value("device", "").c_str());
+    else if (comfy_status_.contains("message"))
+      ImGui::TextColored(kError, "No answer. %s", comfy_status_.value("hint", "").c_str());
+    else
+      ImGui::TextColored(hexv(look::fg3), "Your own ComfyUI can run the models. Give its address.");
+    ImGui::PopTextWrapPos();
+    ImGui::Spacing();
   }
   ImGui::EndChild();
 }

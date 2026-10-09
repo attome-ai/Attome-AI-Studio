@@ -24,6 +24,7 @@ try {
     'click @rail:Models'
     'wait 500'
     "shot $work\address_empty.jpg"
+    'click @button:models_settings', 'wait 300'
     'click @field:comfyui'
     'type 127.0.0.1:59999/'             # no scheme and a trailing slash: stored as http://127.0.0.1:59999
     'wait 200'

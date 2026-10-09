@@ -26,6 +26,7 @@ try {
   $run = Invoke-EditorScript -Project $proj -Script @(
     'click @rail:Models'
     'wait 800'                         # the panel asks the daemon twice a second
+    'click @button:models_settings', 'wait 300'
     'expect @button:models_folder'
     'expect @button:model_fetch'       # "Continue, ... left"
     'expect @button:model_licence'
