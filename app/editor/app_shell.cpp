@@ -297,6 +297,8 @@ void App::draw_toasts() {
     Toast &t = toasts_[i];
     if (hovered)
       t.born = clock_;
+    if (i > 0)
+      ImGui::Separator(); // two notes are two lines of one box, not a gap
     ImGui::PushID(int(i));
     ImGui::AlignTextToFramePadding();
     const ImVec4 ink = t.error ? ImVec4(0.94f, 0.37f, 0.37f, 1.0f) : hexv(look::fg);

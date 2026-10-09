@@ -31,7 +31,7 @@ function Clips($run) { $n = 0; foreach ($t in @(Get-Tracks $run)) { $n += @($t.c
 $failed = $null
 $runA = Invoke-EditorScript -Project $a -TimeoutSeconds 240 -Script @(
   'wait 1200'
-  'rclick @clip:clip', 'wait 400', 'expect @menuitem:Add_both_to_the_library', 'click @menuitem:Add_both_to_the_library', 'wait 900'
+  'rclick @clip:clip', 'wait 400', 'click @menuitem:Add_to_the_library', 'wait 300', 'expect @menuitem:Both', 'click @menuitem:Both', 'wait 900'
   'click @rail:Library', 'wait 700', 'expect @library:clip'
   "shot $work\library_a.jpg"
 )

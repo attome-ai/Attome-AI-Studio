@@ -1359,18 +1359,22 @@ void App::draw_clip_menu(const ClipUi &c) {
   }
   if (menu_item("Go to its start"))
     pending_ = [this, at = c.start] { seek(at); };
-  if (count == 1 && c.own_sound) { // a video with its sound inside it: all of it, or only the picture or the sound
-    if (menu_item("Add the sound only to the library"))
-      pending_ = [this, id = c.id] { add_to_library(false, id, "sound"); };
-    if (menu_item("Add the video only to the library"))
-      pending_ = [this, id = c.id] { add_to_library(false, id, "picture"); };
-    if (menu_item("Add both to the library"))
-      pending_ = [this] { add_to_library(true); };
-  } else if (count == 1 && !linked_of(c).empty()) { // a picture with its sound, or a sound with its picture: the part, or both
-    if (menu_item(c.stream == "audio" ? "Add the sound only to the library" : "Add the picture only to the library"))
-      pending_ = [this, id = c.id] { add_to_library(false, id); };
-    if (menu_item("Add both to the library"))
-      pending_ = [this] { add_to_library(true); };
+  if (count == 1 && (c.own_sound || !linked_of(c).empty())) { // a video with its sound, or a picture and its sound: the part or both, in one entry
+    const bool open = ImGui::BeginMenu("Add to the library");
+    ui_mark("menuitem:Add_to_the_library");
+    if (open) {
+      if (c.own_sound) {
+        if (menu_item("Sound only"))
+          pending_ = [this, id = c.id] { add_to_library(false, id, "sound"); };
+        if (menu_item("Video only"))
+          pending_ = [this, id = c.id] { add_to_library(false, id, "picture"); };
+      } else if (menu_item(c.stream == "audio" ? "Sound only" : "Picture only")) {
+        pending_ = [this, id = c.id] { add_to_library(false, id); };
+      }
+      if (menu_item("Both"))
+        pending_ = [this] { add_to_library(true); };
+      ImGui::EndMenu();
+    }
   } else if (menu_item(count > 1 ? ("Add " + std::to_string(count) + " clips to the library").c_str() : "Add to the library")) {
     pending_ = [this] { add_to_library(); };
   }

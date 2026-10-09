@@ -26,7 +26,7 @@ try {
 
 $runA = Invoke-EditorScript -Project $a -TimeoutSeconds 240 -Script @(
   'wait 1200'
-  'rclick @clip:wide', 'wait 400', 'click @menuitem:Add_both_to_the_library', 'wait 900'
+  'rclick @clip:wide', 'wait 400', 'click @menuitem:Add_to_the_library', 'wait 300', 'click @menuitem:Both', 'wait 900'
 )
 Stop-Daemon $runA
 if ($runA.Errors) { Write-Host "FAIL: $($runA.Errors)" -ForegroundColor Red; exit 1 }

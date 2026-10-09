@@ -31,14 +31,14 @@ $failed = $null
 $run = Invoke-EditorScript -Project $a -TimeoutSeconds 300 -Script @(
   'wait 1200'
   'rclick @clip:clip', 'wait 400'
-  'expect @menuitem:Add_both_to_the_library', 'expect @menuitem:Add_the_video_only_to_the_library'
+  'click @menuitem:Add_to_the_library', 'wait 300', 'expect @menuitem:Both', 'expect @menuitem:Video_only'
   "shot $work\menu.jpg"
-  'click @menuitem:Add_the_sound_only_to_the_library', 'wait 900'
+  'click @menuitem:Sound_only', 'wait 900'
   'click @rail:Library', 'wait 700'
   "shot $work\library_sound.jpg"
   'click @rail:Media', 'wait 400'
-  'rclick @clip:clip', 'wait 400', 'click @menuitem:Add_the_video_only_to_the_library', 'wait 900'
-  'rclick @clip:clip', 'wait 400', 'click @menuitem:Add_both_to_the_library', 'wait 900'
+  'rclick @clip:clip', 'wait 400', 'click @menuitem:Add_to_the_library', 'wait 300', 'click @menuitem:Video_only', 'wait 900'
+  'rclick @clip:clip', 'wait 400', 'click @menuitem:Add_to_the_library', 'wait 300', 'click @menuitem:Both', 'wait 900'
 )
 $failed = $run.Errors
 Stop-Daemon $run
