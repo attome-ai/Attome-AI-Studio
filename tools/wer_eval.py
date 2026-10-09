@@ -5,7 +5,9 @@ usage: python -I tools/wer_eval.py <ggml model> <language> <count> <out.json> [c
 Reads .deps/fleurs_ar/test.tsv and audio/test/*.wav (google/fleurs, CC-BY-4.0, revision 70bb2e84b976b7e960aa89f1c648e09c59f894dd: data/ar_eg/test.tsv and
 data/ar_eg/audio/test.tar.gz, unpacked there). Runs `count` recordings spread evenly over the test set through build/win-msvc-release/bin/attome-whisper
 (or, with `cli`, whisper.cpp's own whisper-cli as a control) and prints the word error rate after stripping diacritics and punctuation and folding the
-usual Arabic letter variants. Results of 2026-10-09 on 100 recordings (1941 words): ggml-small 25.8 %, ggml-large-v3-turbo-q5_0 8.6 % (no recording lost).
+usual Arabic letter variants. Results of 2026-10-09 on 100 recordings (1941 words): ggml-small 25.8 %, ggml-large-v3-turbo-q5_0 8.6 % (no recording lost),
+ggml-large-v3 (full, 3.1 GB) 8.0 %; on the GPU large-v3 runs 15 times real time against 80 for turbo. 22 words of the output are numbers in digits, counted
+wrong against numbers in words.
 A first sample of 30 (591 words) had given 32.0 % and 16.6 %: it happened to hold the one recording the model lost, so a sample that small misleads.
 """
 import json, re, struct, subprocess, sys, time, wave

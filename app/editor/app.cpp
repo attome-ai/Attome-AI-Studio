@@ -616,7 +616,7 @@ void App::auto_captions(const std::string &clip) {
     if (error.code == 1404) // the model is missing
       say("No speech model is on this computer yet. Download \"Whisper small\" (488 MB), or the more exact \"Whisper large-v3 turbo\" (574 MB, better in Arabic), from the Models panel, then try again.", true);
     else if (error.code == 1406) // the program is missing
-      say("The speech program is not part of this build of Attome.", true);
+      say("Auto captions need the speech program, attome-whisper, which this build of Attome does not have. It is built with Attome when whisper.cpp is in .deps/whisper.cpp (README, \"Speech to text\").", true);
     else
       say(error.hint.empty() ? error.message : error.message + "  " + error.hint, true);
     return;
