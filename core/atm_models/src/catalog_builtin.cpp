@@ -108,7 +108,7 @@ constexpr const char *kCatalog = R"json({
       "kind": "model",
       "licence": "MIT: OpenAI's Whisper weights, converted and quantized for whisper.cpp; free to use, also commercially.",
       "licence_url": "https://github.com/openai/whisper/blob/main/LICENSE",
-      "notes": "About a third of the mistakes of Whisper small in Arabic (9 % of words wrong, against 26 %, on 100 FLEURS recordings), and as good in English. Runs on the processor at about three and a half times real time, against eight and a half for small.",
+      "notes": "About a third of the mistakes of Whisper small in Arabic (9 % of words wrong, against 26 %, on 100 FLEURS recordings), and as good in English. About 100 times real time on a recent graphics card (3.5 times on the processor), against 8.5 for small on the processor.",
       "files": [
         {"path": "ggml-large-v3-turbo-q5_0.bin", "size": 574041195,
          "sha256": "394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2",

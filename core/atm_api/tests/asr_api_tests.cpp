@@ -305,6 +305,16 @@ TEST_CASE("asr.transcribe: the more exact model is used when it is there, and a 
   CHECK(f.run(with({{"again", true}}))["result"]["model"] == "custom");
 }
 
+TEST_CASE("asr.transcribe: the graphics card by default, the processor when asked, and the result says which", "[asr][engine]") {
+  AsrFixture f;
+  const json by_default = f.run({{"path", f.tone}});
+  REQUIRE(by_default["state"] == "done");
+  CHECK(by_default["result"]["device"] == "gpu");
+  CHECK(f.run({{"path", f.tone}, {"device", "cpu"}})["result"]["device"] == "cpu");
+  CHECK(f.run({{"path", f.tone}, {"device", "gpu"}})["result"]["device"] == "gpu");
+  CHECK(f.refused({{"path", f.tone}, {"device", "npu"}}) == "E_PARAM");
+}
+
 TEST_CASE("asr.transcribe: an agent can find it and the way to captions", "[asr][engine][parity]") {
   AsrFixture f;
   const json tools = *f.engine->call("tools.list", json::object());

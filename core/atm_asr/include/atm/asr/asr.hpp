@@ -3,9 +3,11 @@
 // network port, as AI_ENGINES.md decides for managed runtimes), and the words come back with their times.
 //
 // The protocol (app/whisper/main.cpp is the other end):
-//   arguments:  --model <ggml file> [--language <code | auto>]
+//   arguments:  --model <ggml file> [--language <code | auto>] [--gpu 1]  (--gpu 1: the graphics card through Vulkan; the processor when no
+//               device takes the model)
 //   stdin:      a 32-bit little-endian count N, then N floats: mono, 16 kHz, -1..1
-//   stdout:     one JSON object a line: {"progress": 0..1}, then once {"words": [{"t": "word", "s": seconds, "e": seconds}], "language": "en"},
+//   stdout:     one JSON object a line: {"progress": 0..1}, then once {"words": [{"t": "word", "s": seconds, "e": seconds}], "language": "en",
+//               "device": "gpu" | "cpu"},
 //               or {"error": "what went wrong"}. Nothing else is printed there.
 // A program that dies before its result is a crash; the caller's cancel flag kills it.
 
@@ -31,6 +33,7 @@ struct Word {
 struct Transcript {
   std::vector<Word> words;
   std::string language; // what was heard ("en"), or what was asked for
+  std::string device = "cpu"; // where it ran: "gpu" or "cpu"
 };
 
 // Appends `frames` frames of 48 kHz stereo float (what media::read_audio gives) to `mono16k`: both channels averaged, three frames
@@ -53,6 +56,7 @@ struct Options {
   std::filesystem::path exe;   // find_runtime()
   std::filesystem::path model; // a ggml file
   std::string language = "auto";
+  bool gpu = false; // ask for the graphics card (the program falls back to the processor by itself)
 };
 
 // Runs the program on mono 16 kHz sound. `progress` (may be empty) gets 0..1 as the program reports it; when `cancel` becomes true the

@@ -167,7 +167,7 @@ Auto captions hear a clip's speech with Whisper. Two things make it work, and ne
 1. **The speech program.** Clone [whisper.cpp](https://github.com/ggml-org/whisper.cpp) (MIT) to `.deps/whisper.cpp` and build as usual: CMake finds it and builds `attome-whisper` next to the other programs. Without it the engine says the program is not installed. `ATM_WHISPER_DIR` points CMake at another copy.
 2. **The model.** Two are in the model catalog (both MIT): `whisper.small` (488 MB, about eight times real time on the processor) and `whisper.large-v3-turbo-q5` (574 MB, about three and a half times real time, and about a third of the mistakes in Arabic: 9 % of words wrong against 26 % on 100 FLEURS recordings; the same in English). Download one from the Models panel, or `attome call models.fetch` with `{"id": "whisper.small"}`. The more exact one that is installed is used. `ATTOME_WHISPER_MODEL` can point at a ggml Whisper file you already have.
 
-Then right-click a clip with speech and choose "Auto captions from its speech", or call `asr.transcribe` and `add_captions` with its `words`. It runs on the processor, about ten times faster than real time on a recent one. It runs on Windows in this version.
+Then right-click a clip with speech and choose "Auto captions from its speech", or call `asr.transcribe` and `add_captions` with its `words`. It runs on the graphics card through Vulkan when the build found the Vulkan SDK (large-v3 turbo: a 5-minute clip in about 3 seconds, the same words as on the processor), and on the processor while a generation is using the card or when no card takes the model (about 4 times real time). It runs on Windows in this version.
 
 ### Requirements
 

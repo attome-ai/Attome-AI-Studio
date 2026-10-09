@@ -244,7 +244,8 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
        "duration":{"type":"number","description":"With path: seconds to listen to, default to the end"},
        "language":{"type":"string","description":"auto (default), or a code such as en, ar, fr"},
        "again":{"type":"boolean","description":"Listen anew even when the project already has what the file says"},
-       "model":{"type":"string","enum":["best","small","turbo"],"description":"best (default): the more exact one that is installed; small or turbo to choose"}}})",
+       "model":{"type":"string","enum":["best","small","turbo"],"description":"best (default): the more exact one that is installed; small or turbo to choose"},
+       "device":{"type":"string","enum":["auto","gpu","cpu"],"description":"auto (default): the graphics card, unless a generation is using it; the result says which ran"}}})",
      &Impl::asr_transcribe},
     {"audio.analyze", "core", false,
      "Where the beat is and how loud a sound is: bpm, the beat grid (first_beat and beats, in seconds of the file), confidence (3 and more is "

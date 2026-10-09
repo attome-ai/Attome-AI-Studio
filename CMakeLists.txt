@@ -190,10 +190,15 @@ set(ATM_WHISPER_DIR "${CMAKE_SOURCE_DIR}/.deps/whisper.cpp" CACHE PATH "whisper.
 if(ATM_WHISPER_DIR AND EXISTS "${ATM_WHISPER_DIR}/CMakeLists.txt")
   enable_language(C) # whisper.cpp's ggml is C and C++; the presets name only the C++ compiler
   set(WHISPER_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+  # The GPU through Vulkan, as the renderer (the Vulkan SDK is already required for it): attome-whisper --gpu uses it, and falls back to
+  # the processor when no device takes it.
+  if(Vulkan_FOUND AND Vulkan_glslc_FOUND)
+    set(GGML_VULKAN ON CACHE BOOL "" FORCE)
+  endif()
   set(WHISPER_BUILD_TESTS OFF CACHE BOOL "" FORCE)
   set(WHISPER_BUILD_SERVER OFF CACHE BOOL "" FORCE)
   set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
-  add_subdirectory(${ATM_WHISPER_DIR} ${CMAKE_BINARY_DIR}/whisper_cpp EXCLUDE_FROM_ALL)
+  add_subdirectory(${ATM_WHISPER_DIR} ${CMAKE_BINARY_DIR}/w EXCLUDE_FROM_ALL) # a short folder: the Vulkan shader generator nests deep and Windows paths stop at 260
   add_executable(attome-whisper app/whisper/main.cpp)
   target_link_libraries(attome-whisper PRIVATE whisper nlohmann_json::nlohmann_json)
   message(STATUS "Attome speech program: attome-whisper (whisper.cpp at ${ATM_WHISPER_DIR})")

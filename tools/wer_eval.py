@@ -16,6 +16,7 @@ exe = root / "build/win-msvc-release/bin/attome-whisper.exe"
 fleurs = root / ".deps/fleurs_ar"
 model, language, count, out = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
 use_cli = len(sys.argv) > 5 and sys.argv[5] == "cli"  # control: whisper.cpp's own whisper-cli with its defaults
+gpu_args = ["--gpu", "1"] if "gpu" in sys.argv[5:] else []  # attome-whisper on the graphics card
 cli = root / ".deps/whisper.cpp/build/bin/whisper-cli.exe"
 
 # Arabic diacritics (tashkeel), tatweel, punctuation
@@ -66,6 +67,7 @@ picked = rows[::step][:count]
 total_ref = total_err = 0
 audio_seconds = run_seconds = 0.0
 per_file = []
+devices = set()
 for r in picked:
     wav = fleurs / "audio/test" / r[1]
     samples = read_wav(wav)
@@ -75,12 +77,13 @@ for r in picked:
         result = {"words": [{"t": w} for w in p.stdout.decode("utf-8", "replace").split()]}
     else:
         payload = struct.pack("<I", len(samples)) + struct.pack("<%df" % len(samples), *samples)
-        p = subprocess.run([str(exe), "--model", model, "--language", language], input=payload, capture_output=True)
+        p = subprocess.run([str(exe), "--model", model, "--language", language] + gpu_args, input=payload, capture_output=True)
         result = None
         for line in p.stdout.decode("utf-8", "replace").splitlines():
             j = json.loads(line)
             if "words" in j:
                 result = j
+                devices.add(j.get("device", "?"))
             elif "error" in j:
                 raise SystemExit("program error: " + j["error"])
     run_seconds += time.time() - started
@@ -94,6 +97,6 @@ for r in picked:
 
 summary = {"model": Path(model).name, "language": language, "files": len(picked), "ref_words": total_ref, "errors": total_err,
            "wer": round(total_err / total_ref, 4), "audio_seconds": round(audio_seconds, 1), "run_seconds": round(run_seconds, 1),
-           "times_real_time": round(audio_seconds / run_seconds, 2)}
+           "times_real_time": round(audio_seconds / run_seconds, 2), "device": sorted(devices)}
 Path(out).write_text(json.dumps({"summary": summary, "files": per_file}, ensure_ascii=False, indent=1), encoding="utf-8")
 print(json.dumps(summary))

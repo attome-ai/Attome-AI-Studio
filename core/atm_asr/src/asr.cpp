@@ -38,6 +38,7 @@ Result<Line> parse_line(std::string_view text) {
   } else if (j.contains("words")) {
     line.kind = Line::Kind::result;
     line.transcript.language = j.value("language", std::string());
+    line.transcript.device = j.value("device", std::string("cpu"));
     if (!j["words"].is_array())
       return fail(ErrorCode::CorruptData, "E_ASR_PROTOCOL", "\"words\" must be a list.");
     for (const nlohmann::json &w : j["words"]) {
@@ -142,7 +143,7 @@ bool start_child(const Options &options, Child &child) {
   si.hStdOutput = out_write;
   si.hStdError = nul;
   const std::wstring language(options.language.begin(), options.language.end());
-  std::wstring command = quoted(options.exe.wstring()) + L" --model " + quoted(options.model.wstring()) + L" --language " + quoted(language);
+  std::wstring command = quoted(options.exe.wstring()) + L" --model " + quoted(options.model.wstring()) + L" --language " + quoted(language) + (options.gpu ? L" --gpu 1" : L"");
   PROCESS_INFORMATION pi{};
   const BOOL ok = CreateProcessW(options.exe.c_str(), command.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
   for (HANDLE h : {in_read, out_write, nul})

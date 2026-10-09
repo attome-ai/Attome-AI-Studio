@@ -34,6 +34,9 @@ Result<json> Engine::Impl::asr_transcribe(const json &params) {
     return bad_param("path", "is required: the sound or video file to listen to (or project and clip)");
   const std::string language = params.value("language", std::string("auto"));
   const bool again = params.value("again", false);
+  const std::string device = params.value("device", std::string("auto"));
+  if (device != "auto" && device != "gpu" && device != "cpu")
+    return bad_param("device", "must be auto, gpu or cpu");
   const std::string wanted_model = params.value("model", std::string("best"));
   if (wanted_model != "best" && wanted_model != "small" && wanted_model != "turbo")
     return bad_param("model", "must be best, small or turbo");
@@ -80,6 +83,9 @@ Result<json> Engine::Impl::asr_transcribe(const json &params) {
                 {}, wanted_model == "turbo" ? "Download it with models.fetch {id: \"whisper.large-v3-turbo-q5\"} (574 MB)."
                                             : "Download one with models.fetch: whisper.small (488 MB) or the more exact whisper.large-v3-turbo-q5 (574 MB, better in Arabic), or point ATTOME_WHISPER_MODEL at a ggml Whisper file.");
   options.language = language;
+  // The graphics card, about 25 times as fast as the processor on a long clip; but a generation that is running keeps it (as for the renderer).
+  const bool generating = std::any_of(jobs.begin(), jobs.end(), [](const auto &j) { return j.second->kind == "gen.run" && j.second->state.load() == Job::running; });
+  options.gpu = device == "gpu" || (device == "auto" && !generating);
 
   ATM_TRY(json info, media_probe({{"path", path}}));
   if (!info.value("has_audio", false))

@@ -51,9 +51,12 @@ int main(int argc, char **argv) {
   _setmode(_fileno(stdout), _O_BINARY);
 #endif
   std::string model, language = "auto";
+  bool gpu = false; // --gpu 1: the graphics card through Vulkan (with flash attention), when the build has it and a device takes the model
   for (int i = 1; i + 1 < argc; i += 2) {
     if (!std::strcmp(argv[i], "--model"))
       model = argv[i + 1];
+    else if (!std::strcmp(argv[i], "--gpu"))
+      gpu = std::strcmp(argv[i + 1], "0") != 0;
     else if (!std::strcmp(argv[i], "--language"))
       language = argv[i + 1];
   }
@@ -69,8 +72,14 @@ int main(int argc, char **argv) {
 
   whisper_log_set([](ggml_log_level, const char *, void *) {}, nullptr); // nothing but the protocol goes to the output
   whisper_context_params cparams = whisper_context_default_params();
-  cparams.use_gpu = false; // the processor: the first version runs the same everywhere
+  cparams.use_gpu = gpu;
+  cparams.flash_attn = gpu;
   whisper_context *ctx = whisper_init_from_file_with_params(model.c_str(), cparams);
+  if (!ctx && gpu) { // no device took it: the processor
+    cparams.use_gpu = cparams.flash_attn = false;
+    gpu = false;
+    ctx = whisper_init_from_file_with_params(model.c_str(), cparams);
+  }
   if (!ctx)
     return fail("the model could not be loaded: " + model);
 
@@ -100,7 +109,7 @@ int main(int argc, char **argv) {
     words.push_back({{"t", text}, {"s", start}, {"e", std::max(end, start)}});
   }
   const char *heard = whisper_lang_str(whisper_full_lang_id(ctx));
-  say({{"words", std::move(words)}, {"language", heard ? heard : language}});
+  say({{"words", std::move(words)}, {"language", heard ? heard : language}, {"device", gpu ? "gpu" : "cpu"}});
   whisper_free(ctx);
   return 0;
 }

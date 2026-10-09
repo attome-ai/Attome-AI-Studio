@@ -102,7 +102,7 @@ void run_asr(const std::shared_ptr<Job> &job, asr::Options options, AsrRun run, 
     for (const asr::Word &w : result->words)
       all.push_back({{"text", w.text}, {"start", thousandths(run.from + w.start)}, {"end", thousandths(run.from + w.end)}});
     json words = asr_words_in(all, run.want_from, run.want_to, run.speed);
-    job->result = {{"words", words}, {"language", result->language}, {"model", run.model_id}, {"path", run.path}, {"cached", false}};
+    job->result = {{"words", words}, {"language", result->language}, {"model", run.model_id}, {"path", run.path}, {"cached", false}, {"device", result->device}};
     if (!run.clip.empty())
       job->result["clip"] = run.clip;
     if (!run.project.empty() && queue) {

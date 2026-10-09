@@ -27,11 +27,14 @@ int main(int argc, char **argv) {
   _setmode(_fileno(stdout), _O_BINARY);
 #endif
   std::string model, language = "auto";
+  bool gpu = false;
   for (int i = 1; i + 1 < argc; i += 2) {
     if (!std::strcmp(argv[i], "--model"))
       model = argv[i + 1];
     else if (!std::strcmp(argv[i], "--language"))
       language = argv[i + 1];
+    else if (!std::strcmp(argv[i], "--gpu"))
+      gpu = std::strcmp(argv[i + 1], "0") != 0;
   }
   uint32_t count = 0;
   if (std::fread(&count, sizeof count, 1, stdin) != 1)
@@ -65,6 +68,6 @@ int main(int argc, char **argv) {
   std::string words;
   for (int i = 0; i < seconds; ++i)
     words += std::string(i ? "," : "") + "{\"t\":\"w" + std::to_string(i) + "\",\"s\":" + std::to_string(i) + ",\"e\":" + std::to_string(i + 0.8) + "}";
-  std::printf("{\"words\":[%s],\"language\":\"%s\"}\n", words.c_str(), language == "auto" ? "en" : language.c_str());
+  std::printf("{\"words\":[%s],\"language\":\"%s\",\"device\":\"%s\"}\n", words.c_str(), language == "auto" ? "en" : language.c_str(), gpu ? "gpu" : "cpu");
   return 0;
 }
