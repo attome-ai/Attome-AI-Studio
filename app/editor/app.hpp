@@ -220,6 +220,7 @@ private:
   int64_t pictures_end() const;                  // the frame after the last picture of the film (0 without pictures)
   int64_t past_pictures(const ClipUi &c) const;  // how long a sound plays on after the pictures end (music longer than the video)
   void end_with_pictures(const std::string &clip_id); // that sound ends where the pictures do, fading out
+  void duck_under_voices(const std::string &clip_id); // audio.duck under every other clip with sound
   const ClipUi *clip_to_cut(const TrackUi **track) const; // the clip a cut at the playhead works on
   void history_step(bool undo);
   void start_export(const std::string &path);

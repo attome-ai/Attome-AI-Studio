@@ -1898,6 +1898,30 @@ void App::end_with_pictures(const std::string &clip_id) {
   timeline_edit(std::move(ops), "End with the video");
 }
 
+// Ducking (audio.duck): the sound goes 12 dB down wherever another clip's sound plays (a picture's own sound, a sound clip on another
+// track, a voice) and comes back after it, as keys of its level. Done again after an edit, it follows the new places.
+void App::duck_under_voices(const std::string &clip_id) {
+  json over = json::array();
+  for (const TrackUi &t : tracks_)
+    if (!t.muted)
+      for (const ClipUi &c : t.clips)
+        if (c.id != clip_id && c.volume > 0.0f && (t.kind == "audio" || c.own_sound))
+          over.push_back(c.id);
+  if (over.empty()) {
+    say("Nothing else in the film has sound: there is nothing to make room for.");
+    return;
+  }
+  json result;
+  if (!rpc("audio.duck", {{"project", project_path_}, {"clip", clip_id}, {"over", std::move(over)}}, result))
+    return;
+  refresh();
+  const size_t n = result.value("ducked", json::array()).size();
+  if (n == 0)
+    say("Nothing else plays while it does: nothing was lowered.");
+  else
+    say("Lowered under " + std::to_string(n) + (n == 1 ? " stretch" : " stretches") + " of other sound", false, true);
+}
+
 // The first free name of a new track: V1, V2, ... or A1, A2, ...
 std::string App::new_track_name(bool sound) const {
   std::string name;

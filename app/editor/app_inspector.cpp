@@ -654,6 +654,20 @@ void App::draw_inspector() {
   const bool show_audio = ac != nullptr;
   const std::string aid = ac ? ac->id : std::string();
   if (show_audio && begin_card("##sound", "Audio", ac != c ? "its sound" : nullptr)) {
+    // A ducked sound has keys of its level (audio.keyframes.gain_db), which play instead of gain_db: a change of Gain moves every key by as
+    // much, in the same edit, so the slider still does what it says.
+    json gain_keys = json::object();
+    if (const json *cj = clip_json(aid); cj && cj->contains("audio"))
+      if (const json &au = (*cj)["audio"]; au.contains("keyframes") && au["keyframes"].contains("gain_db") && au["keyframes"]["gain_db"].is_object())
+        gain_keys = au["keyframes"]["gain_db"];
+    const auto with_gain_keys = [aid, gain_keys, base = ac->gain_db](json ops, const std::string &key, float v) {
+      if (key == "gain_db")
+        for (auto k = gain_keys.begin(); k != gain_keys.end(); ++k)
+          if (k->contains("v") && (*k)["v"].is_number())
+            ops.push_back({{"op", "replace"}, {"path", aid + "/audio/keyframes/gain_db/" + k.key() + "/v"},
+                           {"value", std::round(((*k)["v"].get<float>() + v - base) * 10.0f) / 10.0f}});
+      return ops;
+    };
     // One row: label, slider, value. The edit is sent when the slider is let go.
     const auto row = [&](const char *label, const char *slider, float *value, float lo, float hi, const char *fmt,
                          const char *key, const char *what, bool is_time, float stick = NAN) {
@@ -661,14 +675,14 @@ void App::draw_inspector() {
       ImGui::SameLine(88.0f);
       if (slim_slider(slider, value, lo, hi, ImGui::GetContentRegionAvail().x - 60.0f, "", 0.0f, false, stick)) { // heard while it moves
         const json v = is_time ? json(frames_text(std::llround(double(*value) * fps()))) : json(std::round(*value * 10.0f) / 10.0f);
-        preview_ops(json::array({{{"op", "replace"}, {"path", aid + "/audio/" + key}, {"value", v}}}), true);
+        preview_ops(with_gain_keys(json::array({{{"op", "replace"}, {"path", aid + "/audio/" + key}, {"value", v}}}), key, *value), true);
       }
       if (slider_done()) {
         const float v = *value;
         const std::string k = key, w = what;
-        pending_ = [this, id = aid, v, k, w, is_time] {
+        pending_ = [this, id = aid, v, k, w, is_time, with_gain_keys] {
           const json value = is_time ? json(frames_text(std::llround(double(v) * fps()))) : json(std::round(v * 10.0f) / 10.0f);
-          patch(json::array({{{"op", "replace"}, {"path", id + "/audio/" + k}, {"value", value}}}), w.c_str());
+          patch(with_gain_keys(json::array({{{"op", "replace"}, {"path", id + "/audio/" + k}, {"value", value}}}), k, v), w.c_str());
         };
       }
       slider_number(fmt, *value, 1.0f, lo, is_time ? float(double(ac->frames) / fps()) : hi);
@@ -690,6 +704,27 @@ void App::draw_inspector() {
     if (ac->volume > 0.0f && ac->volume != 1.0f) {
       ImGui::SameLine(0.0f, 16.0f);
       ImGui::TextColored(hexv(look::fg3), "volume x%.2f", ac->volume);
+    }
+    if (const TrackUi *at = track_of(ac->id); at && at->kind == "audio" && ac->link_group.empty()) {
+      // Ducking, for a sound of its own (music, a voice): down under the other sounds of the film, and back up after them.
+      ImGui::TextColored(hexv(look::fg2), "Ducking");
+      ImGui::SameLine(88.0f);
+      const std::string sid = ac->id;
+      if (gain_keys.empty()) {
+        if (soft_button("duck", "Lower under the voices", ImVec2(ImGui::GetContentRegionAvail().x, 26.0f)))
+          pending_ = [this, sid] { duck_under_voices(sid); };
+        if (ImGui::IsItemHovered())
+          ImGui::SetTooltip("12 dB down wherever another clip's sound plays, and back up after it");
+      } else {
+        const float w = (ImGui::GetContentRegionAvail().x - 6.0f) / 2.0f;
+        if (soft_button("duck_again", "Again", ImVec2(w, 26.0f)))
+          pending_ = [this, sid] { duck_under_voices(sid); };
+        if (ImGui::IsItemHovered())
+          ImGui::SetTooltip("Lower it again under the sounds where they are now (after an edit)");
+        ImGui::SameLine(0.0f, 6.0f);
+        if (soft_button("duck_off", "Remove", ImVec2(w, 26.0f)))
+          pending_ = [this, sid] { timeline_edit(json::array({{{"op", "remove_keyframe"}, {"clip", sid}, {"property", "gain_db"}}}), "Ducking removed"); };
+      }
     }
     if (const int64_t past = past_pictures(*ac); past > 0) { // music longer than the video
       ImGui::Spacing();
