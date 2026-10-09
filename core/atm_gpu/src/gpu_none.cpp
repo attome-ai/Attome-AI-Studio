@@ -32,6 +32,9 @@ void Context::draw_source(const Source &, PictureDraw) {}
 void Context::draw_source(const Source &, const Placed &) {}
 void Context::begin_clip(std::vector<Effect>, bool, int) {}
 void Context::end_clip() {}
+void Context::begin_transition() {}
+void Context::begin_incoming() {}
+void Context::end_transition(Transition) {}
 void Context::adjust(std::vector<Effect>, int) {}
 Result<void> Context::end_frame(uint8_t *) { return fail(ErrorCode::EncoderUnavailable, "G_NOT_BUILT", "This build has no GPU path."); }
 Result<void> Context::run_effects(uint8_t *, int, int, const std::vector<Effect> &, Timing *, uint8_t *, uint8_t *) {

@@ -99,6 +99,17 @@ struct Source {
   bool mask = false;
 };
 
+// A transition at one frame, worked out by the renderer (its Mix): the kind, its one number (a dissolve's or a zoom's
+// weight of the incoming picture, 0..256; how far a push or a slide has come in, in luma pixels) and its tables, as
+// transition.comp reads them.
+struct Transition {
+  enum class Kind { dissolve, wipe, push, slide, iris, zoom };
+  Kind kind = Kind::dissolve;
+  int amount = 0;
+  bool horizontal = false, from_start = false;
+  std::vector<uint32_t> table;
+};
+
 class Context {
 public:
   // A Vulkan 1.3 device (with synchronization2): the discrete GPU when there is one. ATTOME_GPU=off refuses (the CPU
@@ -140,6 +151,11 @@ public:
   void end_clip();
   // An adjustment layer: its chain run on the frame so far, mixed with it by `amount` (0..256).
   void adjust(std::vector<Effect> chain, int amount);
+  // A transition between two clips, each drawn over the frame so far: after begin_transition the outgoing clip is drawn,
+  // after begin_incoming the incoming one (over a copy of the frame as it was), and end_transition mixes the two.
+  void begin_transition();
+  void begin_incoming();
+  void end_transition(Transition transition);
   Result<void> end_frame(uint8_t *nv12);
 
   struct Impl;

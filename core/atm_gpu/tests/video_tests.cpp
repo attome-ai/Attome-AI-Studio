@@ -224,6 +224,42 @@ TEST_CASE("gpu video: a frame of video clips decoded and drawn on the GPU is the
     soft.effects = {effect("gaussian_blur", {0.01f})};
     cases.push_back({"captions popping in, and a text with a blur", {layer("clp_a", a, 0), captions, soft}});
   }
+  // Transitions: every kind, between two clips (the incoming one smaller, with effects, in one of them), under a title.
+  {
+    using Kind = atm::eval::TransitionKind;
+    using Dir = atm::eval::WipeDirection;
+    struct Mixing {
+      const char *name;
+      Kind kind;
+      int dir;
+      bool incoming_effects;
+    };
+    for (const Mixing &mx : {Mixing{"a dissolve", Kind::dissolve, 0, false}, Mixing{"a wipe from the left", Kind::wipe, int(Dir::left), false},
+                             Mixing{"a wipe from below", Kind::wipe, int(Dir::down), true}, Mixing{"a push to the right", Kind::push, int(Dir::right), false},
+                             Mixing{"a push up", Kind::push, int(Dir::up), false}, Mixing{"a slide from the left", Kind::slide, int(Dir::left), false},
+                             Mixing{"a slide down", Kind::slide, int(Dir::down), false}, Mixing{"an iris", Kind::iris, 0, true},
+                             Mixing{"a zoom in", Kind::zoom, int(atm::eval::ZoomDirection::in), false},
+                             Mixing{"a zoom out", Kind::zoom, int(atm::eval::ZoomDirection::out), true}}) {
+      atm::render::Layer out_clip = layer("clp_a", a, 0), in_clip = layer("clp_b", b, 5);
+      out_clip.mix_with = 1;
+      out_clip.mix_start = 15;
+      out_clip.mix_frames = 20;
+      out_clip.mix_kind = mx.kind;
+      out_clip.mix_dir = mx.dir;
+      out_clip.mix_softness = 0.15f;
+      out_clip.mix_amount = 0.4f;
+      in_clip.mixed_by = 0;
+      in_clip.start_frame = 15;
+      in_clip.frames = 30;
+      if (mx.incoming_effects) {
+        in_clip.xf.scale_x = in_clip.xf.scale_y = 0.8f;
+        in_clip.effects = {effect("color_grade", {0.1f, 0.2f, 0.5f}), effect("gaussian_blur", {0.005f})};
+      }
+      atm::render::Layer title = text("clp_t", "over the transition");
+      title.xf.pos_y = 0.2f;
+      cases.push_back({mx.name, {out_clip, in_clip, title}});
+    }
+  }
   // Pictures: a transparent one turned over a clip, an opaque one scaled.
   {
     const int pw = 200, ph = 120;

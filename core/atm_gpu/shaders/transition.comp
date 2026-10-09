@@ -1,0 +1,125 @@
+#version 450
+// A transition: the outgoing picture (binding 0) and the incoming one (binding 3), each drawn over the same background,
+// mixed into binding 1, one plane per dispatch and one invocation per 4-byte word. The numbers come from the renderer as
+// tables (binding 2), made by its own code (render.cpp, mix_of), and the arithmetic is its CPU's, so both give the same
+// bytes.
+//   kind 0 dissolve: the incoming picture's weight `amount`, 0..256
+//   kind 1 wipe:     the incoming picture's weight per luma column (or row), then per chroma column (or row)
+//   kind 2 push:     the incoming picture has come `amount` luma pixels in, the outgoing one has moved as far away
+//   kind 3 slide:    the incoming picture has come `amount` luma pixels in, over the outgoing one
+//   kind 4 iris:     weights over the squared distance from the centre (1025 steps), then that distance's parts as
+//                    floats: per luma column (W), per luma row (H), per chroma column (W / 2), per chroma row (H / 2)
+//   kind 5 zoom:     the incoming picture's weight `amount`; per plane (luma, then chroma) four axes (outgoing x, outgoing
+//                    y, incoming x, incoming y), four words per sample: the two source samples, the weight of the second,
+//                    how much of the sample the picture covers
+// flags: bit 0 horizontal, bit 1 from the start (x = 0 or y = 0).
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer Outgoing { uint outgoing[]; };
+layout(std430, set = 0, binding = 1) buffer Result { uint result[]; };
+layout(std430, set = 0, binding = 2) readonly buffer Tables { uint table[]; };
+layout(std430, set = 0, binding = 3) readonly buffer Incoming { uint incoming[]; };
+
+layout(push_constant) uniform Transition {
+  uint kind;
+  uint width;  // bytes per row of a plane (the picture's width)
+  uint height; // luma rows
+  uint stride; // bytes per row on the device (a multiple of 4)
+  uint chroma; // 0: the luma plane; 1: the chroma plane
+  uint at;     // where the transition's numbers start in the tables
+  uint amount;
+  uint flags;
+} pc;
+
+int out_byte(uint i) { return int((outgoing[i >> 2] >> ((i & 3u) * 8u)) & 0xFFu); }
+int in_byte(uint i) { return int((incoming[i >> 2] >> ((i & 3u) * 8u)) & 0xFFu); }
+int T(uint i) { return int(table[pc.at + i]); }
+float TF(uint i) { return uintBitsToFloat(table[pc.at + i]); }
+
+void main() {
+  const uint words_per_row = pc.stride >> 2;
+  const uint id = gl_GlobalInvocationID.x;
+  const uint y = id / words_per_row;
+  const uint rows = pc.chroma != 0u ? pc.height / 2u : pc.height;
+  if (y >= rows)
+    return;
+  const uint plane = pc.chroma != 0u ? pc.stride * pc.height : 0u; // where the plane starts
+  const uint W = pc.width;
+  const bool horizontal = (pc.flags & 1u) != 0u, from_start = (pc.flags & 2u) != 0u;
+  const int d = int(pc.amount);
+  const uint first = (id % words_per_row) * 4u;
+  uint out_word = 0u;
+  for (uint q = 0u; q < 4u; ++q) {
+    const uint x = first + q;
+    if (x >= W)
+      break;
+    const uint here = plane + y * pc.stride + x;
+    int v;
+    if (pc.kind == 0u) {
+      v = (in_byte(here) * d + out_byte(here) * (256 - d)) >> 8;
+    } else if (pc.kind == 1u || pc.kind == 4u) {
+      int a;
+      if (pc.kind == 1u) {
+        const uint span = horizontal ? W : pc.height;
+        a = T((pc.chroma != 0u ? span : 0u) + (horizontal ? (pc.chroma != 0u ? x / 2u : x) : y));
+      } else {
+        const uint H = pc.height;
+        precise float d2 = pc.chroma != 0u ? TF(1025u + W + H + x / 2u) + TF(1025u + W + H + W / 2u + y) : TF(1025u + x) + TF(1025u + W + y);
+        precise float rounded = d2 + 0.5;
+        a = T(uint(clamp(int(rounded), 0, 1024)));
+      }
+      v = (out_byte(here) * (256 - a) + in_byte(here) * a) >> 8;
+    } else if (pc.kind == 2u || pc.kind == 3u) {
+      const bool push = pc.kind == 2u;
+      const int s = pc.chroma != 0u ? d / 2 : d, total = int(rows), w = int(W), xi = int(x), yi = int(y);
+      bool from_incoming;
+      int sx = xi, sy = yi;
+      if (horizontal) {
+        if (from_start) {
+          from_incoming = xi < d;
+          sx = from_incoming ? xi + (w - d) : (push ? xi - d : xi);
+        } else {
+          from_incoming = xi >= w - d;
+          sx = from_incoming ? xi - (w - d) : (push ? xi + d : xi);
+        }
+      } else {
+        if (from_start) {
+          from_incoming = yi < s;
+          sy = from_incoming ? yi + (total - s) : (push ? yi - s : yi);
+        } else {
+          from_incoming = yi >= total - s;
+          sy = from_incoming ? yi - (total - s) : (push ? yi + s : yi);
+        }
+      }
+      const uint src = plane + uint(sy) * pc.stride + uint(sx);
+      v = from_incoming ? in_byte(src) : out_byte(src);
+    } else { // zoom
+      const uint ch = pc.chroma != 0u ? 2u : 1u;
+      const uint w = W / ch, h = rows;
+      const uint base = pc.chroma != 0u ? 8u * W + 8u * pc.height : 0u; // the luma block: 8 W + 8 H words
+      const uint xo = base, yo = xo + 4u * w, xin = yo + 4u * h, yin = xin + 4u * w;
+      const uint px = x / ch, k = x % ch;
+      const int keep = ((256 - d) * ((T(xo + px * 4u + 3u) * T(yo + y * 4u + 3u)) >> 8)) >> 8;
+      int s[2];
+      for (int side = 0; side < 2; ++side) {
+        const uint ax = side == 0 ? xo : xin, ay = side == 0 ? yo : yin;
+        const uint r0 = plane + uint(T(ay + y * 4u)) * pc.stride, r1 = plane + uint(T(ay + y * 4u + 1u)) * pc.stride;
+        const uint xa = uint(T(ax + px * 4u)) * ch + k, xb = uint(T(ax + px * 4u + 1u)) * ch + k;
+        const int fx = T(ax + px * 4u + 2u), fy = T(ay + y * 4u + 2u);
+        int top, bottom;
+        if (side == 0) {
+          top = out_byte(r0 + xa) * (256 - fx) + out_byte(r0 + xb) * fx;
+          bottom = out_byte(r1 + xa) * (256 - fx) + out_byte(r1 + xb) * fx;
+        } else {
+          top = in_byte(r0 + xa) * (256 - fx) + in_byte(r0 + xb) * fx;
+          bottom = in_byte(r1 + xa) * (256 - fx) + in_byte(r1 + xb) * fx;
+        }
+        s[side] = (top * (256 - fy) + bottom * fy) >> 16;
+      }
+      v = (s[0] * keep + s[1] * (256 - keep)) >> 8;
+    }
+    out_word |= uint(v) << (q * 8u);
+  }
+  result[plane / 4u + id] = out_word;
+}

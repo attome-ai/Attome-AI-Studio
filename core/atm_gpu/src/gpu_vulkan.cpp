@@ -40,6 +40,9 @@ const uint32_t kMixSpirv[] = { // a frame's mixes: a clip's coverage, a clip or 
 const uint32_t kPlaceSpirv[] = { // a picture or a text mask placed anywhere on a frame
 #include "place.spv.inc"
 };
+const uint32_t kTransitionSpirv[] = { // two clips mixed by a transition
+#include "transition.spv.inc"
+};
 constexpr uint32_t kMaxRowBytes = 8192; // box_rows.comp holds a row of up to this many bytes in shared memory
 
 using Clock = std::chrono::steady_clock;
@@ -73,6 +76,11 @@ struct DrawPass {
 // The push constants of place.comp, in its order.
 struct PlacePass {
   uint32_t frame_at, stride, x0, x1, y0, y1, chroma, at;
+};
+
+// The push constants of transition.comp, in its order.
+struct TransitionPass {
+  uint32_t kind, width, height, stride, chroma, at, amount, flags;
 };
 
 // The push constants of mix.comp, in its order.
@@ -280,8 +288,9 @@ struct Context::Impl : Vulkan {
   VkDescriptorSetLayout set_layout = VK_NULL_HANDLE;
   VkPipelineLayout layout = VK_NULL_HANDLE;
   VkShaderModule shader = VK_NULL_HANDLE, rows_shader = VK_NULL_HANDLE, pixels_shader = VK_NULL_HANDLE, draw_shader = VK_NULL_HANDLE,
-                 mix_shader = VK_NULL_HANDLE, place_shader = VK_NULL_HANDLE;
-  VkPipeline box = VK_NULL_HANDLE, pixels = VK_NULL_HANDLE, draw = VK_NULL_HANDLE, mix = VK_NULL_HANDLE, place = VK_NULL_HANDLE;
+                 mix_shader = VK_NULL_HANDLE, place_shader = VK_NULL_HANDLE, transition_shader = VK_NULL_HANDLE;
+  VkPipeline box = VK_NULL_HANDLE, pixels = VK_NULL_HANDLE, draw = VK_NULL_HANDLE, mix = VK_NULL_HANDLE, place = VK_NULL_HANDLE,
+             transition = VK_NULL_HANDLE;
   std::map<uint64_t, VkPipeline> rows; // box_rows.comp by the row capacity and chunk it was made for
   uint32_t shared_limit = 0; // bytes of shared memory a workgroup can have
   VkDescriptorPool descriptors = VK_NULL_HANDLE;
@@ -303,8 +312,10 @@ struct Context::Impl : Vulkan {
     Placed placed;         // else place.comp's placement
   };
   struct FrameOp {
-    enum class Kind { draw, clip, adjust } kind = Kind::draw;
+    enum class Kind { draw, clip, adjust, split, mix } kind = Kind::draw;
+    int target = 0;          // drawings and clips: 0 the frame (F), 1 the incoming clip of a transition (G)
     std::vector<Drawing> drawings;
+    Transition transition;   // mix: the outgoing (F) and the incoming (G) clips into F; split: F copied to G
     std::vector<Effect> chain;
     bool everywhere = false; // a clip: it covers the whole frame (no coverage to work out)
     int amount = 256;        // a clip's opacity (0..255), an adjustment layer's amount (0..256)
@@ -312,6 +323,7 @@ struct Context::Impl : Vulkan {
   int frame_w = 0, frame_h = 0;
   std::vector<FrameOp> frame_ops;
   bool in_clip = false;
+  int target = 0; // where drawings go now (FrameOp::target)
   std::map<uint64_t, Source> frame_sources; // the sources of this frame, by key
   // Sources kept in the GPU's memory between frames, in `kept` one after another; when a frame's do not fit, it is
   // emptied and they are sent again.
@@ -321,14 +333,16 @@ struct Context::Impl : Vulkan {
   std::map<uint64_t, Kept> kept_at;
   VkDeviceSize kept_end = 0;
   Buffer kept, kept_stage;
-  Buffer frame, pictures, taps; // the frame; the pictures of its drawings, one after another; their taps and placements
-  VkDescriptorSet draw_sets[3] = {}; // pictures -> F, A and B, with the taps
-  VkDescriptorSet mix_set = VK_NULL_HANDLE; // A, F, B and D for mix.comp
+  Buffer frame, incoming, pictures, taps; // the frame (F) and a transition's incoming clip (G); the pictures of the
+                                          // drawings, one after another; their taps, placements and transition tables
+  VkDescriptorSet draw_sets[4] = {}; // pictures -> F, A, B and G, with the taps
+  VkDescriptorSet mix_sets[2] = {};  // A, F (or G), B and D for mix.comp
+  VkDescriptorSet transition_set = VK_NULL_HANDLE; // F, G -> A for transition.comp
 
   ~Impl() {
     if (device) {
       vkDeviceWaitIdle(device);
-      for (Buffer *buf : {&a, &b, &c, &d, &upload, &download, &tables, &lut, &lut_stage, &frame, &pictures, &taps, &kept, &kept_stage})
+      for (Buffer *buf : {&a, &b, &c, &d, &upload, &download, &tables, &lut, &lut_stage, &frame, &incoming, &pictures, &taps, &kept, &kept_stage})
         release(*buf);
       vkDestroyDescriptorPool(device, descriptors, nullptr);
       vkDestroyPipeline(device, box, nullptr);
@@ -337,6 +351,8 @@ struct Context::Impl : Vulkan {
       vkDestroyPipeline(device, mix, nullptr);
       vkDestroyPipeline(device, place, nullptr);
       vkDestroyShaderModule(device, place_shader, nullptr);
+      vkDestroyPipeline(device, transition, nullptr);
+      vkDestroyShaderModule(device, transition_shader, nullptr);
       vkDestroyShaderModule(device, pixels_shader, nullptr);
       vkDestroyShaderModule(device, draw_shader, nullptr);
       vkDestroyShaderModule(device, mix_shader, nullptr);
@@ -561,9 +577,14 @@ struct Context::Impl : Vulkan {
     VK_TRY("vkCreateShaderModule", vkCreateShaderModule(device, &smi, nullptr, &place_shader));
     cpi.stage.module = place_shader;
     VK_TRY("vkCreateComputePipelines", vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &cpi, nullptr, &place));
+    smi.codeSize = sizeof kTransitionSpirv;
+    smi.pCode = kTransitionSpirv;
+    VK_TRY("vkCreateShaderModule", vkCreateShaderModule(device, &smi, nullptr, &transition_shader));
+    cpi.stage.module = transition_shader;
+    VK_TRY("vkCreateComputePipelines", vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &cpi, nullptr, &transition));
 
 
-    constexpr uint32_t kSets = 10;
+    constexpr uint32_t kSets = 13;
     VkDescriptorPoolSize sizes{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 6 * kSets};
     VkDescriptorPoolCreateInfo dpi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     dpi.maxSets = kSets;
@@ -584,8 +605,9 @@ struct Context::Impl : Vulkan {
     b_to_c = sets[3];
     d_to_b = sets[4];
     b_to_d = sets[5];
-    std::copy(sets + 6, sets + 9, draw_sets);
-    mix_set = sets[9];
+    std::copy(sets + 6, sets + 10, draw_sets);
+    std::copy(sets + 10, sets + 12, mix_sets);
+    transition_set = sets[12];
     return {};
   }
 
@@ -691,9 +713,10 @@ struct Context::Impl : Vulkan {
     return std::pair{luma_rows, chroma_rows};
   }
 
-  void record_mix(const MixPass &p, uint32_t P, uint32_t H) {
+  // A mix of mix.comp into the frame (target 0) or a transition's incoming clip (target 1).
+  void record_mix(const MixPass &p, uint32_t P, uint32_t H, int into = 0) {
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mix);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, layout, 0, 1, &mix_set, 0, nullptr);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, layout, 0, 1, &mix_sets[into], 0, nullptr);
     vkCmdPushConstants(cmd, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);
     const uint32_t words = (P / 4) * (p.kind == 0 ? H : H + H / 2);
     vkCmdDispatch(cmd, (words + 255) / 256, 1, 1);
@@ -787,14 +810,17 @@ void Context::begin_frame(int width, int height) {
   impl_->frame_ops.clear();
   impl_->frame_sources.clear();
   impl_->in_clip = false;
+  impl_->target = 0;
 }
 
 namespace {
 // The op a drawing goes into: the open clip, else a run of drawings over the frame.
 Context::Impl::FrameOp &drawing_op(Context::Impl &m) {
   using Kind = Context::Impl::FrameOp::Kind;
-  if (!m.in_clip && (m.frame_ops.empty() || m.frame_ops.back().kind != Kind::draw))
+  if (!m.in_clip && (m.frame_ops.empty() || m.frame_ops.back().kind != Kind::draw || m.frame_ops.back().target != m.target)) {
     m.frame_ops.emplace_back();
+    m.frame_ops.back().target = m.target;
+  }
   return m.frame_ops.back();
 }
 } // namespace
@@ -837,6 +863,7 @@ void Context::begin_clip(std::vector<Effect> chain, bool everywhere, int opacity
   op.chain = std::move(chain);
   op.everywhere = everywhere;
   op.amount = opacity;
+  op.target = impl_->target;
   impl_->frame_ops.push_back(std::move(op));
   impl_->in_clip = true;
 }
@@ -849,6 +876,22 @@ void Context::adjust(std::vector<Effect> chain, int amount) {
   op.chain = std::move(chain);
   op.amount = amount;
   impl_->frame_ops.push_back(std::move(op));
+}
+
+void Context::begin_transition() {
+  Impl::FrameOp op;
+  op.kind = Impl::FrameOp::Kind::split;
+  impl_->frame_ops.push_back(std::move(op));
+}
+
+void Context::begin_incoming() { impl_->target = 1; }
+
+void Context::end_transition(Transition transition) {
+  Impl::FrameOp op;
+  op.kind = Impl::FrameOp::Kind::mix;
+  op.transition = std::move(transition);
+  impl_->frame_ops.push_back(std::move(op));
+  impl_->target = 0;
 }
 
 Result<void> Context::end_frame(uint8_t *nv12) {
@@ -877,6 +920,8 @@ Result<void> Context::end_frame(uint8_t *nv12) {
     uint32_t taps = 0;
   };
   std::vector<std::vector<Where>> where(m.frame_ops.size());
+  std::vector<uint32_t> transition_at(m.frame_ops.size(), 0);
+  bool transitions = false;
   std::vector<uint32_t> table_at;
   std::vector<size_t> chain_at(m.frame_ops.size(), 0); // where an op's effects start in table_at
   VkDeviceSize picture_bytes = 4;
@@ -895,6 +940,11 @@ Result<void> Context::end_frame(uint8_t *nv12) {
       tap_words += d.upright ? d.draw.luma_x.size() + d.draw.luma_y.size() + d.draw.chroma_x.size() + d.draw.chroma_y.size() : kPlacedWords;
       where[i].push_back(w);
     }
+    if (op.kind == Impl::FrameOp::Kind::mix) {
+      transitions = true;
+      transition_at[i] = uint32_t(tap_words);
+      tap_words += op.transition.table.size();
+    }
     chain_at[i] = table_at.size();
     for (const Effect &e : op.chain) {
       chains = true;
@@ -912,6 +962,8 @@ Result<void> Context::end_frame(uint8_t *nv12) {
   constexpr VkBufferUsageFlags kWork = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
   ATM_CHECK(m.ensure_buffers(size, table_words * 4, lut_effect ? lut_effect->lut_floats * 4 : 0));
   ATM_CHECK(m.ensure(m.frame, size, kWork, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT));
+  if (transitions)
+    ATM_CHECK(m.ensure(m.incoming, size, kWork, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT));
   ATM_CHECK(m.ensure(m.pictures, picture_bytes, kWork, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT));
   ATM_CHECK(m.ensure(m.taps, VkDeviceSize(tap_words) * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT));
   // The sources not kept yet are sent. When they do not fit after the ones kept, the store is emptied (made bigger when
@@ -972,10 +1024,14 @@ Result<void> Context::end_frame(uint8_t *nv12) {
       }
       vkUpdateDescriptorSets(m.device, uint32_t(writes.size()), writes.data(), 0, nullptr);
     };
-    const VkBuffer targets[3] = {m.frame.buffer, m.a.buffer, m.b.buffer};
-    for (int t = 0; t < 3; ++t)
+    // Before a first transition the incoming clip's buffer is not made yet: its sets point at the frame, unused.
+    const VkBuffer incoming = m.incoming.buffer ? m.incoming.buffer : m.frame.buffer;
+    const VkBuffer targets[4] = {m.frame.buffer, m.a.buffer, m.b.buffer, incoming};
+    for (int t = 0; t < 4; ++t)
       point(m.draw_sets[t], {{0, m.pictures.buffer}, {1, targets[t]}, {2, m.taps.buffer}});
-    point(m.mix_set, {{0, m.a.buffer}, {1, m.frame.buffer}, {3, m.b.buffer}, {5, m.d.buffer}});
+    point(m.mix_sets[0], {{0, m.a.buffer}, {1, m.frame.buffer}, {3, m.b.buffer}, {5, m.d.buffer}});
+    point(m.mix_sets[1], {{0, m.a.buffer}, {1, incoming}, {3, m.b.buffer}, {5, m.d.buffer}});
+    point(m.transition_set, {{0, m.frame.buffer}, {1, m.a.buffer}, {2, m.taps.buffer}, {3, incoming}});
   }
   // The taps of upright drawings, the numbers of placed ones (place.comp's order), the effects' tables.
   auto *tap_out = static_cast<uint32_t *>(m.taps.mapped);
@@ -1002,6 +1058,9 @@ Result<void> Context::end_frame(uint8_t *nv12) {
       const float floats[14] = {p.px, p.py, p.cos_r, p.sin_r, p.inv_sx, p.inv_sy, p.ax, p.ay, p.u0, p.v0, p.u1, p.v1, p.sx, p.sy};
       std::memcpy(t + 10, floats, sizeof floats);
     }
+    const std::vector<uint32_t> &mix_table = m.frame_ops[i].transition.table;
+    if (!mix_table.empty())
+      std::memcpy(tap_out + transition_at[i], mix_table.data(), mix_table.size() * 4);
     for (size_t e = 0; e < m.frame_ops[i].chain.size(); ++e) {
       const std::vector<uint32_t> &table = m.frame_ops[i].chain[e].table;
       if (!table.empty())
@@ -1045,7 +1104,7 @@ Result<void> Context::end_frame(uint8_t *nv12) {
       }
     }
   m.compute_to_compute();
-  // The drawings of op i into F, A or B (target 0, 1, 2), in order: each goes over what is drawn before it.
+  // The drawings of op i into F, A, B or G (target 0, 1, 2, 3), in order: each goes over what is drawn before it.
   const auto draw_all = [&](size_t i, int target) {
     for (size_t j = 0; j < m.frame_ops[i].drawings.size(); ++j) {
       const Impl::Drawing &dr = m.frame_ops[i].drawings[j];
@@ -1086,10 +1145,29 @@ Result<void> Context::end_frame(uint8_t *nv12) {
   for (size_t i = 0; i < m.frame_ops.size(); ++i) { // in order: each goes over what is made before it
     const Impl::FrameOp &op = m.frame_ops[i];
     const uint32_t *op_tables = table_at.data() + chain_at[i];
+    const VkBuffer target = op.target ? m.incoming.buffer : m.frame.buffer;
     switch (op.kind) {
     case Kind::draw:
-      draw_all(i, 0);
+      draw_all(i, op.target ? 3 : 0);
       break;
+    case Kind::split: // the frame so far is the background of both clips of a transition
+      vkCmdCopyBuffer(m.cmd, m.frame.buffer, m.incoming.buffer, 1, &whole_picture);
+      m.compute_to_compute();
+      break;
+    case Kind::mix: { // the two clips mixed into A, which becomes the frame
+      const Transition &t = op.transition;
+      vkCmdBindPipeline(m.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m.transition);
+      vkCmdBindDescriptorSets(m.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m.layout, 0, 1, &m.transition_set, 0, nullptr);
+      for (uint32_t chroma = 0; chroma < 2; ++chroma) {
+        const TransitionPass p{uint32_t(t.kind), uw, uh, P, chroma, transition_at[i], uint32_t(t.amount), (t.horizontal ? 1u : 0u) | (t.from_start ? 2u : 0u)};
+        vkCmdPushConstants(m.cmd, m.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);
+        vkCmdDispatch(m.cmd, ((P / 4) * (chroma ? uh / 2 : uh) + 255) / 256, 1, 1);
+      }
+      m.compute_to_compute();
+      vkCmdCopyBuffer(m.cmd, m.a.buffer, m.frame.buffer, 1, &whole_picture);
+      m.compute_to_compute();
+      break;
+    }
     case Kind::clip: // the renderer's draw_isolated: drawn on its own over black in A, over white in B for the coverage
       fill(m.a.buffer, 16);
       if (!op.everywhere)
@@ -1102,10 +1180,10 @@ Result<void> Context::end_frame(uint8_t *nv12) {
       }
       m.record_chain(op.chain, op_tables, uw, uh, P, !op.everywhere, rows.first, rows.second, shift, nullptr);
       if (op.everywhere && op.amount >= 255) { // the clip is all that shows
-        vkCmdCopyBuffer(m.cmd, m.a.buffer, m.frame.buffer, 1, &whole_picture);
+        vkCmdCopyBuffer(m.cmd, m.a.buffer, target, 1, &whole_picture);
         m.compute_to_compute();
       } else {
-        m.record_mix({op.everywhere ? 2u : 3u, uw, uh, P, uint32_t(op.amount)}, P, uh);
+        m.record_mix({op.everywhere ? 2u : 3u, uw, uh, P, uint32_t(op.amount)}, P, uh, op.target);
       }
       break;
     case Kind::adjust: // the chain on a copy of the frame, mixed back by the amount

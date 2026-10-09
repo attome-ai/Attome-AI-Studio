@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <optional>
+#include <tuple>
 #include <utility>
 
 #include "atm/base/parallel.hpp"
@@ -1336,18 +1337,125 @@ void luma_key_nv12(uint8_t *nv12, uint8_t *cover, int W, int H, float level, flo
   });
 }
 
+// A transition at one frame, worked out once and applied by the CPU (apply_mix) or the GPU (transition.comp) to the
+// outgoing picture and the incoming one, each drawn over the same background.
+//   dissolve: amount = the incoming picture's weight, 0..256
+//   wipe:     the incoming picture's weight, 0..256, for each luma and each chroma column (horizontal) or row
+//   push, slide: amount = how far the incoming picture has come in, in luma pixels (even); from the side x = 0 / y = 0
+//            when from_start
+//   iris:     the incoming picture's weight over the squared distance from the centre (kIrisSteps + 1 steps), and that
+//            distance's parts per luma column and row and per chroma column and row
+//   zoom:     amount = the incoming picture's weight, 0..256; per plane (luma, then chroma) four axes: outgoing x and y,
+//            incoming x and y, each sample's two source samples, the weight of the second and how much the picture covers it
+struct ZoomAxis {
+  std::vector<int> a, b, f, cover;
+};
+constexpr int kIrisSteps = 1024;
+struct Mix {
+  eval::TransitionKind kind = eval::TransitionKind::dissolve;
+  int amount = 0;
+  bool horizontal = false, from_start = false;
+  std::vector<int> luma, chroma;
+  std::vector<int> alpha;
+  std::vector<float> dx2, dy2, cx2, cy2;
+  ZoomAxis axes[8];
+};
+
+Mix mix_of(const Layer &l, int64_t frame, int W, int H) {
+  Mix m;
+  m.kind = l.mix_kind;
+  // Progress at the frame centre, so a 1-frame transition shows the 50 % mix.
+  const double progress_d = (double(frame - l.mix_start) + 0.5) / double(l.mix_frames);
+  const float progress = float(progress_d);
+  const eval::WipeDirection dir = eval::WipeDirection(l.mix_dir);
+  m.horizontal = dir == eval::WipeDirection::left || dir == eval::WipeDirection::right;
+  m.from_start = dir == eval::WipeDirection::left || dir == eval::WipeDirection::up;
+  switch (m.kind) {
+  case eval::TransitionKind::dissolve:
+    m.amount = std::clamp(int(progress_d * 256.0 + 0.5), 0, 256);
+    break;
+  case eval::TransitionKind::push:
+  case eval::TransitionKind::slide: {
+    const int extent = m.horizontal ? W : H;
+    m.amount = std::clamp(int(smooth01(progress) * float(extent) + 0.5f) & ~1, 0, extent);
+    break;
+  }
+  case eval::TransitionKind::wipe: {
+    const bool reversed = dir == eval::WipeDirection::right || dir == eval::WipeDirection::down;
+    const float softness = l.mix_softness;
+    const auto alpha_at = [&](float pos) { // pos 0..1 across the picture, in the direction of travel
+      const float u = reversed ? 1.0f - pos : pos;
+      return int(smooth01((progress * (1.0f + softness) - u) / softness) * 256.0f + 0.5f);
+    };
+    const int span = m.horizontal ? W : H;
+    m.luma.resize(size_t(span));
+    m.chroma.resize(size_t(span / 2));
+    for (int i = 0; i < span; ++i)
+      m.luma[size_t(i)] = alpha_at((float(i) + 0.5f) / float(span));
+    for (int i = 0; i < span / 2; ++i)
+      m.chroma[size_t(i)] = alpha_at(float(2 * i + 1) / float(span));
+    break;
+  }
+  case eval::TransitionKind::iris: {
+    const float softness = l.mix_softness;
+    const float half_diag2 = 0.25f * (float(W) * float(W) + float(H) * float(H));
+    const float reach = progress * (1.0f + softness); // the radius, as a fraction of the half diagonal, that is fully open
+    m.alpha.resize(kIrisSteps + 1);
+    for (int i = 0; i <= kIrisSteps; ++i)
+      m.alpha[size_t(i)] = int(smooth01((reach - std::sqrt(float(i) / float(kIrisSteps))) / softness) * 256.0f + 0.5f);
+    const float cx = float(W) * 0.5f, cy = float(H) * 0.5f;
+    const auto d2 = [&](float at, float c) { return (at - c) * (at - c) / half_diag2 * float(kIrisSteps); };
+    for (int x = 0; x < W; ++x)
+      m.dx2.push_back(d2(float(x) + 0.5f, cx));
+    for (int y = 0; y < H; ++y)
+      m.dy2.push_back(d2(float(y) + 0.5f, cy));
+    for (int x = 0; x < W / 2; ++x)
+      m.cx2.push_back(d2(float(2 * x + 1), cx));
+    for (int y = 0; y < H / 2; ++y)
+      m.cy2.push_back(d2(float(2 * y + 1), cy));
+    break;
+  }
+  case eval::TransitionKind::zoom: {
+    const bool zoom_out = eval::ZoomDirection(l.mix_dir) == eval::ZoomDirection::out;
+    const float amount = l.mix_amount, e = smooth01(progress);
+    const float scale_out = zoom_out ? 1.0f / (1.0f + amount * e) : 1.0f + amount * e, scale_in = 1.0f + amount * (1.0f - e);
+    m.amount = int(e * 256.0f + 0.5f);
+    const auto axis = [](int n, float scale) {
+      ZoomAxis ax{std::vector<int>(size_t(n)), std::vector<int>(size_t(n)), std::vector<int>(size_t(n)), std::vector<int>(size_t(n))};
+      const float c = float(n - 1) * 0.5f;
+      for (int i = 0; i < n; ++i) {
+        const float at = c + (float(i) - c) / scale; // where in the source this sample lies; outside 0..n-1 the picture ends
+        const float p = std::clamp(at, 0.0f, float(n - 1));
+        const int a = int(p);
+        ax.a[size_t(i)] = a;
+        ax.b[size_t(i)] = std::min(a + 1, n - 1);
+        ax.f[size_t(i)] = int((p - float(a)) * 256.0f + 0.5f);
+        // Inside the picture the whole sample is covered; past its end the cover falls to nothing over one sample.
+        ax.cover[size_t(i)] = int(std::clamp(at + 1.0f, 0.0f, 1.0f) * std::clamp(float(n) - at, 0.0f, 1.0f) * 256.0f + 0.5f);
+      }
+      return ax;
+    };
+    for (const auto &[w, h, first] : {std::tuple{W, H, 0}, std::tuple{W / 2, H / 2, 4}}) {
+      m.axes[first] = axis(w, scale_out);
+      m.axes[first + 1] = axis(h, scale_out);
+      m.axes[first + 2] = axis(w, scale_in);
+      m.axes[first + 3] = axis(h, scale_in);
+    }
+    break;
+  }
+  }
+  return m;
+}
+
 // The push of a transition: the outgoing picture (in `out`) slides away towards the side opposite `dir` and the
 // incoming one follows it in from `dir`, so the two pictures meet along a moving line and nothing is mixed. The offset
 // is a whole even number of pixels (chroma is shared by 2 x 2 pixels) and follows a smooth start and stop.
-void push_blend(uint8_t *out, const uint8_t *incoming, int W, int H, float progress, eval::WipeDirection dir,
-                std::vector<uint8_t> &outgoing) {
+void push_blend(uint8_t *out, const uint8_t *incoming, int W, int H, const Mix &m, std::vector<uint8_t> &outgoing) {
   ATM_PROFILE_SCOPE("composite.push");
   const size_t size = media::nv12_size(W, H);
   outgoing.assign(out, out + size); // `out` is rewritten from the two pictures
-  const bool horizontal = dir == eval::WipeDirection::left || dir == eval::WipeDirection::right;
-  const bool from_start = dir == eval::WipeDirection::left || dir == eval::WipeDirection::up; // incoming enters at x=0 / y=0
-  const int extent = horizontal ? W : H;
-  const int d = std::clamp(int(smooth01(progress) * float(extent) + 0.5f) & ~1, 0, extent); // how far the incoming has come in
+  const bool horizontal = m.horizontal, from_start = m.from_start; // the incoming enters at x=0 / y=0 when from_start
+  const int d = m.amount; // how far the incoming has come in
   // One plane of `rows` rows of `width` bytes. The shift is `d` luma pixels: d bytes in a luma row, d bytes in a chroma
   // row (two bytes per chroma sample, one sample per two pixels), d rows of luma or d / 2 rows of chroma.
   const auto plane = [&](size_t offset, int rows, int row_shift) {
@@ -1366,15 +1474,15 @@ void push_blend(uint8_t *out, const uint8_t *incoming, int W, int H, float progr
             std::memcpy(row + (W - d), i, size_t(d));
           }
         } else {
-          const int total = rows, s = row_shift; // rows of this plane that the incoming picture covers
+          const int total = rows, sh = row_shift; // rows of this plane that the incoming picture covers
           int64_t src_y;
           const uint8_t *src;
           if (from_start) {
-            src = y < s ? in : old;
-            src_y = y < s ? y + (total - s) : y - s;
+            src = y < sh ? in : old;
+            src_y = y < sh ? y + (total - sh) : y - sh;
           } else {
-            src = y < total - s ? old : in;
-            src_y = y < total - s ? y + s : y - (total - s);
+            src = y < total - sh ? old : in;
+            src_y = y < total - sh ? y + sh : y - (total - sh);
           }
           std::memcpy(row, src + size_t(src_y) * size_t(W), size_t(W));
         }
@@ -1392,44 +1500,24 @@ void push_blend(uint8_t *out, const uint8_t *incoming, int W, int H, float progr
 // the edge of the frame, the next scene shows instead of an empty border, and its edge is antialiased by the part of each
 // pixel it covers. Each plane is resampled bilinearly in fixed point: the source positions depend only on the column or
 // only on the row, so they are worked out once per column and once per row.
-void zoom_blend(uint8_t *out, const uint8_t *incoming, int W, int H, float progress, float amount, bool zoom_out,
-                std::vector<uint8_t> &outgoing) {
+void zoom_blend(uint8_t *out, const uint8_t *incoming, int W, int H, const Mix &m, std::vector<uint8_t> &outgoing) {
   ATM_PROFILE_SCOPE("composite.zoom");
   outgoing.assign(out, out + media::nv12_size(W, H)); // `out` is rewritten from the two pictures
-  const float e = smooth01(progress);
-  const float scale_out = zoom_out ? 1.0f / (1.0f + amount * e) : 1.0f + amount * e, scale_in = 1.0f + amount * (1.0f - e);
-  const int weight = int(e * 256.0f + 0.5f); // of the incoming picture, 0..256
-  struct Axis { // for each destination sample: the two source samples, the weight of the second, and how much of it the picture covers (0..256)
-    std::vector<int> a, b, f, cover;
-  };
-  const auto axis = [](int n, float scale) {
-    Axis ax{std::vector<int>(size_t(n)), std::vector<int>(size_t(n)), std::vector<int>(size_t(n)), std::vector<int>(size_t(n))};
-    const float c = float(n - 1) * 0.5f;
-    for (int i = 0; i < n; ++i) {
-      const float at = c + (float(i) - c) / scale; // where in the source this sample lies; outside 0..n-1 the picture ends
-      const float p = std::clamp(at, 0.0f, float(n - 1));
-      const int a = int(p);
-      ax.a[size_t(i)] = a;
-      ax.b[size_t(i)] = std::min(a + 1, n - 1);
-      ax.f[size_t(i)] = int((p - float(a)) * 256.0f + 0.5f);
-      // Inside the picture the whole sample is covered; past its end the cover falls to nothing over one sample.
-      ax.cover[size_t(i)] = int(std::clamp(at + 1.0f, 0.0f, 1.0f) * std::clamp(float(n) - at, 0.0f, 1.0f) * 256.0f + 0.5f);
-    }
-    return ax;
-  };
-  // A plane of `w` x `h` samples of `ch` bytes each (1 for luma, 2 for the interleaved chroma), rows W bytes apart.
-  const auto plane = [&](size_t offset, int w, int h, int ch) {
-    const Axis xo = axis(w, scale_out), xi = axis(w, scale_in), yo = axis(h, scale_out), yi = axis(h, scale_in);
+  const int weight = m.amount; // of the incoming picture, 0..256
+  // A plane of `w` x `h` samples of `ch` bytes each (1 for luma, 2 for the interleaved chroma), rows W bytes apart, with
+  // its four axes (outgoing x and y, incoming x and y) from axes[first].
+  const auto plane = [&](size_t offset, int w, int h, int ch, size_t first) {
+    const ZoomAxis &xo = m.axes[first], &yo = m.axes[first + 1], &xi = m.axes[first + 2], &yi = m.axes[first + 3];
     const uint8_t *old = outgoing.data() + offset, *in = incoming + offset;
     uint8_t *dst = out + offset;
-    const auto sample = [&](const uint8_t *src, const Axis &ax, const Axis &ay, int x, int y, int k) {
+    const auto sample = [&](const uint8_t *src, const ZoomAxis &ax, const ZoomAxis &ay, int x, int y, int k) {
       const uint8_t *r0 = src + size_t(ay.a[size_t(y)]) * size_t(W), *r1 = src + size_t(ay.b[size_t(y)]) * size_t(W);
       const int xa = ax.a[size_t(x)] * ch + k, xb = ax.b[size_t(x)] * ch + k, fx = ax.f[size_t(x)], fy = ay.f[size_t(y)];
       const int top = r0[xa] * (256 - fx) + r0[xb] * fx, bottom = r1[xa] * (256 - fx) + r1[xb] * fx;
       return (top * (256 - fy) + bottom * fy) >> 16;
     };
-    parallel_for(h, 16, [&](int64_t first, int64_t last) {
-      for (int64_t y = first; y < last; ++y) {
+    parallel_for(h, 16, [&](int64_t first_row, int64_t last) {
+      for (int64_t y = first_row; y < last; ++y) {
         uint8_t *row = dst + size_t(y) * size_t(W);
         for (int x = 0; x < w; ++x) {
           // The weight of the outgoing picture here: what fading leaves of it, where its picture reaches (always, zooming in).
@@ -1440,8 +1528,8 @@ void zoom_blend(uint8_t *out, const uint8_t *incoming, int W, int H, float progr
       }
     });
   };
-  plane(0, W, H, 1);
-  plane(size_t(W) * size_t(H), W / 2, H / 2, 2);
+  plane(0, W, H, 1, 0);
+  plane(size_t(W) * size_t(H), W / 2, H / 2, 2, 4);
 }
 
 // An unsharp mask on the luma: each pixel moves away from the blurred picture by `amount` times its difference from it,
@@ -1603,20 +1691,10 @@ void apply_effect(const std::string &kind, const std::array<float, eval::kMaxEff
 // The wipe of a transition: `out` (the outgoing clip's picture) becomes `incoming` behind an edge that travels across
 // the picture as `progress` goes 0 -> 1, from the side the incoming clip enters. Each pixel mixes by how far the edge
 // has passed it; the edge is `softness` of the picture wide.
-void wipe_blend(uint8_t *out, const uint8_t *incoming, int W, int H, float progress, eval::WipeDirection dir, float softness) {
+void wipe_blend(uint8_t *out, const uint8_t *incoming, int W, int H, const Mix &m) {
   ATM_PROFILE_SCOPE("composite.wipe");
-  const bool horizontal = dir == eval::WipeDirection::left || dir == eval::WipeDirection::right;
-  const bool reversed = dir == eval::WipeDirection::right || dir == eval::WipeDirection::down;
-  const auto alpha_at = [&](float pos) { // pos 0..1 across the picture, in the direction of travel
-    const float u = reversed ? 1.0f - pos : pos;
-    return int(smooth01((progress * (1.0f + softness) - u) / softness) * 256.0f + 0.5f);
-  };
-  const int span = horizontal ? W : H;
-  std::vector<int> luma_a(static_cast<size_t>(span)), chroma_a(static_cast<size_t>(span / 2));
-  for (int i = 0; i < span; ++i)
-    luma_a[size_t(i)] = alpha_at((float(i) + 0.5f) / float(span));
-  for (int i = 0; i < span / 2; ++i)
-    chroma_a[size_t(i)] = alpha_at(float(2 * i + 1) / float(span));
+  const bool horizontal = m.horizontal;
+  const std::vector<int> &luma_a = m.luma, &chroma_a = m.chroma;
   parallel_for(H, 16, [&](int64_t first, int64_t last) {
     for (int64_t y = first; y < last; ++y) {
       uint8_t *d = out + size_t(y) * size_t(W);
@@ -1646,12 +1724,10 @@ void wipe_blend(uint8_t *out, const uint8_t *incoming, int W, int H, float progr
 // The slide of a transition: the incoming picture comes in over the outgoing one from the side `dir` while the outgoing
 // picture stays where it is (a push moves both). `out` holds the outgoing picture and keeps the part the incoming
 // one has not reached; the incoming one is shown by its far edge first, as if it were being pulled in.
-void slide_blend(uint8_t *out, const uint8_t *incoming, int W, int H, float progress, eval::WipeDirection dir) {
+void slide_blend(uint8_t *out, const uint8_t *incoming, int W, int H, const Mix &m) {
   ATM_PROFILE_SCOPE("composite.slide");
-  const bool horizontal = dir == eval::WipeDirection::left || dir == eval::WipeDirection::right;
-  const bool from_start = dir == eval::WipeDirection::left || dir == eval::WipeDirection::up;
-  const int extent = horizontal ? W : H;
-  const int d = std::clamp(int(smooth01(progress) * float(extent) + 0.5f) & ~1, 0, extent); // how far the incoming has come in
+  const bool horizontal = m.horizontal, from_start = m.from_start;
+  const int d = m.amount; // how far the incoming has come in
   const auto plane = [&](size_t offset, int rows, int shift) {
     uint8_t *dst = out + offset;
     const uint8_t *in = incoming + offset;
@@ -1679,31 +1755,15 @@ void slide_blend(uint8_t *out, const uint8_t *incoming, int W, int H, float prog
 // picture's half diagonal wide at its edge, until the circle has passed the corners. The circle is a circle in pixels,
 // not an ellipse that follows the picture's shape. The alpha is a table over the squared distance from the centre, so a
 // pixel costs a lookup, not a square root.
-void iris_blend(uint8_t *out, const uint8_t *incoming, int W, int H, float progress, float softness) {
+void iris_blend(uint8_t *out, const uint8_t *incoming, int W, int H, const Mix &m) {
   ATM_PROFILE_SCOPE("composite.iris");
-  constexpr int N = 1024;
-  const float half_diag2 = 0.25f * (float(W) * float(W) + float(H) * float(H));
-  const float reach = progress * (1.0f + softness); // the radius, as a fraction of the half diagonal, that is fully open
-  int table[N + 1];
-  for (int i = 0; i <= N; ++i)
-    table[i] = int(smooth01((reach - std::sqrt(float(i) / float(N))) / softness) * 256.0f + 0.5f);
-  std::vector<float> dx2(static_cast<size_t>(W)), dy2(static_cast<size_t>(H)), cx2(static_cast<size_t>(W / 2)), cy2(static_cast<size_t>(H / 2));
-  const float cx = float(W) * 0.5f, cy = float(H) * 0.5f;
-  for (int x = 0; x < W; ++x)
-    dx2[size_t(x)] = (float(x) + 0.5f - cx) * (float(x) + 0.5f - cx) / half_diag2 * float(N);
-  for (int y = 0; y < H; ++y)
-    dy2[size_t(y)] = (float(y) + 0.5f - cy) * (float(y) + 0.5f - cy) / half_diag2 * float(N);
-  for (int x = 0; x < W / 2; ++x)
-    cx2[size_t(x)] = (float(2 * x + 1) - cx) * (float(2 * x + 1) - cx) / half_diag2 * float(N);
-  for (int y = 0; y < H / 2; ++y)
-    cy2[size_t(y)] = (float(2 * y + 1) - cy) * (float(2 * y + 1) - cy) / half_diag2 * float(N);
-  const auto alpha = [&](float d2) { return table[std::clamp(int(d2 + 0.5f), 0, N)]; };
+  const auto alpha = [&](float d2) { return m.alpha[size_t(std::clamp(int(d2 + 0.5f), 0, kIrisSteps))]; };
   parallel_for(H, 16, [&](int64_t first, int64_t last) {
     for (int64_t y = first; y < last; ++y) {
       uint8_t *d = out + size_t(y) * size_t(W);
       const uint8_t *s = incoming + size_t(y) * size_t(W);
       for (int x = 0; x < W; ++x) {
-        const int a = alpha(dx2[size_t(x)] + dy2[size_t(y)]);
+        const int a = alpha(m.dx2[size_t(x)] + m.dy2[size_t(y)]);
         d[x] = uint8_t((int(d[x]) * (256 - a) + int(s[x]) * a) >> 8);
       }
     }
@@ -1715,12 +1775,36 @@ void iris_blend(uint8_t *out, const uint8_t *incoming, int W, int H, float progr
       uint8_t *d = d_uv + size_t(y) * size_t(W);
       const uint8_t *s = s_uv + size_t(y) * size_t(W);
       for (int x = 0; x < W / 2; ++x) {
-        const int a = alpha(cx2[size_t(x)] + cy2[size_t(y)]);
+        const int a = alpha(m.cx2[size_t(x)] + m.cy2[size_t(y)]);
         d[2 * x] = uint8_t((int(d[2 * x]) * (256 - a) + int(s[2 * x]) * a) >> 8);
         d[2 * x + 1] = uint8_t((int(d[2 * x + 1]) * (256 - a) + int(s[2 * x + 1]) * a) >> 8);
       }
     }
   });
+}
+
+// The outgoing picture (in `out`) and the incoming one mixed by the transition `m`, into `out`.
+void apply_mix(uint8_t *out, const uint8_t *incoming, int W, int H, const Mix &m, std::vector<uint8_t> &scratch) {
+  switch (m.kind) {
+  case eval::TransitionKind::dissolve:
+    put_rows(out, size_t(W), incoming, size_t(W), H * 3 / 2, W, m.amount);
+    break;
+  case eval::TransitionKind::wipe:
+    wipe_blend(out, incoming, W, H, m);
+    break;
+  case eval::TransitionKind::push:
+    push_blend(out, incoming, W, H, m, scratch);
+    break;
+  case eval::TransitionKind::slide:
+    slide_blend(out, incoming, W, H, m);
+    break;
+  case eval::TransitionKind::iris:
+    iris_blend(out, incoming, W, H, m);
+    break;
+  case eval::TransitionKind::zoom:
+    zoom_blend(out, incoming, W, H, m, scratch);
+    break;
+  }
 }
 
 } // namespace
@@ -2335,25 +2419,23 @@ bool Renderer::render_on_gpu(int64_t frame, uint8_t *out) {
   if (!gpu_)
     return false;
   // First what needs no decoding: every layer must be a video clip the GPU decodes, a picture, a text or an adjustment
-  // layer, with effects that all have a GPU version (one LUT in the frame at most), and no transition.
+  // layer, with effects that all have a GPU version (one LUT in the frame at most).
   struct Shown {
     const Layer *layer;
     Pose pose;
     std::vector<gpu::Effect> chain;
   };
   std::vector<Shown> shown;
+  std::vector<int> shown_at(comp_.layers.size(), -1); // a layer's place in `shown`
   uint64_t lut_id = 0;
-  for (const Layer &l : comp_.layers) {
+  for (size_t i = 0; i < comp_.layers.size(); ++i) {
+    const Layer &l = comp_.layers[i];
     if (!l.video || frame < l.start_frame || frame >= l.start_frame + l.frames)
       continue;
     if (l.reverse || failed_.count(l.clip_id) || gpu_failed_.count(l.clip_id))
       return false;
-    if ((l.mix_with >= 0 && l.mixing_at(frame)) || (l.mixed_by >= 0 && comp_.layers[size_t(l.mixed_by)].mixing_at(frame)))
-      return false;
     Shown s{&l, pose_at(l, comp_, frame), {}};
-    if (s.pose.opacity <= 0.0f || (l.is_adjustment && l.effects.empty()))
-      continue; // nothing to draw
-    if (!l.effects.empty() && !gpu_chain(l, frame, s.chain))
+    if (!l.effects.empty() && s.pose.opacity > 0.0f && !gpu_chain(l, frame, s.chain))
       return false;
     for (const gpu::Effect &e : s.chain)
       if (e.kind == gpu::Effect::Kind::lut) {
@@ -2361,6 +2443,7 @@ bool Renderer::render_on_gpu(int64_t frame, uint8_t *out) {
           return false;
         lut_id = e.lut_id;
       }
+    shown_at[i] = int(shown.size());
     shown.push_back(std::move(s));
   }
   const auto pack = [](const std::vector<Tap> &taps) {
@@ -2369,12 +2452,14 @@ bool Renderer::render_on_gpu(int64_t frame, uint8_t *out) {
       packed[i] = uint32_t(taps[i].i0) | uint32_t(taps[i].w) << 16 | uint32_t(taps[i].i1 - taps[i].i0) << 25;
     return packed;
   };
-  gpu_->begin_frame(width_, height_);
-  for (Shown &s : shown) {
+  // One layer onto what is being drawn (the frame, or a transition's incoming clip); false leaves the frame to the CPU.
+  const auto emit = [&](Shown &s) -> bool {
     const Layer *l = s.layer;
+    if (s.pose.opacity <= 0.0f || (l->is_adjustment && l->effects.empty()))
+      return true; // nothing to draw
     if (l->is_adjustment) {
       gpu_->adjust(std::move(s.chain), int(s.pose.opacity * 256.0f + 0.5f));
-      continue;
+      return true;
     }
     // A layer with effects is drawn on its own at full opacity (draw_isolated), then put over the frame.
     const bool isolated = !s.chain.empty();
@@ -2385,7 +2470,7 @@ bool Renderer::render_on_gpu(int64_t frame, uint8_t *out) {
     if (l->is_text) {
       const std::vector<TextPart> parts = text_parts(*l, frame, p);
       if (parts.empty())
-        continue;
+        return true;
       if (isolated)
         gpu_->begin_clip(std::move(s.chain), false, opacity);
       for (const TextPart &part : parts) {
@@ -2409,7 +2494,7 @@ bool Renderer::render_on_gpu(int64_t frame, uint8_t *out) {
       }
       if (isolated)
         gpu_->end_clip();
-      continue;
+      return true;
     }
     // A picture: a still, or a video frame the GPU decoded.
     gpu::Source still;
@@ -2418,7 +2503,7 @@ bool Renderer::render_on_gpu(int64_t frame, uint8_t *out) {
     bool transparent = false;
     if (l->is_image) {
       if (!still_of(*l))
-        continue; // left out, as on the CPU (which reports it)
+        return true; // left out, as on the CPU (which reports it)
       const media::FrameView v = stills_.at(l->clip_id).view();
       still.key = std::hash<std::string>{}(l->clip_id + "\x1f" + l->path);
       still.width = vw = v.width;
@@ -2453,12 +2538,12 @@ bool Renderer::render_on_gpu(int64_t frame, uint8_t *out) {
     Upright u;
     if (placed) {
       if (!to_placed(pl, width_, height_, alpha, q))
-        continue;
+        return true;
     } else if (xf.scale_x == 1.0f && xf.scale_y == 1.0f && xf.pos_x == 0.5f && xf.pos_y == 0.5f && xf.anchor_x == 0.5f && xf.anchor_y == 0.5f &&
                !xf.cropped()) {
       u = centred(width_, height_, std::min(vw, width_), std::min(vh, height_));
     } else if (!upright(pl, width_, height_, vw, vh, u)) {
-      continue; // off the canvas: nothing of it shows (with effects too: its coverage is 0 everywhere)
+      return true; // off the canvas: nothing of it shows (with effects too: its coverage is 0 everywhere)
     }
     const gpu::Picture *picture = nullptr;
     if (reader) {
@@ -2489,6 +2574,72 @@ bool Renderer::render_on_gpu(int64_t frame, uint8_t *out) {
     }
     if (isolated)
       gpu_->end_clip();
+    return true;
+  };
+  gpu_->begin_frame(width_, height_);
+  for (Shown &s : shown) {
+    const Layer &l = *s.layer;
+    if (l.mixed_by >= 0 && comp_.layers[size_t(l.mixed_by)].mixing_at(frame))
+      continue; // drawn together with the outgoing clip
+    if (l.mix_with < 0 || !l.mixing_at(frame)) {
+      if (!emit(s))
+        return false;
+      continue;
+    }
+    // A transition: both clips over the same background, then mixed (render()'s way).
+    const int incoming = shown_at[size_t(l.mix_with)];
+    gpu_->begin_transition();
+    if (!emit(s))
+      return false;
+    gpu_->begin_incoming();
+    if (incoming >= 0 && !emit(shown[size_t(incoming)]))
+      return false;
+    const Mix m = mix_of(l, frame, width_, height_);
+    gpu::Transition t;
+    t.amount = m.amount;
+    t.horizontal = m.horizontal;
+    t.from_start = m.from_start;
+    const auto ints = [&](const std::vector<int> &v) {
+      for (const int x : v)
+        t.table.push_back(uint32_t(x));
+    };
+    const auto floats = [&](const std::vector<float> &v) {
+      for (const float x : v) {
+        uint32_t bits;
+        std::memcpy(&bits, &x, 4);
+        t.table.push_back(bits);
+      }
+    };
+    switch (m.kind) {
+    case eval::TransitionKind::dissolve:
+      t.kind = gpu::Transition::Kind::dissolve;
+      break;
+    case eval::TransitionKind::wipe:
+      t.kind = gpu::Transition::Kind::wipe;
+      ints(m.luma);
+      ints(m.chroma);
+      break;
+    case eval::TransitionKind::push:
+      t.kind = gpu::Transition::Kind::push;
+      break;
+    case eval::TransitionKind::slide:
+      t.kind = gpu::Transition::Kind::slide;
+      break;
+    case eval::TransitionKind::iris:
+      t.kind = gpu::Transition::Kind::iris;
+      ints(m.alpha);
+      for (const std::vector<float> *part : {&m.dx2, &m.dy2, &m.cx2, &m.cy2})
+        floats(*part);
+      break;
+    case eval::TransitionKind::zoom:
+      t.kind = gpu::Transition::Kind::zoom;
+      for (const ZoomAxis &ax : m.axes) // four words a sample: a, b, f, cover
+        for (size_t i = 0; i < ax.a.size(); ++i)
+          for (const int x : {ax.a[i], ax.b[i], ax.f[i], ax.cover[i]})
+            t.table.push_back(uint32_t(x));
+      break;
+    }
+    gpu_->end_transition(std::move(t));
   }
   ATM_PROFILE_SCOPE("composite.gpu_frame");
   if (auto made = gpu_->end_frame(out); !made) {
@@ -2530,22 +2681,7 @@ Result<void> Renderer::render(int64_t frame, uint8_t *out) {
     mix_.assign(out, out + media::nv12_size(width_, height_));
     draw(l, frame, out, cleared, used);
     draw(comp_.layers[size_t(l.mix_with)], frame, mix_.data(), cleared, used);
-    // Progress at the frame centre, so a 1-frame dissolve shows the 50 % mix.
-    const double progress = (double(frame - l.mix_start) + 0.5) / double(l.mix_frames);
-    if (l.mix_kind == eval::TransitionKind::wipe)
-      wipe_blend(out, mix_.data(), width_, height_, float(progress), eval::WipeDirection(l.mix_dir), l.mix_softness);
-    else if (l.mix_kind == eval::TransitionKind::push)
-      push_blend(out, mix_.data(), width_, height_, float(progress), eval::WipeDirection(l.mix_dir), scratch_);
-    else if (l.mix_kind == eval::TransitionKind::slide)
-      slide_blend(out, mix_.data(), width_, height_, float(progress), eval::WipeDirection(l.mix_dir));
-    else if (l.mix_kind == eval::TransitionKind::iris)
-      iris_blend(out, mix_.data(), width_, height_, float(progress), l.mix_softness);
-    else if (l.mix_kind == eval::TransitionKind::zoom)
-      zoom_blend(out, mix_.data(), width_, height_, float(progress), l.mix_amount,
-                 eval::ZoomDirection(l.mix_dir) == eval::ZoomDirection::out, scratch_);
-    else
-      put_rows(out, size_t(width_), mix_.data(), size_t(width_), height_ * 3 / 2, width_,
-               std::clamp(int(progress * 256.0 + 0.5), 0, 256));
+    apply_mix(out, mix_.data(), width_, height_, mix_of(l, frame, width_, height_), scratch_);
   }
   if (!cleared)
     media::fill_black(out, width_, height_);
