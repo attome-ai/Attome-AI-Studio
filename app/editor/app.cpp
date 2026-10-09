@@ -799,16 +799,9 @@ void App::run_pending() {
 
 void App::add_track(bool audio) {
   json ids;
-  // The next free name of its kind: V1, V2, ... for pictures, A1, A2, ... for sound.
-  std::string name;
-  for (int n = 1; n < 1000; ++n) {
-    name = (audio ? "A" : "V") + std::to_string(n);
-    if (std::none_of(tracks_.begin(), tracks_.end(), [&](const TrackUi &t) { return t.name == name; }))
-      break;
-  }
   if (patch(json::array({{{"op", "add"},
                           {"path", seq_id_ + "/tracks/$new:t"},
-                          {"value", {{"kind", audio ? "audio" : "video"}, {"name", name}}}}}),
+                          {"value", {{"kind", audio ? "audio" : "video"}, {"name", new_track_name(audio)}}}}}),
             audio ? "Add audio track" : "Add track", &ids))
     selected_track_ = ids.value("$new:t", "");
 }

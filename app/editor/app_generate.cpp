@@ -39,6 +39,8 @@ void App::add_generative_clip(const std::string &model, const std::string &track
   params[model.rfind("cwf_", 0) == 0 ? "workflow" : "model"] = model; // a card of the library, or a model's own
   std::string home = track;
   int64_t start = at;
+  if (!speech && track.empty() && at < 0) // a picture added from the panel goes at the playhead, as text and effects do (the engine finds it a track)
+    start = std::clamp<int64_t>(playhead_, 0, std::max<int64_t>(0, total_frames_));
   if (speech && track.empty() && at < 0) {
     // A voice added from the panel goes under the picture, at the playhead: on a sound track that is free there, else on a new one
     // (at the end of a track that holds the video's own sound it would speak after the film).
@@ -75,10 +77,13 @@ void App::add_generative_clip(const std::string &model, const std::string &track
   selected_clip_ = made.value("clip", "");
   focus_prompt_ = selected_clip_; // the next thing to do is to write what it should make
   insp_rev_ = 0;
+  if (!speech && track.empty() && at < 0) // as in CapCut, the playhead goes to its end: the next one follows it
+    if (const ClipUi *c = find_clip(selected_clip_))
+      seek(c->start + c->frames);
 }
 
 // The Generate panel: one card per model, grouped by the kind of clip it makes (video, image, ...) and, within a kind, by
-// family (SD 1.5, SDXL, ...). A card is dragged onto the timeline, or clicked to add its clip at the end.
+// family (SD 1.5, SDXL, ...). A card is dragged onto the timeline, or clicked to add its clip at the playhead.
 void App::draw_generate_panel() {
   if (!gen_models_loaded_ || clock_ >= next_gen_models_poll_) { // which models can run changes with downloads and engines
     gen_models_loaded_ = true;
@@ -148,7 +153,7 @@ void App::draw_generate_panel() {
       tip += !is_installed ? "\nNot installed. Download it in the Models panel."
              : !has_engine ? "\nNothing runs it yet. Set ComfyUI in the Models panel."
                            : "\nReady.";
-      t.tip = tip + "\nDrag it onto the timeline, or click to add it at the end.";
+      t.tip = tip + "\nDrag it onto the timeline, or click to add it at the playhead.";
       t.payload = "gen:" + id;
       t.art = [type, is_installed, has_engine](ImDrawList *dl, ImVec2 p, ImVec2 q) {
         dl->AddCircleFilled(ImVec2(q.x - 12.0f, p.y + 12.0f), 4.5f, hex(!is_installed ? 0xef5f5f : !has_engine ? 0xe3a33a : look::ok)); // ready, no engine, not installed
@@ -186,7 +191,7 @@ void App::draw_generate_panel() {
       t.mark = "workflow_card:" + name;
       t.label = name;
       t.base = 0x2a2218;
-      t.tip = name + "\nA Clip Workflow saved in this project.\nDrag it onto the timeline, or click to add it at the end.";
+      t.tip = name + "\nA Clip Workflow saved in this project.\nDrag it onto the timeline, or click to add it at the playhead.";
       t.payload = "gen:" + id;
       t.art = [](ImDrawList *dl, ImVec2 p, ImVec2 q) {
         const ImVec2 c((p.x + q.x) * 0.5f, p.y + (q.y - p.y) * 0.42f);
@@ -200,7 +205,7 @@ void App::draw_generate_panel() {
     }
     ImGui::Dummy(ImVec2(0, 4.0f));
   }
-  panel_hint("Click a model to add a clip at the end, or drag it onto the timeline. Then write what it should make in the Inspector.");
+  panel_hint("Click a model to add a clip at the playhead, or drag it onto the timeline. Then write what it should make in the Inspector.");
 }
 
 // The clips whose workflow cannot run on this computer, and why. Asked again when the project changes and while a

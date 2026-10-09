@@ -448,6 +448,38 @@ TEST_CASE("generate: refused before anything runs when a model or its engine is 
   }
 }
 
+TEST_CASE("gen.create_clip at a time with no track: the first picture track free there, else a new one over the pictures", "[gen][create]") {
+  const fs::path dir = fs::temp_directory_path() / atm::new_id("attome-gen-free");
+  fs::create_directories(dir);
+  const std::string project = (dir / "Free.attome").string();
+  atm::api::EngineConfig cfg;
+  cfg.models_dir = (dir / "models").string();
+  cfg.providers = {std::make_shared<MockProvider>()};
+  Engine engine(cfg);
+  ok(engine, "project.create", {{"path", project}, {"rate", "24"}, {"canvas", "320x176"}});
+  const auto add = [&](const char *at) {
+    return ok(engine, "gen.create_clip", {{"project", project}, {"prompt", ""}, {"model", atm::api::kMockModel}, {"seconds", 2}, {"at", at}});
+  };
+  const auto layers = [&] { // the picture tracks from the bottom up, as "name:clips"
+    std::string out;
+    const json inspected = ok(engine, "project.inspect", {{"project", project}, {"level", "tracks"}}); // kept: the loop reads inside it
+    for (const json &t : inspected["data"]["sequences"][0]["tracks"])
+      if (t.value("kind", std::string()) != "audio")
+        out += (out.empty() ? "" : " ") + t.value("name", std::string()) + ":" + std::to_string(t.value("clips", 0));
+    return out;
+  };
+  add("0s");                                  // an empty film: a first track
+  CHECK(layers() == "V1:1");
+  ok(engine, "timeline.edit", {{"project", project}, {"ops", json::array({{{"op", "add_text"}, {"text", "Title"}, {"at", "5s"}}})}});
+  add("4s");                                  // free on V1 there
+  CHECK(layers() == "V1:2 Titles:1");
+  const json over = add("1s");                // V1 has a clip there: a new track over it, under the titles
+  CHECK(layers() == "V1:2 V2:1 Titles:1");
+  CHECK(ok(engine, "project.get", {{"project", project}, {"id", over["clip"]}})["object"]["timing"]["record_in"] == "1");
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}
+
 TEST_CASE("gen.create_clip: the clip goes where it is asked for, or after the clips in the way", "[gen][create]") {
   const fs::path dir = fs::temp_directory_path() / atm::new_id("attome-gen-at");
   fs::create_directories(dir);

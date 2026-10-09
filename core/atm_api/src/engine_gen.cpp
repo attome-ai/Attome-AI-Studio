@@ -567,7 +567,9 @@ Result<json> Engine::Impl::gen_create_clip(const json &params) {
   static std::atomic<uint32_t> counter{uint32_t(std::chrono::steady_clock::now().time_since_epoch().count())};
   const int64_t seed = params.value("seed", int64_t((counter.fetch_add(2654435761u) >> 8) % 1000000));
 
-  // The track: the one named, else the lowest picture track that is not for titles or effects, else a new one.
+  // The track: the one named; else the lowest track of its kind (a picture: not one for titles or effects) and, with "at", the first of
+  // them that is free there (from the main picture track up, so a clip asked for where the film already has a picture goes over it);
+  // else a new one.
   json ops = json::array();
   std::string track = params.value("track", std::string());
   const json &tracks = sequence.contains("tracks") ? sequence["tracks"] : json::object();
@@ -576,7 +578,7 @@ Result<json> Engine::Impl::gen_create_clip(const json &params) {
       const auto t = tracks.find(id.get<std::string>());
       if (t != tracks.end() && (t->value("kind", std::string("video")) == "audio") == voice && t->value("name", std::string()) != "Titles" &&
           t->value("name", std::string()) != "Effects") {
-        if (voice && params.contains("at")) { // a voice goes on the first audio track that is free where it is asked to start
+        if (params.contains("at")) { // the first track that is free where it is asked to start
           const auto wanted = parse_time(params["at"]);
           const auto span = Rational::make(std::llround(seconds * 1000.0), 1000);
           bool free_there = true;
@@ -600,9 +602,34 @@ Result<json> Engine::Impl::gen_create_clip(const json &params) {
   const json *track_node = nullptr;
   if (track.empty()) {
     track = "$new:track";
-    json add = {{"op", "add"}, {"path", seq + "/tracks/$new:track"}, {"value", {{"kind", voice ? "audio" : "video"}, {"name", voice ? "Voice" : "V1"}}}};
-    if (const json order = sequence.value("track_order", json::array()); !order.empty() && !voice)
-      add["anchor"] = {{"before", order[0]}};
+    // A picture's new track: the first picture track of the film, under the others; when the picture tracks are taken where the clip is
+    // asked for, over them (under the effects and the titles), so it shows. Named V1, V2, ... as the first free name.
+    const json order = sequence.value("track_order", json::array());
+    std::string name = "Voice";
+    for (int n = 1; !voice && n < 1000; ++n) {
+      name = "V" + std::to_string(n);
+      if (std::none_of(tracks.begin(), tracks.end(), [&](const json &t) { return t.value("name", std::string()) == name; }))
+        break;
+    }
+    json add = {{"op", "add"}, {"path", seq + "/tracks/$new:track"}, {"value", {{"kind", voice ? "audio" : "video"}, {"name", name}}}};
+    bool has_pictures = false;
+    std::string above_effects; // the Effects or the Titles track, the lower of the two
+    for (const json &id : order)
+      if (const auto t = tracks.find(id.get<std::string>()); t != tracks.end() && t->value("kind", std::string("video")) != "audio") {
+        const std::string tname = t->value("name", std::string());
+        if (tname == "Titles" || tname == "Effects") {
+          if (above_effects.empty())
+            above_effects = id.get<std::string>();
+        } else {
+          has_pictures = true;
+        }
+      }
+    if (!voice && !order.empty()) {
+      if (!has_pictures || !params.contains("at"))
+        add["anchor"] = {{"before", order[0]}};
+      else if (!above_effects.empty())
+        add["anchor"] = {{"before", above_effects}};
+    }
     ops.push_back(std::move(add));
   } else if (const auto t = tracks.find(track); t != tracks.end()) {
     track_node = &*t;
