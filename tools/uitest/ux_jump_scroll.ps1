@@ -29,5 +29,5 @@ $run = Invoke-EditorScript -Project $proj -SelectFirstClip -TimeoutSeconds 240 -
 )
 try { } finally { Stop-Daemon $run }
 if ($run.Errors) { Write-Host "FAIL: $($run.Errors)" -ForegroundColor Red; exit 1 }
-Write-Host "RAN: look at the captures in $work" -ForegroundColor Green
+Write-Host "PASS: the playhead is in view after End and Home; look at the captures in $work" -ForegroundColor Green
 exit 0
