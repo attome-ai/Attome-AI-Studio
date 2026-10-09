@@ -113,8 +113,8 @@ Result<json> Engine::Impl::render_sequence(const json &params) {
     (void)found;
     if (settings.width < 16 || settings.height < 16 || settings.width > 8192 || settings.height > 4608)
       return bad_param("height", "gives a size outside 16 x 16 … 8192 x 4608");
-  } else if (settings.width < 16 || settings.height < 16 || settings.width > 4096 || settings.height > 2304) {
-    return bad_param("height", "gives a size outside 16 x 16 … 4096 x 2304 (the H.264 encoder's range)");
+  } else if (!media::h264_size_ok(settings.width, settings.height)) {
+    return bad_param("height", "gives a size the H.264 encoder does not take (each side 16 … 4096, at most 4096 x 2304 pixels)");
   }
 
   auto job = std::make_shared<Job>();

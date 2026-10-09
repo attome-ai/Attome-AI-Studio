@@ -202,6 +202,10 @@ private:
   void draw_presets_card();                                           // every Preset of the project, with a way to take one away
   void draw_generate_card(const ClipUi &clip); // a generative clip: why it cannot run here, and the download that fixes it
   void delete_selected();
+  void ripple_delete_selected(); // Shift+Delete: the clips go and what follows on their tracks closes up
+  void delete_beside_playhead(bool before); // Q / W: the part of the clip before / after the playhead goes, closing up
+  bool gap_at(const TrackUi &track, int64_t frame, int64_t &from, int64_t &to) const; // the empty time around a frame, with clips after it
+  void delete_gap(const std::string &track_id, int64_t frame);
   bool is_picked(const std::string &clip_id) const { return clip_id == selected_clip_ || picked_.count(clip_id) > 0; }
   std::vector<const ClipUi *> picked_clips() const;   // the selected clips, with the clips linked to them
   void select_clips(const std::vector<std::string> &ids, bool extend);
@@ -212,6 +216,7 @@ private:
   void draw_clip_menu(const ClipUi &clip);
   void draw_timeline_menu();
   void split_at_playhead();
+  const ClipUi *clip_to_cut(const TrackUi **track) const; // the clip a cut at the playhead works on
   void history_step(bool undo);
   void start_export(const std::string &path);
   // The Export sheet: where to save, the size, the quality (with the file size it comes to), the sound. Opens from the Export

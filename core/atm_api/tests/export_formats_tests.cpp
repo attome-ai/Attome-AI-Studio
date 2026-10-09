@@ -97,3 +97,30 @@ TEST_CASE("ProRes and DNxHR are written as .mov through the FFmpeg named by ATTO
   CHECK_FALSE(p.engine.call("render.sequence", {{"project", p.path}, {"output", (p.dir / "bad").string()}, {"format", "prores"}, {"profile", "bogus"}}));
   set_env("ATTOME_FFMPEG", "");
 }
+
+TEST_CASE("H.264 export takes a vertical 4K picture, and refuses one larger than the encoder's frame", "[export][media]") {
+  Project p;
+  const std::string out = (p.dir / "tall.mp4").string();
+  const auto started = p.engine.call("render.sequence", {{"project", p.path}, {"output", out}, {"width", 2160}, {"height", 3840}});
+  INFO((started ? "" : started.error().message));
+  REQUIRE(started);
+  json state;
+  for (int i = 0; i < 3000; ++i) {
+    const auto polled = p.engine.call("jobs.get", {{"job_id", started->at("job_id")}});
+    REQUIRE(polled);
+    state = *polled;
+    if (state["state"] != "running")
+      break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  INFO(state.dump());
+  REQUIRE(state["state"] == "done");
+  const auto probed = p.engine.call("media.probe", {{"path", out}});
+  REQUIRE(probed);
+  CHECK(probed->value("width", 0) == 2160);
+  CHECK(probed->value("height", 0) == 3840);
+  // 4096 x 4096 is more pixels than H.264's largest frame (4096 x 2304): refused at the call.
+  const auto too_big = p.engine.call("render.sequence", {{"project", p.path}, {"output", (p.dir / "square.mp4").string()}, {"width", 4096}, {"height", 4096}});
+  REQUIRE_FALSE(too_big);
+  CHECK(too_big.error().rule == "E_PARAM");
+}

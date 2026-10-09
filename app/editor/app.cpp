@@ -921,6 +921,132 @@ void App::delete_selected() {
     say("Some clips are on the locked track " + locked_name + " and stayed.", true);
 }
 
+// Shift+Delete: the selected clips go, and the later clips on their tracks (and on the tracks that follow the cut) move up
+// to close the gap. The engine's ripple_delete takes a clip's linked sound too, so each linked pair is named once.
+void App::ripple_delete_selected() {
+  std::vector<const ClipUi *> list;
+  std::string locked_name;
+  for (const ClipUi *c : picked_clips()) {
+    if (const TrackUi *home = track_of(c->id); home && home->locked) {
+      locked_name = home->name;
+      continue;
+    }
+    const std::vector<const ClipUi *> partners = linked_of(*c);
+    if (std::none_of(list.begin(), list.end(), [&](const ClipUi *x) { return std::find(partners.begin(), partners.end(), x) != partners.end(); }))
+      list.push_back(c);
+  }
+  if (list.empty()) {
+    if (!locked_name.empty())
+      say("Track " + locked_name + " is locked. Unlock it to change its clips.", true);
+    return;
+  }
+  // The latest first: closing a later gap does not move an earlier clip.
+  std::sort(list.begin(), list.end(), [](const ClipUi *a, const ClipUi *b) { return a->start > b->start; });
+  json ops = json::array();
+  for (const ClipUi *c : list)
+    ops.push_back({{"op", "ripple_delete"}, {"clip", c->id}});
+  const std::string label = list.size() > 1 ? "Delete " + std::to_string(list.size()) + " clips and close the gaps" : "Delete and close the gap";
+  json result;
+  selected_clip_.clear();
+  picked_.clear();
+  if (rpc("timeline.edit", {{"project", project_path_}, {"ops", std::move(ops)}, {"label", label}}, result)) {
+    refresh();
+    say(label, false, true);
+  }
+  if (!locked_name.empty())
+    say("Some clips are on the locked track " + locked_name + " and stayed.", true);
+}
+
+// Q and W, CapCut's quick trims: the part of the clip before the playhead (Q) or after it (W) goes, and what follows closes
+// up (a split at the playhead, then the engine's ripple_delete of one half: the linked sound and the tracks that follow
+// the cut go along). After Q the playhead stands where the clip now begins.
+void App::delete_beside_playhead(bool before) {
+  const TrackUi *track = nullptr;
+  const ClipUi *c = clip_to_cut(&track);
+  if (!c || playhead_ <= c->start || playhead_ >= c->start + c->frames) {
+    say(std::string("Move the playhead inside a clip to take out the part ") + (before ? "before" : "after") + " it.");
+    return;
+  }
+  if (track && track->locked) {
+    say("Track " + track->name + " is locked. Unlock it to change its clips.", true);
+    return;
+  }
+  const std::string id = c->id;
+  const int64_t start = c->start;
+  const std::string label = before ? "Delete before the playhead" : "Delete after the playhead";
+  const json ops = json::array({{{"op", "split"}, {"clip", id}, {"at", frames_text(playhead_)}, {"id", "$new:after"}},
+                                {{"op", "ripple_delete"}, {"clip", before ? id : std::string("$new:after")}}});
+  json result;
+  if (rpc("timeline.edit", {{"project", project_path_}, {"ops", ops}, {"label", label}}, result)) {
+    selected_clip_ = before ? result["id_map"].value("$new:after", "") : id;
+    picked_.clear();
+    refresh();
+    if (before)
+      seek(start);
+    say(label, false, true);
+  }
+}
+
+bool App::gap_at(const TrackUi &track, int64_t frame, int64_t &from, int64_t &to) const {
+  from = 0;
+  to = -1;
+  for (const ClipUi &c : track.clips) {
+    if (frame >= c.start && frame < c.start + c.frames)
+      return false; // on a clip, not in a gap
+    if (c.start + c.frames <= frame)
+      from = std::max(from, c.start + c.frames);
+    else if (to < 0 || c.start < to)
+      to = c.start;
+  }
+  return to > from;
+}
+
+// Right click on an empty stretch of a track, "Delete gap": the clips after it move up by its length (with their linked
+// clips), the first first, so none lands on another. The length is taken from the document's exact times: a clip as long
+// as its file is rarely a whole number of frames, and a gap measured in frames would put a linked sound onto the one
+// before it.
+void App::delete_gap(const std::string &track_id, int64_t frame) {
+  const TrackUi *track = nullptr;
+  for (const TrackUi &t : tracks_)
+    if (t.id == track_id)
+      track = &t;
+  int64_t from = 0, to = 0;
+  if (!track || !gap_at(*track, frame, from, to))
+    return;
+  if (track->locked) {
+    say("Track " + track->name + " is locked. Unlock it to change its clips.", true);
+    return;
+  }
+  const json &clips = doc_["sequences"][seq_id_]["tracks"][track->id]["clips"];
+  const auto exact = [&](const std::string &id, const char *key) {
+    return Rational::parse(clips[id]["timing"].value(key, std::string("0"))).value_or(Rational());
+  };
+  std::vector<const ClipUi *> later;
+  Rational gap_from, gap_to;
+  bool any_before = false;
+  for (const ClipUi &c : track->clips)
+    if (c.start >= to) {
+      later.push_back(&c);
+    } else if (const auto end = add(exact(c.id, "record_in"), exact(c.id, "duration")); end && (!any_before || gap_from < *end)) {
+      gap_from = *end;
+      any_before = true;
+    }
+  std::sort(later.begin(), later.end(), [](const ClipUi *a, const ClipUi *b) { return a->start < b->start; });
+  gap_to = exact(later.front()->id, "record_in");
+  const auto length = sub(gap_to, gap_from);
+  if (!length)
+    return;
+  json ops = json::array();
+  for (const ClipUi *c : later)
+    if (const auto at = sub(exact(c->id, "record_in"), *length))
+      ops.push_back({{"op", "move"}, {"clip", c->id}, {"to", at->to_string()}});
+  json result;
+  if (rpc("timeline.edit", {{"project", project_path_}, {"ops", std::move(ops)}, {"label", "Delete gap"}}, result)) {
+    refresh();
+    say("Delete gap", false, true);
+  }
+}
+
 // The selected clips and the clips linked to them (a picture and its sound), each once.
 std::vector<const ClipUi *> App::picked_clips() const {
   std::vector<const ClipUi *> out;
@@ -1193,6 +1319,13 @@ void App::draw_timeline_menu() {
   }
   if (menu_item("Select all", "Ctrl+A"))
     pending_ = [this] { select_all_clips(); };
+  int64_t gap_from = 0, gap_to = 0;
+  for (const TrackUi &t : tracks_)
+    if (t.id == menu_track_ && gap_at(t, menu_frame_, gap_from, gap_to) && menu_item("Delete gap")) {
+      const std::string track = menu_track_;
+      const int64_t at = menu_frame_;
+      pending_ = [this, track, at] { delete_gap(track, at); };
+    }
   ImGui::Separator();
   if (menu_item("Add a video track"))
     pending_ = [this] { add_track(false); };
@@ -1209,17 +1342,23 @@ void App::drop_transitions(const std::string &clip_id, json &ops) const {
         ops.push_back({{"op", "remove"}, {"path", tr.id}});
 }
 
+// The selected clip, else (nothing selected) whatever lies under the playhead on the top-most track.
+const ClipUi *App::clip_to_cut(const TrackUi **track) const {
+  if (const ClipUi *c = selected(track))
+    return c;
+  for (const TrackUi &t : tracks_) // rows run from the top layer down
+    for (const ClipUi &k : t.clips)
+      if (playhead_ > k.start && playhead_ < k.start + k.frames) {
+        if (track)
+          *track = &t;
+        return &k;
+      }
+  return nullptr;
+}
+
 void App::split_at_playhead() {
   const TrackUi *track = nullptr;
-  const ClipUi *c = selected(&track);
-  if (!c) { // no selection: split whatever lies under the playhead on the top-most track
-    for (auto t = tracks_.begin(); t != tracks_.end() && !c; ++t) // rows run from the top layer down
-      for (const ClipUi &k : t->clips)
-        if (playhead_ > k.start && playhead_ < k.start + k.frames) {
-          c = &k;
-          track = &*t;
-        }
-  }
+  const ClipUi *c = clip_to_cut(&track);
   if (!c || playhead_ <= c->start || playhead_ >= c->start + c->frames) { // nothing went wrong: there is no cut to make here
     say(c ? "The playhead is at the clip's edge: move it inside the clip to split it." : "Move the playhead inside a clip to split it.");
     return;

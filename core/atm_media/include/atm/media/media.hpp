@@ -112,6 +112,13 @@ Result<Still> read_still(const std::string &path, int box_width, int box_height)
 // Audio of [start, start + duration) as 48 kHz stereo float. Empty when the file has no audio.
 Result<std::vector<float>> read_audio(const std::string &path, int64_t start_hns, int64_t duration_hns);
 
+// Whether the H.264 encoders take a picture of w x h: each side 16 to 4096, and no more pixels than 4096 x 2304 (H.264
+// level 5.1's largest frame). A vertical 4K picture (2160 x 3840) fits; the hardware and the Windows software encoders
+// both take it.
+inline bool h264_size_ok(int w, int h) {
+  return w >= 16 && h >= 16 && w <= 4096 && h <= 4096 && int64_t(w) * int64_t(h) <= int64_t(4096) * 2304;
+}
+
 struct EncodeSettings {
   std::string path; // .mp4
   int width = 1920, height = 1080;

@@ -79,8 +79,16 @@ void App::shortcuts() {
     play(false);
   if (!io.KeyCtrl && !io.KeyAlt && ImGui::IsKeyPressed(ImGuiKey_L, false))
     play(true);
-  if (ImGui::IsKeyPressed(ImGuiKey_Delete, false) || ImGui::IsKeyPressed(ImGuiKey_Backspace, false))
-    delete_selected();
+  if (ImGui::IsKeyPressed(ImGuiKey_Delete, false) || ImGui::IsKeyPressed(ImGuiKey_Backspace, false)) {
+    if (io.KeyShift) // and close the gap
+      ripple_delete_selected();
+    else
+      delete_selected();
+  }
+  if (!io.KeyCtrl && !io.KeyAlt && ImGui::IsKeyPressed(ImGuiKey_Q, false)) // CapCut's quick trims
+    delete_beside_playhead(true);
+  if (!io.KeyCtrl && !io.KeyAlt && ImGui::IsKeyPressed(ImGuiKey_W, false))
+    delete_beside_playhead(false);
   if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_C, false))
     copy_picked(false);
   if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_X, false))

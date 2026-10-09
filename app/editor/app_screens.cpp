@@ -341,7 +341,7 @@ void App::draw_export() {
     for (int i = 0; i < 5; ++i) {
       int w = 0, h = 0;
       export_size(i, w, h);
-      const bool fits = exp_format_ >= 3 ? (w <= 8192 && h <= 4608 && w >= 16 && h >= 16) : (w <= 4096 && h <= 2304 && w >= 16 && h >= 16); // the encoder's range
+      const bool fits = exp_format_ >= 3 ? (w <= 8192 && h <= 4608 && w >= 16 && h >= 16) : media::h264_size_ok(w, h); // the encoder's range
       if (i)
         ImGui::SameLine();
       if (soft_button((std::string("export_res_") + kRes[i]).c_str(), kRes[i], ImVec2(82.0f, 30.0f), fits, exp_res_ == i))
@@ -585,7 +585,8 @@ void App::draw_shortcuts_sheet() {
                      {"Up / Down", "The previous or next cut or marker"}, {"Home / End", "The start or the end"}, {"Ctrl+L", "Loop playback"}, {"Ctrl+F", "Full screen preview (Esc leaves)"},
                      {"I / O", "Mark In and Out at the playhead: play, loop and export just that part"}, {"Alt+X", "Clear In and Out"}}},
         {"Clips", {{"Click, Ctrl+click, Shift+click", "Select one, add or remove one, a range on the track"}, {"Drag on empty space", "A box that selects what it touches"},
-                   {"Ctrl+A", "Select all clips"}, {"S", "Split at the playhead"}, {"Delete or Backspace", "Delete the selected clips"}, {"Click on empty space", "Select nothing"},
+                   {"Ctrl+A", "Select all clips"}, {"S", "Split at the playhead"}, {"Delete or Backspace", "Delete the selected clips"}, {"Shift+Delete", "Delete them and close the gap"},
+                   {"Q / W", "Take out the part of the clip before / after the playhead, closing up"}, {"Right click on a gap", "Delete gap"}, {"Click on empty space", "Select nothing"},
                    {"Ctrl+C / X / V", "Copy, cut, paste at the playhead"}, {"Ctrl+D", "Duplicate after the clips"}, {"Esc", "Select nothing; while dragging, let go without the change"}, {"Right click", "The menu of a clip or of the empty timeline"}}},
         {"Project", {{"Ctrl+Z / Ctrl+Y", "Undo, redo (Ctrl+Shift+Z also redoes)"}, {"Ctrl+S", "Save now"}, {"Ctrl+I", "Import media"}, {"Ctrl+E", "Export"}, {"Ctrl+,", "Settings: where rendering runs"}, {"F1", "This list"}}},
         {"Timeline", {{"Shift+Z", "Fit the whole film in the window"}, {"+ / -", "Zoom in or out"}, {"Ctrl+mouse wheel", "Zoom about the pointer"}, {"M", "A marker at the playhead (again: remove it)"}, {"N", "Snapping on or off"}, {"Alt while dragging", "The opposite of the Snap switch, for one drag"}, {"Shift while dragging a slider", "Small steps"}, {"Ctrl+plus / minus / 0", "Make the whole editor larger, smaller, or 100 %"}}},
