@@ -19,14 +19,19 @@ fleurs = root / ".deps/fleurs_ar"
 model, language, count, out = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
 use_cli = len(sys.argv) > 5 and sys.argv[5] == "cli"  # control: whisper.cpp's own whisper-cli with its defaults
 gpu_args = ["--gpu", "1"] if "gpu" in sys.argv[5:] else []  # attome-whisper on the graphics card
+for a in sys.argv[5:]:  # any other option of attome-whisper, as name=value: beam=5, prompt=..., timing=segments
+    if "=" in a:
+        gpu_args += ["--" + a.split("=", 1)[0], a.split("=", 1)[1]]
 cli = root / ".deps/whisper.cpp/build/bin/whisper-cli.exe"
 
 # Arabic diacritics (tashkeel), tatweel, punctuation
 DIACRITICS = re.compile(r"[\u0610-\u061A\u064B-\u065F\u0670\u06D6-\u06ED\u0640]")
 PUNCT = re.compile(r"[\u060C\u061B\u061F\u066A-\u066D\.,;:!?\"'()\[\]{}«»\-–—…،؛؟]")
 
+INDIC = str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")
+
 def normal(text: str) -> list[str]:
-    text = DIACRITICS.sub("", text)
+    text = DIACRITICS.sub("", text).translate(INDIC).lower()  # Arabic-Indic digits as 0-9, Latin words in lower case
     text = PUNCT.sub(" ", text)
     text = text.replace("أ", "ا").replace("إ", "ا").replace("آ", "ا").replace("ى", "ي").replace("ة", "ه")  # the usual letter variants
     return text.split()

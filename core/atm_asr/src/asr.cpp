@@ -17,13 +17,50 @@
 namespace atm::asr {
 namespace fs = std::filesystem;
 
-void append_whisper_pcm(const float *stereo48k, size_t frames, std::vector<float> &mono16k) {
-  const size_t out = frames / 3;
-  mono16k.reserve(mono16k.size() + out);
-  for (size_t i = 0; i < out; ++i) {
-    const float *p = stereo48k + i * 6; // three frames of left and right
-    mono16k.push_back((p[0] + p[1] + p[2] + p[3] + p[4] + p[5]) * (1.0f / 6.0f));
+namespace {
+constexpr int kTaps = 95;        // odd: the filter is centred on a sample
+constexpr double kCutoff = 7300; // Hz, at 48 kHz: with a Hamming window of this length the response is 6 dB down here and 50 dB down by 8.2 kHz
+} // namespace
+
+Downsampler::Downsampler() : taps_(kTaps), pending_(size_t(kTaps / 2), 0.0f) { // silence before the start, so the first output sits at the first input
+  const double pi = 3.14159265358979323846, fc = kCutoff / 48000.0;
+  double sum = 0.0;
+  for (int i = 0; i < kTaps; ++i) {
+    const int m = i - kTaps / 2;
+    const double sinc = m == 0 ? 2.0 * fc : std::sin(2.0 * pi * fc * m) / (pi * m);
+    const double window = 0.54 - 0.46 * std::cos(2.0 * pi * i / (kTaps - 1));
+    taps_[size_t(i)] = float(sinc * window);
+    sum += sinc * window;
   }
+  for (float &t : taps_)
+    t = float(t / sum); // a steady level passes unchanged
+}
+
+void Downsampler::run(std::vector<float> &mono16k) {
+  size_t at = skip_;
+  for (; at + size_t(kTaps) <= pending_.size(); at += 3) {
+    const float *p = pending_.data() + at;
+    float v = 0.0f;
+    for (int i = 0; i < kTaps; ++i)
+      v += p[i] * taps_[size_t(i)];
+    mono16k.push_back(v);
+  }
+  const size_t used = std::min(at, pending_.size());
+  skip_ = at - used;
+  pending_.erase(pending_.begin(), pending_.begin() + std::ptrdiff_t(used));
+}
+
+void Downsampler::push(const float *stereo48k, size_t frames, std::vector<float> &mono16k) {
+  pending_.reserve(pending_.size() + frames);
+  for (size_t i = 0; i < frames; ++i)
+    pending_.push_back((stereo48k[i * 2] + stereo48k[i * 2 + 1]) * 0.5f);
+  mono16k.reserve(mono16k.size() + frames / 3 + 1);
+  run(mono16k);
+}
+
+void Downsampler::finish(std::vector<float> &mono16k) {
+  pending_.insert(pending_.end(), size_t(kTaps / 2), 0.0f); // silence after the end, for the samples the filter still looks ahead to
+  run(mono16k);
 }
 
 Result<Line> parse_line(std::string_view text) {
@@ -273,15 +310,17 @@ Result<Transcript> transcribe(const Options &options, const std::string &media_p
 
   std::vector<float> mono;
   mono.reserve(size_t(double(length_hns) / double(media::kHnsPerSecond) * kRate) + 16);
-  const int64_t chunk_hns = 30 * media::kHnsPerSecond; // 30 s of 48 kHz is a whole number of 3-frame groups
+  const int64_t chunk_hns = 30 * media::kHnsPerSecond;
+  Downsampler down;
   for (int64_t done = 0; done < length_hns; done += chunk_hns) {
     if (cancel && cancel->load())
       return fail(ErrorCode::Cancelled, "E_CANCELLED", "Cancelled.");
     ATM_TRY(std::vector<float> chunk, media::read_audio(media_path, from_hns + done, std::min(chunk_hns, length_hns - done)));
-    append_whisper_pcm(chunk.data(), chunk.size() / 2, mono);
+    down.push(chunk.data(), chunk.size() / 2, mono);
     if (progress)
       progress(0.1 * double(std::min(done + chunk_hns, length_hns)) / double(length_hns));
   }
+  down.finish(mono);
   if (progress)
     progress(0.1);
   const auto child_progress = [&](double p) {

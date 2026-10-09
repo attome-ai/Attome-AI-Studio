@@ -36,9 +36,22 @@ struct Transcript {
   std::string device = "cpu"; // where it ran: "gpu" or "cpu"
 };
 
-// Appends `frames` frames of 48 kHz stereo float (what media::read_audio gives) to `mono16k`: both channels averaged, three frames
-// averaged into one sample. A `frames` that is not a multiple of 3 loses its last frames (give whole multiples but for the last chunk).
-void append_whisper_pcm(const float *stereo48k, size_t frames, std::vector<float> &mono16k);
+// 48 kHz stereo float (what media::read_audio gives) to 16 kHz mono, the sound Whisper takes: the two channels are averaged, what is above
+// 8 kHz is filtered out (a windowed-sinc low-pass of 95 taps: flat to about 6.5 kHz, 50 dB down from 8 kHz), and every third sample is kept.
+// Without the filter the sounds above 8 kHz (the hiss of s and sh, cymbals) fold back into the speech band as noise. The sound is given in
+// pieces of any length, in order; finish() gives the last samples (the filter looks 47 samples ahead).
+class Downsampler {
+public:
+  Downsampler();
+  void push(const float *stereo48k, size_t frames, std::vector<float> &mono16k);
+  void finish(std::vector<float> &mono16k);
+
+private:
+  std::vector<float> taps_;
+  std::vector<float> pending_; // mono 48 kHz not yet turned into output: the tail the next piece continues
+  size_t skip_ = 0;            // input samples to pass before the next output sample is taken
+  void run(std::vector<float> &mono16k);
+};
 
 // What a line of the program's output says.
 struct Line {

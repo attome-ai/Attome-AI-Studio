@@ -47,16 +47,60 @@ std::vector<float> seconds_of_sound(int seconds) { return std::vector<float>(siz
 
 } // namespace
 
-TEST_CASE("asr: 48 kHz stereo becomes 16 kHz mono, three frames to one sample", "[asr]") {
-  // Left 1, right 0 for the first three frames; left 0.5, right 0.5 for the next three; a stray frame at the end is dropped.
-  const float in[] = {1, 0, 1, 0, 1, 0, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.9f, 0.9f};
+// The level (RMS) of what a tone of `hz` at 48 kHz stereo becomes at 16 kHz, given in pieces of `piece` frames; 1 s of sound, the ends left out.
+double level_after(double hz, size_t piece) {
+  std::vector<float> in(size_t(48000) * 2);
+  for (size_t i = 0; i < 48000; ++i)
+    in[i * 2] = in[i * 2 + 1] = float(std::sin(2.0 * 3.14159265358979 * hz * double(i) / 48000.0));
+  asr::Downsampler down;
   std::vector<float> out;
-  asr::append_whisper_pcm(in, 7, out);
-  REQUIRE(out.size() == 2);
-  CHECK_THAT(out[0], Catch::Matchers::WithinAbs(0.5, 1e-6));
-  CHECK_THAT(out[1], Catch::Matchers::WithinAbs(0.5, 1e-6));
-  asr::append_whisper_pcm(in, 3, out); // appends
-  CHECK(out.size() == 3);
+  for (size_t at = 0; at < 48000; at += piece)
+    down.push(in.data() + at * 2, std::min(piece, size_t(48000) - at), out);
+  down.finish(out);
+  double sum = 0.0;
+  size_t n = 0;
+  for (size_t i = 200; i + 200 < out.size(); ++i, ++n)
+    sum += double(out[i]) * double(out[i]);
+  return std::sqrt(sum / double(n));
+}
+
+TEST_CASE("asr: 48 kHz stereo becomes 16 kHz mono with what is above 8 kHz filtered out, in pieces of any size", "[asr]") {
+  const double full = std::sqrt(0.5); // the level of a full tone
+  // Speech passes: a tone at 1 kHz and at 5 kHz keeps its level within half a decibel.
+  CHECK(20.0 * std::log10(level_after(1000.0, 48000) / full) > -0.5);
+  CHECK(20.0 * std::log10(level_after(5000.0, 48000) / full) > -0.5);
+  // What would fold back does not: 10 kHz would land on 6 kHz, 12 kHz on 4 kHz, 15 kHz on 1 kHz. Each is at least 45 dB down
+  // (three samples averaged, as before, left them only 5, 10 and 22 dB down).
+  for (const double hz : {9000.0, 10000.0, 12000.0, 15000.0, 20000.0})
+    CHECK(20.0 * std::log10(level_after(hz, 48000) / full) < -45.0);
+
+  // The length is a third of the input's, and pieces of any size give the same samples as one piece.
+  std::vector<float> in(size_t(4800) * 2);
+  for (size_t i = 0; i < 4800; ++i) {
+    in[i * 2] = float(std::sin(double(i) * 0.05));        // left and right differ: they are averaged
+    in[i * 2 + 1] = float(std::sin(double(i) * 0.031) * 0.5);
+  }
+  std::vector<float> whole, parts;
+  asr::Downsampler one, many;
+  one.push(in.data(), 4800, whole);
+  one.finish(whole);
+  for (size_t at = 0, k = 0; at < 4800; ++k) {
+    const size_t piece = std::min<size_t>(1 + (k * 37) % 211, 4800 - at); // odd sizes, not multiples of three
+    many.push(in.data() + at * 2, piece, parts);
+    at += piece;
+  }
+  many.finish(parts);
+  CHECK(whole.size() == 1600);
+  REQUIRE(parts.size() == whole.size());
+  for (size_t i = 0; i < whole.size(); ++i)
+    REQUIRE(parts[i] == whole[i]);
+
+  // A steady level passes unchanged, and the first sample sits at the first input (no delay).
+  std::vector<float> flat(size_t(960) * 2, 0.25f), out;
+  asr::Downsampler d;
+  d.push(flat.data(), 960, out);
+  d.finish(out);
+  CHECK_THAT(out[out.size() / 2], Catch::Matchers::WithinAbs(0.25, 1e-4));
 }
 
 TEST_CASE("asr: the lines of the speech program are read, and what is not one is refused", "[asr]") {

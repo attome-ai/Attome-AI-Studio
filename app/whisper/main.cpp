@@ -18,6 +18,9 @@
 #if defined(_WIN32)
 #include <fcntl.h>
 #include <io.h>
+#define NOMINMAX
+#include <windows.h>
+#include <shellapi.h>
 #endif
 
 namespace {
@@ -49,6 +52,25 @@ int main(int argc, char **argv) {
 #if defined(_WIN32)
   _setmode(_fileno(stdin), _O_BINARY);
   _setmode(_fileno(stdout), _O_BINARY);
+  // The arguments as UTF-8: argv is in the system's own code page, which loses a model path or a prompt in another script (whisper.cpp
+  // takes its paths as UTF-8).
+  std::vector<std::string> utf8_args;
+  std::vector<char *> utf8_argv;
+  int wide_count = 0;
+  if (wchar_t **wide = CommandLineToArgvW(GetCommandLineW(), &wide_count)) {
+    for (int i = 0; i < wide_count; ++i) {
+      const int n = WideCharToMultiByte(CP_UTF8, 0, wide[i], -1, nullptr, 0, nullptr, nullptr);
+      std::string one(size_t(std::max(n, 1)), '\0');
+      WideCharToMultiByte(CP_UTF8, 0, wide[i], -1, one.data(), n, nullptr, nullptr);
+      one.resize(std::strlen(one.c_str()));
+      utf8_args.push_back(std::move(one));
+    }
+    LocalFree(wide);
+    for (std::string &a : utf8_args)
+      utf8_argv.push_back(a.data());
+    argc = int(utf8_argv.size());
+    argv = utf8_argv.data();
+  }
 #endif
   std::string model, language = "auto";
   bool gpu = false; // --gpu 1: the graphics card through Vulkan (with flash attention), when the build has it and a device takes the model
@@ -56,6 +78,8 @@ int main(int argc, char **argv) {
   // Measured against a voice whose word positions are known (8 recordings, 172 words): with DTW 97-98 % of the words start within 0.2 s of the
   // truth, with segments 73-83 %.
   std::string timing = "dtw";
+  std::string prompt; // --prompt <text>: words given to the decoder before it starts, which steer its spelling and style
+  int beam = 1;       // --beam N: beam search with N candidate texts (1: greedy, the fastest)
   std::string vad; // --vad <Silero ggml file>: only the speech is decoded (whisper.cpp's voice activity detection); silence and music are skipped
   for (int i = 1; i + 1 < argc; i += 2) {
     if (!std::strcmp(argv[i], "--model"))
@@ -68,6 +92,10 @@ int main(int argc, char **argv) {
       timing = argv[i + 1];
     else if (!std::strcmp(argv[i], "--vad"))
       vad = argv[i + 1];
+    else if (!std::strcmp(argv[i], "--prompt"))
+      prompt = argv[i + 1];
+    else if (!std::strcmp(argv[i], "--beam"))
+      beam = std::clamp(std::atoi(argv[i + 1]), 1, 10);
   }
   if (model.empty())
     return fail("no --model given");
@@ -102,7 +130,11 @@ int main(int argc, char **argv) {
   if (!ctx)
     return fail("the model could not be loaded: " + model);
 
-  whisper_full_params params = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
+  whisper_full_params params = whisper_full_default_params(beam > 1 ? WHISPER_SAMPLING_BEAM_SEARCH : WHISPER_SAMPLING_GREEDY);
+  if (beam > 1)
+    params.beam_search.beam_size = beam;
+  if (!prompt.empty())
+    params.initial_prompt = prompt.c_str();
   params.n_threads = int(std::max(1u, std::thread::hardware_concurrency() / 2));
   params.print_progress = params.print_realtime = params.print_timestamps = params.print_special = false;
   params.token_timestamps = true; // token times: with DTW they carry a word's time back from the speech-only timeline that VAD decodes
