@@ -217,6 +217,9 @@ private:
   void draw_timeline_menu();
   void split_at_playhead();
   std::string new_track_name(bool sound) const; // V1, V2, ... or A1, A2, ...: the first not taken
+  int64_t pictures_end() const;                  // the frame after the last picture of the film (0 without pictures)
+  int64_t past_pictures(const ClipUi &c) const;  // how long a sound plays on after the pictures end (music longer than the video)
+  void end_with_pictures(const std::string &clip_id); // that sound ends where the pictures do, fading out
   const ClipUi *clip_to_cut(const TrackUi **track) const; // the clip a cut at the playhead works on
   void history_step(bool undo);
   void start_export(const std::string &path);

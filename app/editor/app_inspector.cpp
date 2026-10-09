@@ -691,6 +691,16 @@ void App::draw_inspector() {
       ImGui::SameLine(0.0f, 16.0f);
       ImGui::TextColored(hexv(look::fg3), "volume x%.2f", ac->volume);
     }
+    if (const int64_t past = past_pictures(*ac); past > 0) { // music longer than the video
+      ImGui::Spacing();
+      ImGui::PushTextWrapPos(0.0f);
+      ImGui::TextColored(hexv(look::fg2), "Plays %.1f s past the end of the video: the film ends in black.", double(past) / fps());
+      ImGui::PopTextWrapPos();
+      if (soft_button("end_with_video", "End with the video", ImVec2(ImGui::GetContentRegionAvail().x, 26.0f)))
+        pending_ = [this, id = ac->id] { end_with_pictures(id); };
+      if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Ends the sound where the last picture ends, with a short fade out");
+    }
   }
   if (show_audio)
     end_card();

@@ -1377,6 +1377,8 @@ void App::draw_clip_menu(const ClipUi &c) {
       pending_ = [this, id, v = c.volume <= 0.0f ? 1.0f : 0.0f] {
         patch(json::array({{{"op", "replace"}, {"path", id + "/volume"}, {"value", v}}}), v > 0.0f ? "Unmute" : "Mute");
       };
+    if (past_pictures(c) > 0 && menu_item("End with the video", nullptr, false, !locked))
+      pending_ = [this, id] { end_with_pictures(id); };
     if (!sound && !c.is_adjustment && menu_item("Fade in and out...", nullptr, false, !locked))
       opened_cards_.insert(id + ":fade");
   }
@@ -1862,6 +1864,38 @@ void App::add_transition_at(const std::string &from, const std::string &to, cons
     op["direction"] = kind == "zoom_out" ? "out" : "in";
   }
   timeline_edit(json::array({std::move(op)}), "Add transition");
+}
+
+int64_t App::pictures_end() const {
+  int64_t end = 0;
+  for (const TrackUi &t : tracks_)
+    if (t.kind != "audio")
+      for (const ClipUi &c : t.clips)
+        end = std::max(end, c.start + c.frames);
+  return end;
+}
+
+// Music longer than the video makes the film longer: its last seconds are black. A sound of its own (not a picture's sound, which goes
+// with its picture) that starts before the pictures end and plays on after them is offered "End with the video".
+int64_t App::past_pictures(const ClipUi &c) const {
+  const TrackUi *t = track_of(c.id);
+  if (!t || t->kind != "audio" || !c.link_group.empty())
+    return 0;
+  const int64_t end = pictures_end();
+  return end > c.start && c.start + c.frames > end ? c.start + c.frames - end : 0;
+}
+
+// The sound ends where the pictures do, and fades out over its last second and a half (or half of it, when it is short): a trim and a
+// fade, one edit.
+void App::end_with_pictures(const std::string &clip_id) {
+  const ClipUi *c = find_clip(clip_id);
+  if (!c || past_pictures(*c) <= 0)
+    return;
+  const int64_t end = pictures_end(), fade = std::min<int64_t>(std::llround(1.5 * fps()), (end - c->start) / 2);
+  json ops = json::array({{{"op", "trim"}, {"clip", clip_id}, {"edge", "out"}, {"to", frames_text(end)}}});
+  if (fade > 0)
+    ops.push_back({{"op", "fade"}, {"clip", clip_id}, {"out", frames_text(fade)}});
+  timeline_edit(std::move(ops), "End with the video");
 }
 
 // The first free name of a new track: V1, V2, ... or A1, A2, ...
