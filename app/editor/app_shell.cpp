@@ -177,6 +177,11 @@ void App::frame(double dt) {
   }
   for (auto &[path, peaks] : thumbs_.take_peaks()) // waveforms of sounds
     peaks_[path] = std::move(peaks.peak);
+  for (auto &[path, beats] : thumbs_.take_beats()) { // the beat of sounds that show it
+    beats_[path] = beats;
+    if (beats.bpm <= 0.0)
+      say(beats.failed ? "The sound of " + file_name(path) + " could not be read for its beat." : "No clear beat was found in " + file_name(path) + ".", beats.failed);
+  }
 
   draw_menu();
   if (project_path_.empty()) {

@@ -421,6 +421,17 @@ void App::draw_timeline() {
           }
         }
       }
+      if (c.show_beats) { // the beats of its sound: a tick at the top and a dot at the bottom of each, where it is drawn now (a drag moves them)
+        int drawn = 0;
+        for (const int64_t b : beat_frames(c))
+          if (const float bx = x_of(double(b - c.start + start)); bx > x0 + 1.0f && bx < x1 - 1.0f && bx >= vis_l && bx <= vis_r) {
+            dl->AddLine(ImVec2(bx, cy + 2.0f), ImVec2(bx, cy + 8.0f), hex(look::accent), 1.5f);
+            dl->AddCircleFilled(ImVec2(bx, cy + ch - 4.0f), 2.0f, hex(look::accent));
+            ++drawn;
+          }
+        if (drawn > 0)
+          ui_mark("beats:" + c.name); // a test can see that they are drawn
+      }
       // Under the pointer: the clip lightens and its two ends show the grips that trim it.
       if (lanes_hovered && !attached_sound && ImGui::IsMouseHoveringRect(ImVec2(std::max(x0, win.x + header_w), cy), ImVec2(x1, cy + ch))) {
         dl->AddRectFilled(ImVec2(x0, cy), ImVec2(x1 - 1.0f, cy + ch), IM_COL32(255, 255, 255, 20), 5.0f);

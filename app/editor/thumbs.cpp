@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstring>
 
+#include "atm/api/audio_tools.hpp"
 #include "atm/base/profiler.hpp"
 #include "atm/media/media.hpp"
 
@@ -33,6 +34,7 @@ void Thumbs::push(int kind, const std::string &path) {
 void Thumbs::request(const std::string &path) { push(0, path); }
 void Thumbs::request_strip(const std::string &path) { push(1, path); }
 void Thumbs::request_peaks(const std::string &path) { push(2, path); }
+void Thumbs::request_beats(const std::string &path) { push(3, path); }
 
 std::vector<std::pair<std::string, Thumb>> Thumbs::take() {
   std::lock_guard lock(mutex_);
@@ -47,6 +49,11 @@ std::vector<std::pair<std::string, Strip>> Thumbs::take_strips() {
 std::vector<std::pair<std::string, Peaks>> Thumbs::take_peaks() {
   std::lock_guard lock(mutex_);
   return std::exchange(done_peaks_, {});
+}
+
+std::vector<std::pair<std::string, Beats>> Thumbs::take_beats() {
+  std::lock_guard lock(mutex_);
+  return std::exchange(done_beats_, {});
 }
 
 namespace {
@@ -80,6 +87,23 @@ void Thumbs::run() {
       queue_.pop_front();
     }
     const std::string &path = job.path;
+
+    if (job.kind == 3) { // the beat of a sound: its first three minutes, as audio.analyze reads it
+      ATM_PROFILE_SCOPE("beats.make");
+      Beats b;
+      b.failed = true;
+      if (const auto info = media::probe(path); info && info->has_audio && info->duration_hns > 0)
+        if (const auto pcm = media::read_audio(path, 0, std::min<int64_t>(info->duration_hns, 180 * media::kHnsPerSecond))) {
+          b.failed = false;
+          if (const api::audio::Tempo tempo = api::audio::find_tempo(*pcm); tempo.bpm > 0.0 && tempo.confidence >= 3.0) { // clear (find_tempo: 3 and more); a steady tone scores near 2
+            b.bpm = tempo.bpm;
+            b.first = tempo.first_beat;
+          }
+        }
+      std::lock_guard lock(mutex_);
+      done_beats_.emplace_back(path, b);
+      continue;
+    }
 
     if (job.kind == 2) { // the peaks of a sound, read in pieces of 20 s
       ATM_PROFILE_SCOPE("peaks.make");

@@ -497,6 +497,9 @@ void App::refresh() {
                 }
               c.ducked = kfs->contains("duck_db") && !(*kfs)["duck_db"].empty();
             }
+            c.show_beats = au->value("beats", false);
+            if (c.show_beats && !c.path.empty())
+              thumbs_.request_beats(c.path);
           }
           if (track.kind == "audio" && !c.path.empty() && c.stream != "audio") // a linked sound uses a video file
             audio_only_.insert(c.path);
@@ -1385,6 +1388,16 @@ void App::draw_clip_menu(const ClipUi &c) {
       pending_ = [this, id, v = c.volume <= 0.0f ? 1.0f : 0.0f] {
         patch(json::array({{{"op", "replace"}, {"path", id + "/volume"}, {"value", v}}}), v > 0.0f ? "Unmute" : "Mute");
       };
+    if (sound && menu_item(c.show_beats ? "Hide beats" : "Show beats", nullptr, false, !locked)) { // marks on the clip that edges catch on
+      const json *cj = clip_json(id);
+      const bool has_audio = cj && cj->contains("audio") && (*cj)["audio"].is_object();
+      pending_ = [this, id, on = !c.show_beats, has_audio] {
+        json op = !has_audio ? json{{"op", "add"}, {"path", id + "/audio"}, {"value", {{"beats", true}}}}
+                  : on       ? json{{"op", "add"}, {"path", id + "/audio/beats"}, {"value", true}}
+                             : json{{"op", "remove"}, {"path", id + "/audio/beats"}};
+        patch(json::array({std::move(op)}), on ? "Show beats" : "Hide beats");
+      };
+    }
     if (sound && menu_item("Fade in and out", nullptr, false, !locked)) { // a second each (a third of a short clip); the Audio card changes them
       const int64_t f = std::max<int64_t>(1, std::min<int64_t>(std::llround(fps()), c.frames / 3));
       pending_ = [this, id, f] {
@@ -1685,6 +1698,8 @@ int64_t App::snap_frame(int64_t start, int64_t length, const std::string &skip) 
         continue; // its own linked sound still sits where the clip came from
       consider(c.start);
       consider(c.end_ceil);
+      for (const int64_t b : beat_frames(c)) // the beats a music clip shows: cut to the beat
+        consider(b);
     }
   if (line >= 0)
     snap_at_ = line;
@@ -1935,6 +1950,20 @@ void App::duck_under_voices(const std::string &clip_id) {
     say("Nothing else plays while it does: nothing was lowered.");
   else
     say("Lowered under " + std::to_string(n) + (n == 1 ? " stretch" : " stretches") + " of other sound", false, true);
+}
+
+// A clip's beats on the film: the file's beat grid (first beat, tempo) through the clip's start in the file and its speed. None for a clip
+// played backwards, or before the beat is known.
+std::vector<int64_t> App::beat_frames(const ClipUi &c) const {
+  std::vector<int64_t> out;
+  const auto found = c.show_beats && !c.reverse ? beats_.find(c.path) : beats_.end();
+  if (found == beats_.end() || found->second.bpm <= 0.0)
+    return out;
+  const double period = 60.0 / found->second.bpm, speed = std::max(0.01, double(c.speed));
+  const double from = double(c.source_frames) / fps() * speed, to = from + double(c.frames) / fps() * speed; // seconds of the file it plays
+  for (double t = found->second.first + std::ceil((from - found->second.first) / period) * period; t < to && out.size() < 20000; t += period)
+    out.push_back(c.start + std::llround((t - from) / speed * fps()));
+  return out;
 }
 
 // The first free name of a new track: V1, V2, ... or A1, A2, ...

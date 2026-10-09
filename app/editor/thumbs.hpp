@@ -32,6 +32,13 @@ struct Peaks {
   static constexpr double kSeconds = 0.02; // the length one value stands for
 };
 
+// Where the beat of a sound falls: its tempo and first beat (the engine's beat finder over its first three minutes), held steady to the
+// end of the file. bpm 0 when there is no clear beat: marks on the clip must be right, so this asks for a clearer beat than audio.analyze.
+struct Beats {
+  double bpm = 0.0, first = 0.0; // beats a minute; the second of the file of the first beat
+  bool failed = false;
+};
+
 class Thumbs {
 public:
   Thumbs();
@@ -39,15 +46,17 @@ public:
   void request(const std::string &path);       // a poster frame; does nothing when already requested
   void request_strip(const std::string &path); // frames across the file, for a clip on the timeline
   void request_peaks(const std::string &path); // the waveform of a sound
+  void request_beats(const std::string &path); // the beat of a sound
   // Moves finished work out; the caller turns it into textures.
   std::vector<std::pair<std::string, Thumb>> take();
   std::vector<std::pair<std::string, Strip>> take_strips();
   std::vector<std::pair<std::string, Peaks>> take_peaks();
+  std::vector<std::pair<std::string, Beats>> take_beats();
 
 private:
   void run();
   struct Job {
-    int kind = 0; // 0 poster, 1 strip, 2 peaks
+    int kind = 0; // 0 poster, 1 strip, 2 peaks, 3 beats
     std::string path;
   };
   void push(int kind, const std::string &path);
@@ -58,6 +67,7 @@ private:
   std::vector<std::pair<std::string, Thumb>> done_;
   std::vector<std::pair<std::string, Strip>> done_strips_;
   std::vector<std::pair<std::string, Peaks>> done_peaks_;
+  std::vector<std::pair<std::string, Beats>> done_beats_;
   bool stop_ = false;
   std::thread thread_;
 };

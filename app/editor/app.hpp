@@ -83,6 +83,7 @@ struct ClipUi {
   json gain_keyframes = json::object();     // audio.keyframes.gain_db: the level over time, clip-local (the Gain diamond)
   eval::Curve gain_keys;                    // the same, to read the level at a time
   bool ducked = false;                      // audio.keyframes.duck_db: lowered under the other sounds (audio.duck)
+  bool show_beats = false;                  // audio.beats: its beats are marked on it, and edges catch on them
 };
 
 struct TransitionUi { // a dissolve, wipe, push, zoom, slide or iris over [cut - in, cut + out), where `to` starts
@@ -539,6 +540,8 @@ private:
   };
   std::map<std::string, StripInfo> strips_;            // frames across a picture file, by path (the filmstrip of a clip)
   std::map<std::string, std::vector<float>> peaks_;    // the waveform of a sound file, by path: a value per 20 ms
+  std::map<std::string, Beats> beats_;                 // the beat of a sound file, by path
+  std::vector<int64_t> beat_frames(const ClipUi &c) const; // the film frames of the beats a clip plays, when it shows them
   std::vector<std::string> media_paths_;
   std::set<std::string> opened_cards_; // "<clip id>:fade" and "<clip id>:transition": cards the user added before anything is set
   bool menu_seen_ = false; // a menu or popup was open when the shortcuts were last looked at

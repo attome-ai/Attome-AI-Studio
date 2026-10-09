@@ -406,6 +406,9 @@ void check_audio(const json &clip, const std::string &clip_id, const Rational &d
       }
     }
   }
+  if (const auto beats = it->find("beats"); beats != it->end() && !beats->is_boolean()) // the editor marks the beats of the sound on the clip
+    problems.push_back(problem("AUDIO_TYPE_MISMATCH", path + "/beats", clip_id, "beats of clip " + clip_id + " must be true or false.",
+                               "true marks the beats of its sound on the clip."));
   const std::string curve = it->value("fade_curve", std::string("equal_power"));
   if (curve != "equal_power" && curve != "linear")
     problems.push_back(problem("AUDIO_TYPE_MISMATCH", path + "/fade_curve", clip_id,
