@@ -355,6 +355,7 @@ private:
   bool rename_focus_ = false;
   void delete_track(const std::string &track_id);
   void auto_captions(const std::string &clip); // hears the clip (asr.transcribe, a job followed in poll) and makes captions from the words
+  const ClipUi *speech_clip() const;            // the clip Auto captions in the Text panel hears: the selected one, else the one under the playhead
   void freeze_frame(int seconds = 2); // the selected video (or the picture of the selected sound) holds the frame at the playhead
   void select_nothing(); // a click on empty space: no clip, no media card
   // While a value is dragged: the edit it would make, shown in the Monitor at once (the project is not changed until the value is let go).

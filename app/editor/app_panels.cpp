@@ -449,11 +449,48 @@ std::vector<std::string> App::partner_of(const std::string &clip_id) const {
   return out;
 }
 
+// The clip whose speech Auto captions hears: the selected one when it has sound to hear, else the one under the playhead that has
+// (the clip menu's test: a file's own sound, or a sound clip).
+const ClipUi *App::speech_clip() const {
+  const auto has_speech = [](const ClipUi &c, const TrackUi &t) { return !c.path.empty() && !c.is_generative && (c.own_sound || t.kind == "audio"); };
+  const TrackUi *home = nullptr;
+  if (const ClipUi *c = selected(&home); c && home && has_speech(*c, *home))
+    return c;
+  for (const TrackUi &t : tracks_)
+    for (const ClipUi &c : t.clips)
+      if (playhead_ >= c.start && playhead_ < c.start + c.frames && has_speech(c, t))
+        return &c;
+  return nullptr;
+}
+
 void App::draw_text_panel() {
   static const std::string tabs[] = {"All", "Titles", "Captions"};
   panel_tabs("tab", tabs, text_tab_);
   ImGui::NewLine();
   ImGui::Spacing();
+  if (text_tab_ != 1) { // captions from what is said: the clip it will hear, and the button (Stop while it listens)
+    section_label("AUTO CAPTIONS");
+    const ClipUi *source = speech_clip();
+    ImGui::PushTextWrapPos(0.0f);
+    if (!asr_job_.empty())
+      ImGui::TextColored(hexv(look::fg2), "Listening...");
+    else if (source)
+      ImGui::TextColored(hexv(look::fg2), "Captions from what is said in %s.", source->name.c_str());
+    else
+      ImGui::TextColored(hexv(look::fg3), "Select a clip with speech, or put the playhead on one.");
+    ImGui::PopTextWrapPos();
+    if (!asr_job_.empty()) {
+      if (soft_button("auto_captions_stop", "Stop listening", ImVec2(160.0f, 30.0f)))
+        pending_ = [this] {
+          json unused;
+          rpc("jobs.cancel", {{"job_id", asr_job_}}, unused);
+        };
+    } else if (soft_button("auto_captions", "Auto captions", ImVec2(160.0f, 30.0f), source != nullptr, source != nullptr)) {
+      pending_ = [this, id = source->id] { auto_captions(id); };
+    }
+    ImGui::Spacing();
+    section_label("STYLES");
+  }
   struct Style {
     const char *name, *sample, *hint;
     float size;
