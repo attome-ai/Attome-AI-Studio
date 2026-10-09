@@ -1204,9 +1204,39 @@ void remask_nv12(uint8_t *nv12, const uint8_t *cover, int W, int H) {
 // (greys and near-blacks, whose angle is noise, are kept). The matte is made per chroma sample from the mean luma of its
 // 2 x 2 pixels and read back bilinearly for the luma, so its edge is not blocky. Pixels that stay get the key colour's
 // spill taken out of their chroma (the part along the key direction), strongest near the key's hue.
-void key_nv12(uint8_t *nv12, uint8_t *cover, int W, int H, float hue, float similarity, float smoothness, float detail,
-              std::vector<uint8_t> &matte) {
-  ATM_PROFILE_SCOPE("effect.chroma_key");
+//
+// Every curve is a table made once per key setting (chroma_key_tables), and what is done with the tables is whole-number
+// arithmetic: the GPU's chroma key (chroma.comp) applies the same tables the same way, so the two give the same bytes.
+// What depends on the colour alone (its angle from the key, how far the despill moves it) is looked up by the chroma
+// sample's (Cb, Cr) bytes; what depends on brightness by the sum of its four luma bytes.
+//
+// The gate. A pixel is only taken for screen when its hue means something. Near black the faint tint that video compression
+// leaves in blocks has a hue like any other (found on real footage: a black jacket in front of a green screen came out with
+// holes; the real screen was never darker than luma 0.58, the tint of those pixels at most 0.05 chroma). A dark pixel
+// therefore counts only if it is clearly coloured: that is what tells a screen in shadow (a blue one at a quarter of the
+// light: luma 0.05, chroma 0.06 of a key colour whose own chroma is 0.43) from a black jacket of the same luma (chroma 0.006
+// typically, at most 0.05). A bright pixel needs no such proof. The brightness threshold follows the key colour's own
+// brightness, so a blue screen (dark by nature) is not shut out. Below all of it, a floor: no chroma at all is no hue.
+// The chroma key's tables (see key_nv12), 32-bit words the GPU reads as they are (chroma.comp has the same layout).
+//   [0, 65536): for each chroma sample's (Cb, Cr) bytes (Cb * 256 + Cr): its hue match times the floor | coloured << 8 |
+//               despill strength << 16 | length index << 24 (the chroma's length, 0..kLenTop as 0..255)
+//   [kSpill, +65536): the despill's direction for the same pair, in sixteenths of a code: Cb in the low half, Cr in the high (signed)
+//   then byte tables, four bytes to a word: the saturation gate [length index * 1021 + the sum of 4 luma bytes], the brightness
+//   gate [the sum of 4 luma bytes], how sure the screen's luma near a sample is [its weight sum, 0..kMaxWeight], smoothstep [0..255]
+struct ChromaKeyTables {
+  static constexpr float kLenTop = 0.81f;                // the longest chroma, sqrt(2) * 128 / 224, and a little
+  static constexpr int kMaxWeight = 49 * 255;            // 7 x 7 samples, each 0..255 keyed out
+  static constexpr int kDistUnit = 4 * 255 * 219;        // a luma distance of 1 (the full video range) when sure: |4 L - ref| * valid
+  static constexpr int kThin0 = 8935, kThinSpan = 13403; // 0.04 and 0.06 of kDistUnit
+  static constexpr uint32_t kSpill = 65536, kSat = 2 * 65536, kBright = kSat + 256 * 1021 / 4, kValid = kBright + 1024 / 4,
+                            kSmooth = kValid + (kMaxWeight + 4) / 4, kWords = kSmooth + 64;
+  std::vector<uint32_t> words;
+  uint32_t start = 0;  // how far from the screen a line must be to be kept, in kDistUnit
+  bool detail = false; // the fine detail pass runs
+};
+
+ChromaKeyTables make_chroma_key_tables(float hue, float similarity, float smoothness, float detail) {
+  ATM_PROFILE_SCOPE("effect.chroma_key.tables");
   constexpr float kPi = 3.14159265f;
   // The key colour at full saturation: its chroma direction and how saturated that is (chroma over luma).
   const float h6 = std::fmod(hue, 360.0f) / 60.0f;
@@ -1222,41 +1252,95 @@ void key_nv12(uint8_t *nv12, uint8_t *cover, int W, int H, float hue, float simi
   const float key_sat = key_len / std::max(ly, 0.05f);      // chroma per unit of luma, at full saturation
   const float yk = std::max(ly, 0.15f);                     // how bright the key colour is: dark means dark for that colour
   const float a0 = similarity * (kPi * 0.5f), a1 = a0 + smoothness * 0.6f + 0.02f;
+  const auto q = [](float v) { return uint32_t(std::lround(std::clamp(v, 0.0f, 1.0f) * 255.0f)); };
+  ChromaKeyTables t;
+  t.words.assign(ChromaKeyTables::kWords, 0u);
+  uint8_t *bytes = reinterpret_cast<uint8_t *>(t.words.data()); // byte i of a byte table is bits 8 (i % 4) of word i / 4, as the GPU reads it
+  for (int u = 0; u < 256; ++u)
+    for (int v = 0; v < 256; ++v) {
+      const float cb = (float(u) - 128.0f) * (1.0f / 224.0f), cr = (float(v) - 128.0f) * (1.0f / 224.0f);
+      const float len = std::sqrt(cb * cb + cr * cr);
+      const float along = cb * kx + cr * ky;
+      const float ang = std::atan2(std::fabs(cb * ky - cr * kx), along); // 0 .. pi from the key direction
+      const float hue_match = 1.0f - smooth01((ang - a0) / (a1 - a0));
+      const float floor = smooth01((len / key_len - 0.05f) / 0.07f), coloured = smooth01((len / key_len - 0.08f) / 0.06f);
+      const float spill = along > 0.0f ? 1.0f - smooth01((ang - a1) / 0.7f) : 0.0f; // the despill, near the key's hue
+      const uint32_t li = uint32_t(std::min(255L, std::lround(len / ChromaKeyTables::kLenTop * 255.0f)));
+      const size_t i = size_t(u) * 256 + size_t(v);
+      t.words[i] = q(hue_match * floor) | (q(coloured) << 8) | (q(spill) << 16) | (li << 24);
+      if (along > 0.0f) // the part of the chroma that points at the key colour, in sixteenths of a code
+        t.words[ChromaKeyTables::kSpill + i] = (uint32_t(int32_t(std::lround(along * kx * 224.0f * 16.0f))) & 0xFFFFu) |
+                                               (uint32_t(int32_t(std::lround(along * ky * 224.0f * 16.0f))) << 16);
+    }
+  for (int li = 0; li < 256; ++li) // saturated enough to have a hue: a tenth of the key's saturation and up, fading in over another tenth
+    for (int y4 = 0; y4 <= 1020; ++y4) {
+      const float len = float(li) * (ChromaKeyTables::kLenTop / 255.0f), y = (float(y4) * 0.25f - 16.0f) * (1.0f / 219.0f);
+      bytes[size_t(ChromaKeyTables::kSat) * 4 + size_t(li) * 1021 + size_t(y4)] = uint8_t(q(smooth01((len / std::max(y, 0.05f) / key_sat - 0.1f) / 0.1f)));
+    }
+  for (int y4 = 0; y4 <= 1020; ++y4) { // bright enough that the chroma is not noise
+    const float y = (float(y4) * 0.25f - 16.0f) * (1.0f / 219.0f);
+    bytes[size_t(ChromaKeyTables::kBright) * 4 + size_t(y4)] = uint8_t(q(smooth01((y - 0.12f * yk) / (0.12f * yk))));
+  }
+  for (int sw = 0; sw <= ChromaKeyTables::kMaxWeight; ++sw) // how much screen there is near a sample, of 7 x 7 at most
+    bytes[size_t(ChromaKeyTables::kValid) * 4 + size_t(sw)] = uint8_t(q(smooth01((float(sw) / float(ChromaKeyTables::kMaxWeight) - 0.15f) / 0.15f)));
+  for (int i = 0; i < 256; ++i)
+    bytes[size_t(ChromaKeyTables::kSmooth) * 4 + size_t(i)] = uint8_t(q(smooth01(float(i) / 255.0f)));
+  t.detail = detail > 0.001f;
+  t.start = uint32_t(std::lround((0.10f + 0.25f * (1.0f - detail)) * float(ChromaKeyTables::kDistUnit))); // weak features (markers) need detail 1 to stay
+  return t;
+}
+
+// The tables of the last key setting made on this thread (a key keeps its setting from frame to frame).
+const ChromaKeyTables &chroma_key_tables(float hue, float similarity, float smoothness, float detail) {
+  thread_local ChromaKeyTables t;
+  thread_local std::array<float, 4> made = {NAN, NAN, NAN, NAN};
+  if (const std::array<float, 4> now = {hue, similarity, smoothness, detail}; std::memcmp(now.data(), made.data(), sizeof now) != 0) {
+    t = make_chroma_key_tables(hue, similarity, smoothness, detail);
+    made = now;
+  }
+  return t;
+}
+
+// A rounded quotient of a signed number by a positive one (the GPU's ckdiv, the same way).
+int rounded_div(int n, int d) { return n >= 0 ? (n + d / 2) / d : -((-n + d / 2) / d); }
+
+// Where a pixel of a plane reads its two-times-smaller one, bilinearly: the first sample and how far towards the next (0..256).
+std::pair<int, int> half_tap(int px, int n) {
+  if (px == 0)
+    return {0, 0};
+  if ((px & 1) == 0)
+    return {px / 2 - 1, 192};
+  return px / 2 >= n - 1 ? std::pair{n - 1, 0} : std::pair{px / 2, 64};
+}
+
+void key_nv12(uint8_t *nv12, uint8_t *cover, int W, int H, float hue, float similarity, float smoothness, float detail,
+              std::vector<uint8_t> &matte) {
+  ATM_PROFILE_SCOPE("effect.chroma_key");
+  const ChromaKeyTables &t = chroma_key_tables(hue, similarity, smoothness, detail);
+  const uint32_t *words = t.words.data();
+  const uint8_t *bytes = reinterpret_cast<const uint8_t *>(words);
+  const uint8_t *sat = bytes + size_t(ChromaKeyTables::kSat) * 4, *bright = bytes + size_t(ChromaKeyTables::kBright) * 4,
+                *valid_of = bytes + size_t(ChromaKeyTables::kValid) * 4, *smooth = bytes + size_t(ChromaKeyTables::kSmooth) * 4;
   const int CW = W / 2, CH = H / 2;
   matte.resize(size_t(CW) * size_t(CH));
   uint8_t *uv = nv12 + size_t(W) * size_t(H);
+  // The matte of each chroma sample (255 keeps it), and the spill taken out of what stays.
   parallel_for(CH, 16, [&](int64_t first, int64_t last) {
     for (int64_t cy = first; cy < last; ++cy) {
       const uint8_t *l0 = nv12 + size_t(2 * cy) * size_t(W), *l1 = l0 + W;
       for (int cx = 0; cx < CW; ++cx) {
         uint8_t *p = uv + size_t(cy) * size_t(W) + size_t(cx) * 2;
-        const float cb = (float(p[0]) - 128.0f) * (1.0f / 224.0f), cr = (float(p[1]) - 128.0f) * (1.0f / 224.0f);
-        const float y = (float(l0[2 * cx] + l0[2 * cx + 1] + l1[2 * cx] + l1[2 * cx + 1]) * 0.25f - 16.0f) * (1.0f / 219.0f);
-        const float len = std::sqrt(cb * cb + cr * cr);
-        const float along = cb * kx + cr * ky;
-        const float ang = std::atan2(std::fabs(cb * ky - cr * kx), along); // 0 .. pi from the key direction
-        // Saturated enough to have a hue: a tenth of the key's saturation and up, fading in over another tenth, and not
-        // so dark that the chroma is noise.
-        const float sat = len / std::max(y, 0.05f);
-        // A pixel is only taken for screen when its hue means something. Near black the faint tint that video compression
-        // leaves in blocks has a hue like any other (found on real footage: a black jacket in front of a green screen came
-        // out with holes; the real screen was never darker than luma 0.58, the tint of those pixels at most 0.05 chroma).
-        // A dark pixel therefore counts only if it is clearly coloured: that is what tells a screen in shadow (a blue one
-        // at a quarter of the light: luma 0.05, chroma 0.06 of a key colour whose own chroma is 0.43) from a black jacket
-        // of the same luma (chroma 0.006 typically, at most 0.05). A bright pixel needs no such proof. The brightness
-        // threshold follows the key colour's own brightness, so a blue screen (dark by nature) is not shut out. Below all
-        // of it, a floor: no chroma at all is no hue.
-        const float bright = smooth01((y - 0.12f * yk) / (0.12f * yk));
-        const float coloured = smooth01((len / key_len - 0.08f) / 0.06f);
-        const float gate = smooth01((sat / key_sat - 0.1f) / 0.1f) * std::max(bright, coloured) *
-                           smooth01((len / key_len - 0.05f) / 0.07f);
-        const float key = (1.0f - smooth01((ang - a0) / (a1 - a0))) * gate; // 1: fully the key colour
-        matte[size_t(cy) * size_t(CW) + size_t(cx)] = uint8_t(std::lround((1.0f - key) * 255.0f));
-        // Despill what stays: take the part of the chroma that points at the key colour away, near the key's hue.
-        if (along > 0.0f) {
-          const float w = (1.0f - smooth01((ang - a1) / 0.7f)) * (1.0f - key);
-          p[0] = uint8_t(std::clamp(int(128.0f + (cb - along * kx * w) * 224.0f + 0.5f), 16, 240));
-          p[1] = uint8_t(std::clamp(int(128.0f + (cr - along * ky * w) * 224.0f + 0.5f), 16, 240));
+        const int y4 = l0[2 * cx] + l0[2 * cx + 1] + l1[2 * cx] + l1[2 * cx + 1];
+        const size_t i = size_t(p[0]) * 256 + size_t(p[1]);
+        const uint32_t c = words[i];
+        const int hue_match = int(c & 0xFFu), coloured = int((c >> 8) & 0xFFu), spill = int((c >> 16) & 0xFFu), li = int(c >> 24);
+        const int key = (hue_match * int(sat[li * 1021 + y4]) * std::max(int(bright[y4]), coloured) + 32512) / 65025; // 255: fully the key colour
+        const int m = 255 - key;
+        matte[size_t(cy) * size_t(CW) + size_t(cx)] = uint8_t(m);
+        if (const uint32_t s = words[ChromaKeyTables::kSpill + i]; s != 0u) { // despill what stays, by how much stays
+          const int w = spill * m;
+          p[0] = uint8_t(std::clamp(int(p[0]) + rounded_div(-int(int16_t(s & 0xFFFFu)) * w, 16 * 65025), 16, 240));
+          p[1] = uint8_t(std::clamp(int(p[1]) + rounded_div(-int(int16_t(s >> 16)) * w, 16 * 65025), 16, 240));
         }
       }
     }
@@ -1266,91 +1350,96 @@ void key_nv12(uint8_t *nv12, uint8_t *cover, int W, int H, float hue, float simi
   // wide shares its chroma sample with the screen round it and is taken for screen. The luma has full resolution: where the
   // matte says "screen" but a pixel is much darker or lighter than the screen round it, and is a thin line (more extreme
   // than the pixels two steps to either side across it), it is foreground and is kept. The screen's own luma comes from the
-  // keyed-out samples near the pixel (it drifts with the lighting); a soft edge is not a thin line, so it is left to the
-  // matte. The kept pixels have no chroma of their own here (the screen's green is in it), so they come out neutral.
-  // Buffers kept between frames (this runs on the render thread; the workers get references).
-  thread_local std::vector<float> t_ref, t_valid, t_wl, t_ww, t_tl, t_tw;
+  // keyed-out samples near the pixel, a 7 x 7 window of chroma samples weighted by how keyed out they are (it drifts with
+  // the lighting); a soft edge is not a thin line, so it is left to the matte. The kept pixels have no chroma of their own
+  // here (the screen's green is in it), so they come out neutral. Per sample: the screen's luma as a sum of four (0..1020)
+  // and how sure it is (0..255), as ref | valid << 16. Buffers kept between frames (this runs on the render thread).
+  thread_local std::vector<uint32_t> t_refs;
+  thread_local std::vector<int> t_w, t_wl, t_sw, t_swl;
   thread_local std::vector<uint8_t> t_alpha;
   const size_t csize = size_t(CW) * size_t(CH);
-  for (std::vector<float> *v : {&t_ref, &t_valid, &t_wl, &t_ww, &t_tl, &t_tw})
-    v->resize(csize);
-  t_alpha.resize(size_t(W) * size_t(H));
-  std::vector<float> &ref = t_ref, &valid = t_valid, &wl = t_wl, &ww = t_ww, &tl = t_tl, &tw = t_tw;
-  std::vector<uint8_t> &alpha = t_alpha;
-  const float start = 0.10f + 0.25f * (1.0f - detail); // how far from the screen a line must be: weak features (markers) need detail 1 to stay
-  if (detail > 0.001f) {
+  std::vector<uint32_t> &refs = t_refs;
+  if (t.detail) {
     ATM_PROFILE_SCOPE("effect.chroma_key.detail");
     constexpr int R = 3;
+    for (std::vector<int> *v : {&t_w, &t_wl, &t_sw, &t_swl})
+      v->resize(csize);
+    refs.resize(csize);
+    std::vector<int> &w = t_w, &wl = t_wl, &sw = t_sw, &swl = t_swl;
     parallel_for(CH, 16, [&](int64_t first, int64_t last) {
       for (int64_t cy = first; cy < last; ++cy) {
         const uint8_t *l0 = nv12 + size_t(2 * cy) * size_t(W), *l1 = l0 + W;
         for (int cx = 0; cx < CW; ++cx) {
-          const float w = 1.0f - float(m[size_t(cy) * size_t(CW) + size_t(cx)]) * (1.0f / 255.0f);
-          const float l = float(l0[2 * cx] + l0[2 * cx + 1] + l1[2 * cx] + l1[2 * cx + 1]) * 0.25f;
-          ww[size_t(cy) * size_t(CW) + size_t(cx)] = w;
-          wl[size_t(cy) * size_t(CW) + size_t(cx)] = w * l;
+          const size_t i = size_t(cy) * size_t(CW) + size_t(cx);
+          w[i] = 255 - int(m[i]);
+          wl[i] = w[i] * (l0[2 * cx] + l0[2 * cx + 1] + l1[2 * cx] + l1[2 * cx + 1]);
         }
       }
     });
-    parallel_for(CH, 16, [&](int64_t first, int64_t last) { // box blur along x, a sliding sum per row
+    parallel_for(CH, 16, [&](int64_t first, int64_t last) { // along x: a sliding sum per row, the edge sample repeated beyond the edges
       for (int64_t cy = first; cy < last; ++cy) {
         const size_t o = size_t(cy) * size_t(CW);
-        float sl = 0.0f, sw = 0.0f;
+        int s = 0, sl = 0;
         for (int k = -R; k <= R; ++k)
-          sl += wl[o + size_t(std::clamp(k, 0, CW - 1))], sw += ww[o + size_t(std::clamp(k, 0, CW - 1))];
+          s += w[o + size_t(std::clamp(k, 0, CW - 1))], sl += wl[o + size_t(std::clamp(k, 0, CW - 1))];
         for (int cx = 0; cx < CW; ++cx) {
-          tl[o + size_t(cx)] = sl, tw[o + size_t(cx)] = sw;
+          sw[o + size_t(cx)] = s, swl[o + size_t(cx)] = sl;
           const size_t add = o + size_t(std::min(cx + R + 1, CW - 1)), drop = o + size_t(std::max(cx - R, 0));
-          sl += wl[add] - wl[drop], sw += ww[add] - ww[drop];
+          s += w[add] - w[drop], sl += wl[add] - wl[drop];
         }
       }
     });
-    parallel_for(CW, 16, [&](int64_t first, int64_t last) { // along y, per column; then the screen's luma and how much screen there is
+    parallel_for(CW, 16, [&](int64_t first, int64_t last) { // along y, per column; then the screen's luma and how sure it is
       for (int64_t cx = first; cx < last; ++cx) {
-        float sl = 0.0f, sw = 0.0f;
+        int s = 0, sl = 0;
         for (int k = -R; k <= R; ++k) {
           const size_t i = size_t(std::clamp(k, 0, CH - 1)) * size_t(CW) + size_t(cx);
-          sl += tl[i], sw += tw[i];
+          s += sw[i], sl += swl[i];
         }
         for (int cy = 0; cy < CH; ++cy) {
           const size_t i = size_t(cy) * size_t(CW) + size_t(cx);
-          ref[i] = sl / std::max(sw, 1e-3f);
-          valid[i] = smooth01((sw * (1.0f / float((2 * R + 1) * (2 * R + 1))) - 0.15f) / 0.15f);
+          const uint32_t ref = s > 0 ? uint32_t((sl + s / 2) / s) : 0u;
+          refs[i] = ref | (uint32_t(valid_of[s]) << 16);
           const size_t add = size_t(std::min(cy + R + 1, CH - 1)) * size_t(CW) + size_t(cx), drop = size_t(std::max(cy - R, 0)) * size_t(CW) + size_t(cx);
-          sl += tl[add] - tl[drop], sw += tw[add] - tw[drop];
+          s += sw[add] - sw[drop], sl += swl[add] - swl[drop];
         }
       }
     });
   }
+  t_alpha.resize(size_t(W) * size_t(H));
+  uint8_t *alpha = t_alpha.data();
   {
     // The matte for every pixel, from the unchanged luma: the chroma matte read bilinearly, raised where a thin line is. How
-    // far a pixel is from the screen near it is taken from the nearest chroma sample (the screen's luma is smooth).
+    // far a pixel is from the screen near it (|its luma - the screen's| times how sure that is, in units of kDistUnit to 1)
+    // is taken from the nearest chroma sample (the screen's luma is smooth).
     const auto dist = [&](int px, int y) {
-      const size_t i = size_t(y >> 1) * size_t(CW) + size_t(px >> 1);
-      return std::abs(float(nv12[size_t(y) * size_t(W) + size_t(px)]) - ref[i]) * valid[i] * (1.0f / 219.0f);
+      const uint32_t r = refs[size_t(y >> 1) * size_t(CW) + size_t(px >> 1)];
+      return std::abs(4 * int(nv12[size_t(y) * size_t(W) + size_t(px)]) - int(r & 0xFFFFu)) * int(r >> 16);
     };
+    const int start = int(t.start);
     parallel_for(H, 16, [&](int64_t first, int64_t last) {
       for (int64_t y = first; y < last; ++y) {
-        const float fy = std::clamp((float(y) + 0.5f) * 0.5f - 0.5f, 0.0f, float(CH - 1));
-        const int y0 = std::min(int(fy), CH - 1), y1 = std::min(y0 + 1, CH - 1);
-        const int ty = int((fy - float(y0)) * 256.0f);
+        const auto [y0, ty] = half_tap(int(y), CH);
+        const int y1 = std::min(y0 + 1, CH - 1);
         const bool inside_y = y >= 2 && y + 2 < H;
         for (int px = 0; px < W; ++px) {
-          const float fx = std::clamp((float(px) + 0.5f) * 0.5f - 0.5f, 0.0f, float(CW - 1));
-          const int x0 = std::min(int(fx), CW - 1), x1 = std::min(x0 + 1, CW - 1);
-          const int tx = int((fx - float(x0)) * 256.0f);
+          const auto [x0, tx] = half_tap(px, CW);
+          const int x1 = std::min(x0 + 1, CW - 1);
           const int top = int(m[size_t(y0) * size_t(CW) + size_t(x0)]) * (256 - tx) + int(m[size_t(y0) * size_t(CW) + size_t(x1)]) * tx;
           const int bot = int(m[size_t(y1) * size_t(CW) + size_t(x0)]) * (256 - tx) + int(m[size_t(y1) * size_t(CW) + size_t(x1)]) * tx;
           int a = (top * (256 - ty) + bot * ty) >> 16; // 0..255
-          if (a < 200 && detail > 0.001f) { // mostly screen: look for a thin line in it
-            const float d = dist(px, int(y));
+          if (a < 200 && t.detail) { // mostly screen: look for a thin line in it
+            const int d = dist(px, int(y));
             if (d > start) {
-              float thin = 0.0f;
+              int thin = 0;
               if (px >= 2 && px + 2 < W)
                 thin = std::max(thin, std::min(d - dist(px - 2, int(y)), d - dist(px + 2, int(y))));
               if (inside_y)
                 thin = std::max(thin, std::min(d - dist(px, int(y) - 2), d - dist(px, int(y) + 2)));
-              a = std::max(a, int(smooth01((d - start) / 0.10f) * smooth01((thin - 0.04f) / 0.06f) * 255.0f + 0.5f));
+              // How far past the threshold (a tenth of the range fades it in) and how thin (from 0.04, over 0.06).
+              const int far = std::min(255, ((d - start) * 255 + ChromaKeyTables::kDistUnit / 20) / (ChromaKeyTables::kDistUnit / 10));
+              const int sharp = thin <= ChromaKeyTables::kThin0 ? 0 : std::min(255, ((thin - ChromaKeyTables::kThin0) * 255 + ChromaKeyTables::kThinSpan / 2) / ChromaKeyTables::kThinSpan);
+              a = std::max(a, (int(smooth[far]) * int(smooth[sharp]) + 127) / 255);
             }
           }
           alpha[size_t(y) * size_t(W) + size_t(px)] = uint8_t(a);
@@ -2461,6 +2550,14 @@ bool Renderer::gpu_chain(const Layer &l, int64_t frame, std::vector<gpu::Effect>
       uint8_t keep[256];
       luma_key_table(v[0], v[1], v[2], keep);
       g.table.assign(std::begin(keep), std::end(keep));
+    } else if (e.kind == "chroma_key") {
+      if (l.is_adjustment)
+        continue; // as the luma key
+      const ChromaKeyTables &t = chroma_key_tables(v[0], v[1], v[2], v[3]);
+      g.kind = gpu::Effect::Kind::chroma_key;
+      g.table = t.words;
+      g.key_start = t.start;
+      g.key_detail = t.detail;
     } else if (e.kind == "film_grain") {
       g.kind = gpu::Effect::Kind::grain;
       g.amount = grain_amp(v[0]);

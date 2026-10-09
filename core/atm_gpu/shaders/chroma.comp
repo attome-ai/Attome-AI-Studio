@@ -1,0 +1,206 @@
+#version 450
+// The chroma key, in four steps, the same whole-number arithmetic on the same tables as the renderer's CPU key (key_nv12 and
+// ChromaKeyTables in render.cpp; the layout of the tables below is theirs). The picture is in binding 0 (rows `stride` bytes
+// apart, the chroma after `height` luma rows), the clip's coverage in binding 5.
+//   kind 0 samples: per chroma sample, its matte (0..255, 255 keeps it) from its (Cb, Cr) and the sum of its four luma bytes,
+//                   and the key colour's spill taken out of its chroma. An invocation takes four samples (two chroma words);
+//                   the mattes go to binding 3 as bytes, rows `mrow` words apart.
+//   kind 1 refs:    per chroma sample, the screen's luma near it (a 7 x 7 window of samples weighted by how keyed out they
+//                   are, the edge sample repeated beyond the edges) and how sure that is: ref | valid << 16 into binding 1.
+//   kind 2 alpha:   per luma pixel, the matte read bilinearly, raised where a thin line stands out from the screen (when
+//                   the fine detail pass runs): bytes into binding 3 after the mattes (`alpha_at` words in), rows as the luma's.
+//   kind 3 apply:   the luma and the coverage by the pixel's alpha, the chroma by its sample's matte.
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 0) buffer Data { uint data[]; };
+layout(std430, set = 0, binding = 1) buffer Refs { uint refs[]; };
+layout(std430, set = 0, binding = 2) readonly buffer Tables { uint table[]; };
+layout(std430, set = 0, binding = 3) buffer Work { uint work[]; };
+layout(std430, set = 0, binding = 5) buffer Cover { uint cover[]; };
+
+layout(push_constant) uniform Chroma {
+  uint kind;
+  uint width;    // luma pixels per row
+  uint height;   // luma rows
+  uint stride;   // bytes per row on the device (a multiple of 4)
+  uint mrow;     // words per row of the mattes
+  uint alpha_at; // where the alphas start in binding 3, in words
+  uint start;    // how far from the screen a line must be to be kept (ChromaKeyTables::start)
+  uint flags;    // 1: the fine detail pass runs; 2: there is a coverage to change
+  uint table_at; // where the tables start
+} pc;
+
+// ChromaKeyTables' layout.
+const uint kSpill = 65536u, kSat = 131072u, kBright = kSat + 256u * 1021u / 4u, kValid = kBright + 256u, kSmooth = kValid + 3124u;
+const int kDistUnit = 4 * 255 * 219, kThin0 = 8935, kThinSpan = 13403;
+
+uint tword(uint i) { return table[pc.table_at + i]; }
+int tbyte(uint at, uint i) { return int((table[pc.table_at + at + (i >> 2)] >> ((i & 3u) * 8u)) & 0xFFu); }
+int byte_of(uint word, uint q) { return int((word >> (q * 8u)) & 0xFFu); }
+uint set_byte(uint word, uint q, int v) { return (word & ~(0xFFu << (q * 8u))) | (uint(v & 0xFF) << (q * 8u)); }
+
+int pic(uint y, uint x) { const uint at = y * pc.stride + x; return byte_of(data[at >> 2], at & 3u); }
+int matte(uint cy, uint cx) { return byte_of(work[cy * pc.mrow + (cx >> 2)], cx & 3u); }
+// The sum of a chroma sample's four luma bytes.
+int luma4(uint cy, uint cx) { return pic(2u * cy, 2u * cx) + pic(2u * cy, 2u * cx + 1u) + pic(2u * cy + 1u, 2u * cx) + pic(2u * cy + 1u, 2u * cx + 1u); }
+
+// A rounded quotient of a signed number by a positive one (the CPU's rounded_div).
+int ckdiv(int n, int d) { return n >= 0 ? (n + d / 2) / d : -((-n + d / 2) / d); }
+
+void samples() {
+  const uint cw = pc.width / 2u, ch = pc.height / 2u;
+  const uint groups = (cw + 3u) / 4u;
+  const uint id = gl_GlobalInvocationID.x;
+  const uint cy = id / groups, j = id - cy * groups;
+  if (cy >= ch)
+    return;
+  const uint row = (pc.height + cy) * pc.stride; // the chroma row, in bytes
+  uint mword = 0u;
+  for (uint h = 0u; h < 2u; ++h) { // the two chroma words: samples 4j + 2h, 4j + 2h + 1
+    const uint wi = (row >> 2) + 2u * j + h;
+    uint word = data[wi];
+    for (uint k = 0u; k < 2u; ++k) {
+      const uint cx = 4u * j + 2u * h + k;
+      if (cx >= cw)
+        break;
+      const int u = byte_of(word, 2u * k), v = byte_of(word, 2u * k + 1u);
+      const int y4 = luma4(cy, cx);
+      const uint i = uint(u) * 256u + uint(v);
+      const uint c = tword(i);
+      const int hue_match = int(c & 0xFFu), coloured = int((c >> 8) & 0xFFu), spill = int((c >> 16) & 0xFFu), li = int(c >> 24);
+      const int key = (hue_match * tbyte(kSat, uint(li * 1021 + y4)) * max(tbyte(kBright, uint(y4)), coloured) + 32512) / 65025;
+      const int m = 255 - key;
+      mword = set_byte(mword, 2u * h + k, m);
+      const uint s = tword(kSpill + i);
+      if (s != 0u) {
+        const int w = spill * m;
+        const int du = int(s << 16) >> 16, dv = int(s) >> 16; // the signed halves
+        word = set_byte(word, 2u * k, clamp(u + ckdiv(-du * w, 16 * 65025), 16, 240));
+        word = set_byte(word, 2u * k + 1u, clamp(v + ckdiv(-dv * w, 16 * 65025), 16, 240));
+      }
+    }
+    data[wi] = word;
+  }
+  work[cy * pc.mrow + j] = mword;
+}
+
+void screen_refs() {
+  const int cw = int(pc.width / 2u), ch = int(pc.height / 2u);
+  const int id = int(gl_GlobalInvocationID.x);
+  const int cy = id / cw, cx = id - cy * cw;
+  if (cy >= ch)
+    return;
+  int s = 0, sl = 0;
+  for (int dy = -3; dy <= 3; ++dy) {
+    const uint yy = uint(clamp(cy + dy, 0, ch - 1));
+    for (int dx = -3; dx <= 3; ++dx) {
+      const uint xx = uint(clamp(cx + dx, 0, cw - 1));
+      const int w = 255 - matte(yy, xx);
+      s += w;
+      sl += w * luma4(yy, xx);
+    }
+  }
+  const uint ref = s > 0 ? uint((sl + s / 2) / s) : 0u;
+  refs[uint(cy * cw + cx)] = ref | (uint(tbyte(kValid, uint(s))) << 16);
+}
+
+// How far pixel (px, y) is from the screen near it (the CPU's dist).
+int dist(int px, int y) {
+  const uint r = refs[uint((y >> 1) * int(pc.width / 2u) + (px >> 1))];
+  return abs(4 * pic(uint(y), uint(px)) - int(r & 0xFFFFu)) * int(r >> 16);
+}
+
+// Where a pixel reads its plane's half-size one, bilinearly: the first sample and how far towards the next (the CPU's half_tap).
+ivec2 half_tap(int px, int n) {
+  if (px == 0)
+    return ivec2(0, 0);
+  if ((px & 1) == 0)
+    return ivec2(px / 2 - 1, 192);
+  return px / 2 >= n - 1 ? ivec2(n - 1, 0) : ivec2(px / 2, 64);
+}
+
+void alphas() {
+  const uint words_per_row = pc.stride >> 2;
+  const uint id = gl_GlobalInvocationID.x;
+  const uint y = id / words_per_row, wx = id - y * words_per_row;
+  if (y >= pc.height || wx * 4u >= pc.width)
+    return;
+  const int W = int(pc.width), H = int(pc.height), cw = W / 2, ch = H / 2;
+  const ivec2 ty = half_tap(int(y), ch);
+  const uint y0 = uint(ty.x), y1 = uint(min(ty.x + 1, ch - 1));
+  const bool detail = (pc.flags & 1u) != 0u;
+  const bool inside_y = int(y) >= 2 && int(y) + 2 < H;
+  uint out_word = 0u;
+  for (uint q = 0u; q < 4u; ++q) {
+    const int px = int(wx * 4u + q);
+    if (px >= W)
+      break;
+    const ivec2 tx = half_tap(px, cw);
+    const uint x0 = uint(tx.x), x1 = uint(min(tx.x + 1, cw - 1));
+    const int top = matte(y0, x0) * (256 - tx.y) + matte(y0, x1) * tx.y;
+    const int bot = matte(y1, x0) * (256 - tx.y) + matte(y1, x1) * tx.y;
+    int a = (top * (256 - ty.y) + bot * ty.y) >> 16;
+    if (a < 200 && detail) {
+      const int d = dist(px, int(y));
+      if (d > int(pc.start)) {
+        int thin = 0;
+        if (px >= 2 && px + 2 < W)
+          thin = max(thin, min(d - dist(px - 2, int(y)), d - dist(px + 2, int(y))));
+        if (inside_y)
+          thin = max(thin, min(d - dist(px, int(y) - 2), d - dist(px, int(y) + 2)));
+        const int far = min(255, ((d - int(pc.start)) * 255 + kDistUnit / 20) / (kDistUnit / 10));
+        const int sharp = thin <= kThin0 ? 0 : min(255, ((thin - kThin0) * 255 + kThinSpan / 2) / kThinSpan);
+        a = max(a, (tbyte(kSmooth, uint(far)) * tbyte(kSmooth, uint(sharp)) + 127) / 255);
+      }
+    }
+    out_word = set_byte(out_word, q, a);
+  }
+  work[pc.alpha_at + id] = out_word;
+}
+
+void apply() {
+  const uint words_per_row = pc.stride >> 2;
+  const uint id = gl_GlobalInvocationID.x;
+  const uint y = id / words_per_row, wx = id - y * words_per_row;
+  if (y >= pc.height + pc.height / 2u || wx * 4u >= pc.width)
+    return;
+  const uint word = data[id];
+  uint out_word = word;
+  if (y < pc.height) {
+    const uint aw = work[pc.alpha_at + id];
+    const bool covered = (pc.flags & 2u) != 0u;
+    const uint cw = covered ? cover[id] : 0u;
+    uint cover_out = cw;
+    for (uint q = 0u; q < 4u; ++q) {
+      if (wx * 4u + q >= pc.width)
+        break;
+      const int a = byte_of(aw, q);
+      out_word = set_byte(out_word, q, 16 + ((byte_of(word, q) - 16) * a + 127) / 255);
+      cover_out = set_byte(cover_out, q, (byte_of(cw, q) * a + 127) / 255);
+    }
+    if (covered)
+      cover[id] = cover_out;
+  } else {
+    const uint cy = y - pc.height;
+    for (uint q = 0u; q < 4u; ++q) {
+      const uint cx = (wx * 4u + q) >> 1;
+      if (wx * 4u + q >= pc.width)
+        break;
+      const int a = matte(cy, cx), v = byte_of(word, q);
+      out_word = set_byte(out_word, q, 128 + ((v - 128) * a + (v >= 128 ? 127 : -127)) / 255);
+    }
+  }
+  data[id] = out_word;
+}
+
+void main() {
+  if (pc.kind == 0u)
+    samples();
+  else if (pc.kind == 1u)
+    screen_refs();
+  else if (pc.kind == 2u)
+    alphas();
+  else
+    apply();
+}

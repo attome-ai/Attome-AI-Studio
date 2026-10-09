@@ -328,6 +328,17 @@ TEST_CASE("gpu video: a frame of video clips decoded and drawn on the GPU is the
     card.xf.pos_x = 0.25f;
     card.xf.scale_x = card.xf.scale_y = 0.3f;
     cases.push_back({"a transparent picture turned over a clip, and an opaque one scaled", {layer("clp_a", a, 0), logo, card}});
+    // The chroma key on the card's blues (the clips are grey: nothing to key there): with its fine detail pass on the card
+    // at full size, and without it between a blur and a grade on the card made smaller and turned.
+    atm::render::Layer keyed = card;
+    keyed.clip_id = "clp_keyed";
+    keyed.xf = {};
+    keyed.effects = {effect("chroma_key", {240.0f, 0.35f, 0.1f, 0.8f})};
+    cases.push_back({"a chroma key with its detail pass on a picture, over a clip", {layer("clp_a", a, 0), keyed}});
+    keyed.xf.scale_x = keyed.xf.scale_y = 0.7f;
+    keyed.xf.rotation = 7.0f;
+    keyed.effects = {effect("gaussian_blur", {0.004f}), effect("chroma_key", {240.0f, 0.35f, 0.1f, 0.0f}), effect("color_grade", {0.05f, 0.2f, 1.2f})};
+    cases.push_back({"a chroma key without detail between a blur and a grade on a smaller turned picture", {layer("clp_a", a, 0), keyed}});
   }
   // In order, then back and forth (the readers seek).
   std::vector<int64_t> order;

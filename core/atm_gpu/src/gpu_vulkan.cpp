@@ -46,6 +46,9 @@ const uint32_t kTransitionSpirv[] = { // two clips mixed by a transition
 const uint32_t kHalfSpirv[] = { // a picture halved before it is drawn much smaller
 #include "half.spv.inc"
 };
+const uint32_t kChromaSpirv[] = { // the chroma key's four steps
+#include "chroma.spv.inc"
+};
 constexpr uint32_t kMaxRowBytes = 8192; // box_rows.comp holds a row of up to this many bytes in shared memory
 
 using Clock = std::chrono::steady_clock;
@@ -84,6 +87,11 @@ struct PlacePass {
 // The push constants of half.comp, in its order.
 struct HalfPass {
   uint32_t src_at, src_pitch, dst_at, dst_pitch, width, rows, chroma;
+};
+
+// The push constants of chroma.comp, in its order.
+struct ChromaPass {
+  uint32_t kind, width, height, stride, mrow, alpha_at, start, flags, table_at;
 };
 
 // The push constants of transition.comp, in its order.
@@ -311,9 +319,10 @@ struct Context::Impl : Vulkan {
   VkDescriptorSetLayout set_layout = VK_NULL_HANDLE;
   VkPipelineLayout layout = VK_NULL_HANDLE;
   VkShaderModule shader = VK_NULL_HANDLE, rows_shader = VK_NULL_HANDLE, pixels_shader = VK_NULL_HANDLE, draw_shader = VK_NULL_HANDLE,
-                 mix_shader = VK_NULL_HANDLE, place_shader = VK_NULL_HANDLE, transition_shader = VK_NULL_HANDLE, half_shader = VK_NULL_HANDLE;
+                 mix_shader = VK_NULL_HANDLE, place_shader = VK_NULL_HANDLE, transition_shader = VK_NULL_HANDLE, half_shader = VK_NULL_HANDLE,
+                 chroma_shader = VK_NULL_HANDLE;
   VkPipeline box = VK_NULL_HANDLE, pixels = VK_NULL_HANDLE, draw = VK_NULL_HANDLE, mix = VK_NULL_HANDLE, place = VK_NULL_HANDLE,
-             transition = VK_NULL_HANDLE, half = VK_NULL_HANDLE;
+             transition = VK_NULL_HANDLE, half = VK_NULL_HANDLE, chroma = VK_NULL_HANDLE;
   std::map<uint64_t, VkPipeline> rows; // box_rows.comp by the row capacity and chunk it was made for
   uint32_t shared_limit = 0; // bytes of shared memory a workgroup can have
   VkDescriptorPool descriptors = VK_NULL_HANDLE;
@@ -380,6 +389,8 @@ struct Context::Impl : Vulkan {
       vkDestroyShaderModule(device, transition_shader, nullptr);
       vkDestroyPipeline(device, half, nullptr);
       vkDestroyShaderModule(device, half_shader, nullptr);
+      vkDestroyPipeline(device, chroma, nullptr);
+      vkDestroyShaderModule(device, chroma_shader, nullptr);
       vkDestroyShaderModule(device, pixels_shader, nullptr);
       vkDestroyShaderModule(device, draw_shader, nullptr);
       vkDestroyShaderModule(device, mix_shader, nullptr);
@@ -616,6 +627,11 @@ struct Context::Impl : Vulkan {
     VK_TRY("vkCreateShaderModule", vkCreateShaderModule(device, &smi, nullptr, &half_shader));
     cpi.stage.module = half_shader;
     VK_TRY("vkCreateComputePipelines", vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &cpi, nullptr, &half));
+    smi.codeSize = sizeof kChromaSpirv;
+    smi.pCode = kChromaSpirv;
+    VK_TRY("vkCreateShaderModule", vkCreateShaderModule(device, &smi, nullptr, &chroma_shader));
+    cpi.stage.module = chroma_shader;
+    VK_TRY("vkCreateComputePipelines", vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &cpi, nullptr, &chroma));
 
 
     constexpr uint32_t kSets = 14;
@@ -736,9 +752,23 @@ struct Context::Impl : Vulkan {
         record_pixels({6, uw, uh, P, 0.0f, 0, 0, 0, table_at[i]}, P, uh);
         record_pixels({7, uw, uh, P, 0.0f, 0, 0, 0, table_at[i]}, P, uh);
         break;
+      case Effect::Kind::chroma_key: { // chroma.comp: the samples' mattes (into C), the screen's luma near them (B), the pixels' alphas (C), then all applied
+        const uint32_t cw = uw / 2, ch = uh / 2, mrow = (cw + 3) / 4;
+        ChromaPass p{0, uw, uh, P, mrow, mrow * ch, e.key_start, (e.key_detail ? 1u : 0u) | (cover ? 2u : 0u), table_at[i]};
+        record_chroma(p, mrow * ch); // four samples an invocation
+        if (e.key_detail) {
+          p.kind = 1;
+          record_chroma(p, cw * ch);
+        }
+        p.kind = 2;
+        record_chroma(p, (P / 4) * uh);
+        p.kind = 3;
+        record_chroma(p, (P / 4) * (uh + uh / 2));
+        break;
+      }
       }
       // A colour effect: what it changed where the clip is not, taken back (a key changes the coverage itself).
-      if (cover && e.kind != Effect::Kind::blur && e.kind != Effect::Kind::luma_key)
+      if (cover && e.kind != Effect::Kind::blur && e.kind != Effect::Kind::luma_key && e.kind != Effect::Kind::chroma_key)
         record_pixels({5, uw, uh, P, 0.0f, 0, 0, 0, 0}, P, uh);
     }
   }
@@ -793,6 +823,14 @@ struct Context::Impl : Vulkan {
         dispatch({chroma_at, H / 2, P, P / 4, 1, rc, seg(rc), 1});
       compute_to_compute();
     }
+  }
+
+  void record_chroma(const ChromaPass &p, uint32_t invocations) {
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, chroma);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, layout, 0, 1, &a_to_b, 0, nullptr);
+    vkCmdPushConstants(cmd, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);
+    vkCmdDispatch(cmd, (invocations + 255) / 256, 1, 1);
+    compute_to_compute();
   }
 
   void record_pixels(const PixelsPass &p, uint32_t P, uint32_t H) {

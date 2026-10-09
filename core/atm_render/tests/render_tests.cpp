@@ -2816,6 +2816,7 @@ TEST_CASE("render: with a GPU, clips and adjustment layers with effects come out
   fs::create_directories(dir);
   const std::string video = (dir / "v.mp4").string();
   write_clip(video, 320, 240, 30);
+  std::string source = video; // the clip frame_of draws
   const auto fx = [](const char *kind, json params) { return json{{"effect", std::string("attome.") + kind + "@1.0.0"}, {"params", std::move(params)}}; };
   // A look as a .cube: a warm, contrasty curve, 9 points a side (not a grid the table falls on).
   const std::string cube = (dir / "look.cube").string();
@@ -2840,7 +2841,7 @@ TEST_CASE("render: with a GPU, clips and adjustment layers with effects come out
   // canvas, clip transform, clip effects, adjustment layer effects (null: none)
   const auto frame_of = [&](int cw, int ch, const json &transform, const json &clip_fx, const json &adjust_fx, atm::gpu::Context *device, int64_t *runs,
                             double adjust_amount = 1.0) {
-    json clips = {{"clp_a", {{"timing", {{"record_in", "0"}, {"duration", "1"}, {"source_in", "0"}}}, {"media_ref", {{"type", "file"}, {"path", video}, {"stream", "video"}}},
+    json clips = {{"clp_a", {{"timing", {{"record_in", "0"}, {"duration", "1"}, {"source_in", "0"}}}, {"media_ref", {{"type", "file"}, {"path", source}, {"stream", "video"}}},
                              {"transform", transform}, {"effects", clip_fx}}}};
     json tracks = {{"trk_a", {{"clips", clips}}}};
     json order = json::array({"trk_a"});
@@ -2895,13 +2896,50 @@ TEST_CASE("render: with a GPU, clips and adjustment layers with effects come out
       CHECK(frame_of(322, 182, part, single, nullptr, nullptr, nullptr) == frame_of(322, 182, part, single, nullptr, gpu->get(), nullptr));
     }
   }
-  // A luma key runs on the GPU too; a chroma key has no GPU version yet: that clip stays on the CPU.
+  // The keys run on the GPU too: the luma key, and the chroma key with its fine detail pass and without, on a clip that fills
+  // the frame and on a smaller turned one (its coverage keyed with it), alone and between a blur and a grade.
   const json luma_keyed = {{"fx_k", fx("luma_key", {{"level", 0.0}, {"tolerance", 0.2}})}};
   CHECK(frame_of(320, 240, {{"opacity", 1.0}}, luma_keyed, nullptr, nullptr, nullptr) == frame_of(320, 240, {{"opacity", 1.0}}, luma_keyed, nullptr, gpu->get(), &runs));
   CHECK(runs == 1);
-  const json chroma_keyed = {{"fx_k", fx("chroma_key", {{"hue", 120.0}})}};
-  CHECK(frame_of(320, 240, {{"opacity", 1.0}}, chroma_keyed, nullptr, nullptr, nullptr) == frame_of(320, 240, {{"opacity", 1.0}}, chroma_keyed, nullptr, gpu->get(), &runs));
-  CHECK(runs == 0);
+  // A green screen to key: lit unevenly, a skin-toned disc, thin dark lines (hair, for the fine detail pass) and a marker cross,
+  // through the H.264 encoder (its noise and soft chroma edges).
+  {
+    const int w = 320, h = 240;
+    source = (dir / "screen.mp4").string();
+    auto encoder = media::Encoder::create({source, w, h, 30, 1, 2'000'000, false});
+    REQUIRE(encoder);
+    std::vector<uint8_t> picture(size_t(w) * size_t(h) * 4), nv12(media::nv12_size(w, h));
+    for (int y = 0; y < h; ++y)
+      for (int x = 0; x < w; ++x) {
+        uint8_t *p = picture.data() + (size_t(y) * size_t(w) + size_t(x)) * 4;
+        const double light = 0.6 + 0.4 * double(x) / double(w); // darker to the left
+        int r = int(30 * light), g = int(200 * light), b = int(70 * light);
+        if ((x - 160) * (x - 160) + (y - 120) * (y - 120) < 55 * 55) // the subject
+          r = 205, g = 150, b = 120;
+        if ((x + y / 3) % 37 < 2 && y < 110) // strands of hair over the screen
+          r = g = b = 25;
+        if ((x == 60 || x == 61) && y > 170 && y < 200) // a marker, a little lighter than the screen
+          r = g = b = 150;
+        p[0] = uint8_t(b), p[1] = uint8_t(g), p[2] = uint8_t(r), p[3] = 255;
+      }
+    media::bgrx_to_nv12(picture.data(), w, h, nv12.data());
+    for (int f = 0; f < 30; ++f)
+      REQUIRE((*encoder)->video(nv12.data(), f));
+    REQUIRE((*encoder)->finish());
+  }
+  for (const double hue : {120.0, 0.0})
+    for (const double detail : {0.0, 0.6, 1.0}) {
+      INFO("chroma key, hue " << hue << ", detail " << detail);
+      const json key = fx("chroma_key", {{"hue", hue}, {"similarity", 0.4}, {"smoothness", 0.1}, {"detail", detail}});
+      CHECK(frame_of(320, 240, {{"opacity", 1.0}}, {{"fx_k", key}}, nullptr, nullptr, nullptr) != frame_of(320, 240, {{"opacity", 1.0}}, json::object(), nullptr, nullptr, nullptr)); // it keys something out
+      for (const json &keyed : {json{{"fx_k", key}}, json{{"fx_1", fx("gaussian_blur", {{"radius", 0.004}})}, {"fx_2", key}, {"fx_3", fx("color_grade", {{"saturation", 1.3}})}}})
+        for (const json &part : {json{{"opacity", 1.0}}, json{{"scale", {0.6, 0.6}}, {"position", {0.4, 0.55}}, {"rotation", 9.0}, {"opacity", 0.9}}})
+          for (const auto &[cw, ch] : {std::pair{320, 240}, std::pair{322, 182}}) {
+            INFO(keyed.size() << " effects, " << part.dump() << ", " << cw << "x" << ch);
+            CHECK(frame_of(cw, ch, part, keyed, nullptr, nullptr, nullptr) == frame_of(cw, ch, part, keyed, nullptr, gpu->get(), &runs));
+            CHECK(runs == 1);
+          }
+    }
   std::error_code ec;
   fs::remove_all(dir, ec);
 }

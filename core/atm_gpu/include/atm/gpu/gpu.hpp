@@ -44,15 +44,18 @@ struct Timing {
 // One effect of a chain run on the GPU (Context::run_effects). The numbers that must match the CPU exactly come from the
 // renderer, made by the same code its CPU path uses: the GPU only applies them.
 struct Effect {
-  enum class Kind { blur, sharpen, table, vignette, grain, lut, luma_key };
+  enum class Kind { blur, sharpen, table, vignette, grain, lut, luma_key, chroma_key };
   Kind kind = Kind::blur;
   float sigma = 0.0f;          // blur, sharpen: the blur's sigma in pixels
   float amount = 0.0f;         // sharpen: the amount; grain: the amplitude (strength * 48); lut: the strength
   uint32_t cell = 1, seed = 0; // grain: the size of a grain in pixels, the frame's seed
   // table: 512 words, the new byte of each luma value (0..255) then of each chroma value; luma_key: 256 words, how much
   // of each luma value is kept (0..255; it needs the clip's coverage);
-  // vignette: floats as their bits: the mask (1025), x terms (width), y terms (height), chroma x (width / 2), chroma y (height / 2).
+  // vignette: floats as their bits: the mask (1025), x terms (width), y terms (height), chroma x (width / 2), chroma y (height / 2);
+  // chroma_key: the renderer's ChromaKeyTables words (it needs the clip's coverage).
   std::vector<uint32_t> table;
+  uint32_t key_start = 0;  // chroma_key: how far from the screen a thin line must be to be kept (ChromaKeyTables::start)
+  bool key_detail = false; // chroma_key: the fine detail pass runs
   // lut: the baked table, 33^3 nodes of video-range YUV (Y fastest), and an id that changes when the table does: it stays
   // in the GPU's memory between calls and is sent again only when the id changes. Not owned; it must live through the call.
   const float *lut = nullptr;
