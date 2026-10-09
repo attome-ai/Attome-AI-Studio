@@ -529,6 +529,13 @@ void App::draw_viewer() {
   ui_mark("transport:play");
   if (playing_)
     ui_mark("transport:playing"); // a UI test can see that it plays
+  if (playing_ && shuttle_ != 1) { // the shuttle's speed, left of the buttons
+    char speed[24];
+    std::snprintf(speed, sizeof speed, shuttle_ < 0 ? "%dx back" : "%dx", std::abs(shuttle_));
+    const ImVec2 sz = ImGui::CalcTextSize(speed);
+    dl->AddText(ImVec2(cx - 80.0f - sz.x, cy - sz.y * 0.5f), hex(look::accent), speed);
+    ui_mark(std::string("transport:speed:") + std::to_string(shuttle_));
+  }
   const bool play_hover = ImGui::IsItemHovered();
   if (ImGui::IsItemClicked() && total_frames_ > 0)
     play(!playing_);

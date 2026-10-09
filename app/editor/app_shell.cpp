@@ -113,13 +113,26 @@ void App::frame(double dt) {
   if (auto mix = audio_mixer_.take()) {
     const bool was_playing = playing_;
     audio_out_.set_mix(std::move(mix));
-    if (was_playing) // a mix finished while playing: continue from the playhead with the new sound
+    if (was_playing && shuttle_ == 1) // a mix finished while playing: continue from the playhead with the new sound
       audio_out_.play(playhead_ * int64_t(media::kAudioRate) * rate_.den() / rate_.num());
   }
   if (playing_) {
     audio_out_.pump();
-    const int64_t heard = audio_out_.position();
-    if (heard >= 0 && heard < int64_t(audio_out_.mix_frames())) {
+    const int64_t heard = shuttle_ == 1 ? audio_out_.position() : -1;
+    if (shuttle_ != 1) { // the shuttle: faster, or backwards, on the wall clock
+      play_accum_ += dt * fps() * double(shuttle_);
+      const int64_t step = int64_t(play_accum_); // towards zero, either way
+      play_accum_ -= double(step);
+      playhead_ += step;
+      if (playhead_ < play_start()) { // backwards to the start (the In mark): round again when looping, else stop there
+        if (loop_) {
+          playhead_ = std::max(play_start(), play_end() - 1);
+        } else {
+          playhead_ = play_start();
+          play(false);
+        }
+      }
+    } else if (heard >= 0 && heard < int64_t(audio_out_.mix_frames())) {
       // The audio clock is the master: the playhead is the frame being heard.
       playhead_ = heard * rate_.num() / (int64_t(media::kAudioRate) * rate_.den());
     } else { // no sound to follow (no device, mix not ready, or the sound ended): use the wall clock
@@ -128,10 +141,11 @@ void App::frame(double dt) {
       play_accum_ -= double(step);
       playhead_ += step;
     }
-    if (playhead_ >= play_end()) {
+    if (shuttle_ > 0 && playhead_ >= play_end()) {
       if (loop_ && total_frames_ > 0) { // back to the start (the In mark) and on
         playhead_ = play_start();
-        audio_out_.play(playhead_ * int64_t(media::kAudioRate) * rate_.den() / rate_.num());
+        if (shuttle_ == 1)
+          audio_out_.play(playhead_ * int64_t(media::kAudioRate) * rate_.den() / rate_.num());
         play_accum_ = 0.0;
       } else {
         playhead_ = mark_out_ > 0 ? play_end() : std::max<int64_t>(0, total_frames_ - 1);

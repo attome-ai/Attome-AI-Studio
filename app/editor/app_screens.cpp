@@ -581,7 +581,7 @@ void App::draw_shortcuts_sheet() {
       std::vector<Row> rows;
     };
     static const std::vector<Group> groups = {
-        {"Playing", {{"Space", "Play or pause"}, {"K / L", "Stop, play"}, {"Left / Right", "One frame back or forward"}, {"Shift+Left / Right", "One second back or forward"},
+        {"Playing", {{"Space", "Play or pause"}, {"J / K / L", "Play backwards, stop, play; J or L again goes faster"}, {"Left / Right", "One frame back or forward"}, {"Shift+Left / Right", "One second back or forward"},
                      {"Up / Down", "The previous or next cut or marker"}, {"Home / End", "The start or the end"}, {"Ctrl+L", "Loop playback"}, {"Ctrl+F", "Full screen preview (Esc leaves)"},
                      {"I / O", "Mark In and Out at the playhead: play, loop and export just that part"}, {"Alt+X", "Clear In and Out"}}},
         {"Clips", {{"Click, Ctrl+click, Shift+click", "Select one, add or remove one, a range on the track"}, {"Drag on empty space", "A box that selects what it touches"},

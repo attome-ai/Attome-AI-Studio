@@ -75,10 +75,12 @@ void App::shortcuts() {
   }
   if (ImGui::IsKeyPressed(ImGuiKey_Space, false))
     play(!playing_);
-  if (!io.KeyCtrl && !io.KeyAlt && ImGui::IsKeyPressed(ImGuiKey_K, false)) // K stops, L plays, as in other editors
+  if (!io.KeyCtrl && !io.KeyAlt && ImGui::IsKeyPressed(ImGuiKey_K, false)) // J plays backwards, K stops, L plays; J and L again go faster
     play(false);
   if (!io.KeyCtrl && !io.KeyAlt && ImGui::IsKeyPressed(ImGuiKey_L, false))
-    play(true);
+    shuttle(1);
+  if (!io.KeyCtrl && !io.KeyAlt && ImGui::IsKeyPressed(ImGuiKey_J, false))
+    shuttle(-1);
   if (ImGui::IsKeyPressed(ImGuiKey_Delete, false) || ImGui::IsKeyPressed(ImGuiKey_Backspace, false)) {
     if (io.KeyShift) // and close the gap
       ripple_delete_selected();

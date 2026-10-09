@@ -166,6 +166,7 @@ void App::play(bool on) {
     return;
   playing_ = on;
   play_accum_ = 0.0;
+  shuttle_ = 1;
   if (on) {
     if (playhead_ >= play_end() - 1)
       playhead_ = play_start();
@@ -175,10 +176,29 @@ void App::play(bool on) {
   }
 }
 
+// J and L, the shuttle: L plays, J plays backwards; pressed again, each doubles the speed (up to 8x), and the other key turns
+// round at 1x. Only plain playing forwards is heard: the sound cannot follow the playhead at another speed or backwards.
+void App::shuttle(int dir) {
+  if (total_frames_ <= 0)
+    return;
+  const int speed = playing_ && (shuttle_ > 0) == (dir > 0) ? std::min(8, std::abs(shuttle_) * 2) : 1;
+  if (dir * speed == 1) { // plain playing, with its sound
+    play(false);
+    play(true);
+    return;
+  }
+  if (!playing_ && dir > 0 && playhead_ >= play_end() - 1)
+    playhead_ = play_start();
+  audio_out_.stop();
+  playing_ = true;
+  play_accum_ = 0.0;
+  shuttle_ = dir * speed;
+}
+
 // Moves the playhead; when playing, the sound restarts at the new place.
 void App::seek(int64_t frame) {
   playhead_ = std::clamp<int64_t>(frame, 0, std::max<int64_t>(0, total_frames_));
-  if (playing_)
+  if (playing_ && shuttle_ == 1)
     audio_out_.play(playhead_ * int64_t(media::kAudioRate) * rate_.den() / rate_.num());
 }
 
