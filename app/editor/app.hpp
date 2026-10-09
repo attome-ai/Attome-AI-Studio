@@ -221,6 +221,9 @@ private:
   void draw_timeline_menu();
   void split_at_playhead();
   std::string new_track_name(bool sound) const; // V1, V2, ... or A1, A2, ...: the first not taken
+  std::string history_head() const;              // the change set at the head of the History ("" at its start)
+  // A card dropped on a new track is two edits (the track, then what is added to it); Undo and Redo take them as one.
+  std::string drop_track_cs_, drop_clip_cs_;
   int64_t pictures_end() const;                  // the frame after the last picture of the film (0 without pictures)
   int64_t past_pictures(const ClipUi &c) const;  // how long a sound plays on after the pictures end (music longer than the video)
   void end_with_pictures(const std::string &clip_id); // that sound ends where the pictures do, fading out
@@ -282,6 +285,7 @@ private:
   };
   DropPlan plan_drop(const std::string &payload, int row, int64_t frame);
   void commit_drop(const DropPlan &plan);
+  void drop_card(const DropPlan &p, std::string &made_track); // commit_drop's work; made_track: the change set of a track it made
   const json &media_info(const std::string &path); // media.probe, asked once per file
   // The first frame at or after `start` where `length` frames fit on the track without touching a clip (`skip` excepted).
   // For what is added at the playhead; a drag uses landing().

@@ -60,17 +60,22 @@ if (-not $failed) {
     'wait 800'
     'drag @media:broll.mp4 @clip:broll@0.5,-1.0 hold', 'wait 300'
     "shot $work\media_held_over_rows.jpg"
-    'release', 'wait 900'
+    'release', 'wait 900', 'expect @track:V3'
+    'key Z ctrl', 'wait 800', 'absent @track:V3'   # one undo takes back the clip and the track made for it
+    'key Y ctrl', 'wait 800', 'expect @track:V3'   # one redo brings both
   )
   if ($r4.Errors) { $failed = $r4.Errors }
-  elseif ((Layers $run) -notmatch '^V1:talk V2:broll V3:broll') { $failed = "4. after the media drop the layers are: $(Layers $run)" }
+  elseif ((Layers $run) -notmatch '^V1:talk V2:broll V3:broll') { $failed = "4. after the media drop, undo and redo the layers are: $(Layers $run)" }
+  else {
+    $u = Invoke-EditorScript -Project $proj -Endpoint $run.Endpoint -Script @('wait 600', 'rclick @track:V3', 'wait 300', 'click @menuitem:Delete_track_and_its_1_clip', 'wait 800')
+    if ($u.Errors) { $failed = $u.Errors }
+  }
 }
 
 # The b-roll on V2, made small at a time both play: it is seen over the talk.
 if (-not $failed) {
   $r5 = Invoke-EditorScript -Project $proj -Endpoint $run.Endpoint -Script @(
     'wait 800'
-    'key Z ctrl', 'wait 600'                     # the media drop undone
     'rclick @clip:broll', 'wait 300', 'click @menuitem:Go_to_its_start', 'wait 400', 'key Right shift', 'wait 300', 'click @clip:broll', 'wait 300'
     'slide @slider:scale 0.3', 'wait 900'
     "shot $work\broll_over_talk.jpg"

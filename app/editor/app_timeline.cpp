@@ -490,6 +490,18 @@ void App::draw_timeline() {
         }
         dl->AddPolyline(pts.data(), int(pts.size()), IM_COL32(255, 255, 255, 200), 0, 1.5f);
       }
+      if (!c.gain_keys.empty() && drag_id_ != c.id) { // the sound's level over time, as the Gain slider spans it (-40 .. +12 dB)
+        const int steps = std::clamp(int((x1 - x0) / 4.0f), 2, 400);
+        std::vector<ImVec2> pts;
+        pts.reserve(size_t(steps) + 1);
+        for (int i = 0; i <= steps; ++i) {
+          const double local = double(frames) * double(i) / double(steps);
+          const auto t = Rational::make(std::llround(local * 1000.0) * rate_.den(), rate_.num() * 1000);
+          const double v = t ? (std::clamp(c.gain_keys.at(*t)[0], -40.0, 12.0) + 40.0) / 52.0 : 40.0 / 52.0;
+          pts.push_back(ImVec2(x0 + (x1 - x0 - 1.0f) * float(i) / float(steps), cy + ch - 3.0f - float(v) * (ch - 6.0f)));
+        }
+        dl->AddPolyline(pts.data(), int(pts.size()), hex(look::accent, 230), 0, 1.5f);
+      }
       float label_x = x0 + 9.0f; // past the dissolve band when one leads into this clip
       for (const TransitionUi &tr : track.transitions)
         if (tr.to == c.id && drag_id_.empty())
@@ -517,8 +529,8 @@ void App::draw_timeline() {
       }
       if (!attached_sound) // the sound of a picture is a thin line: its name is the picture's
         dl->AddText(ImVec2(label_x, cy + (ch - ImGui::GetFontSize()) * 0.5f), IM_COL32(255, 255, 255, 235), label.c_str());
-      // The keys of its position, scale and rotation: small diamonds along the bottom, where they are in time.
-      for (const eval::Curve *curve : {&c.position_keys, &c.scale_keys, &c.rotation_keys})
+      // The keys of its position, scale, rotation and sound level: small diamonds along the bottom, where they are in time.
+      for (const eval::Curve *curve : {&c.position_keys, &c.scale_keys, &c.rotation_keys, &c.gain_keys})
         for (const eval::Key &k : curve->keys) {
           const float kx = x_of(double(c.start) + k.t.to_seconds_lossy() * rate), ky = cy + ch - 6.0f, r = 3.5f;
           const ImVec2 quad[4] = {ImVec2(kx, ky - r), ImVec2(kx + r, ky), ImVec2(kx, ky + r), ImVec2(kx - r, ky)};

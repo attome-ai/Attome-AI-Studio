@@ -1595,8 +1595,19 @@ void App::history_step(bool undo) {
       for (const json &cs : history_["changesets"])
         if (cs.value("id", "") == moved.front().get<std::string>())
           what = cs.value("label", "");
-    say(std::string(undo ? "Undo" : "Redo") + (what.empty() ? "" : ": " + what));
     refresh();
+    // A drop on a new track: the track and what was dropped on it go back, and come again, together.
+    const std::string first = moved.is_array() && !moved.empty() ? moved.front().get<std::string>() : std::string();
+    if (!drop_track_cs_.empty() && ((undo && first == drop_clip_cs_ && history_head() == drop_track_cs_) || (!undo && first == drop_track_cs_))) {
+      json again;
+      if (rpc(undo ? "project.undo" : "project.redo", {{"project", project_path_}}, again))
+        refresh();
+      if (!undo)
+        for (const json &cs : history_.value("changesets", json::array()))
+          if (cs.value("id", "") == drop_clip_cs_)
+            what = cs.value("label", "");
+    }
+    say(std::string(undo ? "Undo" : "Redo") + (what.empty() ? "" : ": " + what));
   }
 }
 
@@ -1977,7 +1988,22 @@ std::string App::new_track_name(bool sound) const {
   return name;
 }
 
+std::string App::history_head() const {
+  const auto head = history_.find("head");
+  return head != history_.end() && head->is_string() ? head->get<std::string>() : std::string();
+}
+
+// A drop on a new track is two edits, the track and what fills it: they are remembered as a pair, which Undo and Redo take as one.
 void App::commit_drop(const DropPlan &p) {
+  std::string made_track;
+  drop_card(p, made_track);
+  if (const std::string after = history_head(); !made_track.empty() && !after.empty() && after != made_track) {
+    drop_track_cs_ = made_track;
+    drop_clip_cs_ = after;
+  }
+}
+
+void App::drop_card(const DropPlan &p, std::string &made_track) {
   if (p.kind == "tr") {
     const ClipUi *to = find_clip(p.clip);
     if (!to)
@@ -2002,6 +2028,7 @@ void App::commit_drop(const DropPlan &p) {
     if (!patch(json::array({std::move(op)}), "Add track", &ids))
       return;
     track = ids.value("$new:t", "");
+    made_track = history_head();
   }
   if (!p.pushed.empty()) { // the clips in the way slide right first
     json ops = json::array();
