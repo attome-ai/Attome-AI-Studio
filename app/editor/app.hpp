@@ -356,6 +356,23 @@ private:
   void delete_track(const std::string &track_id);
   void auto_captions(const std::string &clip); // hears the clip (asr.transcribe, a job followed in poll) and makes captions from the words
   const ClipUi *speech_clip() const;            // the clip Auto captions in the Text panel hears: the selected one, else the one under the playhead
+  // A ready-made text style of the Text panel: the words it starts with, where it sits, and its look and motion (the content fields it
+  // sets: outline, shadow, background, font, animate_in / animate_out). One table for the panel's cards and for add_title.
+  struct TextStyle {
+    const char *name, *sample, *hint;
+    bool caption; // in the Captions tab (else Titles)
+    float size, y;
+    bool bold;
+    uint32_t color;                                       // 0xRRGGBB
+    float outline = 0.0f;                                 // its width (black); 0: none
+    float shadow = 0.0f, shadow_blur = 0.0f, shadow_off = 0.0f; // opacity, blur, offset; colour below
+    uint32_t shadow_color = 0x000000;
+    float box = 0.0f;                                     // its opacity; 0: none
+    uint32_t box_color = 0x000000;
+    const char *font = "";                                // a family, used when it is installed
+    const char *in = "", *out = "";                       // animations (fade | pop | slide | typewriter), "" none
+  };
+  static const std::vector<TextStyle> &text_styles();
   void freeze_frame(int seconds = 2); // the selected video (or the picture of the selected sound) holds the frame at the playhead
   void select_nothing(); // a click on empty space: no clip, no media card
   // While a value is dragged: the edit it would make, shown in the Monitor at once (the project is not changed until the value is let go).

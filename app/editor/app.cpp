@@ -846,16 +846,56 @@ void App::delete_track(const std::string &track_id) {
 }
 
 // Adds a text clip at the playhead on the "Titles" track (made when missing), on the first free spot.
+// The Text panel's styles: the plain three first (their look is what the Inspector starts from), then looks with motion.
+const std::vector<App::TextStyle> &App::text_styles() {
+  static const std::vector<TextStyle> styles = [] {
+    std::vector<TextStyle> s;
+    s.push_back({"Title", "Your title", "Large, centred", false, 0.12f, 0.5f, true, 0xFFFFFF});
+    s.push_back({"Lower third", "Name Surname", "Near the bottom", true, 0.06f, 0.84f, true, 0xFFFFFF});
+    s.push_back({"Caption", "Caption text", "Small, bottom", true, 0.05f, 0.9f, false, 0xFFFFFF});
+    TextStyle pop{"Bold pop", "WOW", "Yellow with a black outline, pops in", false, 0.14f, 0.5f, true, 0xFFE600};
+    pop.outline = 0.12f, pop.in = "pop", pop.out = "fade";
+    s.push_back(pop);
+    TextStyle neon{"Neon", "Neon glow", "Glows, and fades in and out", false, 0.11f, 0.5f, true, 0x39FF88};
+    neon.shadow = 0.9f, neon.shadow_blur = 0.35f, neon.shadow_color = 0x39FF88, neon.in = "fade", neon.out = "fade";
+    s.push_back(neon);
+    TextStyle typed{"Typewriter", "Typing...", "Types itself on a dark box", false, 0.07f, 0.5f, false, 0xFFFFFF};
+    typed.box = 0.75f, typed.font = "Consolas", typed.in = "typewriter", typed.out = "fade";
+    s.push_back(typed);
+    TextStyle headline{"Headline", "BREAKING", "Dark words on a white box, slides in", false, 0.08f, 0.3f, true, 0x111111};
+    headline.box = 1.0f, headline.box_color = 0xFFFFFF, headline.in = "slide", headline.out = "fade";
+    s.push_back(headline);
+    TextStyle subtitle{"Subtitle", "Subtitle text", "Plain with a soft shadow, at the bottom", true, 0.055f, 0.88f, false, 0xFFFFFF};
+    subtitle.shadow = 0.8f, subtitle.shadow_blur = 0.08f, subtitle.shadow_off = 0.05f;
+    s.push_back(subtitle);
+    return s;
+  }();
+  return styles;
+}
+
 void App::add_title(int preset, const std::string &on_track, int64_t on_at) {
-  struct Preset {
-    const char *name, *text;
-    float size, y;
-    bool bold;
+  const TextStyle &p = text_styles()[size_t(std::clamp<int>(preset, 0, int(text_styles().size()) - 1))];
+  const auto hex_of = [](uint32_t rgb) {
+    char text[8];
+    std::snprintf(text, sizeof text, "#%06x", rgb & 0xFFFFFFu);
+    return std::string(text);
   };
-  static const Preset presets[] = {{"Title", "Your title", 0.12f, 0.5f, true},
-                                   {"Lower third", "Name Surname", 0.06f, 0.84f, true},
-                                   {"Caption", "Caption text", 0.05f, 0.9f, false}};
-  const Preset &p = presets[std::clamp(preset, 0, 2)];
+  json content = {{"text", p.sample}, {"size", p.size}, {"color", hex_of(p.color)}, {"bold", p.bold}};
+  if (p.outline > 0.0f)
+    content["outline"] = {{"color", "#000000"}, {"width", p.outline}};
+  if (p.shadow > 0.0f)
+    content["shadow"] = {{"color", hex_of(p.shadow_color)}, {"x", p.shadow_off}, {"y", p.shadow_off}, {"blur", p.shadow_blur}, {"opacity", p.shadow}};
+  if (p.box > 0.0f)
+    content["background"] = {{"color", hex_of(p.box_color)}, {"opacity", p.box}, {"padding", 0.3}, {"radius", 0.3}};
+  if (*p.font) {
+    const std::vector<std::string> &fonts = media::list_fonts();
+    if (std::find(fonts.begin(), fonts.end(), p.font) != fonts.end())
+      content["font"] = p.font;
+  }
+  if (*p.in)
+    content["animate_in"] = {{"style", p.in}, {"duration", "1/2"}};
+  if (*p.out)
+    content["animate_out"] = {{"style", p.out}, {"duration", "1/2"}};
   const TrackUi *titles = nullptr; // the track it goes on: the one it was dropped on, else "Titles"
   for (const TrackUi &t : tracks_)
     if (on_track.empty() ? t.name == "Titles" : t.id == on_track)
@@ -874,7 +914,7 @@ void App::add_title(int preset, const std::string &on_track, int64_t on_at) {
                   {{"name", p.name},
                    {"timing", {{"record_in", frames_text(at)}, {"duration", frames_text(frames)}, {"source_in", "0"}}},
                    {"media_ref", {{"type", "text"}}},
-                   {"content", {{"text", p.text}, {"size", p.size}, {"color", "#ffffff"}, {"bold", p.bold}}},
+                   {"content", std::move(content)},
                    {"transform", {{"position", json::array({0.5, double(p.y)})}, {"opacity", 1.0}}}}}});
   json ids;
   if (patch(std::move(ops), (std::string("Add ") + p.name).c_str(), &ids)) {
@@ -1790,8 +1830,7 @@ App::DropPlan App::plan_drop(const std::string &payload, int row, int64_t frame)
     p.frames = three_seconds; // on empty track space: an adjustment layer there
     p.label += " layer";
   } else if (p.kind == "title") {
-    static const char *const names[] = {"Title", "Lower third", "Caption"};
-    p.label = names[std::clamp(std::atoi(p.id.c_str()), 0, 2)];
+    p.label = text_styles()[size_t(std::clamp<int>(std::atoi(p.id.c_str()), 0, int(text_styles().size()) - 1))].name;
     p.frames = three_seconds;
   } else if (p.kind == "gen") {
     for (const json &m : gen_models_)

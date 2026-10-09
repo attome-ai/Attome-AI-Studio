@@ -491,23 +491,17 @@ void App::draw_text_panel() {
     ImGui::Spacing();
     section_label("STYLES");
   }
-  struct Style {
-    const char *name, *sample, *hint;
-    float size;
-    bool bold;
-  };
-  static const Style styles[] = {{"Title", "Your title", "Large, centred", 30.0f, true},
-                                 {"Lower third", "Name Surname", "Near the bottom", 20.0f, true},
-                                 {"Caption", "Caption text", "Small, bottom", 16.0f, false}};
-  const auto in_tab = [&](int i) { return text_tab_ == 0 || (text_tab_ == 1) == (i == 0); }; // the first style is the title
-  TileGrid grid = tile_grid(text_tab_ == 0 ? 3 : text_tab_ == 1 ? 1 : 2);
-  for (int i = 0; i < 3; ++i) {
-    if (!in_tab(i))
+  const std::vector<TextStyle> &styles = text_styles();
+  const auto in_tab = [&](const TextStyle &s) { return text_tab_ == 0 || (text_tab_ == 2) == s.caption; };
+  TileGrid grid = tile_grid(int(std::count_if(styles.begin(), styles.end(), in_tab)));
+  for (size_t i = 0; i < styles.size(); ++i) {
+    if (!in_tab(styles[i]))
       continue;
-    const Style st = styles[i];
+    const TextStyle st = styles[i];
     Tile t;
     t.id = std::string("style_") + st.name;
     t.mark = std::string("style:") + st.name;
+    std::replace(t.mark.begin(), t.mark.end(), ' ', '_'); // "style:Bold_pop", as a script writes it
     t.label = st.name;
     t.tip = std::string(st.hint) + ". Drag it onto the timeline, or click to add it at the playhead.";
     t.payload = "title:" + std::to_string(i);
@@ -518,14 +512,30 @@ void App::draw_text_panel() {
       dl->AddRectFilled(p, ImVec2(q.x, p.y + h * 0.4f), IM_COL32(64, 98, 150, 255), 10.0f, ImDrawFlags_RoundCornersTop);
       dl->AddRectFilled(ImVec2(p.x, p.y + h * 0.4f), ImVec2(q.x, p.y + h * 0.7f), IM_COL32(40, 62, 100, 255));
       dl->AddRectFilled(ImVec2(p.x, p.y + h * 0.7f), q, IM_COL32(22, 30, 48, 255), 10.0f, ImDrawFlags_RoundCornersBottom);
-      ImGui::PushFont(st.bold ? g_fonts.bold : g_fonts.ui, st.size * 0.8f * (q.x - p.x) / 133.0f); // 133 px: the tile of a two-column panel
+      // The sample as the style draws it: its colour, outline, shadow or glow, and box (the sizes scaled to the tile: 133 px wide in a
+      // two-column panel, the text 0.12 of a short side is about 30 px there).
+      const float scale = (q.x - p.x) / 133.0f, px = std::min(st.size * 250.0f, 34.0f) * scale;
+      ImGui::PushFont(st.bold ? g_fonts.bold : g_fonts.ui, px);
       const ImVec2 ss = ImGui::CalcTextSize(st.sample);
-      const bool low = std::string(st.name) != "Title"; // lower third and caption sit near the bottom
-      dl->AddText(ImVec2(p.x + (q.x - p.x - ss.x) * 0.5f, p.y + (low ? h * 0.46f : h * 0.30f)), IM_COL32(255, 255, 255, 255), st.sample);
+      const ImVec2 at(p.x + (q.x - p.x - ss.x) * 0.5f, st.y > 0.7f ? p.y + h * 0.55f : st.y < 0.4f ? p.y + h * 0.12f : p.y + (h * 0.62f - ss.y) * 0.5f);
+      const auto rgb = [](uint32_t c, float a) { return IM_COL32((c >> 16) & 255, (c >> 8) & 255, c & 255, int(a * 255.0f)); };
+      if (st.box > 0.0f)
+        dl->AddRectFilled(ImVec2(at.x - px * 0.3f, at.y - px * 0.15f), ImVec2(at.x + ss.x + px * 0.3f, at.y + ss.y + px * 0.15f), rgb(st.box_color, st.box), px * 0.3f);
+      if (st.shadow > 0.0f) {
+        const float spread = std::max(1.0f, st.shadow_blur * px * 0.15f), off = st.shadow_off * px;
+        for (const ImVec2 d : {ImVec2(-1, -1), ImVec2(1, -1), ImVec2(-1, 1), ImVec2(1, 1)})
+          dl->AddText(ImVec2(at.x + off + d.x * spread, at.y + off + d.y * spread), rgb(st.shadow_color, st.shadow * 0.3f), st.sample);
+      }
+      if (st.outline > 0.0f) {
+        const float w = std::max(1.0f, st.outline * px * 0.6f);
+        for (const ImVec2 d : {ImVec2(-1, 0), ImVec2(1, 0), ImVec2(0, -1), ImVec2(0, 1), ImVec2(-1, -1), ImVec2(1, 1), ImVec2(-1, 1), ImVec2(1, -1)})
+          dl->AddText(ImVec2(at.x + d.x * w, at.y + d.y * w), IM_COL32(0, 0, 0, 255), st.sample);
+      }
+      dl->AddText(at, rgb(st.color, 1.0f), st.sample);
       ImGui::PopFont();
     };
     if (gallery_tile(grid, t))
-      add_title(i);
+      add_title(int(i));
   }
   panel_hint("Drag a style onto the timeline, or click it to add it at the playhead. Edit the words, size and colour in the "
              "Inspector; Arabic and other right-to-left text work.");
