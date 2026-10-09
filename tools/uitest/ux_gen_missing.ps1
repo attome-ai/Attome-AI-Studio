@@ -40,6 +40,8 @@ try {
     'expect @card:Generate', 'expect @card:Workflow'
     'above @card:Generate @card:Workflow'
     "shot $work\clip_added.jpg"
+    'click @mode:Workflows', 'wait 1200'
+    "shot $work\workflow_note.jpg"      # under the model's node: what is wrong, in words, not the node's ID
   )
   $failed = $run.Errors
   Stop-Daemon $run

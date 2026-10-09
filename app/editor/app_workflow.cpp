@@ -696,8 +696,19 @@ void App::draw_workflow_canvas(const json &library) {
     if (const auto found = gen_problems_.find(wf_clip_); found != gen_problems_.end())
       for (const json &problem : found->second) {
         const std::string path = problem.value("path", std::string()), at = path.substr(0, path.find('/'));
-        if (nodes.contains(at) && !fail_notes.contains(at))
-          fail_notes[at] = problem.value("message", std::string());
+        if (nodes.contains(at) && !fail_notes.contains(at)) {
+          // The engine words it for an agent, naming the node ("Node nod_... (Title) has no model chosen."); under the node that
+          // name says nothing, and it is what a short note would show: it goes.
+          std::string message = problem.value("message", std::string());
+          if (const std::string head = "Node " + at + " "; message.rfind(head, 0) == 0) {
+            message.erase(0, head.size());
+            if (const size_t close = message.find(") "); !message.empty() && message[0] == '(' && close != std::string::npos)
+              message.erase(0, close + 2);
+            if (!message.empty())
+              message[0] = char(std::toupper(static_cast<unsigned char>(message[0])));
+          }
+          fail_notes[at] = message;
+        }
       }
   if (!wf_fail_.empty() && wf_fail_clip_ == wf_id_ && wf_fail_hash_ == std::hash<std::string>{}(workflow.dump()))
     for (const auto &[node, why] : wf_fail_)
@@ -1392,12 +1403,28 @@ void App::draw_workflow_canvas(const json &library) {
       missing = true;
     dl->AddRect(p, q, selected ? hex(look::accent) : missing ? ImGui::ColorConvertFloat4ToU32(kError) : hex(hovered ? look::line2 : look::line), 10.0f * z, 0,
                 selected ? 2.0f : 1.3f);
-    if (note != fail_notes.end()) { // why: a line of red under the node, and the whole of it when the pointer is on the node
-      std::string line = note->second;
+    if (note != fail_notes.end()) { // why: up to three lines of red under the node, and the whole of it when the pointer is on the node
       const float room = node_w - 2.0f * pad;
-      while (line.size() > 4 && text_size(line.c_str()).x > room)
-        line.resize(line.size() - 4), line += "...";
-      dl->AddText(ImVec2(p.x + pad, q.y + 4.0f * z), ImGui::ColorConvertFloat4ToU32(kError), line.c_str());
+      std::vector<std::string> lines(1);
+      size_t at = 0;
+      for (size_t next = 0; at < note->second.size() && lines.size() <= 3; at = next) { // word by word
+        next = note->second.find(' ', at + 1);
+        const std::string word = note->second.substr(at, next == std::string::npos ? std::string::npos : next - at);
+        if (next == std::string::npos)
+          next = note->second.size();
+        if (!lines.back().empty() && text_size((lines.back() + word).c_str()).x > room)
+          lines.push_back(word.substr(word[0] == ' ' ? 1 : 0));
+        else
+          lines.back() += lines.back().empty() && word[0] == ' ' ? word.substr(1) : word;
+      }
+      if (lines.size() > 3) { // more than fits: the third line ends in dots
+        lines.resize(3);
+        while (lines[2].size() > 4 && text_size((lines[2] + "...").c_str()).x > room)
+          lines[2].pop_back();
+        lines[2] += "...";
+      }
+      for (size_t i = 0; i < lines.size(); ++i)
+        dl->AddText(ImVec2(p.x + pad, q.y + 4.0f * z + float(i) * ImGui::GetFontSize()), ImGui::ColorConvertFloat4ToU32(kError), lines[i].c_str());
       ui_mark("note:" + b.id);
       if (hovered) {
         ImGui::BeginTooltip();
