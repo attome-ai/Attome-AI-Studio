@@ -307,6 +307,8 @@ private:
   void draw_rail();
   void draw_media();
   void jump_cut(bool forward);
+  void select_at_playhead();         // D: the clip on top under the playhead
+  void select_neighbour(bool next);  // Tab, Shift+Tab: the next or the previous clip on the selected clip's track (the playhead goes to its start)
   void draw_welcome();
   void note_recent(const std::string &path);          // the project goes to the top of the recent list
   void create_project(const std::string &name, int shape, int rate);

@@ -123,6 +123,10 @@ void App::shortcuts() {
     set_mark(false);
   if (io.KeyAlt && ImGui::IsKeyPressed(ImGuiKey_X, false))
     clear_marks();
+  if (!io.KeyCtrl && !io.KeyAlt && ImGui::IsKeyPressed(ImGuiKey_D, false))
+    select_at_playhead();
+  if (!io.KeyCtrl && !io.KeyAlt && ImGui::IsKeyPressed(ImGuiKey_Tab, false))
+    select_neighbour(!io.KeyShift);
   if (ImGui::IsKeyPressed(ImGuiKey_UpArrow, false))
     jump_cut(false);
   if (ImGui::IsKeyPressed(ImGuiKey_DownArrow, false))
@@ -165,8 +169,42 @@ void App::shortcuts() {
     seek(total_frames_);
 }
 
+void App::select_at_playhead() {
+  for (const TrackUi &t : tracks_) // the top track first: what the Monitor shows
+    if (!t.hidden)
+      for (const ClipUi &c : t.clips)
+        if (playhead_ >= c.start && playhead_ < c.start + c.frames) {
+          select_clips({c.id}, false);
+          reveal_clip_ = c.id;
+          return;
+        }
+  say("There is no clip under the playhead.");
+}
 
-// ---- transform keys ----------------------------------------------------------------------------------------------
+void App::select_neighbour(bool next) {
+  const TrackUi *home = nullptr;
+  const ClipUi *now = selected(&home);
+  const ClipUi *pick = nullptr;
+  if (!now) { // nothing selected: the one under the playhead, else the first after it on the top track that has one (the last before it, going back)
+    for (const TrackUi &t : tracks_)
+      for (const ClipUi &c : t.clips)
+        if (next ? c.start + c.frames > playhead_ : c.start < playhead_)
+          if (!pick || (next ? c.start < pick->start : c.start > pick->start))
+            pick = &c;
+  } else {
+    for (const ClipUi &c : home->clips)
+      if (&c != now && (next ? c.start >= now->start + now->frames : c.start + c.frames <= now->start))
+        if (!pick || (next ? c.start < pick->start : c.start > pick->start))
+          pick = &c;
+  }
+  if (!pick) {
+    say(next ? "That is the last clip." : "That is the first clip.");
+    return;
+  }
+  select_clips({pick->id}, false);
+  reveal_clip_ = pick->id;
+  seek(pick->start);
+}
 
 
 } // namespace atm::editor
