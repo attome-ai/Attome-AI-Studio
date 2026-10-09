@@ -604,7 +604,7 @@ const App::MarkerUi *App::marker_at(int64_t frame, int64_t reach) const {
 }
 
 // "Auto captions" of a clip: its speech is heard (asr.transcribe, a job that poll follows) and made into captions, one clip for each sentence,
-// each word timed as it was said. Needs the speech model (a download from the Models panel) and the speech program.
+// each word timed as it was said. Needs the speech model (offered for download when it is missing) and the speech program.
 void App::auto_captions(const std::string &clip) {
   if (!asr_job_.empty()) {
     say("Already listening to a clip. Stop it first, from the clip's menu.", true);
@@ -613,8 +613,10 @@ void App::auto_captions(const std::string &clip) {
   json started;
   RpcError error;
   if (!client_.call("asr.transcribe", {{"project", project_path_}, {"clip", clip}}, started, error)) {
-    if (error.code == 1404) // the model is missing
-      say("No speech model is on this computer yet. Download \"Whisper small\" (488 MB), or the more exact \"Whisper large-v3 turbo\" (574 MB, better in Arabic), from the Models panel, then try again.", true);
+    if (error.code == 1404) { // the model is missing: offered here, with the download
+      asr_offer_clip_ = clip;
+      asr_offer_model_.clear();
+    }
     else if (error.code == 1406) // the program is missing
       say("Auto captions need the speech program, attome-whisper, which this build of Attome does not have. It is built with Attome when whisper.cpp is in .deps/whisper.cpp (README, \"Speech to text\").", true);
     else

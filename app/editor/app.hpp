@@ -316,6 +316,7 @@ private:
   void draw_history();
   void draw_profiler();
   void draw_export();
+  void draw_asr_offer(); // "Auto captions" without a speech model: offers the download, then goes on with the captions
   bool open_project_has_clips() const;
   void draw_shortcuts_sheet();  // Help > Keyboard shortcuts (F1)
   void draw_monitor_full();     // the picture over the whole window (Ctrl+F; Esc leaves)
@@ -638,6 +639,7 @@ private:
   std::map<std::string, json> gen_state_; // every generative clip as gen.status reports it: state, reason, takes
   std::string asr_job_, asr_clip_;        // "Auto captions": the transcription that is running, started here, and the clip it listens to
   double next_asr_poll_ = 0.0;
+  std::string asr_offer_clip_, asr_offer_model_; // no speech model yet: the clip waiting for one, and the model being downloaded for it ("" = still choosing)
   std::string gen_job_;                   // the generation that is running, started here
   json gen_job_state_ = json::object();   // as jobs.get last reported it; kept after the end to show a failure
   double next_gen_job_poll_ = 0.0;
