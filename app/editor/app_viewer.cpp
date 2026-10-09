@@ -510,7 +510,7 @@ void App::draw_viewer() {
   const float cy = ty + 28.0f;
   const auto skip_button = [&](const char *id, float x, bool forward, const char *tip) {
     ImGui::SetCursorScreenPos(ImVec2(x - 18.0f, cy - 18.0f));
-    ImGui::InvisibleButton(id, ImVec2(36.0f, 36.0f));
+    ImGui::InvisibleButton(id, ImVec2(36.0f, 36.0f), ImGuiButtonFlags_EnableNav);
     const bool hovered = ImGui::IsItemHovered();
     const ImU32 ink = total_frames_ > 0 ? hex(hovered ? look::accent : look::fg) : hex(look::fg3);
     const float d = forward ? 1.0f : -1.0f;
@@ -525,7 +525,7 @@ void App::draw_viewer() {
   if (skip_button("next", cx + 48.0f, true, "Next cut"))
     jump_cut(true);
   ImGui::SetCursorScreenPos(ImVec2(cx - 22.0f, cy - 22.0f));
-  ImGui::InvisibleButton("##play", ImVec2(44.0f, 44.0f));
+  ImGui::InvisibleButton("##play", ImVec2(44.0f, 44.0f), ImGuiButtonFlags_EnableNav);
   ui_mark("transport:play");
   if (playing_)
     ui_mark("transport:playing"); // a UI test can see that it plays

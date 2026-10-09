@@ -363,11 +363,11 @@ void App::draw_library_panel() {
     ImGui::PushID(id.c_str());
     const ImVec2 p = ImGui::GetCursorScreenPos();
     ImGui::SetNextItemAllowOverlap();
-    ImGui::InvisibleButton("##card", ImVec2(cell, thumb_h + 38.0f));
+    const bool card_pressed = ImGui::InvisibleButton("##card", ImVec2(cell, thumb_h + 38.0f), ImGuiButtonFlags_EnableNav);
     ui_mark("library:" + name);
     const bool hovered = ImGui::IsItemHovered();
     card_source("lib:" + id, name.c_str());
-    const bool add_by_double_click = hovered && ImGui::IsMouseDoubleClicked(0);
+    const bool add_by_double_click = (hovered && ImGui::IsMouseDoubleClicked(0)) || (card_pressed && !ImGui::IsMouseReleased(0)); // or Enter on the card
     bool add_now = add_by_double_click;
     if (ImGui::BeginPopupContextItem("##libctx")) {
       if (menu_item("Add at the playhead"))
@@ -410,7 +410,7 @@ void App::draw_library_panel() {
     {
       const ImVec2 here = ImGui::GetCursorScreenPos();
       ImGui::SetCursorScreenPos(ImVec2(p.x + cell - 34.0f, p.y + 6.0f));
-      ImGui::InvisibleButton("##add", ImVec2(28.0f, 28.0f));
+      ImGui::InvisibleButton("##add", ImVec2(28.0f, 28.0f), ImGuiButtonFlags_EnableNav);
       ui_mark("button:add_library_" + name);
       if (ImGui::IsItemClicked())
         add_now = true;

@@ -186,7 +186,7 @@ inline bool soft_button(const char *id, const char *label, ImVec2 size, bool ena
   const ImVec2 p = ImGui::GetCursorScreenPos();
   if (size.x <= 0.0f)
     size.x = text_size(label).x + 24.0f;
-  const bool pressed = ImGui::InvisibleButton("##b", size);
+  const bool pressed = ImGui::InvisibleButton("##b", size, ImGuiButtonFlags_EnableNav);
   ui_mark(std::string("button:") + id);
   const bool hovered = enabled && ImGui::IsItemHovered(), held = enabled && ImGui::IsItemActive();
   ImDrawList *dl = ImGui::GetWindowDrawList();
@@ -209,7 +209,7 @@ inline bool icon_button(const char *id, Icon cp, bool enabled = true, bool activ
                  const char *tip = nullptr) {
   ImGui::PushID(id);
   const ImVec2 p = ImGui::GetCursorScreenPos();
-  const bool pressed = ImGui::InvisibleButton("##i", ImVec2(size, size));
+  const bool pressed = ImGui::InvisibleButton("##i", ImVec2(size, size), ImGuiButtonFlags_EnableNav);
   ui_mark(std::string("icon:") + id);
   const bool hovered = enabled && ImGui::IsItemHovered();
   ImDrawList *dl = ImGui::GetWindowDrawList();
@@ -243,6 +243,7 @@ struct SliderState {
   ImGuiID reset_hold = 0; // a double click set the value back: the drag that goes with the click is ignored until the button is up
   bool fine = false;      // Shift is held: the drag moves a tenth as fast, on from where the value was when Shift went down
   float grab_t = 0.0f, grab_x = 0.0f;
+  ImGuiID key_edit = 0;   // the slider whose value the arrow keys are changing
 };
 inline SliderState g_slider;
 
@@ -258,7 +259,7 @@ inline bool slim_slider(const char *id, float *value, float lo, float hi, float 
   const ImGuiIO &io = ImGui::GetIO();
   const auto to_t = [&](float v) { return log_scale ? std::log(std::max(v, lo) / lo) / std::log(hi / lo) : (v - lo) / (hi - lo); };
   const auto from_t = [&](float t) { return log_scale ? lo * std::pow(hi / lo, t) : lo + t * (hi - lo); };
-  ImGui::InvisibleButton("##s", ImVec2(width, h));
+  ImGui::InvisibleButton("##s", ImVec2(width, h), ImGuiButtonFlags_EnableNav);
   const ImGuiID item = ImGui::GetItemID();
   ui_mark(std::string("slider:") + id);
   bool changed = false, done = false;
@@ -273,6 +274,30 @@ inline bool slim_slider(const char *id, float *value, float lo, float hi, float 
     changed = true;
     g_slider.reset_hold = item;
     ImGui::MarkItemEdited(item);
+  } else if (const bool keyed = ImGui::IsItemFocused() && ImGui::GetCurrentContext()->NavCursorVisible; keyed && !ImGui::IsItemActive() &&
+             (ImGui::SetKeyOwner(ImGuiKey_LeftArrow, item), ImGui::SetKeyOwner(ImGuiKey_RightArrow, item),
+              ImGui::IsKeyPressed(ImGuiKey_LeftArrow, ImGuiInputFlags_Repeat, item) || ImGui::IsKeyPressed(ImGuiKey_RightArrow, ImGuiInputFlags_Repeat, item) ||
+              ImGui::IsKeyPressed(ImGuiKey_Home, false, item) || ImGui::IsKeyPressed(ImGuiKey_End, false, item))) {
+    // The keys, with the ring on the slider (F6 and the arrows): Left and Right a fiftieth of the track (Shift: a five-hundredth), Home and End the ends.
+    const float step = io.KeyShift ? 0.002f : 0.02f;
+    float t = to_t(*value);
+    if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow, ImGuiInputFlags_Repeat, item))
+      t -= step;
+    if (ImGui::IsKeyPressed(ImGuiKey_RightArrow, ImGuiInputFlags_Repeat, item))
+      t += step;
+    if (ImGui::IsKeyPressed(ImGuiKey_Home, false, item))
+      t = 0.0f;
+    if (ImGui::IsKeyPressed(ImGuiKey_End, false, item))
+      t = 1.0f;
+    float v = from_t(std::clamp(t, 0.0f, 1.0f));
+    if (!std::isnan(stick) && !io.KeyShift && std::fabs(to_t(v) - to_t(stick)) < step * 0.75f)
+      v = stick; // the knob stops at 0 dB, the centre, 100 %
+    if (v != *value) {
+      *value = v;
+      changed = true;
+      ImGui::MarkItemEdited(item);
+    }
+    g_slider.key_edit = item;
   } else if (ImGui::IsItemActive() && g_slider.reset_hold != item) {
     if (ImGui::IsItemActivated() || io.KeyShift != g_slider.fine) { // pressed, or Shift went down or up on the way: go on from here
       g_slider.fine = io.KeyShift;
@@ -290,6 +315,11 @@ inline bool slim_slider(const char *id, float *value, float lo, float hi, float 
       changed = true;
       ImGui::MarkItemEdited(item);
     }
+  }
+  if (g_slider.key_edit == item && ImGui::IsItemFocused() && !changed && !ImGui::IsKeyDown(ImGuiKey_LeftArrow) && !ImGui::IsKeyDown(ImGuiKey_RightArrow) &&
+      !ImGui::IsKeyDown(ImGuiKey_Home) && !ImGui::IsKeyDown(ImGuiKey_End)) { // the keys let go: one saved edit, as a drag that ends
+    g_slider.key_edit = 0;
+    done = true;
   }
   done = done || ImGui::IsItemDeactivatedAfterEdit();
   if (!std::isnan(def) && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal) && !ImGui::IsItemActive())
@@ -358,7 +388,7 @@ inline void slider_number(const char *fmt, float shown, float scale = 0.0f, floa
     char label[48];
     std::snprintf(label, sizeof label, fmt, double(shown));
     const ImVec2 at = ImGui::GetCursorScreenPos(), size = ImGui::CalcTextSize(label);
-    const bool pressed = ImGui::InvisibleButton("##t", ImVec2(std::max(size.x, 30.0f), std::max(size.y, 18.0f)));
+    const bool pressed = ImGui::InvisibleButton("##t", ImVec2(std::max(size.x, 30.0f), std::max(size.y, 18.0f)), ImGuiButtonFlags_EnableNav);
     ui_mark("number:" + g_slider.name);
     const bool hovered = ImGui::IsItemHovered();
     ImDrawList *dl = ImGui::GetWindowDrawList();
@@ -407,7 +437,7 @@ inline bool begin_card(const char *id, const char *title, const char *right = nu
     static std::set<std::string> folded;
     const bool is_folded = folded.count(id) > 0;
     const ImVec2 at = ImGui::GetCursorScreenPos();
-    const bool pressed = ImGui::InvisibleButton("##fold", ImVec2(ImGui::GetContentRegionAvail().x, 18.0f));
+    const bool pressed = ImGui::InvisibleButton("##fold", ImVec2(ImGui::GetContentRegionAvail().x, 18.0f), ImGuiButtonFlags_EnableNav);
     ui_mark(std::string("card:") + title);
     const bool hovered = ImGui::IsItemHovered();
     if (item_hit(pressed)) {
@@ -493,7 +523,7 @@ inline void panel_tabs(const char *mark, std::span<const std::string> labels, in
     const ImVec2 p = ImGui::GetCursorScreenPos();
     const float tw = text_size(labels[size_t(i)].c_str()).x + 20.0f;
     ImGui::PushID(i);
-    const bool pressed = ImGui::InvisibleButton(mark, ImVec2(tw, 28.0f));
+    const bool pressed = ImGui::InvisibleButton(mark, ImVec2(tw, 28.0f), ImGuiButtonFlags_EnableNav);
     ImGui::PopID();
     ui_mark(std::string(mark) + ":" + labels[size_t(i)]);
     if (item_hit(pressed))
@@ -549,11 +579,11 @@ inline bool gallery_tile(TileGrid &g, const Tile &t) {
     ImGui::SameLine(0.0f, g.gap);
   ++g.n;
   const ImVec2 p = ImGui::GetCursorScreenPos(), q(p.x + g.size, p.y + g.size);
-  ImGui::InvisibleButton(("##tile_" + t.id).c_str(), ImVec2(g.size, g.size));
+  const bool tile_pressed = ImGui::InvisibleButton(("##tile_" + t.id).c_str(), ImVec2(g.size, g.size), ImGuiButtonFlags_EnableNav);
   if (!t.mark.empty())
     ui_mark(t.mark);
   const bool hovered = ImGui::IsItemHovered();
-  const bool clicked = card_source(t.payload, t.label.c_str());
+  const bool clicked = card_source(t.payload, t.label.c_str()) || (tile_pressed && !ImGui::IsMouseReleased(0)); // a click, or Enter
   ImDrawList *dl = ImGui::GetWindowDrawList();
   constexpr float kRound = 10.0f;
   dl->AddRectFilled(p, q, hex(t.base), kRound);
@@ -600,7 +630,7 @@ inline bool gallery_tile(TileGrid &g, const Tile &t) {
 inline bool key_diamond(const char *id, int state) {
   const ImVec2 p = ImGui::GetCursorScreenPos();
   const float size = 18.0f;
-  const bool pressed = ImGui::InvisibleButton(id, ImVec2(size, size));
+  const bool pressed = ImGui::InvisibleButton(id, ImVec2(size, size), ImGuiButtonFlags_EnableNav);
   const bool hovered = ImGui::IsItemHovered();
   const ImVec2 c(p.x + size * 0.5f, p.y + size * 0.5f + 1.0f);
   const float r = 5.5f;

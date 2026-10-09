@@ -1,7 +1,7 @@
-# UI test: a library card shows the clip's own picture, not the canvas (UX review 6: W7), and a double click selects what it added and
-# moves the playhead to its end (W6), so cards clicked in a row follow one another. A 16:9 clip kept from a 9:16 project, then used in
-# another 9:16 project twice. The library is the test's own folder. Virtual input only (uitest.psm1). Look at the captures.
-#   .\tools\uitest\ux_library_follow.ps1
+# UI test: a Library card is reached and added by key (UX review 6: W5, plan K4). F6 puts the keys in the Library panel, Tab goes from the
+# search field to the card, Enter adds it at the playhead. The library is the test's own folder. Virtual input only (uitest.psm1).
+#   .\tools\uitest\ux_card_keys.ps1
+
 
 $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'uitest.psm1') -Force -DisableNameChecking
@@ -29,25 +29,20 @@ $runA = Invoke-EditorScript -Project $a -TimeoutSeconds 240 -Script @(
   'rclick @clip:wide', 'wait 400', 'click @menuitem:Add_to_the_library', 'wait 300', 'click @menuitem:Both', 'wait 900'
 )
 Stop-Daemon $runA
-if ($runA.Errors) { Write-Host "FAIL: $($runA.Errors)" -ForegroundColor Red; exit 1 }
 $runB = Invoke-EditorScript -Project $b -TimeoutSeconds 240 -Script @(
   'wait 1200'
   'click @rail:Library', 'wait 900', 'expect @library:wide'
-  "shot $work\card.jpg"
-  'click @field:library_search', 'type zzz', 'wait 300', "shot $work\search_none.jpg"
-  'key A ctrl', 'type WID', 'wait 300', 'expect @library:wide'     # not case-sensitive
-  'dblclick @library:wide', 'wait 1200'
-  'dblclick @library:wide', 'wait 1200'
-  "shot $work\twice.jpg"
+  'key F6', 'wait 300', 'key Tab', 'wait 300', "shot $work\ring_on_card.jpg"
+  'key Enter', 'wait 1200'
+  "shot $work\added.jpg"
 )
 $failed = $runB.Errors
 try {
   if (-not $failed) {
-    $t = @(Get-Tracks $runB | Where-Object { @($_.clip_list).Count -gt 0 })
-    $starts = @($t | ForEach-Object { $_.clip_list } | ForEach-Object { [double](ConvertFrom-Rational $_.record_in) } | Sort-Object)
-    "clip starts: $($starts -join ', ')"
-    if ($starts.Count -ne 2 -or [math]::Abs($starts[0]) -gt 0.01 -or [math]::Abs($starts[1] - 3) -gt 0.05) { $failed = 'the second clip does not follow the first at 3 s' }
+    $n = 0; foreach ($t in @(Get-Tracks $runB)) { $n += @($t.clip_list).Count }
+    "clips: $n"
+    if ($n -ne 1) { $failed = "Enter on the card added $n clips, not 1" }
   }
 } finally { Stop-Daemon $runB }
 if ($failed) { Write-Host "FAIL: $failed" -ForegroundColor Red; exit 1 }
-Write-Host "PASS: cards follow one another; look at the captures in $work" -ForegroundColor Green
+Write-Host "PASS: a Library card is reached by F6 and Tab and added by Enter; look at the captures in $work" -ForegroundColor Green

@@ -738,7 +738,7 @@ void App::draw_media() {
     const ImVec2 p = ImGui::GetCursorScreenPos();
     ImGui::PushID(path.c_str());
     ImGui::SetNextItemAllowOverlap();
-    ImGui::InvisibleButton("##m", ImVec2(cell, thumb_h + 24.0f));
+    const bool card_pressed = ImGui::InvisibleButton("##m", ImVec2(cell, thumb_h + 24.0f), ImGuiButtonFlags_EnableNav);
     ui_mark("media:" + name);
     const bool card_hovered = ImGui::IsItemHovered();
     const bool media_clicked = card_source("media:" + path, name.c_str());
@@ -783,12 +783,12 @@ void App::draw_media() {
         };
       ImGui::EndPopup();
     }
-    const bool add_by_double_click = card_hovered && ImGui::IsMouseDoubleClicked(0);
+    const bool add_by_double_click = (card_hovered && ImGui::IsMouseDoubleClicked(0)) || (card_pressed && !ImGui::IsMouseReleased(0)); // or Enter on the card
     bool add_by_plus = false;
     {
       const ImVec2 here = ImGui::GetCursorScreenPos();
       ImGui::SetCursorScreenPos(ImVec2(p.x + cell - 34.0f, p.y + 6.0f));
-      ImGui::InvisibleButton("##add", ImVec2(28.0f, 28.0f));
+      ImGui::InvisibleButton("##add", ImVec2(28.0f, 28.0f), ImGuiButtonFlags_EnableNav);
       ui_mark("button:add_media_" + name);
       add_by_plus = ImGui::IsItemClicked();
       if (ImGui::IsItemHovered())

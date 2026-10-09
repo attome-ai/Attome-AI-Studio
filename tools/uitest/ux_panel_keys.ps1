@@ -22,7 +22,9 @@ try {
 } finally { Remove-Item Env:\ATTOME_ENDPOINT -ErrorAction SilentlyContinue }
 
 $steps = @('wait 1200', 'key Home', 'key F6', 'key F6', 'key F6', 'wait 300', "shot $work\first.jpg")
-foreach ($i in 1..6) { $steps += 'key Down', 'wait 150' }          # Name, Start, Duration, the text, Size, ... the Italic box
+foreach ($i in 1..6) { $steps += 'key Tab', 'wait 120' }           # Name, Start, Duration, the Text header, the text box, the Size slider
+$steps += "shot $work\size_ring.jpg", 'key Right', 'key Right', 'key Right', 'key Right', 'key Right', 'wait 800'   # Right moves the slider: 5 steps
+foreach ($i in 1..5) { $steps += 'key Tab', 'wait 120' }           # the number, Color, Bold, Font, the Italic box
 $steps += "shot $work\italic_ring.jpg", 'key Enter', 'wait 600'    # Enter presses it
 foreach ($i in 1..3) { $steps += 'key Down', 'wait 150' }
 $steps += 'key Home', 'wait 200', "shot $work\home_in_panel.jpg"   # Home is the panel's: the playhead stays at the start
@@ -33,8 +35,9 @@ try {
   if (-not $failed) {
     $t = @(Get-Tracks $run)[0]
     $c = (Get-Object $run @($t.clip_list)[0].id).content
-    "italic after Enter: $($c.italic)"
-    if ($c.italic -ne $true) { $failed = 'Enter did not press the Italic box' }
+    "italic after Enter: $($c.italic); size after Right x5: $($c.size)"
+    if ($c.size -le 0.09) { $failed = "Right did not move the Size slider (size $($c.size), it was 0.08)" }
+    elseif ($c.italic -ne $true) { $failed = 'Enter did not press the Italic box' }
   }
 } finally { Stop-Daemon $run }
 if ($failed) { Write-Host "FAIL: $failed" -ForegroundColor Red; exit 1 }

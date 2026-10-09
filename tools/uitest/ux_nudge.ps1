@@ -11,7 +11,7 @@ New-Item -ItemType Directory -Force $work | Out-Null
 $proj = Join-Path $work 'Nudge.attome'
 Remove-Item $proj -Recurse -Force -ErrorAction SilentlyContinue
 
-$env:ATTOME_ENDPOINT = "\.\pipe\attome-uitest-setup-$PID"
+$env:ATTOME_ENDPOINT = "\\.\pipe\attome-uitest-setup-$PID"
 try {
   New-Sample "$work\a.mp4" "--seconds 2 --height 180"
   & "$bin\attome.exe" new $proj --rate 30 --canvas 640x360 | Out-Null

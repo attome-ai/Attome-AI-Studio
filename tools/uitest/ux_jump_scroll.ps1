@@ -12,7 +12,7 @@ New-Item -ItemType Directory -Force $work | Out-Null
 $proj = Join-Path $work 'Jump.attome'
 Remove-Item $proj -Recurse -Force -ErrorAction SilentlyContinue
 
-$env:ATTOME_ENDPOINT = "\.\pipe\attome-uitest-setup-$PID"
+$env:ATTOME_ENDPOINT = "\\.\pipe\attome-uitest-setup-$PID"
 try {
   & "$bin\attome.exe" new $proj --rate 30 --canvas 640x360 | Out-Null
   [IO.File]::WriteAllText("$work\call.json", (@{ project = $proj; ops = @(@{ op = 'add_text'; text = 'Long'; name = 'Long'; at = '0s'; duration = '180s' }) } | ConvertTo-Json -Depth 6 -Compress), (New-Object Text.UTF8Encoding($false)))

@@ -11,7 +11,7 @@ New-Item -ItemType Directory -Force $work | Out-Null
 $proj = Join-Path $work 'Keys.attome'
 Remove-Item $proj -Recurse -Force -ErrorAction SilentlyContinue
 
-$env:ATTOME_ENDPOINT = "\.\pipe\attome-uitest-setup-$PID"
+$env:ATTOME_ENDPOINT = "\\.\pipe\attome-uitest-setup-$PID"
 try {
   & "$bin\attome.exe" new $proj --rate 30 --canvas 640x360 | Out-Null
   $ops = @(foreach ($i in 0..2) { @{ op = 'add_text'; text = "T$i"; name = "T$i"; at = "$($i * 3)s"; duration = '2s' } })
