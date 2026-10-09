@@ -732,8 +732,13 @@ struct Context::Impl : Vulkan {
         if (e.amount > 0.0f) // strength 0 leaves the picture alone, as on the CPU
           record_pixels({4, uw, uh, P, e.amount, 0, 0, 0, 0}, P, uh);
         break;
+      case Effect::Kind::luma_key: // the chroma from the luma as it is, then the luma and the coverage
+        record_pixels({6, uw, uh, P, 0.0f, 0, 0, 0, table_at[i]}, P, uh);
+        record_pixels({7, uw, uh, P, 0.0f, 0, 0, 0, table_at[i]}, P, uh);
+        break;
       }
-      if (cover && e.kind != Effect::Kind::blur) // a colour effect: what it changed where the clip is not, taken back
+      // A colour effect: what it changed where the clip is not, taken back (a key changes the coverage itself).
+      if (cover && e.kind != Effect::Kind::blur && e.kind != Effect::Kind::luma_key)
         record_pixels({5, uw, uh, P, 0.0f, 0, 0, 0, 0}, P, uh);
     }
   }

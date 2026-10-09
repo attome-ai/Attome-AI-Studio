@@ -335,6 +335,11 @@ void half_nv12(const media::FrameView &in, uint8_t *out) {
   });
 }
 
+// Whether a layer has a key among its effects (a key takes coverage away).
+bool keyed(const Layer &l) {
+  return std::any_of(l.effects.begin(), l.effects.end(), [](const Effect &e) { return e.kind == "luma_key" || e.kind == "chroma_key"; });
+}
+
 // The plain copy of a picture of w x h (no larger than the canvas) centred on the canvas, as an upright drawing: what
 // put_rows does on the CPU.
 Upright centred(int W, int H, int w, int h) {
@@ -1354,13 +1359,18 @@ void key_nv12(uint8_t *nv12, uint8_t *cover, int W, int H, float hue, float simi
 // black, a logo on white, smoke on a dark set. A pixel is kept in full beyond `tolerance + softness` from the level and
 // removed inside `tolerance`; between them it fades. The matte is made per luma pixel from the picture's own luma and
 // multiplies the picture and the coverage like the chroma key's; the chroma of a 2 x 2 block follows the mean matte.
-void luma_key_nv12(uint8_t *nv12, uint8_t *cover, int W, int H, float level, float tolerance, float softness) {
-  ATM_PROFILE_SCOPE("effect.luma_key");
-  uint8_t keep[256]; // opacity 0..255 for each luma code
+// The luma key's opacity, 0..255, for each luma code (shared with the GPU's luma key).
+void luma_key_table(float level, float tolerance, float softness, uint8_t keep[256]) {
   for (int i = 0; i < 256; ++i) {
     const float l = (float(i) - 16.0f) * (1.0f / 219.0f);
     keep[i] = uint8_t(std::lround(smooth01((std::fabs(l - level) - tolerance) / (softness + 0.002f)) * 255.0f));
   }
+}
+
+void luma_key_nv12(uint8_t *nv12, uint8_t *cover, int W, int H, float level, float tolerance, float softness) {
+  ATM_PROFILE_SCOPE("effect.luma_key");
+  uint8_t keep[256]; // opacity 0..255 for each luma code
+  luma_key_table(level, tolerance, softness, keep);
   uint8_t *uv = nv12 + size_t(W) * size_t(H);
   parallel_for(H / 2, 16, [&](int64_t first, int64_t last) { // chroma first: it reads the luma that is still the picture's own
     for (int64_t cy = first; cy < last; ++cy) {
@@ -2015,6 +2025,77 @@ bool Renderer::still_of(const Layer &l) {
   return true;
 }
 
+media::VideoReader *Renderer::reader_of(const Layer &l) {
+  auto it = readers_.find(l.clip_id);
+  if (it == readers_.end()) {
+    // At its own size (the renderer scales it), but for a clip played backwards: its frames are kept, fitted to the canvas.
+    auto reader = media::VideoReader::open(l.path, l.reverse ? width_ : 0, l.reverse ? height_ : 0);
+    if (!reader) {
+      failed_[l.clip_id] = true;
+      if (warning_.empty())
+        warning_ = reader.error().message;
+      return nullptr;
+    }
+    it = readers_.emplace(l.clip_id, std::move(*reader)).first;
+  }
+  return it->second.get();
+}
+
+// A clip played backwards: a decoder reads forwards, so a run of frames is decoded in one go (one seek, then forwards) and
+// kept, and the frames are shown from the cache in the other order.
+std::optional<media::FrameView> Renderer::backwards_frame(const Layer &l, int64_t frame) {
+  media::VideoReader *reader = reader_of(l);
+  if (!reader)
+    return std::nullopt;
+  const int64_t rel = std::max<int64_t>(0, l.frames - 1 - (frame - l.start_frame));
+  const auto source_time_of = [&](int64_t r) {
+    int64_t t = l.source_in_hns + comp_.frame_hns(r);
+    if (l.speed != 1.0)
+      t = int64_t(double(t) * l.speed);
+    return std::max<int64_t>(0, t);
+  };
+  BackCache &cache = back_[l.clip_id];
+  if (cache.first < 0 || rel < cache.first || rel >= cache.first + int64_t(cache.frames.size())) {
+    ATM_PROFILE_SCOPE("decode.reverse_run");
+    constexpr int64_t kRun = 24; // the run read in one go: the frame needed is its last, the next ones needed come before it
+    cache.first = std::max<int64_t>(0, rel - kRun + 1);
+    cache.frames.clear();
+    for (int64_t r = cache.first; r <= rel; ++r) {
+      auto got = reader->frame_at(source_time_of(r));
+      if (!got) {
+        if (warning_.empty() && got.error().rule != "M_NO_FRAME")
+          warning_ = got.error().message;
+        cache.first = -1;
+        return std::nullopt;
+      }
+      cache.width = got->width;
+      cache.height = got->height;
+      std::vector<uint8_t> &packed = cache.frames.emplace_back(media::nv12_size(got->width, got->height));
+      for (int y = 0; y < got->height; ++y)
+        std::memcpy(packed.data() + size_t(y) * size_t(got->width), got->y + std::ptrdiff_t(got->y_pitch) * y, size_t(got->width));
+      for (int y = 0; y < got->height / 2; ++y)
+        std::memcpy(packed.data() + size_t(got->width) * size_t(got->height + y), got->uv + std::ptrdiff_t(got->uv_pitch) * y,
+                    size_t(got->width));
+    }
+  }
+  const std::vector<uint8_t> &packed = cache.frames[size_t(rel - cache.first)];
+  media::FrameView v;
+  v.width = cache.width;
+  v.height = cache.height;
+  v.y = packed.data();
+  v.y_pitch = cache.width;
+  v.uv = packed.data() + size_t(cache.width) * size_t(cache.height);
+  v.uv_pitch = cache.width;
+  return v;
+}
+
+void Renderer::forget_unused(const std::vector<const std::string *> &used) {
+  const auto unused = [&](const auto &entry) { return std::none_of(used.begin(), used.end(), [&](const std::string *id) { return *id == entry.first; }); };
+  if (readers_.size() > 6) // keep the decoders of this frame, close the rest
+    std::erase_if(readers_, unused);
+  std::erase_if(back_, unused); // the frames kept for a clip played backwards: only while it is on screen
+}
+
 void Renderer::draw(const Layer &l, int64_t frame, uint8_t *out, bool &cleared, std::vector<const std::string *> &used,
                     bool raw) {
   const size_t pitch = size_t(width_); // Y and UV rows of the packed NV12 output
@@ -2083,62 +2164,19 @@ void Renderer::draw(const Layer &l, int64_t frame, uint8_t *out, bool &cleared, 
       return;
     view = stills_.at(l.clip_id).view();
   } else {
-    auto it = readers_.find(l.clip_id);
-    if (it == readers_.end()) {
-      // At its own size (the renderer scales it), but for a clip played backwards: its frames are kept, fitted to the canvas.
-      auto reader = media::VideoReader::open(l.path, l.reverse ? width_ : 0, l.reverse ? height_ : 0);
-      if (!reader) {
-        failed_[l.clip_id] = true;
-        if (warning_.empty())
-          warning_ = reader.error().message;
-        return;
-      }
-      it = readers_.emplace(l.clip_id, std::move(*reader)).first;
-    }
+    media::VideoReader *reader = reader_of(l);
+    if (!reader)
+      return;
     used.push_back(&l.clip_id);
-    const int64_t rel = l.reverse ? std::max<int64_t>(0, l.frames - 1 - (frame - l.start_frame)) : frame - l.start_frame;
-    const auto source_time_of = [&](int64_t r) {
-      int64_t t = l.source_in_hns + comp_.frame_hns(r);
+    if (l.reverse) {
+      view = backwards_frame(l, frame);
+      if (!view)
+        return;
+    } else {
+      int64_t t = l.source_in_hns + comp_.frame_hns(frame - l.start_frame);
       if (l.speed != 1.0)
         t = int64_t(double(t) * l.speed);
-      return std::max<int64_t>(0, t);
-    };
-    if (l.reverse) {
-      BackCache &cache = back_[l.clip_id];
-      if (cache.first < 0 || rel < cache.first || rel >= cache.first + int64_t(cache.frames.size())) {
-        ATM_PROFILE_SCOPE("decode.reverse_run");
-        constexpr int64_t kRun = 24; // the run read in one go: the frame needed is its last, the next ones needed come before it
-        cache.first = std::max<int64_t>(0, rel - kRun + 1);
-        cache.frames.clear();
-        for (int64_t r = cache.first; r <= rel; ++r) {
-          auto got = it->second->frame_at(source_time_of(r));
-          if (!got) {
-            if (warning_.empty() && got.error().rule != "M_NO_FRAME")
-              warning_ = got.error().message;
-            cache.first = -1;
-            return;
-          }
-          cache.width = got->width;
-          cache.height = got->height;
-          std::vector<uint8_t> &packed = cache.frames.emplace_back(media::nv12_size(got->width, got->height));
-          for (int y = 0; y < got->height; ++y)
-            std::memcpy(packed.data() + size_t(y) * size_t(got->width), got->y + std::ptrdiff_t(got->y_pitch) * y, size_t(got->width));
-          for (int y = 0; y < got->height / 2; ++y)
-            std::memcpy(packed.data() + size_t(got->width) * size_t(got->height + y), got->uv + std::ptrdiff_t(got->uv_pitch) * y,
-                        size_t(got->width));
-        }
-      }
-      const std::vector<uint8_t> &packed = cache.frames[size_t(rel - cache.first)];
-      media::FrameView v;
-      v.width = cache.width;
-      v.height = cache.height;
-      v.y = packed.data();
-      v.y_pitch = cache.width;
-      v.uv = packed.data() + size_t(cache.width) * size_t(cache.height);
-      v.uv_pitch = cache.width;
-      view = v;
-    } else {
-      auto decoded = it->second->frame_at(source_time_of(rel));
+      auto decoded = reader->frame_at(std::max<int64_t>(0, t));
       if (!decoded) {
         if (warning_.empty() && decoded.error().rule != "M_NO_FRAME")
           warning_ = decoded.error().message;
@@ -2210,10 +2248,12 @@ void Renderer::draw_isolated(const Layer &l, int64_t frame, uint8_t *out, bool &
   bool drawn = true;
   draw(l, frame, clip, drawn, used, true);
   // A clip that covers the whole canvas has coverage 255 everywhere: the second drawing, the difference, the coverage's own blur and the
-  // masking of a colour change would all come to nothing, and are left out (the result is the same, byte for byte).
-  bool everywhere = drew_everywhere_ && !g_always_measure_coverage.load();
+  // masking of a colour change would all come to nothing, and are left out (the result is the same, byte for byte). A key
+  // takes coverage away, so a keyed clip keeps its coverage (255, not measured) and is put over the frame through it.
+  const bool covers = drew_everywhere_ && !g_always_measure_coverage.load();
+  const bool everywhere = covers && !keyed(l);
   cover_.resize(luma);
-  if (everywhere) {
+  if (covers) {
     std::memset(cover_.data(), 255, luma);
   } else {
     over_white_.resize(size);
@@ -2251,10 +2291,8 @@ void Renderer::draw_isolated(const Layer &l, int64_t frame, uint8_t *out, bool &
       // The coverage blurs the same way as the luma plane (the same passes, in the same order, as the GPU does too).
       blur_nv12(cover_.data(), W, H, sigma, scratch_, true);
     } else if (e.kind == "luma_key") {
-      everywhere = false; // a key takes coverage away
       luma_key_nv12(over_black_.data(), cover_.data(), W, H, v[0], v[1], v[2]);
     } else if (e.kind == "chroma_key") {
-      everywhere = false;
       key_nv12(over_black_.data(), cover_.data(), W, H, v[0], v[1], v[2], v[3], scratch_);
     } else { // a colour effect: apply it, then take back what it changed where the clip is not
       apply_effect(e.kind, v, over_black_.data(), W, H, scratch_, frame, lut_for(e));
@@ -2357,6 +2395,13 @@ bool Renderer::gpu_chain(const Layer &l, int64_t frame, std::vector<gpu::Effect>
       for (const gpu::Effect &other : chain)
         if (other.kind == gpu::Effect::Kind::lut && other.lut_id != g.lut_id)
           return false; // two different tables in one chain: the CPU does it
+    } else if (e.kind == "luma_key") {
+      if (l.is_adjustment)
+        continue; // a key leaves the picture below an adjustment layer alone, as on the CPU
+      g.kind = gpu::Effect::Kind::luma_key;
+      uint8_t keep[256];
+      luma_key_table(v[0], v[1], v[2], keep);
+      g.table.assign(std::begin(keep), std::end(keep));
     } else if (e.kind == "film_grain") {
       g.kind = gpu::Effect::Kind::grain;
       g.amount = grain_amp(v[0]);
@@ -2491,12 +2536,13 @@ bool Renderer::render_on_gpu(int64_t frame, uint8_t *out) {
   };
   std::vector<Shown> shown;
   std::vector<int> shown_at(comp_.layers.size(), -1); // a layer's place in `shown`
+  std::vector<const std::string *> used; // the clips whose CPU readers drew (played backwards)
   uint64_t lut_id = 0;
   for (size_t i = 0; i < comp_.layers.size(); ++i) {
     const Layer &l = comp_.layers[i];
     if (!l.video || frame < l.start_frame || frame >= l.start_frame + l.frames)
       continue;
-    if (l.reverse || failed_.count(l.clip_id) || gpu_failed_.count(l.clip_id))
+    if (failed_.count(l.clip_id) || gpu_failed_.count(l.clip_id))
       return false;
     Shown s{&l, pose_at(l, comp_, frame), {}};
     if (!l.effects.empty() && s.pose.opacity > 0.0f && !gpu_chain(l, frame, s.chain))
@@ -2560,7 +2606,7 @@ bool Renderer::render_on_gpu(int64_t frame, uint8_t *out) {
         gpu_->end_clip();
       return true;
     }
-    // A picture: a still, or a video frame the GPU decoded.
+    // A picture: a still or a frame of a clip played backwards (both from the CPU), or a video frame the GPU decoded.
     gpu::Source still;
     GpuReader *reader = nullptr;
     int vw = 0, vh = 0;
@@ -2580,6 +2626,23 @@ bool Renderer::render_on_gpu(int64_t frame, uint8_t *out) {
       still.uv_pitch = v.uv_pitch;
       still.alpha_pitch = v.alpha_pitch;
       transparent = v.alpha != nullptr;
+    } else if (l->reverse) {
+      const std::optional<media::FrameView> v = backwards_frame(*l, frame);
+      if (!v)
+        return true; // left out, as on the CPU (which reports it)
+      used.push_back(&l->clip_id);
+      // What the frame is (the file, where the clip starts in it, its pace and length, the frame's place) and its size:
+      // the same key, the same pixels.
+      char what[160];
+      std::snprintf(what, sizeof what, "|%lld|%.9g|%lld|%lld|%dx%d", static_cast<long long>(l->source_in_hns), l->speed, static_cast<long long>(l->frames),
+                    static_cast<long long>(frame - l->start_frame), v->width, v->height);
+      still.key = std::hash<std::string>{}(l->clip_id + "\x1f" + l->path + what);
+      still.width = vw = v->width;
+      still.height = vh = v->height;
+      still.y = v->y;
+      still.uv = v->uv;
+      still.y_pitch = v->y_pitch;
+      still.uv_pitch = v->uv_pitch;
     } else {
       auto it = gpu_readers_.find(l->clip_id);
       if (it == gpu_readers_.end()) {
@@ -2627,7 +2690,8 @@ bool Renderer::render_on_gpu(int64_t frame, uint8_t *out) {
       picture = *got;
     }
     if (isolated)
-      gpu_->begin_clip(std::move(s.chain), !transparent && reaches_corners(pl, xf, width_, height_, vw, vh) && !g_always_measure_coverage.load(), opacity);
+      gpu_->begin_clip(std::move(s.chain), !transparent && reaches_corners(pl, xf, width_, height_, vw, vh) && !g_always_measure_coverage.load() && !keyed(*l),
+                       opacity);
     if (placed) {
       if (reader)
         gpu_->draw_picture(*reader->decoder, *picture, q, halved);
@@ -2715,6 +2779,7 @@ bool Renderer::render_on_gpu(int64_t frame, uint8_t *out) {
     return false;
   }
   ++gpu_runs_;
+  forget_unused(used);
   if (gpu_readers_.size() > 6) // keep the decoders of this frame, close the rest
     std::erase_if(gpu_readers_, [&](const auto &entry) { return std::none_of(shown.begin(), shown.end(), [&](const Shown &s) { return s.layer->clip_id == entry.first; }); });
   return true;
@@ -2753,13 +2818,7 @@ Result<void> Renderer::render(int64_t frame, uint8_t *out) {
   }
   if (!cleared)
     media::fill_black(out, width_, height_);
-  if (readers_.size() > 6) // keep the decoders of this frame, close the rest
-    std::erase_if(readers_, [&](const auto &entry) {
-      return std::none_of(used.begin(), used.end(), [&](const std::string *id) { return *id == entry.first; });
-    });
-  std::erase_if(back_, [&](const auto &entry) { // the frames kept for a clip played backwards: only while it is on screen
-    return std::none_of(used.begin(), used.end(), [&](const std::string *id) { return *id == entry.first; });
-  });
+  forget_unused(used);
   return {};
 }
 

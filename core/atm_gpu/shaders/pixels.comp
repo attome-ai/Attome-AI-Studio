@@ -8,6 +8,9 @@
 //   kind 3 sharpen:  luma + amount * (luma - blurred luma), the blurred luma in binding 3; f0 = amount
 //   kind 5 remask:   a clip drawn on its own is premultiplied around black (16 / 128); after a colour effect the change is
 //                    scaled by the clip's coverage (binding 5, a luma-sized plane), integer arithmetic like the CPU's
+//   kind 6 luma key, its chroma: data[0..255] how much of each luma value is kept (0..255); each U and V goes towards
+//                    128 by the rounded mean of its 2 x 2 luma pixels' (read before kind 7 changes them)
+//   kind 7 luma key, its luma: each luma byte towards black, and the clip's coverage (binding 5) down, by its own
 //   kind 4 lut:      a 3D table of video-range YUV (binding 4, 33^3 nodes, Y fastest), trilinear, mixed by f0 = strength.
 //                    It works on 2 x 2 blocks (a pixel's luma looks up with the block's chroma, the chroma with the block's
 //                    mean luma), so an invocation takes one chroma word (two blocks) and the two luma words above it.
@@ -18,7 +21,7 @@ layout(std430, set = 0, binding = 0) buffer Data { uint data[]; };
 layout(std430, set = 0, binding = 2) readonly buffer Tables { uint table[]; };
 layout(std430, set = 0, binding = 3) readonly buffer Aux { uint aux[]; };
 layout(std430, set = 0, binding = 4) readonly buffer Lut { float lut[]; };
-layout(std430, set = 0, binding = 5) readonly buffer Cover { uint cover[]; };
+layout(std430, set = 0, binding = 5) buffer Cover { uint cover[]; };
 
 layout(push_constant) uniform Pixels {
   uint kind;
@@ -166,7 +169,11 @@ void main() {
     return; // grain: luma only
   if (pc.kind == 3u && !luma)
     return; // sharpen: luma only
+  if ((pc.kind == 6u && luma) || (pc.kind == 7u && !luma))
+    return; // a luma key's two halves
   const uint word = data[id];
+  const uint cover_word = pc.kind == 7u ? cover[id] : 0u;
+  uint cover_out = 0u;
   uint out_word = 0u;
   for (uint q = 0u; q < 4u; ++q) {
     const uint x = wx * 4u + q;
@@ -209,6 +216,16 @@ void main() {
         precise float sum = float(v) + add;
         precise float rounded = sum + 0.5;
         v = clamp(int(rounded), 16, 235);
+      } else if (pc.kind == 6u) {
+        const uint cy = y - pc.height, cx = x >> 1;
+        const uint r0 = (2u * cy) * pc.stride + 2u * cx, r1 = r0 + pc.stride;
+        const int a = (int(table[pc.table_at + uint(byte_of(data[r0 >> 2], r0 & 3u))]) + int(table[pc.table_at + uint(byte_of(data[(r0 + 1u) >> 2], (r0 + 1u) & 3u))]) +
+                       int(table[pc.table_at + uint(byte_of(data[r1 >> 2], r1 & 3u))]) + int(table[pc.table_at + uint(byte_of(data[(r1 + 1u) >> 2], (r1 + 1u) & 3u))]) + 2) / 4;
+        v = 128 + ((v - 128) * a + (v >= 128 ? 127 : -127)) / 255;
+      } else if (pc.kind == 7u) {
+        const int a = int(table[pc.table_at + uint(v)]);
+        v = 16 + ((v - 16) * a + 127) / 255;
+        cover_out |= uint((byte_of(cover_word, q) * a + 127) / 255) << (q * 8u);
       } else if (pc.kind == 3u) {
         const int soft = byte_of(aux[id], q);
         precise float d = float(v) - float(soft);
@@ -221,4 +238,6 @@ void main() {
     out_word |= uint(v & 0xFF) << (q * 8u);
   }
   data[id] = out_word;
+  if (pc.kind == 7u)
+    cover[id] = cover_out;
 }

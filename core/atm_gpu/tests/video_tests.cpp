@@ -260,6 +260,27 @@ TEST_CASE("gpu video: a frame of video clips decoded and drawn on the GPU is the
       cases.push_back({mx.name, {out_clip, in_clip, title}});
     }
   }
+  // A luma key: on a clip that fills the frame, and after a blur and before a grade on a smaller one.
+  {
+    atm::render::Layer keyed = layer("clp_k", b, 0);
+    keyed.effects = {effect("luma_key", {0.15f, 0.08f, 0.1f})};
+    cases.push_back({"a luma key on a clip that fills the frame, over another", {layer("clp_a", a, 0), keyed}});
+    keyed.xf.scale_x = keyed.xf.scale_y = 0.7f;
+    keyed.xf.pos_x = 0.4f;
+    keyed.opacity = 0.9f;
+    keyed.effects = {effect("gaussian_blur", {0.004f}), effect("luma_key", {0.15f, 0.05f, 0.2f}), effect("color_grade", {0.05f, 0.2f, 1.2f})};
+    cases.push_back({"a luma key between a blur and a grade on a smaller clip", {layer("clp_a", a, 0), keyed}});
+  }
+  // Clips played backwards: on their own, and scaled with effects over another.
+  {
+    atm::render::Layer back = layer("clp_r", a, 5);
+    back.reverse = true;
+    cases.push_back({"a clip played backwards", {back}});
+    back.xf.scale_x = back.xf.scale_y = 0.6f;
+    back.xf.pos_x = 0.6f;
+    back.effects = {effect("color_grade", {0.0f, 0.3f, 1.3f}), effect("vignette", {0.5f, 0.4f, 0.5f})};
+    cases.push_back({"a clip played backwards, scaled, with effects, over another", {layer("clp_b", b, 0), back}});
+  }
   // Pictures: a transparent one turned over a clip, an opaque one scaled.
   {
     const int pw = 200, ph = 120;

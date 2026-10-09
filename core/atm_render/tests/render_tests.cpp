@@ -2826,9 +2826,12 @@ TEST_CASE("render: with a GPU, clips and adjustment layers with effects come out
       CHECK(frame_of(322, 182, part, single, nullptr, nullptr, nullptr) == frame_of(322, 182, part, single, nullptr, gpu->get(), nullptr));
     }
   }
-  // A key has no GPU version yet: that clip stays on the CPU.
-  const json keyed = {{"fx_k", fx("luma_key", {{"level", 0.0}, {"tolerance", 0.2}})}};
-  CHECK(frame_of(320, 240, {{"opacity", 1.0}}, keyed, nullptr, nullptr, nullptr) == frame_of(320, 240, {{"opacity", 1.0}}, keyed, nullptr, gpu->get(), &runs));
+  // A luma key runs on the GPU too; a chroma key has no GPU version yet: that clip stays on the CPU.
+  const json luma_keyed = {{"fx_k", fx("luma_key", {{"level", 0.0}, {"tolerance", 0.2}})}};
+  CHECK(frame_of(320, 240, {{"opacity", 1.0}}, luma_keyed, nullptr, nullptr, nullptr) == frame_of(320, 240, {{"opacity", 1.0}}, luma_keyed, nullptr, gpu->get(), &runs));
+  CHECK(runs == 1);
+  const json chroma_keyed = {{"fx_k", fx("chroma_key", {{"hue", 120.0}})}};
+  CHECK(frame_of(320, 240, {{"opacity", 1.0}}, chroma_keyed, nullptr, nullptr, nullptr) == frame_of(320, 240, {{"opacity", 1.0}}, chroma_keyed, nullptr, gpu->get(), &runs));
   CHECK(runs == 0);
   std::error_code ec;
   fs::remove_all(dir, ec);

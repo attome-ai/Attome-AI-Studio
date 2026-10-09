@@ -8,6 +8,7 @@
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -210,6 +211,9 @@ private:
     int width = 0, height = 0;
   };
   std::unordered_map<std::string, BackCache> back_;
+  media::VideoReader *reader_of(const Layer &l); // opens a clip's reader once; null (and a warning) when the file does not open
+  std::optional<media::FrameView> backwards_frame(const Layer &l, int64_t frame); // a frame of a clip played backwards, from back_
+  void forget_unused(const std::vector<const std::string *> &used); // the readers (past six) and kept frames of clips not drawn
   std::unordered_map<std::string, bool> failed_;
   struct TextEntry {
     std::string key;
