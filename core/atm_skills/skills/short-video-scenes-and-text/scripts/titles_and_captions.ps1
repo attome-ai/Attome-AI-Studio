@@ -61,22 +61,22 @@ foreach ($sc in $scenes) {
     $w = $words[$i].ToUpper()
     $bare = ($words[$i].ToLower() -replace "[^a-z-]", '')
     $color = if ($key -contains $bare) { '#FFE600' } else { '#FFFFFF' }
-    AddText 'capshadow' "shadow $w" $w $f0 $frames 0.07 '#000000' (0.5 + $off) (0.70 + $off)
-    AddText 'caps' $w $w $f0 $frames 0.07 $color 0.5 0.70
+    AddText 'capshadow' "shadow $w" $w $f0 $frames 0.124 '#000000' (0.5 + $off) (0.70 + $off)
+    AddText 'caps' $w $w $f0 $frames 0.124 $color 0.5 0.70
   }
   if ($sc.label) {
     $lf0 = F ($sc.s + 0.1); $lf = F 1.5
-    AddText 'titleshadow' "shadow $($sc.label)" $sc.label $lf0 $lf 0.055 '#000000' (0.5 + $off) (0.14 + $off)
-    AddText 'titles' $sc.label $sc.label $lf0 $lf 0.055 '#FFE600' 0.5 0.14
+    AddText 'titleshadow' "shadow $($sc.label)" $sc.label $lf0 $lf 0.098 '#000000' (0.5 + $off) (0.14 + $off)
+    AddText 'titles' $sc.label $sc.label $lf0 $lf 0.098 '#FFE600' 0.5 0.14
   }
 }
 # The hook title over the first three seconds; the call to follow over the last two.
 $hook = "WHAT IF YOU WERE`nINVISIBLE FOR`n24 HOURS?"
-AddText 'titleshadow' 'shadow hook title' $hook 0 (F 3) 0.075 '#000000' (0.5 + $off) (0.27 + $off)
-AddText 'titles' 'Hook title' $hook 0 (F 3) 0.075 '#FFFFFF' 0.5 0.27
+AddText 'titleshadow' 'shadow hook title' $hook 0 (F 3) 0.133 '#000000' (0.5 + $off) (0.27 + $off)
+AddText 'titles' 'Hook title' $hook 0 (F 3) 0.133 '#FFFFFF' 0.5 0.27
 $cta = "FOLLOW FOR MORE`nWHAT IFS!"
-AddText 'titleshadow' 'shadow CTA' $cta (F 34) (F 2) 0.075 '#000000' (0.5 + $off) (0.40 + $off)
-AddText 'titles' 'Call to follow' $cta (F 34) (F 2) 0.075 '#FFE600' 0.5 0.40
+AddText 'titleshadow' 'shadow CTA' $cta (F 34) (F 2) 0.133 '#000000' (0.5 + $off) (0.40 + $off)
+AddText 'titles' 'Call to follow' $cta (F 34) (F 2) 0.133 '#FFE600' 0.5 0.40
 
 "ops: $($ops.Count)"
 $r = Call project.patch @{ project = $p; patch = @{ ops = @($ops); label = 'Titles and captions' } }

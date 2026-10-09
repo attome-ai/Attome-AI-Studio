@@ -2106,7 +2106,7 @@ std::vector<Renderer::TextPart> Renderer::text_parts(const Layer &l, int64_t fra
   animate(l.text_out, l.clip_end_frame - 1 - frame, -1.0f);
   if (shown_text.empty() || shown <= 0.0f)
     return {};
-  const int px_size = std::max(1, int(std::lround(l.text_size * float(height_))));
+  const int px_size = std::max(1, int(std::lround(l.text_size * float(std::min(width_, height_))))); // a share of the short side
   char look[160];
   std::snprintf(look, sizeof look, "|%.3f|%.3f,%.3f,%.3f|%.3f,%.3f", double(l.outline_width), double(l.shadow_x), double(l.shadow_y), double(l.shadow_blur),
                 double(l.box_padding), double(l.box_radius));

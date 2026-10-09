@@ -728,7 +728,7 @@ private:
     }
 
     const std::string style = op_.value("style", std::string("pop"));
-    const double size = op_.value("size", 0.07), y = op_.value("y", 0.72);
+    const double size = op_.value("size", 0.1), y = op_.value("y", 0.72); // a word at a time, big: a tenth of the short side
     const std::string color = op_.value("color", std::string("#ffffff")), emphasis_color = op_.value("emphasis_color", std::string("#FFE600"));
     std::vector<std::string> emphasis;
     if (op_.contains("emphasis") && op_["emphasis"].is_array())

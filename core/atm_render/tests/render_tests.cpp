@@ -711,6 +711,35 @@ TEST_CASE("render: captions show one word at a time, from its start until the ne
   CHECK(lit(frame(36)) > 0);
 }
 
+TEST_CASE("render: a text's size is a share of the canvas's short side: the same in 16:9 and 9:16", "[media]") {
+  // "Your title" at 0.12 on a 320 x 180 canvas and on a 180 x 320 one: the same letters (the short side is 180 in both), on one line.
+  const auto lit_rows = [](int w, int h, std::vector<int> &columns) {
+    json clip = {{"timing", {{"record_in", "0"}, {"duration", "1"}, {"source_in", "0"}}}, {"media_ref", {{"type", "text"}}},
+                 {"content", {{"text", "Your title"}, {"size", 0.12}, {"color", "#ffffff"}, {"bold", true}}}};
+    const json doc = {{"sequences", {{"seq_1", {{"rate", "30"}, {"canvas", {{"width", w}, {"height", h}}}, {"track_order", {"trk_v"}},
+                                                 {"tracks", {{"trk_v", {{"kind", "video"}, {"clips", {{"clp_t", clip}}}}}}}}}}},
+                      {"sequence_order", {"seq_1"}}};
+    auto comp = atm::render::compile(doc);
+    REQUIRE(comp);
+    atm::render::Renderer renderer(*comp, w, h);
+    std::vector<uint8_t> nv12(media::nv12_size(w, h));
+    REQUIRE(renderer.render(0, nv12.data()));
+    int top = h, bottom = -1, left = w, right = -1;
+    for (int y = 0; y < h; ++y)
+      for (int x = 0; x < w; ++x)
+        if (nv12[size_t(y) * size_t(w) + size_t(x)] > 128) {
+          top = std::min(top, y), bottom = std::max(bottom, y), left = std::min(left, x), right = std::max(right, x);
+        }
+    columns = {left, right};
+    return bottom - top + 1;
+  };
+  std::vector<int> wide, tall;
+  const int wide_h = lit_rows(320, 180, wide), tall_h = lit_rows(180, 320, tall);
+  CHECK(wide_h > 10);
+  CHECK(tall_h == wide_h);                               // one line, as tall as in 16:9: not wrapped onto two
+  CHECK(tall[1] - tall[0] == wide[1] - wide[0]);         // and as wide
+}
+
 TEST_CASE("render: a text comes in and goes: fade, pop, slide, typewriter", "[media]") {
   // A white text from 0 s to 2 s on a 30 fps sequence, 320 x 240: frames 0 .. 59. Animations of half a second are 15 frames.
   const auto make = [](const json &motion) {

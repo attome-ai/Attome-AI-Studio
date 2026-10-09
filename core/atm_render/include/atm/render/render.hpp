@@ -80,7 +80,8 @@ struct Layer {
   int64_t clip_end_frame = 0;
   Transform xf;
   // Text clips (media_ref.type "text"): no file, the picture is the text. `text_size` is the font height as a
-  // fraction of the canvas height; the colour is 0xRRGGBB.
+  // fraction of the canvas's short side (its height in 16:9, its width in 9:16), so a title looks the same in any shape;
+  // the colour is 0xRRGGBB.
   bool is_text = false, text_bold = false, text_italic = false;
   std::string text_font;      // content.font: a family name (empty: the default)
   int text_align = 0;         // content.align: left -1, centre 0, right 1; how the lines of a text sit against each other

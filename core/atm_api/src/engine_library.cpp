@@ -509,7 +509,7 @@ Result<json> Engine::Impl::guide_get(const json &params) {
        "trim, split, delete, slip, roll, slide) apply to both; add \"unlink\": true to an op to edit one alone (for "
        "J and L cuts). A dissolve between two linked clips also cross-fades their sound.\n"
        "- add_text {text (\\n for a new line), at? (0), duration? (3s), placement? (center | lower_third | top | "
-       "bottom) or position?, size? (0.08 of the height), color? (#ffffff), bold? (true), italic? (false), font? (a family from fonts.list), align? (left | center | right: the lines of a "
+       "bottom) or position?, size? (0.08 of the canvas's short side: its height in 16:9, its width in 9:16), color? (#ffffff), bold? (true), italic? (false), font? (a family from fonts.list), align? (left | center | right: the lines of a "
        "text against each other), line_spacing? (1 = the font's own, 0.5..3), outline? {color, width}, shadow? {color, x, y, blur, opacity}, "
        "background? {color, opacity, padding, radius}, animate_in? and animate_out? (fade | pop | slide | typewriter, or {style, duration? (0.5s)}: how the "
        "text comes in and goes), rotation?, fade_in?, fade_out?} - "
@@ -544,7 +544,7 @@ Result<json> Engine::Impl::guide_get(const json &params) {
        "add_marker {at, name?} and remove_marker {marker} - markers on the ruler; "
        "freeze_frame {clip, at, duration? (2s)} - the picture at that time holds for the duration: the clip is cut there, a still of the frame "
        "goes in between, and what follows on its tracks (its sound too) moves later by the duration; "
-       "add_captions {clip (a voice clip, or any clip with speech) or text + at + duration, words? [{text, start, end}] (the words as they were HEARD, from asr.transcribe's result: seconds from the clip's start; they replace text and give each word its real time; a caption goes soon after its last word), style? (pop | plain | box), size? (0.07), y? (0.72), color?, emphasis? [words shown in emphasis_color], track?} - "
+       "add_captions {clip (a voice clip, or any clip with speech) or text + at + duration, words? [{text, start, end}] (the words as they were HEARD, from asr.transcribe's result: seconds from the clip's start; they replace text and give each word its real time; a caption goes soon after its last word), style? (pop | plain | box), size? (0.1), y? (0.72), color?, emphasis? [words shown in emphasis_color], track?} - "
        "one text clip for each sentence, shown one word at a time, each word popping in; with clip, the words are timed from what the voice model reported (Kokoro does) and otherwise by their letters (a guess); with words, from what was heard. To caption a clip that SPEAKS (a recording, an imported video): asr.transcribe {project, clip} (a job: jobs.get until done; models.fetch whisper.small first if it says the model is missing), then add_captions {clip, words: the job's result.words}; goes on a Captions track on top; "
        "sync_captions {clip (the voice)} - after the voice was made anew, the captions made from it get their times from its words again; "
        "split {clip, at}; duplicate {clips: [{clip, at, track?} or {snapshot, at, track}, ...]} (copies with their effects, keyframes and fades, each at a time and "
@@ -590,7 +590,7 @@ Result<json> Engine::Impl::guide_get(const json &params) {
       {"text",
        "Text clips (titles, lower thirds, captions) have no file: \"media_ref\":{\"type\":\"text\"},\"content\":"
        "{\"text\":\"Summer in the City\\nصيف في المدينة\",\"size\":0.08,\"color\":\"#ffffff\",\"bold\":true}. size is "
-       "the font height as a fraction of the canvas height; \\n starts a new line; lines are centred. Arabic and "
+       "the font height as a fraction of the canvas's short side (its height in 16:9, its width in 9:16); \\n starts a new line; lines are centred. Arabic and "
        "other right-to-left text is shaped correctly. Put text on its own track after (above) the video tracks. "
        "A lower third: \"transform\":{\"position\":[0.5,0.84]}. To fade it, see the topic \"keyframes\"."},
       {"dissolves",

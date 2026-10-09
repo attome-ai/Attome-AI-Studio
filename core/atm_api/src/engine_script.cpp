@@ -64,7 +64,7 @@ Result<json> Engine::Impl::text_pop(const json &params) {
   ATM_PROFILE_SCOPE("api.text_pop");
   if (!params.contains("words") || !params["words"].is_array() || params["words"].empty())
     return bad_param("words", "is required: [{at, say, color?, y?}]");
-  const double seconds = params.value("seconds", 0.87), size = params.value("size", 0.09);
+  const double seconds = params.value("seconds", 0.87), size = params.value("size", 0.15);
   if (!(seconds >= 0.2 && seconds <= 10.0))
     return bad_param("seconds", "must be from 0.2 to 10");
   const json shadow = params.value("shadow", json::object());

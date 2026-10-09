@@ -80,7 +80,7 @@ foreach ($b in $bursts) {
     $id = "`$new:b$layer$bi"
     [void]$ops.Add(@{ op = 'add'; path = "`$new:$track/clips/$id"; value = @{
         name = "$layer $($b.say)"; timing = @{ record_in = (T $f0); duration = (T $dur); source_in = '0' }; media_ref = @{ type = 'text' }
-        content = @{ text = $b.say; size = 0.09; color = $(if ($layer -eq 'shadow') { '#010101' } else { $b.color }); bold = $true }
+        content = @{ text = $b.say; size = 0.16; color = $(if ($layer -eq 'shadow') { '#010101' } else { $b.color }); bold = $true }
         transform = @{ position = @(@((0.5 + $off), ($b.y + $off))); opacity = 1.0 } } })
     # a pop with a bounce, a wobble, and out
     $base = "$id/transform/keyframes"
