@@ -160,6 +160,15 @@ Safe to run again at any time. It skips what is already done.
 | `-DepsOnly` / `--deps-only` | Install tools and libraries, skip the build. |
 | `-Config debug` / `--debug` | Build the debug configuration. |
 
+### Speech to text (optional)
+
+Auto captions hear a clip's speech with Whisper. Two things make it work, and neither is part of setup:
+
+1. **The speech program.** Clone [whisper.cpp](https://github.com/ggml-org/whisper.cpp) (MIT) to `.deps/whisper.cpp` and build as usual: CMake finds it and builds `attome-whisper` next to the other programs. Without it the engine says the program is not installed. `ATM_WHISPER_DIR` points CMake at another copy.
+2. **The model.** `whisper.small` (488 MB, MIT) is in the model catalog: download it from the Models panel, or `attome call models.fetch` with `{"id": "whisper.small"}`. `ATTOME_WHISPER_MODEL` can point at a ggml Whisper file you already have.
+
+Then right-click a clip with speech and choose "Auto captions from its speech", or call `asr.transcribe` and `add_captions` with its `words`. It runs on the processor, about ten times faster than real time on a recent one. It runs on Windows in this version.
+
 ### Requirements
 
 | | |

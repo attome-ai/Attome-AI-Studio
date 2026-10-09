@@ -592,6 +592,30 @@ const App::MarkerUi *App::marker_at(int64_t frame, int64_t reach) const {
   return best;
 }
 
+// "Auto captions" of a clip: its speech is heard (asr.transcribe, a job that poll follows) and made into captions, one clip for each sentence,
+// each word timed as it was said. Needs the speech model (a download from the Models panel) and the speech program.
+void App::auto_captions(const std::string &clip) {
+  if (!asr_job_.empty()) {
+    say("Already listening to a clip. Stop it first, from the clip's menu.", true);
+    return;
+  }
+  json started;
+  RpcError error;
+  if (!client_.call("asr.transcribe", {{"project", project_path_}, {"clip", clip}}, started, error)) {
+    if (error.code == 1404) // the model is missing
+      say("The speech model is not on this computer yet. Download \"Whisper small\" (488 MB) from the Models panel, then try again.", true);
+    else if (error.code == 1406) // the program is missing
+      say("The speech program is not part of this build of Attome.", true);
+    else
+      say(error.hint.empty() ? error.message : error.message + "  " + error.hint, true);
+    return;
+  }
+  asr_job_ = started.value("job_id", "");
+  asr_clip_ = clip;
+  next_asr_poll_ = 0.0;
+  say("Listening to the clip...");
+}
+
 void App::toggle_marker(int64_t frame) {
   if (seq_id_.empty())
     return;
@@ -605,6 +629,39 @@ void App::toggle_marker(int64_t frame) {
 }
 
 void App::poll(double now) {
+  if (!asr_job_.empty() && now >= next_asr_poll_) { // "Auto captions": how far the listening is, then the captions
+    next_asr_poll_ = now + 0.3;
+    const auto forget_toasts = [&] { std::erase_if(toasts_, [](const Toast &t) { return t.text.starts_with("Listening"); }); };
+    json job;
+    RpcError error;
+    if (!client_.call("jobs.get", {{"job_id", asr_job_}}, job, error)) {
+      asr_job_.clear();
+      forget_toasts();
+    } else if (const std::string state = job.value("state", ""); state == "running") {
+      forget_toasts(); // one toast that counts up, not one for each report
+      say("Listening to the clip... " + std::to_string(int(job.value("progress", 0.0) * 100.0)) + " %");
+    } else {
+      const std::string clip = std::exchange(asr_clip_, std::string());
+      asr_job_.clear();
+      forget_toasts();
+      if (state == "done") {
+        const json words = job.value("result", json::object()).value("words", json::array());
+        if (words.empty()) {
+          say("No speech was found in this clip.");
+        } else {
+          json ops = json::array({{{"op", "add_captions"}, {"id", "$new:caps"}, {"clip", clip}, {"words", words}, {"style", "pop"}}});
+          const size_t heard = words.size();
+          if (timeline_edit(std::move(ops), "Auto captions"))
+            say("Captions made from what was said (" + std::to_string(heard) + " words), on the Captions track. Edit a caption's look in its Text card.", false, true);
+        }
+      } else if (state == "failed") {
+        const json e = job.value("error", json::object());
+        say(e.value("message", std::string("The speech could not be read.")), true);
+      } else {
+        say("Stopped listening.");
+      }
+    }
+  }
   if (!gen_job_.empty() && now >= next_gen_job_poll_) { // a generation started here: its progress, whatever is selected
     next_gen_job_poll_ = now + 0.2;
     json job;
@@ -1270,6 +1327,17 @@ void App::draw_clip_menu(const ClipUi &c) {
       pending_ = [this] { add_to_library(true); };
   } else if (menu_item(count > 1 ? ("Add " + std::to_string(count) + " clips to the library").c_str() : "Add to the library")) {
     pending_ = [this] { add_to_library(); };
+  }
+  if (count == 1 && !c.path.empty() && !c.is_generative && (c.own_sound || (home && home->kind == "audio"))) { // a clip that has speech to hear
+    if (asr_job_.empty()) {
+      if (menu_item("Auto captions from its speech"))
+        pending_ = [this, id = c.id] { auto_captions(id); };
+    } else if (menu_item("Stop listening")) {
+      pending_ = [this] {
+        json unused;
+        rpc("jobs.cancel", {{"job_id", asr_job_}}, unused);
+      };
+    }
   }
   if (!c.path.empty() && !c.is_generative && !audio_only_.count(c.path) &&
       menu_item("Freeze frame (2 s)", nullptr, false, !locked && playhead_ > c.start && playhead_ < c.start + c.frames))

@@ -74,11 +74,17 @@ function New-Sample([string]$Path, [string]$SampleArgs) {
   $name = "$key" + [IO.Path]::GetExtension($Path)
   $cached = Join-Path $cache $name
   if (-not (Test-Path $cached)) {
-    # The picture's colour is a hash of the file name as `attome sample` is given it. Made from inside the cache folder with a relative
-    # name, it is the same wherever %TEMP% is, so a test that looks for a colour in it (chroma_key) does not depend on the folder it runs from.
+    # The picture's colour is a hash of the file name as `attome sample` is given it. Made with a relative name, it is the same wherever
+    # %TEMP% is, so a test that looks for a colour in it (chroma_key) does not depend on the folder it runs from. It is made in a folder of its
+    # own and moved into the cache whole: tests run side by side, and one must never copy a sample that another is still writing.
+    $stage = Join-Path $cache ('stage-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    New-Item -ItemType Directory -Force $stage | Out-Null
     $env:ATTOME_ENDPOINT = "\\.\pipe\attome-uitest-sample-$PID"
-    Push-Location $cache
+    Push-Location $stage
     try { & (Join-Path (Get-BinDir) 'attome.exe') sample $name @($SampleArgs -split ' ' | Where-Object { $_ }) | Out-Null } finally { Pop-Location; Remove-Item Env:\ATTOME_ENDPOINT -ErrorAction SilentlyContinue }
+    try { Move-Item (Join-Path $stage $name) $cached -ErrorAction Stop } catch { } # another test was first: its file is the same
+    Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
+    if (-not (Test-Path $cached)) { throw "the sample $name could not be made" }
   }
   Copy-Item $cached $Path -Force
 }

@@ -341,6 +341,7 @@ private:
   char rename_buf_[96] = {};
   bool rename_focus_ = false;
   void delete_track(const std::string &track_id);
+  void auto_captions(const std::string &clip); // hears the clip (asr.transcribe, a job followed in poll) and makes captions from the words
   void freeze_frame(int seconds = 2); // the selected video (or the picture of the selected sound) holds the frame at the playhead
   void select_nothing(); // a click on empty space: no clip, no media card
   // While a value is dragged: the edit it would make, shown in the Monitor at once (the project is not changed until the value is let go).
@@ -599,6 +600,8 @@ private:
   // known, or not installed). A clip that is not in the map is ready.
   std::map<std::string, json> gen_problems_;
   std::map<std::string, json> gen_state_; // every generative clip as gen.status reports it: state, reason, takes
+  std::string asr_job_, asr_clip_;        // "Auto captions": the transcription that is running, started here, and the clip it listens to
+  double next_asr_poll_ = 0.0;
   std::string gen_job_;                   // the generation that is running, started here
   json gen_job_state_ = json::object();   // as jobs.get last reported it; kept after the end to show a failure
   double next_gen_job_poll_ = 0.0;
