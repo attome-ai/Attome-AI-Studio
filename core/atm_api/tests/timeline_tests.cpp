@@ -178,6 +178,60 @@ TEST_CASE("timeline.edit: add_captions makes a clip for each sentence with its w
   CHECK(f.fail_rule(json::array({{{"op", "add_captions"}, {"text", "x"}}})) == "E_PARAM");
 }
 
+TEST_CASE("timeline.edit: add_captions with words that were heard times each word and lets a caption go soon after its last", "[timeline]") {
+  Fixture f;
+  const auto seconds = [](const std::string &r_) {
+    const size_t slash = r_.find('/');
+    return slash == std::string::npos ? std::stod(r_) : std::stod(r_.substr(0, slash)) / std::stod(r_.substr(slash + 1));
+  };
+  const json heard = json::array({{{"text", "Hello"}, {"start", 0.5}, {"end", 0.9}},
+                                  {{"text", "there."}, {"start", 1.0}, {"end", 1.4}},
+                                  {{"text", "How"}, {"start", 3.0}, {"end", 3.2}},
+                                  {{"text", "are"}, {"start", 3.3}, {"end", 3.5}},
+                                  {{"text", "you?"}, {"start", 3.6}, {"end", 4.0}}});
+  const json r = f.ok(json::array({{{"op", "add_captions"}, {"id", "$new:c"}, {"words", heard}, {"at", "1s"}, {"duration", "6s"}}}));
+  const json clips = f.tracks()[0]["clip_list"];
+  REQUIRE(clips.size() == 2); // two sentences, cut at the full stop
+  const json a = f.get(r["id_map"]["$new:c.c0"]), b = f.get(r["id_map"]["$new:c.c1"]);
+  CHECK(a["content"]["text"] == "Hello there.");
+  CHECK(b["content"]["text"] == "How are you?");
+  // Each starts a little before its first word (0.03 s) and counts from the stretch's start (1 s).
+  CHECK(seconds(a["timing"]["record_in"]) == Catch::Approx(1.0 + 0.47).margin(0.002));
+  CHECK(seconds(b["timing"]["record_in"]) == Catch::Approx(1.0 + 2.97).margin(0.002));
+  // The first goes 0.6 s after its last word (1.4 s), long before the second begins; the second 0.6 s after "you?" (4.0 s).
+  CHECK(seconds(a["timing"]["record_in"]) + seconds(a["timing"]["duration"]) == Catch::Approx(1.0 + 2.0).margin(0.002));
+  CHECK(seconds(b["timing"]["record_in"]) + seconds(b["timing"]["duration"]) == Catch::Approx(1.0 + 4.6).margin(0.002));
+  // The words inside a caption start where they were said, counted from the caption's own start.
+  REQUIRE(a["content"]["words"].size() == 2);
+  CHECK(seconds(a["content"]["words"][0]["at"]) == Catch::Approx(0.0).margin(0.002));
+  CHECK(seconds(a["content"]["words"][1]["at"]) == Catch::Approx(0.5).margin(0.002));
+  REQUIRE(b["content"]["words"].size() == 3);
+  CHECK(seconds(b["content"]["words"][2]["at"]) == Catch::Approx(0.6).margin(0.002));
+  bool noted = false;
+  for (const json &n : r["notes"])
+    noted = noted || n.get<std::string>().find("heard") != std::string::npos;
+  CHECK(noted);
+  CHECK(f.engine.call("project.validate", {{"project", f.project}})->at("ok") == true);
+
+  // The words win over a text; a word past the end of the stretch is held to it; an empty word is skipped; the words are kept in order.
+  const json clipped = f.ok(json::array({{{"op", "add_captions"}, {"id", "$new:d"}, {"text", "ignored"}, {"at", "20s"}, {"duration", "2s"},
+                                          {"words", json::array({{{"text", "late"}, {"start", 5.0}, {"end", 6.0}}, {{"text", " "}, {"start", 5.1}, {"end", 5.2}},
+                                                                 {{"text", "words"}, {"start", 1.0}, {"end", 1.5}}})}}}));
+  const json d = f.get(clipped["id_map"]["$new:d.c0"]);
+  CHECK(d["content"]["text"] == "late words");
+  CHECK(seconds(d["content"]["words"][0]["at"]) <= seconds(d["content"]["words"][1]["at"]));
+  CHECK(seconds(d["timing"]["record_in"]) + seconds(d["timing"]["duration"]) <= 22.0 + 0.06); // not past the 2 s it was given, but for the 0.05 s a caption lasts at least
+
+  // What is refused.
+  const auto refused = [&](json words) {
+    return f.fail_rule(json::array({{{"op", "add_captions"}, {"words", std::move(words)}, {"at", "40s"}, {"duration", "2s"}}}));
+  };
+  CHECK(refused(json::array()) == "E_PARAM");
+  CHECK(refused("text") == "E_PARAM");
+  CHECK(refused(json::array({{{"text", "x"}, {"start", 0}}})) == "E_PARAM");              // no end
+  CHECK(refused(json::array({{{"text", "two words"}, {"start", 0}, {"end", 1}}})) == "E_PARAM"); // a space inside
+}
+
 TEST_CASE("timeline.edit: bad ops are refused with the op's index and a hint", "[timeline]") {
   Fixture f;
   auto r = f.edit(json::array({{{"op", "add_text"}, {"text", "ok"}}, {{"op", "explode"}}}));

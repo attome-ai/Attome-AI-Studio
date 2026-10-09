@@ -229,6 +229,19 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
        "budgets":{"type":"array","items":{"type":"number"},"description":"Seconds each voice may take, in order; default: up to the next voice"},
        "target_peak":{"type":"number","description":"0..1, default 0.9"}},"required":["project"]})",
      &Impl::voice_fit},
+    {"asr.transcribe", "core", false,
+     "Hear what a clip says, word by word, as a background job (follow it with jobs.get, stop it with jobs.cancel). Give project and clip (the part "
+     "of the file the clip plays) or a path (a sound or video file, optionally from and duration in seconds). The job's result is {words: "
+     "[{text, start, end}], language}: the times are seconds from the start of the clip (or of `from`). Runs on this computer with the "
+     "whisper.small model (models.fetch whisper.small downloads it once, 488 MB) and the attome-whisper program; language \"auto\" finds it, or "
+     "give a code such as en or ar. To make captions from it: add_captions {clip, words: <the result's words>} (guide.get topic \"timeline\").",
+     R"({"type":"object","properties":{"project":{"type":"string","description":"With clip: path of the .attome project folder, or its prj_ ID"},
+       "clip":{"type":"string","description":"A clip made from a sound or video file"},
+       "path":{"type":"string","description":"A sound or video file, instead of a clip"},
+       "from":{"type":"number","description":"With path: seconds into the file, default 0"},
+       "duration":{"type":"number","description":"With path: seconds to listen to, default to the end"},
+       "language":{"type":"string","description":"auto (default), or a code such as en, ar, fr"}}})",
+     &Impl::asr_transcribe},
     {"audio.analyze", "core", false,
      "Where the beat is and how loud a sound is: bpm, the beat grid (first_beat and beats, in seconds of the file), confidence (3 and more is "
      "clear; has_beat says whether there is one), peak and RMS in dB, and the integrated loudness in LUFS (-23 for EBU R128 broadcast, about -14 for streaming). Pass path (the first two minutes, or from..to in seconds) or project "

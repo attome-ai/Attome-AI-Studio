@@ -5,6 +5,7 @@
 
 #include "atm/api/engine.hpp"
 #include "atm/api/audio_tools.hpp"
+#include "atm/asr/asr.hpp"
 #include "atm/api/script_plan.hpp"
 #include "atm/api/edl.hpp"
 #include "atm/api/subtitles.hpp"
@@ -147,6 +148,11 @@ void run_gen(const std::shared_ptr<Job> &job, GenRun run, std::shared_ptr<Finish
 // keeps what arrived; the next models.fetch of the same entry continues from there.
 void run_fetch(const std::shared_ptr<Job> &job, models::CatalogEntry entry, fs::path dir, std::vector<fs::path> also,
                std::shared_ptr<net::Transport> transport);
+
+// A transcription as a job (asr.transcribe): the sound of [from_s, from_s + duration_s) of `path` goes to the speech program; the words, with
+// their times divided by `speed` (a clip's times are film time), are the job's result. `clip` is the clip they came from, or empty.
+void run_asr(const std::shared_ptr<Job> &job, asr::Options options, std::string path, double from_s, double duration_s, double speed,
+             std::string clip);
 
 
 
@@ -291,6 +297,7 @@ struct Engine::Impl {
   Result<json> library_insert(const json &params);
   Result<json> media_remove(const json &params);
   Result<json> audio_analyze(const json &params);
+  Result<json> asr_transcribe(const json &params);
   Result<json> music_fit(const json &params);
   Result<json> clip_motion(const json &params);
   Result<json> text_pop(const json &params);

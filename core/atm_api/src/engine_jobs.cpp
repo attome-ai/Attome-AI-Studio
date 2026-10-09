@@ -50,7 +50,7 @@ Result<json> Engine::Impl::jobs_get(const json &params) {
               {"frames_total", total},
               {"units_done", done},
               {"units_total", total},
-              {"unit", job->kind == "models.fetch" ? "bytes" : job->kind == "gen.run" ? "steps" : "frames"},
+              {"unit", job->kind == "models.fetch" ? "bytes" : job->kind == "gen.run" ? "steps" : job->kind == "asr.transcribe" ? "thousandths" : "frames"},
               {"output", job->output}};
   std::lock_guard lock(job->mutex);
   const double seconds = state == Job::running

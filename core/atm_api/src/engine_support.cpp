@@ -79,6 +79,33 @@ void run_fetch(const std::shared_ptr<Job> &job, models::CatalogEntry entry, fs::
   }
 }
 
+void run_asr(const std::shared_ptr<Job> &job, asr::Options options, std::string path, double from_s, double duration_s, double speed,
+             std::string clip) {
+  prof::set_thread_name("atm-asr");
+  const auto result = asr::transcribe(options, path, from_s, duration_s,
+                                      [&](double p) { job->units_done.store(int64_t(std::clamp(p, 0.0, 1.0) * 1000.0)); }, &job->cancel);
+  std::lock_guard lock(job->mutex);
+  job->seconds = std::chrono::duration<double>(Clock::now() - job->started).count();
+  if (result) {
+    json words = json::array();
+    const auto thousandths = [&](double t) { return std::round(t / speed * 1000.0) / 1000.0; };
+    for (const asr::Word &w : result->words)
+      words.push_back({{"text", w.text}, {"start", thousandths(w.start)}, {"end", thousandths(w.end)}});
+    job->result = {{"words", std::move(words)}, {"language", result->language}, {"model", "whisper.small"}, {"path", path}};
+    if (!clip.empty())
+      job->result["clip"] = clip;
+    job->units_done.store(1000);
+    job->detail = std::to_string(result->words.size()) + " words";
+    job->state.store(Job::done);
+  } else if (result.error().code == ErrorCode::Cancelled) {
+    job->detail = "Stopped";
+    job->state.store(Job::cancelled);
+  } else {
+    job->error = result.error();
+    job->state.store(Job::failed);
+  }
+}
+
 // A little-endian 16-bit stereo WAV of `stereo` (interleaved floats), from stereo frame `from` to `to`.
 std::string wav_bytes(const std::vector<float> &stereo, size_t from, size_t to) {
   const size_t frames = to > from ? to - from : 0;

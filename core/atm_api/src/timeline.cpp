@@ -20,6 +20,8 @@ namespace {
 // A caption shows this many seconds before its word is heard: the model reports a word a little after its sound starts, and the eye is
 // quicker than the ear to call a word late.
 constexpr double kCaptionLead = 0.03;
+// A caption made from heard words stays this long after its last word has been said (when no caption follows it sooner).
+constexpr double kCaptionHold = 0.6;
 
 using doc::Document;
 
@@ -631,8 +633,32 @@ private:
   // holds each word and when it starts, after the clip's start), every word popping in. The words are timed in proportion to their letters,
   // with a pause after a comma, a colon and a full stop: a guess, as long as nothing knows when each word is really said. The text is "text"
   // with "at" and "duration", or "clip": a voice clip (a generative clip with a "text" input), whose own time is used.
+  // "words": [{text, start, end}] (seconds from the start of the stretch, as asr.transcribe gives them) is the text and the times at once: each word
+  // starts when it is said, and a caption goes when its last word has been said (a short hold after it), not when the next one begins.
   Result<void> add_captions() {
     std::string text = op_.value("text", std::string());
+    std::vector<double> said_start, said_end; // from "words"
+    if (op_.contains("words")) {
+      if (!op_["words"].is_array() || op_["words"].empty())
+        return fail("E_PARAM", "\"words\" must be a list of {text, start, end}.", "asr.transcribe's result has them.");
+      text.clear();
+      for (const json &w : op_["words"]) {
+        if (!w.is_object() || !w.contains("text") || !w["text"].is_string() || !w.contains("start") || !w["start"].is_number() || !w.contains("end") ||
+            !w["end"].is_number())
+          return fail("E_PARAM", "Each of \"words\" must be {text, start, end}: a word and its times in seconds.");
+        const std::string raw = w["text"].get<std::string>();
+        const char *blank = " \n\t\r";
+        const size_t first = raw.find_first_not_of(blank);
+        if (first == std::string::npos)
+          continue; // an empty word says nothing
+        const std::string word = raw.substr(first, raw.find_last_not_of(blank) - first + 1);
+        if (word.find_first_of(blank) != std::string::npos)
+          return fail("E_PARAM", "A word of \"words\" has a space inside: \"" + word + "\".", "One entry for each word.");
+        text += (text.empty() ? "" : " ") + word;
+        said_start.push_back(std::max(0.0, w["start"].get<double>()));
+        said_end.push_back(std::max(said_start.back(), w["end"].get<double>()));
+      }
+    }
     std::optional<Rational> at, duration;
     if (op_.contains("clip")) {
       ATM_TRY(auto c, clip("clip"));
@@ -691,6 +717,13 @@ private:
         total += w.weight;
     if (total <= 0.0)
       return fail("E_PARAM", "add_captions: the text has no words.");
+    if (!said_start.empty()) {
+      size_t counted = 0;
+      for (const auto &sentence : sentences)
+        counted += sentence.size();
+      if (counted != said_start.size())
+        return fail("E_PARAM", "add_captions: \"words\" has " + std::to_string(said_start.size()) + " words and the text made of them " + std::to_string(counted) + ".");
+    }
 
     const std::string style = op_.value("style", std::string("pop"));
     const double size = op_.value("size", 0.07), y = op_.value("y", 0.72);
@@ -723,7 +756,14 @@ private:
         word_start.push_back(seconds * cumulative / total);
         cumulative += w.weight;
       }
-    if (op_.contains("clip") && ctx_.words_of) {
+    if (!said_start.empty()) {
+      double previous = 0.0;
+      for (size_t i = 0; i < word_start.size(); ++i) {
+        word_start[i] = std::max(previous, std::max(0.0, std::min(said_start[i], seconds) - kCaptionLead));
+        previous = word_start[i];
+      }
+      exact = true;
+    } else if (op_.contains("clip") && ctx_.words_of) {
       const json known = ctx_.words_of(op_.value("clip", std::string()));
       if (known.is_array() && known.size() == word_start.size()) {
         std::vector<double> times;
@@ -740,14 +780,17 @@ private:
       }
     }
     if (exact)
-      out_.notes.push_back("Captions are timed from the words the voice model reported.");
+      out_.notes.push_back(said_start.empty() ? "Captions are timed from the words the voice model reported."
+                                              : "Captions are timed from the words that were heard.");
     size_t flat = 0;
     int index = 0;
     for (size_t si = 0; si < sentences.size(); ++si) {
       const auto &sentence = sentences[si];
       const size_t first = flat, count = sentence.size();
       const double begin = word_start[first];
-      const double end = si + 1 < sentences.size() ? word_start[first + count] : seconds;
+      double end = si + 1 < sentences.size() ? word_start[first + count] : seconds;
+      if (!said_end.empty()) // heard words: it goes soon after its last word, but not into the next caption
+        end = std::min(end, std::min(said_end[first + count - 1], seconds) + kCaptionHold);
       json words = json::array();
       std::string full;
       for (const Word &w : sentence) {
