@@ -56,6 +56,7 @@ int main(int argc, char **argv) {
   // Measured against a voice whose word positions are known (8 recordings, 172 words): with DTW 97-98 % of the words start within 0.2 s of the
   // truth, with segments 73-83 %.
   std::string timing = "dtw";
+  std::string vad; // --vad <Silero ggml file>: only the speech is decoded (whisper.cpp's voice activity detection); silence and music are skipped
   for (int i = 1; i + 1 < argc; i += 2) {
     if (!std::strcmp(argv[i], "--model"))
       model = argv[i + 1];
@@ -65,6 +66,8 @@ int main(int argc, char **argv) {
       language = argv[i + 1];
     else if (!std::strcmp(argv[i], "--timing"))
       timing = argv[i + 1];
+    else if (!std::strcmp(argv[i], "--vad"))
+      vad = argv[i + 1];
   }
   if (model.empty())
     return fail("no --model given");
@@ -102,10 +105,15 @@ int main(int argc, char **argv) {
   whisper_full_params params = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
   params.n_threads = int(std::max(1u, std::thread::hardware_concurrency() / 2));
   params.print_progress = params.print_realtime = params.print_timestamps = params.print_special = false;
-  if (!dtw) {
-    params.token_timestamps = true; // a segment of one word each (the same as whisper-cli -ml 1 -sow)
+  params.token_timestamps = true; // token times: with DTW they carry a word's time back from the speech-only timeline that VAD decodes
+  if (!dtw) { // a segment of one word each (the same as whisper-cli -ml 1 -sow)
     params.max_len = 1;
     params.split_on_word = true;
+  }
+  if (!vad.empty()) {
+    params.vad = true;
+    params.vad_model_path = vad.c_str();
+    params.vad_params = whisper_vad_default_params();
   }
   params.no_context = true;
   params.language = language.c_str();
@@ -130,7 +138,10 @@ int main(int argc, char **argv) {
         if (whisper_full_get_token_id(ctx, i, k) >= eot)
           continue; // timestamps and other special tokens
         const std::string piece = whisper_full_get_token_text(ctx, i, k);
-        const double at = double(whisper_full_get_token_data(ctx, i, k).t_dtw) / 100.0;
+        // With VAD the decoder sees the speech only, joined up: its times are on that shorter timeline. whisper.cpp maps a token's start
+        // back to the file's time but not its DTW time; inside one stretch of speech the shift is the same for both, so it is applied to it.
+        const whisper_token_data data = whisper_full_get_token_data(ctx, i, k);
+        const double at = double(whisper_full_get_token_t0(ctx, i, k) + (data.t_dtw - data.t0)) / 100.0;
         if (found.empty() || (!piece.empty() && piece.front() == ' '))
           found.push_back({piece, at});
         else

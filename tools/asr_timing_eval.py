@@ -3,8 +3,8 @@
 usage: powershell -File tools/asr_timing_truth.ps1 -Out <folder>   (8 recordings by the Windows voices, with each word's true start)
        python -I tools/asr_timing_eval.py <folder>
 
-Results of 2026-10-09 (172 words, on the GPU): one-word segments put 52 % (small) and 39 % (large-v3 turbo) of the words within 0.1 s of the truth;
-DTW, 0.2 s earlier as attome-whisper now gives it, 76 % and 64 %, and 98 % and 97 % within 0.2 s. A clean synthetic voice: real speech is harder.
+Results of 2026-10-09 (180 words, on the GPU): one-word segments put 51 % (small) and 39 % (large-v3 turbo) of the words within 0.1 s of the truth;
+DTW, 0.2 s earlier as attome-whisper now gives it, 76 % and 63 %, and 98 % and 97 % within 0.2 s. A clean synthetic voice: real speech is harder.
 """
 import json, re, struct, subprocess, sys, difflib, statistics
 from pathlib import Path
@@ -13,6 +13,8 @@ root = Path(r"C:\Users\Computia.me\Downloads\everything\attome-wt-uifix")
 exe = root / "build/win-msvc-release/bin/attome-whisper.exe"
 data = Path(sys.argv[1])
 truth = json.loads((data / "truth.json").read_text(encoding="utf-8-sig"))
+for rec in truth:  # the voice reports its words through events that can arrive slightly out of order
+    rec["words"] = sorted(rec["words"], key=lambda w: w["s"])
 
 def pcm16(path):
     b = path.read_bytes()
