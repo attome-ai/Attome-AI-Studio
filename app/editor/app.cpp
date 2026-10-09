@@ -201,7 +201,7 @@ void App::say(std::string text, bool error, bool undo) {
   if (undo) // Undo takes back the latest edit only: an older toast's button would undo something else
     std::erase_if(toasts_, [](const Toast &t) { return t.undo; });
   toasts_.push_back({std::move(text), error, undo, clock_});
-  if (toasts_.size() > 3)
+  if (toasts_.size() > 2) // two at most: a column of them hides the timeline and is not read
     toasts_.erase(toasts_.begin());
 }
 
@@ -862,11 +862,19 @@ void App::import_files(const std::vector<std::string> &paths, const std::string 
     json result;
     const std::string label = added == 1 ? "Add " + file_name(paths[0]) : "Add " + std::to_string(added) + " clips";
     if (rpc("timeline.edit", {{"project", project_path_}, {"ops", std::move(ops)}, {"label", label}}, result)) {
-      selected_clip_ = result["id_map"].value("$new:c" + std::to_string(added - 1), "");
+      selected_clip_ = result["id_map"].value("$new:c0", ""); // the first file's clip: where what was added begins
       refresh();
       reveal_clip_ = selected_clip_; // the timeline scrolls to it
-      const TrackUi *placed = track_of(selected_clip_);
-      say(placed ? label + " to " + placed->name : label, false, true);
+      // Where the clips went: every track that took one, in the order of the files (a video's own sound goes with it).
+      std::vector<std::string> names;
+      for (int i = 0; i < added; ++i)
+        if (const TrackUi *t = track_of(result["id_map"].value("$new:c" + std::to_string(i), "")))
+          if (std::find(names.begin(), names.end(), t->name) == names.end())
+            names.push_back(t->name);
+      std::string where;
+      for (size_t i = 0; i < names.size(); ++i)
+        where += (i == 0 ? " to " : i + 1 == names.size() ? " and " : ", ") + names[i];
+      say(label + where, false, true);
     }
   }
   if (!problem.empty())
@@ -1212,8 +1220,8 @@ void App::split_at_playhead() {
           track = &*t;
         }
   }
-  if (!c || playhead_ <= c->start || playhead_ >= c->start + c->frames) {
-    say("Move the playhead inside a clip to split it.", true);
+  if (!c || playhead_ <= c->start || playhead_ >= c->start + c->frames) { // nothing went wrong: there is no cut to make here
+    say(c ? "The playhead is at the clip's edge: move it inside the clip to split it." : "Move the playhead inside a clip to split it.");
     return;
   }
   if (track && track->locked) {
@@ -1323,7 +1331,14 @@ void App::split_at_playhead() {
 void App::history_step(bool undo) {
   json result;
   if (rpc(undo ? "project.undo" : "project.redo", {{"project", project_path_}}, result)) {
-    say(undo ? "Undo" : "Redo");
+    // What was taken back or done again, by the name it has in the History.
+    const json &moved = result[undo ? "undone" : "redone"];
+    std::string what;
+    if (moved.is_array() && !moved.empty() && history_.contains("changesets"))
+      for (const json &cs : history_["changesets"])
+        if (cs.value("id", "") == moved.front().get<std::string>())
+          what = cs.value("label", "");
+    say(std::string(undo ? "Undo" : "Redo") + (what.empty() ? "" : ": " + what));
     refresh();
   }
 }

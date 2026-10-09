@@ -709,6 +709,16 @@ void App::draw_timeline() {
       dl->AddRect(ImVec2(bx0, by0), ImVec2(bx1, by1), IM_COL32(255, 255, 255, 120), 4.0f);
     }
   }
+  // The empty space under the rows: a right click there has the empty timeline's menu too (paste, select all, a new track).
+  if (rows > 0 && ImGui::IsWindowHovered() && ImGui::IsMouseClicked(1) && mouse.y > origin.y + ruler_h + float(rows) * row_h && mouse.x > win.x + header_w) {
+    menu_frame_ = std::max<int64_t>(0, std::llround((mouse.x - origin.x - header_w) / pps_ * rate));
+    menu_track_.clear();
+    ImGui::OpenPopup("##belowctx");
+  }
+  if (ImGui::BeginPopup("##belowctx")) {
+    draw_timeline_menu();
+    ImGui::EndPopup();
+  }
   if (box_active_) {
     if (ImGui::IsMouseDown(0)) {
       const ImVec2 lo(std::min(box_from_.x, mouse.x), std::min(box_from_.y, mouse.y)), hi(std::max(box_from_.x, mouse.x), std::max(box_from_.y, mouse.y));
@@ -999,7 +1009,9 @@ void App::draw_timeline() {
     zoom_anchor_px_ = std::max(0.0f, mouse.x - win.x - header_w); // the moment under the pointer stays under it
   }
 
-  if (!reveal_clip_.empty()) { // a clip just added: bring it into view (across and down)
+  // A clip just added: bring it into view (across and down), once the panel has its size (files opened with the editor
+  // are added before it has: a width below nothing would scroll a clip at the start out of view).
+  if (!reveal_clip_.empty() && view_w - header_w > 100.0f) {
     const std::string wanted = std::exchange(reveal_clip_, std::string());
     for (int ti = 0; ti < rows; ++ti)
       for (const ClipUi &k : tracks_[size_t(ti)].clips)
