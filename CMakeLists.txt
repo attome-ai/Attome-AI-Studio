@@ -180,7 +180,26 @@ std::span<const File> files() { return std::span<const File>(kFiles, sizeof(kFil
 ")
 file(COPY_FILE ${ATM_SKILLS_CPP}.tmp ${ATM_SKILLS_CPP} ONLY_IF_DIFFERENT)
 target_sources(atm_skills PRIVATE ${ATM_SKILLS_CPP})
-atm_module(atm_api DEPS atm_patch atm_storage atm_render atm_models atm_skills atm_gpu)
+# Speech to text: decodes a clip's sound and talks to attome-whisper over its standard input and output.
+atm_module(atm_asr DEPS atm_media)
+atm_module(atm_api DEPS atm_patch atm_storage atm_render atm_models atm_skills atm_gpu atm_asr)
+
+# attome-whisper, the speech program (app/whisper): a small program around whisper.cpp, built next to the others when the whisper.cpp source is
+# at ATM_WHISPER_DIR (git clone https://github.com/ggml-org/whisper.cpp .deps/whisper.cpp). Without it the engine says the program is not installed.
+set(ATM_WHISPER_DIR "${CMAKE_SOURCE_DIR}/.deps/whisper.cpp" CACHE PATH "whisper.cpp source for attome-whisper (empty: not built)")
+if(ATM_WHISPER_DIR AND EXISTS "${ATM_WHISPER_DIR}/CMakeLists.txt")
+  enable_language(C) # whisper.cpp's ggml is C and C++; the presets name only the C++ compiler
+  set(WHISPER_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+  set(WHISPER_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+  set(WHISPER_BUILD_SERVER OFF CACHE BOOL "" FORCE)
+  set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+  add_subdirectory(${ATM_WHISPER_DIR} ${CMAKE_BINARY_DIR}/whisper_cpp EXCLUDE_FROM_ALL)
+  add_executable(attome-whisper app/whisper/main.cpp)
+  target_link_libraries(attome-whisper PRIVATE whisper nlohmann_json::nlohmann_json)
+  message(STATUS "Attome speech program: attome-whisper (whisper.cpp at ${ATM_WHISPER_DIR})")
+else()
+  message(STATUS "Attome speech program: not built (no whisper.cpp at ATM_WHISPER_DIR)")
+endif()
 
 add_executable(attomed core/daemon/main.cpp)
 target_link_libraries(attomed PRIVATE atm_api CLI11::CLI11 atm_options)
@@ -202,6 +221,13 @@ if(ATM_BUILD_TESTS)
   file(GLOB test_sources CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/core/*/tests/*.cpp)
   add_executable(atm_tests ${test_sources})
   target_link_libraries(atm_tests PRIVATE atm_api atm_gpu Catch2::Catch2WithMain atm_options)
+  # A stand-in for attome-whisper that speaks its protocol without a model (tests/tools/fake_whisper.cpp).
+  add_executable(atm_fake_whisper tests/tools/fake_whisper.cpp)
+  add_dependencies(atm_tests atm_fake_whisper)
+  target_compile_definitions(atm_tests PRIVATE ATM_FAKE_WHISPER="$<TARGET_FILE:atm_fake_whisper>" ATM_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+  if(TARGET attome-whisper)
+    add_dependencies(atm_tests attome-whisper) # the one test that runs the real program
+  endif()
   enable_testing()
   add_test(NAME atm_tests COMMAND atm_tests)
 endif()

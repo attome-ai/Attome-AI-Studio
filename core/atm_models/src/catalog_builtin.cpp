@@ -10,6 +10,9 @@ namespace {
 #define ATM_H3 "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/e5eb578a89295337b8ff433a035929ce0279e0b6/"
 // FastVideo/FastVideo-FastH3-Comfy at revision ec1e3aa374a91c57b0b94a1623b7e657c0498cf2 (read 2026-10-04).
 #define ATM_FASTH3 "https://huggingface.co/FastVideo/FastVideo-FastH3-Comfy/resolve/ec1e3aa374a91c57b0b94a1623b7e657c0498cf2/"
+// ggerganov/whisper.cpp at revision 5359861c739e955e79d9a303bcbc70fb988958b1 (read 2026-10-09: the revision, size and hash are what the
+// repository's own headers report for ggml-small.bin, and the hash matches the file as downloaded).
+#define ATM_WHISPER "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/"
 
 constexpr const char *kCatalog = R"json({
   "version": 1,
@@ -84,6 +87,19 @@ constexpr const char *kCatalog = R"json({
         {"path": "diffusion_models/fastvideo_fasth3_8step_v2_pruned_int8_convrot.safetensors", "size": 22128378696,
          "sha256": "0922785978dc9bfe1adf27d8b291b0ca763f9f165f882e6cb297c72fbb6deda8",
          "url": ")json" ATM_FASTH3 R"json(diffusion_models/fastvideo_fasth3_8step_v2_pruned_int8_convrot.safetensors"}
+      ]
+    },
+    {
+      "id": "whisper.small",
+      "title": "Whisper small: speech to text, word by word (many languages)",
+      "kind": "model",
+      "licence": "MIT: OpenAI's Whisper weights, converted for whisper.cpp; free to use, also commercially.",
+      "licence_url": "https://github.com/openai/whisper/blob/main/LICENSE",
+      "notes": "Hears what a clip says and times every word, for auto captions. Runs on the processor; about 12 times faster than real time on a recent one.",
+      "files": [
+        {"path": "ggml-small.bin", "size": 487601967,
+         "sha256": "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b",
+         "url": ")json" ATM_WHISPER R"json(ggml-small.bin"}
       ]
     }
   ]
