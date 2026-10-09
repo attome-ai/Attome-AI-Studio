@@ -108,9 +108,20 @@ void App::shortcuts() {
     select_at_playhead();
   if (!io.KeyCtrl && !io.KeyAlt && ImGui::IsKeyPressed(ImGuiKey_Tab, false))
     select_neighbour(!io.KeyShift);
-  if (ImGui::IsKeyPressed(ImGuiKey_UpArrow, false))
+  if (io.KeyAlt && !io.KeyCtrl) {
+    const int64_t step = io.KeyShift ? int64_t(std::llround(fps())) : 1;
+    if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow, true))
+      nudge_picked(-step);
+    if (ImGui::IsKeyPressed(ImGuiKey_RightArrow, true))
+      nudge_picked(step);
+    if (ImGui::IsKeyPressed(ImGuiKey_UpArrow, false))
+      nudge_track(true);
+    if (ImGui::IsKeyPressed(ImGuiKey_DownArrow, false))
+      nudge_track(false);
+  }
+  if (!io.KeyAlt && ImGui::IsKeyPressed(ImGuiKey_UpArrow, false))
     jump_cut(false);
-  if (ImGui::IsKeyPressed(ImGuiKey_DownArrow, false))
+  if (!io.KeyAlt && ImGui::IsKeyPressed(ImGuiKey_DownArrow, false))
     jump_cut(true);
   if ((ImGui::IsKeyPressed(ImGuiKey_Equal, true) || ImGui::IsKeyPressed(ImGuiKey_KeypadAdd, true)) && !io.KeyCtrl)
     pps_ = std::clamp(pps_ * 1.25f, 4.0f, 800.0f);
@@ -140,14 +151,81 @@ void App::shortcuts() {
     ask_export();
   if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Comma, false))
     open_settings();
-  if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow, true))
+  if (!io.KeyAlt && ImGui::IsKeyPressed(ImGuiKey_LeftArrow, true))
     seek(playhead_ - (io.KeyShift ? int64_t(std::llround(fps())) : 1)); // Shift: a second
-  if (ImGui::IsKeyPressed(ImGuiKey_RightArrow, true))
+  if (!io.KeyAlt && ImGui::IsKeyPressed(ImGuiKey_RightArrow, true))
     seek(playhead_ + (io.KeyShift ? int64_t(std::llround(fps())) : 1));
   if (ImGui::IsKeyPressed(ImGuiKey_Home, false))
     seek(0);
   if (ImGui::IsKeyPressed(ImGuiKey_End, false))
     seek(total_frames_);
+}
+
+// Whether `start .. start + frames` on a track is free of every clip but the ones in `except`.
+static bool room_for(const TrackUi &t, int64_t start, int64_t frames, const std::set<const ClipUi *> &except) {
+  for (const ClipUi &o : t.clips)
+    if (!except.count(&o) && start < o.start + o.frames && o.start < start + frames)
+      return false;
+  return true;
+}
+
+void App::nudge_picked(int64_t frames) {
+  const std::vector<const ClipUi *> group = picked_clips();
+  if (group.empty())
+    return;
+  for (const ClipUi *m : group)
+    frames = std::max(frames, -m->start); // none goes before the start
+  if (frames == 0)
+    return;
+  const std::set<const ClipUi *> moving(group.begin(), group.end());
+  json ops = json::array();
+  for (const ClipUi *m : group) {
+    const TrackUi *home = track_of(m->id);
+    if (!home)
+      return;
+    if (home->locked) {
+      say("Track " + home->name + " is locked. Unlock it to change its clips.", true);
+      return;
+    }
+    if (!room_for(*home, m->start + frames, m->frames, moving)) {
+      say("There is no room for it there.");
+      return;
+    }
+    drop_transitions(m->id, ops);
+    ops.push_back({{"op", "replace"}, {"path", m->id + "/timing/record_in"}, {"value", frames_text(m->start + frames)}});
+  }
+  patch(std::move(ops), group.size() == 1 ? "Move clip" : ("Move " + std::to_string(group.size()) + " clips").c_str());
+}
+
+void App::nudge_track(bool up) {
+  const std::vector<const ClipUi *> group = picked_clips();
+  if (group.size() != 1) { // one clip at a time: a group may sit on tracks of different kinds
+    if (!group.empty())
+      say("Select one clip to move it to another track.");
+    return;
+  }
+  const ClipUi &c = *group.front();
+  const TrackUi *home = track_of(c.id);
+  if (!home)
+    return;
+  const std::ptrdiff_t at = home - tracks_.data(), to = up ? at - 1 : at + 1; // the tracks are listed from the top
+  if (to < 0 || to >= std::ptrdiff_t(tracks_.size()) || tracks_[size_t(to)].kind != home->kind) {
+    say(up ? "There is no track above it for this kind of clip." : "There is no track below it for this kind of clip.");
+    return;
+  }
+  const TrackUi &target = tracks_[size_t(to)];
+  if (home->locked || target.locked) {
+    say("Track " + (home->locked ? home->name : target.name) + " is locked. Unlock it to change its clips.", true);
+    return;
+  }
+  if (!room_for(target, c.start, c.frames, {})) {
+    say("There is no room for it there.");
+    return;
+  }
+  json ops = json::array();
+  drop_transitions(c.id, ops);
+  ops.push_back({{"op", "move"}, {"path", c.id}, {"to", target.id + "/clips"}});
+  patch(std::move(ops), "Move clip");
 }
 
 void App::select_at_playhead() {

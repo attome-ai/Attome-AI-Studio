@@ -331,6 +331,17 @@ void App::draw_library_panel() {
     ImGui::TextColored(hexv(look::fg2), "Nothing is kept yet.");
     return;
   }
+  ImGui::SetNextItemWidth(-1.0f);
+  ImGui::PushStyleColor(ImGuiCol_FrameBg, hexv(look::raised));
+  ImGui::InputTextWithHint("##library_filter", "Search", library_filter_, sizeof library_filter_);
+  ui_mark("field:library_search");
+  ImGui::PopStyleColor();
+  ImGui::Spacing();
+  const auto lower = [](std::string text) {
+    std::transform(text.begin(), text.end(), text.begin(), [](unsigned char ch) { return char(std::tolower(ch)); });
+    return text;
+  };
+  const std::string wanted = lower(library_filter_);
   ImGui::BeginChild("##library", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_NoBackground);
   const float avail = ImGui::GetContentRegionAvail().x;
   const int columns = std::max(1, int((avail + 10.0f) / (130.0f + 10.0f)));
@@ -339,6 +350,8 @@ void App::draw_library_panel() {
   std::string remove_id;
   for (const json &item : library_items_) {
     const std::string id = item.value("id", std::string()), name = item.value("name", std::string("Clip"));
+    if (!wanted.empty() && lower(name).find(wanted) == std::string::npos)
+      continue;
     std::string thumb = item.value("picture_path", std::string()); // the clip's own file; the item's frame is canvas-shaped, with bars
     if (thumb.empty())
       thumb = item.value("thumb", std::string());
@@ -443,6 +456,8 @@ void App::draw_library_panel() {
     ImGui::EndGroup();
     column = (column + 1) % columns;
   }
+  if (column == 0 && !wanted.empty() && std::none_of(library_items_.begin(), library_items_.end(), [&](const json &i) { return lower(i.value("name", std::string())).find(wanted) != std::string::npos; }))
+    ImGui::TextColored(hexv(look::fg2), "Nothing kept matches.");
   ImGui::EndChild();
   if (!remove_id.empty()) {
     json ignored;

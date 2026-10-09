@@ -34,6 +34,8 @@ $runB = Invoke-EditorScript -Project $b -TimeoutSeconds 240 -Script @(
   'wait 1200'
   'click @rail:Library', 'wait 900', 'expect @library:wide'
   "shot $work\card.jpg"
+  'click @field:library_search', 'type zzz', 'wait 300', "shot $work\search_none.jpg"
+  'key A ctrl', 'type WID', 'wait 300', 'expect @library:wide'     # not case-sensitive
   'dblclick @library:wide', 'wait 1200'
   'dblclick @library:wide', 'wait 1200'
   "shot $work\twice.jpg"

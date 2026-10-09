@@ -307,6 +307,8 @@ private:
   void draw_rail();
   void draw_media();
   void jump_cut(bool forward);
+  void nudge_picked(int64_t frames);   // Alt+Left / Right: the selected clips a frame (a second with Shift) earlier or later
+  void nudge_track(bool up);           // Alt+Up / Down: the selected clip on the track above or below, where it is free
   void select_at_playhead();         // D: the clip on top under the playhead
   void select_neighbour(bool next);  // Tab, Shift+Tab: the next or the previous clip on the selected clip's track (the playhead goes to its start)
   void draw_welcome();
@@ -582,6 +584,7 @@ private:
   bool assets_listed_ = false; // the project's own imported files are put in the media list once, when it is opened
   std::set<std::string> audio_only_; // media files without a picture
   char media_filter_[128] = {};
+  char library_filter_[128] = {}; // the Library's search
   int media_kind_ = 0; // the Media panel's filter: 0 all, 1 video, 2 audio, 3 pictures
   int text_tab_ = 0, fx_tab_ = 0, gen_tab_ = 0; // the tab chosen in the Text, Effects and Generate panels; 0 is All
   int inspector_tab_ = 0;
