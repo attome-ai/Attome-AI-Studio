@@ -232,6 +232,7 @@ private:
   std::vector<uint8_t> mix_;                          // the incoming clip of a dissolve, drawn over the same background
   std::vector<uint8_t> adjust_, scratch_;             // an adjustment layer's copy of the picture below it
   std::vector<uint8_t> over_black_, over_white_, cover_; // a clip with effects, drawn on its own (see draw_isolated)
+  std::vector<uint8_t> halves_[2]; // a video frame halved before it is drawn much smaller (see halvings)
   gpu::Context *gpu_ = nullptr;
   int64_t gpu_runs_ = 0;
   struct GpuReader; // a clip decoded by the GPU (render.cpp)

@@ -26,8 +26,8 @@ const Info &Context::info() const { return impl_->info; }
 Result<void> Context::blur_nv12(uint8_t *, int, int, float, Timing *) { return fail(ErrorCode::EncoderUnavailable, "G_NOT_BUILT", "This build has no GPU path."); }
 uint8_t *Context::staging(int, int) { return nullptr; }
 void Context::begin_frame(int, int) {}
-void Context::draw_picture(const VideoDecoder &, const Picture &, PictureDraw) {}
-void Context::draw_picture(const VideoDecoder &, const Picture &, const Placed &) {}
+void Context::draw_picture(const VideoDecoder &, const Picture &, PictureDraw, int) {}
+void Context::draw_picture(const VideoDecoder &, const Picture &, const Placed &, int) {}
 void Context::draw_source(const Source &, PictureDraw) {}
 void Context::draw_source(const Source &, const Placed &) {}
 void Context::begin_clip(std::vector<Effect>, bool, int) {}

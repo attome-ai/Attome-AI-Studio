@@ -308,24 +308,29 @@ TEST_CASE("gpu video: a frame of video clips decoded and drawn on the GPU is the
     comp.layers = c.layers;
     for (size_t i = 0; i < comp.layers.size(); ++i)
       comp.layers[i].track = int(i);
-    atm::render::Renderer cpu(comp, W, H), on_gpu(comp, W, H);
-    on_gpu.use_gpu(gpu->get());
-    std::vector<uint8_t> want(atm::media::nv12_size(W, H)), got(want.size());
-    for (const int64_t f : order) {
-      INFO("frame " << f);
-      REQUIRE(cpu.render(f, want.data()));
-      REQUIRE(on_gpu.render(f, got.data()));
-      size_t differ = 0, first = want.size();
-      for (size_t i = 0; i < want.size(); ++i)
-        if (want[i] != got[i]) {
-          ++differ;
-          first = std::min(first, i);
-        }
-      INFO("first difference at byte " << first << " (row " << first / W << ", column " << first % W << ")");
-      REQUIRE(differ == 0);
+    // At the canvas's size, and smaller and larger (the clips are scaled by the drawing, halved first when much smaller).
+    for (const auto &[ow, oh] : {std::pair{W, H}, std::pair{640, 360}, std::pair{426, 240}, std::pair{320, 180}, std::pair{1920, 1080}}) {
+      INFO("output " << ow << "x" << oh);
+      atm::render::Renderer cpu(comp, ow, oh), on_gpu(comp, ow, oh);
+      on_gpu.use_gpu(gpu->get());
+      const int rw = cpu.width();
+      std::vector<uint8_t> want(atm::media::nv12_size(cpu.width(), cpu.height())), got(want.size());
+      for (const int64_t f : order) {
+        INFO("frame " << f);
+        REQUIRE(cpu.render(f, want.data()));
+        REQUIRE(on_gpu.render(f, got.data()));
+        size_t differ = 0, first = want.size();
+        for (size_t i = 0; i < want.size(); ++i)
+          if (want[i] != got[i]) {
+            ++differ;
+            first = std::min(first, i);
+          }
+        INFO("first difference at byte " << first << " (row " << first / size_t(rw) << ", column " << first % size_t(rw) << ")");
+        REQUIRE(differ == 0);
+      }
+      CHECK(on_gpu.gpu_runs() == (c.on_gpu ? int64_t(order.size()) : 0)); // every frame was made on the GPU, or none
+      CHECK(on_gpu.take_warning().empty());
     }
-    CHECK(on_gpu.gpu_runs() == (c.on_gpu ? int64_t(order.size()) : 0)); // every frame was made on the GPU, or none
-    CHECK(on_gpu.take_warning().empty());
   }
   fs::remove_all(dir, ec);
 }

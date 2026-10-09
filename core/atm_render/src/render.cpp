@@ -288,6 +288,53 @@ bool to_placed(const Placement &pl, int W, int H, int alpha, gpu::Placed &q) {
   return true;
 }
 
+// A video frame read at its own size (vw x vh) is drawn as large as the fitted picture the CPU reader used to make: the
+// fit to the canvas is folded into the transform's scale, so the renderer's own drawing does all the scaling, the same on
+// the CPU and on the GPU.
+void fold_fit(Transform &xf, int vw, int vh, int W, int H) {
+  const auto [fw, fh] = media::fit_inside(vw, vh, W, H);
+  xf.scale_x *= float(fw) / float(vw);
+  xf.scale_y *= float(fh) / float(vh);
+}
+
+// How many times a picture is halved (each pixel the mean of 2 x 2) before it is drawn, so that bilinear sampling never
+// skips pixels: while it would be drawn at less than half its size both ways and the halves keep even sizes. The size and
+// the scale change to match: the picture lands where it did.
+int halvings(Transform &xf, int &vw, int &vh) {
+  int k = 0;
+  while (xf.scale_x > 0.0f && xf.scale_x < 0.5f && xf.scale_y > 0.0f && xf.scale_y < 0.5f && vw % 4 == 0 && vh % 4 == 0) {
+    xf.scale_x *= 2.0f;
+    xf.scale_y *= 2.0f;
+    vw /= 2;
+    vh /= 2;
+    ++k;
+  }
+  return k;
+}
+
+// A picture halved: each luma byte the rounded mean of the 2 x 2 below it, each U and V of its 2 x 2 chroma samples
+// (half.comp does the same). `out` is packed NV12 of (width / 2) x (height / 2).
+void half_nv12(const media::FrameView &in, uint8_t *out) {
+  const int w = in.width / 2, h = in.height / 2;
+  parallel_for(h + h / 2, 16, [&](int64_t first, int64_t last) {
+    for (int64_t r = first; r < last; ++r) {
+      const bool chroma = r >= h;
+      const int y = chroma ? int(r) - h : int(r);
+      const uint8_t *a = chroma ? in.uv + std::ptrdiff_t(in.uv_pitch) * (2 * y) : in.y + std::ptrdiff_t(in.y_pitch) * (2 * y);
+      const uint8_t *b = a + (chroma ? in.uv_pitch : in.y_pitch);
+      uint8_t *o = out + size_t(r) * size_t(w);
+      if (!chroma)
+        for (int x = 0; x < w; ++x)
+          o[x] = uint8_t((a[2 * x] + a[2 * x + 1] + b[2 * x] + b[2 * x + 1] + 2) >> 2);
+      else
+        for (int x = 0; x < w; ++x) { // byte x: U or V of pair x / 2, from pairs x / 2 * 2 and x / 2 * 2 + 1
+          const int at = (x / 2) * 4 + (x % 2);
+          o[x] = uint8_t((a[at] + a[at + 2] + b[at] + b[at + 2] + 2) >> 2);
+        }
+    }
+  });
+}
+
 // The plain copy of a picture of w x h (no larger than the canvas) centred on the canvas, as an upright drawing: what
 // put_rows does on the CPU.
 Upright centred(int W, int H, int w, int h) {
@@ -2038,7 +2085,8 @@ void Renderer::draw(const Layer &l, int64_t frame, uint8_t *out, bool &cleared, 
   } else {
     auto it = readers_.find(l.clip_id);
     if (it == readers_.end()) {
-      auto reader = media::VideoReader::open(l.path, width_, height_);
+      // At its own size (the renderer scales it), but for a clip played backwards: its frames are kept, fitted to the canvas.
+      auto reader = media::VideoReader::open(l.path, l.reverse ? width_ : 0, l.reverse ? height_ : 0);
       if (!reader) {
         failed_[l.clip_id] = true;
         if (warning_.empty())
@@ -2099,10 +2147,26 @@ void Renderer::draw(const Layer &l, int64_t frame, uint8_t *out, bool &cleared, 
       view = *decoded;
     }
   }
+  Transform xf = p.xf;
+  if (!l.is_image && !l.reverse) { // a frame at its own size: fitted by the drawing, halved first when drawn much smaller
+    int vw = view->width, vh = view->height;
+    fold_fit(xf, vw, vh, width_, height_);
+    for (int k = halvings(xf, vw, vh), i = 0; i < k; ++i) {
+      std::vector<uint8_t> &half = halves_[size_t(i % 2)];
+      half.resize(media::nv12_size(view->width / 2, view->height / 2));
+      half_nv12(*view, half.data());
+      media::FrameView v;
+      v.width = view->width / 2;
+      v.height = view->height / 2;
+      v.y = half.data();
+      v.y_pitch = v.uv_pitch = v.width;
+      v.uv = half.data() + size_t(v.width) * size_t(v.height);
+      view = v;
+    }
+  }
   const int w = std::min(view->width, width_), h = std::min(view->height, height_);
   const int alpha = int(p.opacity * 256.0f + 0.5f);
-  // The common case, a clip fitted and centred, stays on the plain copy path.
-  const Transform &xf = p.xf;
+  // The common case, a clip at the canvas's size and centred, stays on the plain copy path.
   const Placement pl(xf, width_, height_, float(view->width), float(view->height));
   const bool plain = xf.scale_x == 1.0f && xf.scale_y == 1.0f && xf.pos_x == 0.5f && xf.pos_y == 0.5f &&
                      xf.anchor_x == 0.5f && xf.anchor_y == 0.5f && !pl.rotated && !xf.cropped() && !view->alpha;
@@ -2505,7 +2569,8 @@ bool Renderer::render_on_gpu(int64_t frame, uint8_t *out) {
       if (!still_of(*l))
         return true; // left out, as on the CPU (which reports it)
       const media::FrameView v = stills_.at(l->clip_id).view();
-      still.key = std::hash<std::string>{}(l->clip_id + "\x1f" + l->path);
+      // Read fitted to this renderer's size: another renderer on the same GPU may hold the same file at another.
+      still.key = std::hash<std::string>{}(l->clip_id + "\x1f" + l->path + "\x1f" + std::to_string(v.width) + "x" + std::to_string(v.height));
       still.width = vw = v.width;
       still.height = vh = v.height;
       still.y = v.y;
@@ -2519,9 +2584,7 @@ bool Renderer::render_on_gpu(int64_t frame, uint8_t *out) {
       auto it = gpu_readers_.find(l->clip_id);
       if (it == gpu_readers_.end()) {
         auto opened = GpuReader::open(*gpu_, l->path);
-        // A picture the CPU reader would scale to fit the canvas stays with the CPU, which scales it.
-        if (!opened || media::fit_inside((*opened)->decoder->width(), (*opened)->decoder->height(), width_, height_) !=
-                           std::pair{(*opened)->decoder->width(), (*opened)->decoder->height()}) {
+        if (!opened) {
           gpu_failed_[l->clip_id] = true;
           return false;
         }
@@ -2531,7 +2594,12 @@ bool Renderer::render_on_gpu(int64_t frame, uint8_t *out) {
       vw = reader->decoder->width();
       vh = reader->decoder->height();
     }
-    const Transform &xf = p.xf;
+    Transform xf = p.xf;
+    int halved = 0;
+    if (reader) { // a frame at its own size: fitted by the drawing, halved first when drawn much smaller (as draw())
+      fold_fit(xf, vw, vh, width_, height_);
+      halved = halvings(xf, vw, vh);
+    }
     const Placement pl(xf, width_, height_, float(vw), float(vh));
     const bool placed = pl.rotated || transparent; // draw_rotated's way; else upright (draw_transformed, or the plain copy)
     gpu::Placed q;
@@ -2562,13 +2630,13 @@ bool Renderer::render_on_gpu(int64_t frame, uint8_t *out) {
       gpu_->begin_clip(std::move(s.chain), !transparent && reaches_corners(pl, xf, width_, height_, vw, vh) && !g_always_measure_coverage.load(), opacity);
     if (placed) {
       if (reader)
-        gpu_->draw_picture(*reader->decoder, *picture, q);
+        gpu_->draw_picture(*reader->decoder, *picture, q, halved);
       else
         gpu_->draw_source(still, q);
     } else {
       gpu::PictureDraw d{u.ix0, u.ix1, u.iy0, u.iy1, u.cx0, u.cx1, u.cy0, u.cy1, pack(u.xs), pack(u.ys), pack(u.cxs), pack(u.cys), alpha};
       if (reader)
-        gpu_->draw_picture(*reader->decoder, *picture, std::move(d));
+        gpu_->draw_picture(*reader->decoder, *picture, std::move(d), halved);
       else
         gpu_->draw_source(still, std::move(d));
     }

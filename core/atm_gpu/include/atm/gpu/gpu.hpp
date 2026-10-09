@@ -139,9 +139,11 @@ public:
   // (packed NV12) by end_frame. The pictures must stay held (not released), and the sources' pixels unchanged, until
   // end_frame has returned; a frame holds one LUT at most.
   void begin_frame(int width, int height);
-  // Drawings over the frame: a decoded picture upright or placed, a still or a text mask placed.
-  void draw_picture(const VideoDecoder &decoder, const Picture &picture, PictureDraw draw);
-  void draw_picture(const VideoDecoder &decoder, const Picture &picture, const Placed &placed);
+  // Drawings over the frame: a decoded picture upright or placed, a still or a text mask placed. A decoded picture can be
+  // halved `halvings` times first (each pixel the mean of 2 x 2, as the renderer's half_nv12): `draw` and `placed` are
+  // for the halved picture.
+  void draw_picture(const VideoDecoder &decoder, const Picture &picture, PictureDraw draw, int halvings = 0);
+  void draw_picture(const VideoDecoder &decoder, const Picture &picture, const Placed &placed, int halvings = 0);
   void draw_source(const Source &source, PictureDraw draw);
   void draw_source(const Source &source, const Placed &placed);
   // A clip with effects, as the renderer draws it: the drawings between begin_clip and end_clip make the clip on its own

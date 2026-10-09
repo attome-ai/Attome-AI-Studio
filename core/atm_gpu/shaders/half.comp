@@ -1,0 +1,39 @@
+#version 450
+// A picture halved before it is drawn much smaller (the renderer's half_nv12): each luma byte the rounded mean of the
+// 2 x 2 below it, each U and V the rounded mean of its 2 x 2 chroma samples. One plane per dispatch, one invocation per
+// 4-byte word of the half; the picture and its half are two places in the same buffer (bindings 0 and 1).
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer Source { uint src[]; };
+layout(std430, set = 0, binding = 1) buffer Half { uint dst[]; };
+
+layout(push_constant) uniform Halve {
+  uint src_at, src_pitch; // the plane being halved: where it starts, bytes per row
+  uint dst_at, dst_pitch; // its half (dst_pitch a multiple of 4)
+  uint width, rows;       // bytes per row and rows of the half
+  uint chroma;            // 1: U and V interleaved, a pair per two bytes
+} pc;
+
+int src_byte(uint i) { return int((src[i >> 2] >> ((i & 3u) * 8u)) & 0xFFu); }
+
+void main() {
+  const uint words_per_row = pc.dst_pitch >> 2;
+  const uint id = gl_GlobalInvocationID.x;
+  const uint y = id / words_per_row;
+  if (y >= pc.rows)
+    return;
+  const uint first = (id % words_per_row) * 4u;
+  const uint a = pc.src_at + 2u * y * pc.src_pitch, b = a + pc.src_pitch;
+  uint out_word = 0u;
+  for (uint q = 0u; q < 4u; ++q) {
+    const uint x = first + q;
+    if (x >= pc.width)
+      break;
+    const uint at = pc.chroma != 0u ? (x / 2u) * 4u + (x % 2u) : 2u * x;
+    const uint next = pc.chroma != 0u ? 2u : 1u;
+    const int v = (src_byte(a + at) + src_byte(a + at + next) + src_byte(b + at) + src_byte(b + at + next) + 2) >> 2;
+    out_word |= uint(v) << (q * 8u);
+  }
+  dst[pc.dst_at / 4u + id] = out_word;
+}

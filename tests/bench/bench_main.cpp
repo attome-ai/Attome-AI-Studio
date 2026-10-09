@@ -389,6 +389,8 @@ int bench_export() {
   std::printf("  %-52s %12.2f x real time   target >= 1\n", "2160p30, 30 s, effects and an adjustment layer", fx2160);
   const double titled = export_scene(engine, dir, hd, 1920, 1080, 60, false, true);
   std::printf("  %-52s %12.2f x real time   target >= 4\n", "1080p30, 60 s, 2 tracks, a title and captions", titled);
+  const double down = export_scene(engine, dir, uhd, 1920, 1080, 30);
+  std::printf("  %-52s %12.2f x real time   target >= 4\n", "2160p footage into 1080p30, 30 s, 2 tracks", down);
   std::printf("\nZone profile of the exports\n%s", atm::prof::format_report(atm::prof::snapshot()).c_str());
   return 0;
 }
