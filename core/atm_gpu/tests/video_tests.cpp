@@ -223,6 +223,21 @@ TEST_CASE("gpu video: a frame of video clips decoded and drawn on the GPU is the
     soft.opacity = 0.8f;
     soft.effects = {effect("gaussian_blur", {0.01f})};
     cases.push_back({"captions popping in, and a text with a blur", {layer("clp_a", a, 0), captions, soft}});
+    // Texts coming in and going: popping in and sliding out; typing itself on a box and fading out; sliding in with a blur.
+    using Motion = atm::render::Layer::TextMotion;
+    atm::render::Layer popping = text("clp_p", "pops in");
+    popping.xf.pos_y = 0.25f;
+    popping.text_in = {Motion::pop, 20};
+    popping.text_out = {Motion::slide, 15};
+    atm::render::Layer typed = text("clp_y", "types itself");
+    typed.box_opacity = 0.6f;
+    typed.text_in = {Motion::typewriter, 30};
+    typed.text_out = {Motion::fade, 10};
+    atm::render::Layer sliding = text("clp_l", "slides");
+    sliding.xf.pos_y = 0.8f;
+    sliding.effects = {effect("gaussian_blur", {0.005f})};
+    sliding.text_in = {Motion::slide, 25};
+    cases.push_back({"texts popping, typing, sliding and fading", {layer("clp_a", a, 0), popping, typed, sliding}});
   }
   // Transitions: every kind, between two clips (the incoming one smaller, with effects, in one of them), under a title.
   {

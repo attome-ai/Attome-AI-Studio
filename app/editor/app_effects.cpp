@@ -236,6 +236,58 @@ void App::draw_text_style(const ClipUi &c) {
   slider("Outline", "outline", "outline", "width", outline.value("width", 0.0f), 0.3f, json{{"color", "#000000"}});
   slider("Shadow", "shadow", "shadow", "opacity", shadow.value("opacity", 0.0f), 1.0f, json{{"color", "#000000"}, {"x", 0.06}, {"y", 0.07}, {"blur", 0.05}});
   slider("Box", "box", "background", "opacity", box.value("opacity", 0.0f), 1.0f, json{{"color", "#000000"}, {"padding", 0.3}, {"radius", 0.3}});
+
+  // How the text comes in and goes: content.animate_in and content.animate_out, {style, duration}. A style, then its length in seconds.
+  ImGui::Spacing();
+  ImGui::TextColored(hexv(look::fg2), "Animation");
+  const auto motion = [&](const char *label, const char *key) {
+    static const char *kStyles[] = {"none", "fade", "pop", "slide", "typewriter"};
+    static const char *kStyleNames[] = {"None", "Fade", "Pop", "Slide", "Typewriter"};
+    const json now = content.value(key, json::object());
+    const std::string style = now.is_object() ? now.value("style", std::string("none")) : std::string("none");
+    const std::string duration = now.is_object() ? now.value("duration", std::string("1/2")) : std::string("1/2");
+    const auto with = [&](const std::string &new_style, const std::string &new_duration) {
+      return new_style == "none" ? json(nullptr) : json{{"style", new_style}, {"duration", new_duration}};
+    };
+    ImGui::TextColored(hexv(look::fg2), "%s", label);
+    ImGui::SameLine(88.0f);
+    const char *shown = "None";
+    for (size_t i = 0; i < std::size(kStyles); ++i)
+      if (style == kStyles[i])
+        shown = kStyleNames[i];
+    ImGui::PushStyleColor(ImGuiCol_FrameBg, hexv(look::raised));
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+    if (ImGui::BeginCombo((std::string("##") + key).c_str(), shown)) {
+      for (size_t i = 0; i < std::size(kStyles); ++i) {
+        if (ImGui::Selectable(kStyleNames[i], style == kStyles[i]) && style != kStyles[i])
+          set_content(key, with(kStyles[i], duration), (std::string("Text ") + label + ": " + kStyleNames[i]).c_str());
+        ui_mark(std::string(key) + ":" + kStyleNames[i]);
+      }
+      ImGui::EndCombo();
+    }
+    ui_mark(std::string("field:") + key);
+    ImGui::PopStyleColor();
+    if (style == "none")
+      return;
+    ImGui::Dummy(ImVec2(80.0f, 0.0f));
+    ImGui::SameLine(88.0f);
+    const std::string edit_id = id + "/" + key;
+    float &seconds = fx_edit_[edit_id];
+    if (fx_edit_active_ != edit_id)
+      seconds = float(Rational::parse(duration).value_or(Rational()).to_seconds_lossy());
+    const auto in_tenths = [&] { return Rational::make(std::clamp(int(std::lround(seconds * 10.0f)), 1, 50), 10).value().to_string(); };
+    if (slim_slider((std::string("text_") + key).c_str(), &seconds, 0.1f, 2.0f, ImGui::GetContentRegionAvail().x - 52.0f, "", 0.5f)) {
+      fx_edit_active_ = edit_id;
+      preview_ops(json::array({{{"op", "replace"}, {"path", id + "/content/" + key}, {"value", with(style, in_tenths())}}}));
+    }
+    if (slider_done()) {
+      fx_edit_active_.clear();
+      set_content(key, with(style, in_tenths()), (std::string("Text ") + label + " length").c_str());
+    }
+    slider_number("%3.1fs", seconds, 1.0f, 0.1f, 5.0f);
+  };
+  motion("In", "animate_in");
+  motion("Out", "animate_out");
 }
 
 // The effect cards of a clip or adjustment layer. A clip shows a card for every effect (an empty one offers to add it).

@@ -107,6 +107,15 @@ struct Layer {
   };
   std::vector<Word> words;
   float word_pop = 0.0f;
+  // How a text comes in and goes (content.animate_in, content.animate_out: {style, duration (seconds, "1/2")}), over the first and
+  // the last `frames` of the clip's own length: it fades, pops (grows from a third of its size, overshooting a little), slides up
+  // into its place and on up out of it while fading, or types itself letter by letter (and takes the letters back).
+  enum class TextMotion { none, fade, pop, slide, typewriter };
+  struct Motion {
+    TextMotion style = TextMotion::none;
+    int64_t frames = 0;
+  };
+  Motion text_in, text_out;
   // Effects. On an adjustment layer (media_ref.type "adjustment", no picture of its own) they change everything below
   // it, and opacity mixes the changed picture with the unchanged one. On a clip they change only the clip: it is drawn
   // on its own, changed, and composited with its blurred coverage, so its edges soften into what is below.

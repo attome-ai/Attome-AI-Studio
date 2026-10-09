@@ -74,6 +74,17 @@ TEST_CASE("timeline.edit: titles and a blur land on their own tracks, with fades
   CHECK(f.tracks().empty());
 }
 
+TEST_CASE("timeline.edit: add_text takes how the text comes in and goes", "[timeline]") {
+  Fixture f;
+  const json r = f.ok(json::array({{{"op", "add_text"}, {"id", "$new:t"}, {"text", "Hi"}, {"animate_in", "pop"},
+                                    {"animate_out", {{"style", "typewriter"}, {"duration", "0.8s"}}}}}));
+  const json content = f.get(r["id_map"]["$new:t"])["content"];
+  CHECK(content["animate_in"] == json({{"style", "pop"}, {"duration", "1/2"}}));
+  CHECK(content["animate_out"] == json({{"style", "typewriter"}, {"duration", "4/5"}}));
+  CHECK(f.fail_rule(json::array({{{"op", "add_text"}, {"text", "x"}, {"animate_in", "spin"}}})) == "E_PARAM");
+  CHECK(f.fail_rule(json::array({{{"op", "add_text"}, {"text", "x"}, {"animate_out", {{"style", "fade"}, {"duration", "soon"}}}}})) == "E_PARAM");
+}
+
 TEST_CASE("timeline.edit: duplicate copies clips with effects and keyframes, keeps links, and refuses an overlap", "[timeline]") {
   Fixture f;
   const json r = f.ok(json::array(

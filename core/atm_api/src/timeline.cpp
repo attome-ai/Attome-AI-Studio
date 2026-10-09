@@ -284,6 +284,25 @@ private:
     return std::optional<Rational>{*t};
   }
 
+  // A text's animate_in / animate_out: "fade" (half a second) or {style, duration?}, as the content keeps it: {style, duration}.
+  Result<json> text_motion(const char *key) const {
+    const auto it = op_.find(key);
+    if (it == op_.end() || it->is_null())
+      return json();
+    const json given = it->is_string() ? json{{"style", *it}} : *it;
+    const std::string style = given.is_object() ? given.value("style", std::string()) : std::string();
+    if (style != "fade" && style != "pop" && style != "slide" && style != "typewriter")
+      return fail("E_PARAM", "\"" + std::string(key) + "\" needs a style: fade, pop, slide or typewriter.", "For example \"pop\" or {\"style\": \"fade\", \"duration\": \"1s\"}.");
+    Rational duration = Rational::make(1, 2).value();
+    if (const auto d = given.find("duration"); d != given.end() && !d->is_null()) {
+      auto t = parse_time(*d, TimeContext{ctx_.rate});
+      if (!t)
+        return fail("E_PARAM", "\"" + std::string(key) + ".duration\" is not a time: " + t.error().message, "Write times like \"0.5s\" or \"15@30\".");
+      duration = *t;
+    }
+    return json{{"style", style}, {"duration", duration.to_string()}};
+  }
+
   Result<Rational> time_or(const char *key, Rational fallback) const {
     ATM_TRY(auto t, time(key));
     return t ? *t : fallback;
@@ -596,6 +615,11 @@ private:
     for (const char *k : {"font", "italic", "align", "line_spacing", "outline", "shadow", "background"}) // how the text is drawn
       if (op_.contains(k))
         value["content"][k] = op_[k];
+    for (const char *k : {"animate_in", "animate_out"}) { // how it comes in and goes: a style, or {style, duration}
+      ATM_TRY(json motion, text_motion(k));
+      if (!motion.is_null())
+        value["content"][k] = std::move(motion);
+    }
     ATM_TRY(json keys, fade_keys(duration, op_.value("opacity", 1.0)));
     if (!keys.is_null())
       value["transform"]["keyframes"]["opacity"] = std::move(keys);

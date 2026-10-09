@@ -686,6 +686,22 @@ Result<Composition> compile(const json &project, std::string_view sequence_id, c
               l.outline_color = parse_color(o->value("color", "#000000"), 0x000000);
             }
             l.word_pop = clamped(*content, "word_pop", 0.0f, 0.0f, 1.0f);
+            const auto motion_of = [&](const char *key) {
+              Layer::Motion m;
+              const auto o = content->find(key);
+              if (o == content->end() || !o->is_object())
+                return m;
+              const std::string style = o->value("style", std::string());
+              using M = Layer::TextMotion;
+              m.style = style == "fade" ? M::fade : style == "pop" ? M::pop : style == "slide" ? M::slide : style == "typewriter" ? M::typewriter : M::none;
+              m.frames = 1;
+              if (const auto seconds = Rational::parse(o->value("duration", std::string("1/2"))))
+                if (const auto frames = to_frames(*seconds, rate, Round::nearest_even))
+                  m.frames = std::max<int64_t>(1, *frames);
+              return m;
+            };
+            l.text_in = motion_of("animate_in");
+            l.text_out = motion_of("animate_out");
             if (const auto w = content->find("words"); w != content->end() && w->is_array()) {
               const auto frames_of = [&](const json &o, const char *key) -> int64_t {
                 const auto r = Rational::parse(o.value(key, std::string("0")));
@@ -1956,7 +1972,45 @@ std::vector<Renderer::TextPart> Renderer::text_parts(const Layer &l, int64_t fra
       text_xf.scale_y *= k;
     }
   }
-  if (shown_text.empty())
+  // Coming in and going: `t` runs from 0 (not in yet, or gone) to 1 (in place) over the motion's frames.
+  float shown = 1.0f;
+  const auto animate = [&](const Layer::Motion &m, int64_t frames_in, float rise) {
+    if (m.style == Layer::TextMotion::none || frames_in >= m.frames)
+      return;
+    const float t = std::clamp(float(frames_in) / float(m.frames), 0.0f, 1.0f), ease = 1.0f - (1.0f - t) * (1.0f - t);
+    switch (m.style) {
+    case Layer::TextMotion::fade:
+      shown *= ease;
+      break;
+    case Layer::TextMotion::pop: { // an ease that overshoots ("back"), from a third of the size
+      const float u = t - 1.0f, back = 1.0f + 2.70158f * u * u * u + 1.70158f * u * u, k = 0.3f + 0.7f * back;
+      text_xf.scale_x *= k;
+      text_xf.scale_y *= k;
+      shown *= std::min(1.0f, 2.0f * t);
+      break;
+    }
+    case Layer::TextMotion::slide: // from a little below its place, or on up out of it
+      text_xf.pos_y += rise * 0.06f * (1.0f - ease);
+      shown *= ease;
+      break;
+    case Layer::TextMotion::typewriter: { // the first letters (UTF-8 characters, not bytes)
+      size_t letters = 0;
+      for (const char ch : shown_text)
+        letters += (uint8_t(ch) & 0xC0) != 0x80;
+      size_t keep = size_t(std::lround(float(letters) * t)), end = 0;
+      for (; end < shown_text.size() && (keep > 0 || (uint8_t(shown_text[end]) & 0xC0) == 0x80); ++end)
+        if ((uint8_t(shown_text[end]) & 0xC0) != 0x80)
+          --keep;
+      shown_text.resize(end);
+      break;
+    }
+    case Layer::TextMotion::none:
+      break;
+    }
+  };
+  animate(l.text_in, frame - l.origin_frame, 1.0f);
+  animate(l.text_out, l.clip_end_frame - 1 - frame, -1.0f);
+  if (shown_text.empty() || shown <= 0.0f)
     return {};
   const int px_size = std::max(1, int(std::lround(l.text_size * float(height_))));
   char look[160];
@@ -1995,7 +2049,7 @@ std::vector<Renderer::TextPart> Renderer::text_parts(const Layer &l, int64_t fra
     return {};
   // A mask's key: the clip, the text's look and which of its masks (the same key, the same pixels).
   const auto key_of = [&](char which) { return std::hash<std::string>{}(l.clip_id + "\x1f" + entry.key + which); };
-  const int alpha = int(p.opacity * 256.0f + 0.5f);
+  const int alpha = int(p.opacity * shown * 256.0f + 0.5f);
   std::vector<TextPart> parts;
   if (entry.box.width > 0) // the box behind everything
     parts.push_back({&entry.box, text_xf, int(float(alpha) * l.box_opacity), l.box_color, key_of('b')});

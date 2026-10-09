@@ -711,6 +711,75 @@ TEST_CASE("render: captions show one word at a time, from its start until the ne
   CHECK(lit(frame(36)) > 0);
 }
 
+TEST_CASE("render: a text comes in and goes: fade, pop, slide, typewriter", "[media]") {
+  // A white text from 0 s to 2 s on a 30 fps sequence, 320 x 240: frames 0 .. 59. Animations of half a second are 15 frames.
+  const auto make = [](const json &motion) {
+    json content = {{"text", "MOVE ME"}, {"size", 0.2}, {"color", "#ffffff"}, {"bold", true}};
+    content.update(motion);
+    json clip = {{"timing", {{"record_in", "0"}, {"duration", "2"}, {"source_in", "0"}}}, {"media_ref", {{"type", "text"}}}, {"content", content}};
+    json track = {{"kind", "video"}, {"clips", {{"clp_m", clip}}}};
+    const json doc = {{"sequences", {{"seq_1", {{"rate", "30"}, {"canvas", {{"width", 320}, {"height", 240}}}, {"track_order", {"trk_v"}}, {"tracks", {{"trk_v", track}}}}}}},
+                      {"sequence_order", {"seq_1"}}};
+    auto comp = atm::render::compile(doc);
+    REQUIRE(comp);
+    return *comp;
+  };
+  struct Look {
+    int lit = 0;      // pixels lit at all
+    int64_t sum = 0;  // their brightness
+    double y = 0.0;   // their middle, from the top
+  };
+  const auto look_at = [](const atm::render::Composition &comp, int n) {
+    atm::render::Renderer renderer(comp, 320, 240);
+    std::vector<uint8_t> nv12(media::nv12_size(320, 240)), rgb(320 * 240 * 4);
+    REQUIRE(renderer.render(n, nv12.data()));
+    media::nv12_to_bgrx(nv12.data(), 320, 240, rgb.data());
+    Look l;
+    double ys = 0.0;
+    for (size_t i = 0; i < rgb.size(); i += 4) {
+      const int v = int(rgb[i]) + int(rgb[i + 1]) + int(rgb[i + 2]);
+      if (v > 60) {
+        ++l.lit;
+        l.sum += v;
+        ys += double(i / 4 / 320);
+      }
+    }
+    l.y = l.lit ? ys / l.lit : 0.0;
+    return l;
+  };
+  const auto still = make(json::object());
+  const Look plain = look_at(still, 30);
+  REQUIRE(plain.lit > 500);
+
+  const auto fade = make({{"animate_in", {{"style", "fade"}, {"duration", "1/2"}}}, {"animate_out", {{"style", "fade"}, {"duration", "1/2"}}}});
+  CHECK(fade.layers[0].text_in.frames == 15);
+  CHECK(fade.layers[0].text_out.style == atm::render::Layer::TextMotion::fade);
+  CHECK(look_at(fade, 0).lit == 0);                                  // not in yet
+  CHECK(look_at(fade, 7).sum < plain.sum * 3 / 4);                   // half way in: dimmer
+  CHECK(look_at(fade, 30).sum == plain.sum);                         // in place: as without an animation
+  CHECK(look_at(fade, 52).sum < plain.sum * 3 / 4);                  // going
+  CHECK(look_at(fade, 59).lit == 0);                                 // gone on the last frame
+
+  const auto pop = make({{"animate_in", {{"style", "pop"}}}});       // half a second when not given
+  CHECK(look_at(pop, 1).lit < plain.lit / 2);                        // small at first
+  CHECK(look_at(pop, 9).lit > plain.lit);                            // a little past its size, then back
+  CHECK(look_at(pop, 30).sum == plain.sum);
+
+  const auto slide = make({{"animate_in", {{"style", "slide"}}}, {"animate_out", {{"style", "slide"}}}});
+  CHECK(look_at(slide, 5).y > plain.y + 3.0);                        // comes up from below
+  CHECK(look_at(slide, 54).y < plain.y - 3.0);                       // and goes on up
+  CHECK(look_at(slide, 30).sum == plain.sum);
+
+  const auto typed = make({{"animate_in", {{"style", "typewriter"}, {"duration", "1"}}}});
+  const int a = look_at(typed, 8).lit, b = look_at(typed, 20).lit;
+  CHECK(a > 0);
+  CHECK(a < b);                                                      // more letters as it goes
+  CHECK(b < plain.lit);
+  CHECK(look_at(typed, 30).sum == plain.sum);                        // all of it after a second
+
+  CHECK(make({{"animate_in", {{"style", "spin"}}}}).layers[0].text_in.style == atm::render::Layer::TextMotion::none); // unknown: none
+}
+
 namespace {
 
 // A clip of one colour (0xRRGGBB) with a sine tone, `seconds` long at 30 fps.
