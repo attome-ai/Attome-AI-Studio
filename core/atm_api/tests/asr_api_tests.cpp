@@ -265,6 +265,46 @@ TEST_CASE("asr.transcribe: a file that changed is listened to again", "[asr][eng
   CHECK(changed["result"]["words"].size() == 3);
 }
 
+// A model of the catalog counts as installed when a file of its exact size is under its name: the fake program ignores what is inside.
+void put_model(const fs::path &models, const char *name, uintmax_t size) {
+  fs::create_directories(models);
+  std::ofstream(models / name, std::ios::binary).put('x');
+  fs::resize_file(models / name, size);
+}
+
+TEST_CASE("asr.transcribe: the more exact model is used when it is there, and a model can be asked for", "[asr][engine]") {
+  AsrFixture f;
+  f.env.set("ATTOME_WHISPER_MODEL", ""); // no file of the user's own: the catalog's models
+  const fs::path models = f.dir / "models";
+  const json params = {{"path", f.tone}};
+  const auto with = [&](json extra) {
+    json p = params;
+    for (auto it = extra.begin(); it != extra.end(); ++it)
+      p[it.key()] = it.value();
+    return p;
+  };
+
+  CHECK(f.refused(params) == "E_ASR_MODEL"); // none at all
+  const auto none = f.engine->call("asr.transcribe", params);
+  REQUIRE_FALSE(none);
+  CHECK(none.error().hint.find("whisper.large-v3-turbo-q5") != std::string::npos); // it says both can be had
+
+  put_model(models, "ggml-small.bin", 487601967);
+  const json small = f.run(params);
+  REQUIRE(small["state"] == "done");
+  CHECK(small["result"]["model"] == "whisper.small");
+  CHECK(f.refused(with({{"model", "turbo"}})) == "E_ASR_MODEL"); // asked for the one that is not there
+  CHECK(f.refused(with({{"model", "big"}})) == "E_PARAM");
+
+  put_model(models, "ggml-large-v3-turbo-q5_0.bin", 574041195);
+  CHECK(f.run(with({{"again", true}}))["result"]["model"] == "whisper.large-v3-turbo-q5");                       // the better one by default
+  CHECK(f.run(with({{"again", true}, {"model", "small"}}))["result"]["model"] == "whisper.small");               // or the other, asked for
+  CHECK(f.run(with({{"again", true}, {"model", "turbo"}}))["result"]["model"] == "whisper.large-v3-turbo-q5");
+  f.set_model("ok"); // a file of the user's own beats both, and says so
+  f.env.set("ATTOME_WHISPER_MODEL", (f.dir / "model.bin").string());
+  CHECK(f.run(with({{"again", true}}))["result"]["model"] == "custom");
+}
+
 TEST_CASE("asr.transcribe: an agent can find it and the way to captions", "[asr][engine][parity]") {
   AsrFixture f;
   const json tools = *f.engine->call("tools.list", json::object());

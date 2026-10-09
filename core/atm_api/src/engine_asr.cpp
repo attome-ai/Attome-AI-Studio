@@ -34,6 +34,9 @@ Result<json> Engine::Impl::asr_transcribe(const json &params) {
     return bad_param("path", "is required: the sound or video file to listen to (or project and clip)");
   const std::string language = params.value("language", std::string("auto"));
   const bool again = params.value("again", false);
+  const std::string wanted_model = params.value("model", std::string("best"));
+  if (wanted_model != "best" && wanted_model != "small" && wanted_model != "turbo")
+    return bad_param("model", "must be best, small or turbo");
   const bool code = !language.empty() && language.size() <= 3 &&
                     std::all_of(language.begin(), language.end(), [](unsigned char c) { return c >= 'a' && c <= 'z'; });
   if (language != "auto" && !code)
@@ -44,20 +47,38 @@ Result<json> Engine::Impl::asr_transcribe(const json &params) {
   if (options.exe.empty())
     return fail(ErrorCode::WorkerUnavailable, "E_ASR_NOT_INSTALLED", "The speech program (attome-whisper) is not installed.", {},
                 "It is built with Attome when whisper.cpp is in .deps/whisper.cpp; ATTOME_WHISPER_EXE can point at one.");
+  std::string model_id; // which one listens: a model of the catalog, or the user's own file
   if (const char *own = std::getenv("ATTOME_WHISPER_MODEL"); own && *own) { // a ggml Whisper file of the user's own (or a test's)
     std::error_code ec;
-    if (fs::exists(to_path(own), ec))
+    if (fs::exists(to_path(own), ec)) {
       options.model = to_path(own);
+      model_id = "custom";
+    }
   }
   if (options.model.empty()) {
-    const models::CatalogEntry *entry = models::find_entry(models::builtin_catalog(), "whisper.small");
-    if (!entry || entry->files.empty())
-      return fail(ErrorCode::Internal, "E_ASR_MODEL", "The speech model is not in the catalog of this version.");
-    options.model = models::find_file(entry->files.front(), models_dir(), model_folders);
+    // The best one that is installed, unless one is asked for: the more exact large-v3 turbo first, then small.
+    std::vector<std::string> order;
+    if (wanted_model != "small")
+      order.push_back("whisper.large-v3-turbo-q5");
+    if (wanted_model != "turbo")
+      order.push_back("whisper.small");
+    for (const std::string &id : order) {
+      const models::CatalogEntry *entry = models::find_entry(models::builtin_catalog(), id);
+      if (!entry || entry->files.empty())
+        return fail(ErrorCode::Internal, "E_ASR_MODEL", "The speech model " + id + " is not in the catalog of this version.");
+      if (const fs::path found = models::find_file(entry->files.front(), models_dir(), model_folders); !found.empty()) {
+        options.model = found;
+        model_id = id;
+        break;
+      }
+    }
   }
   if (options.model.empty())
-    return fail(ErrorCode::ModelMissing, "E_ASR_MODEL", "The speech model (whisper.small) is not on this computer.", {},
-                "Download it once with models.fetch {id: \"whisper.small\"} (488 MB), or point ATTOME_WHISPER_MODEL at a ggml Whisper file.");
+    return fail(ErrorCode::ModelMissing, "E_ASR_MODEL",
+                wanted_model == "turbo" ? "The speech model whisper.large-v3-turbo-q5 is not on this computer."
+                                         : "No speech model is on this computer.",
+                {}, wanted_model == "turbo" ? "Download it with models.fetch {id: \"whisper.large-v3-turbo-q5\"} (574 MB)."
+                                            : "Download one with models.fetch: whisper.small (488 MB) or the more exact whisper.large-v3-turbo-q5 (574 MB, better in Arabic), or point ATTOME_WHISPER_MODEL at a ggml Whisper file.");
   options.language = language;
 
   ATM_TRY(json info, media_probe({{"path", path}}));
@@ -71,6 +92,7 @@ Result<json> Engine::Impl::asr_transcribe(const json &params) {
   run.clip = clip_id;
   run.speed = speed;
   run.asked = language;
+  run.model_id = model_id;
   run.want_from = std::clamp(from, 0.0, std::max(0.0, file_seconds));
   run.want_to = duration > 0.0 ? std::min(file_seconds, run.want_from + duration) : file_seconds;
   run.from = run.want_from;

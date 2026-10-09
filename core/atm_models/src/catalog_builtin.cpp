@@ -101,6 +101,19 @@ constexpr const char *kCatalog = R"json({
          "sha256": "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b",
          "url": ")json" ATM_WHISPER R"json(ggml-small.bin"}
       ]
+    },
+    {
+      "id": "whisper.large-v3-turbo-q5",
+      "title": "Whisper large-v3 turbo: speech to text, more exact (many languages)",
+      "kind": "model",
+      "licence": "MIT: OpenAI's Whisper weights, converted and quantized for whisper.cpp; free to use, also commercially.",
+      "licence_url": "https://github.com/openai/whisper/blob/main/LICENSE",
+      "notes": "About a third of the mistakes of Whisper small in Arabic (9 % of words wrong, against 26 %, on 100 FLEURS recordings), and as good in English. Runs on the processor at about three and a half times real time, against eight and a half for small.",
+      "files": [
+        {"path": "ggml-large-v3-turbo-q5_0.bin", "size": 574041195,
+         "sha256": "394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2",
+         "url": ")json" ATM_WHISPER R"json(ggml-large-v3-turbo-q5_0.bin"}
+      ]
     }
   ]
 })json";

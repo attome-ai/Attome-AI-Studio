@@ -165,6 +165,7 @@ struct AsrRun {
   std::string project;           // not empty: keep the transcript in this project
   int64_t file_size = 0;
   std::string asked;             // the language that was asked for ("auto" or a code)
+  std::string model_id;          // the catalog model that listens ("whisper.small", ...), or "custom" for a file of the user's own
 };
 void run_asr(const std::shared_ptr<Job> &job, asr::Options options, AsrRun run, std::shared_ptr<FinishedQueue> queue);
 

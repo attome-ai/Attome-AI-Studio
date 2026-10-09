@@ -614,7 +614,7 @@ void App::auto_captions(const std::string &clip) {
   RpcError error;
   if (!client_.call("asr.transcribe", {{"project", project_path_}, {"clip", clip}}, started, error)) {
     if (error.code == 1404) // the model is missing
-      say("The speech model is not on this computer yet. Download \"Whisper small\" (488 MB) from the Models panel, then try again.", true);
+      say("No speech model is on this computer yet. Download \"Whisper small\" (488 MB), or the more exact \"Whisper large-v3 turbo\" (574 MB, better in Arabic), from the Models panel, then try again.", true);
     else if (error.code == 1406) // the program is missing
       say("The speech program is not part of this build of Attome.", true);
     else
