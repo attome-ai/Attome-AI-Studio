@@ -54,7 +54,25 @@ json Engine::Impl::unmade_clips(const Project &pr, const std::string &sequence, 
 Result<json> Engine::Impl::render_sequence(const json &params) {
   ATM_TRY(Project *pr, project(params));
   ATM_TRY(const std::string *output, string_param(params, "output"));
-  ATM_TRY(render::Composition comp, render::compile(pr->doc.root(), params.value("sequence", std::string()), to_utf8(pr->dir)));
+  std::string sequence = params.value("sequence", std::string()); // the one drawn: the first when none is named
+  if (const json &order = pr->doc.root().value("sequence_order", json::array()); sequence.empty() && !order.empty() && order[0].is_string())
+    sequence = order[0].get<std::string>();
+  // "rate": the film made at another frame rate. It is compiled with that rate, so every time becomes frames of it and a source plays
+  // at its own times: 60 from 60 fps footage keeps all its frames, 24 from 30 leaves out evenly the ones between.
+  const json *root = &pr->doc.root();
+  json retimed;
+  if (const auto r = params.find("rate"); r != params.end() && !r->is_null()) {
+    const auto rate = r->is_number() ? Rational::make(std::llround(r->get<double>() * 1000.0), 1000)
+                      : r->is_string() ? Rational::parse(r->get<std::string>()) : Result<Rational>(Rational());
+    if (!rate || rate->num() <= 0 || rate->to_seconds_lossy() > 240.0)
+      return bad_param("rate", "is a frame rate: 24, 25, 30, 50, 60, or \"30000/1001\"");
+    retimed = pr->doc.root();
+    if (!retimed["sequences"].contains(sequence))
+      return fail(ErrorCode::NotFound, "R_SEQUENCE", "The project has no sequence \"" + sequence + "\".");
+    retimed["sequences"][sequence]["rate"] = rate->to_string();
+    root = &retimed;
+  }
+  ATM_TRY(render::Composition comp, render::compile(*root, sequence, to_utf8(pr->dir)));
   if (comp.frames <= 0)
     return fail(ErrorCode::InvalidArgument, "R_EMPTY", "The sequence has no media clips to render.", {},
                 "Add a clip whose media_ref is {\"type\": \"file\", \"path\": …} first.");
@@ -73,9 +91,6 @@ Result<json> Engine::Impl::render_sequence(const json &params) {
   }
   first = std::clamp<int64_t>(first, 0, comp.frames - 1);
   last = std::clamp<int64_t>(last, first + 1, comp.frames);
-  std::string sequence = params.value("sequence", std::string()); // the one compile() drew: the first when none is named
-  if (const json &order = pr->doc.root().value("sequence_order", json::array()); sequence.empty() && !order.empty() && order[0].is_string())
-    sequence = order[0].get<std::string>();
   json not_made = unmade_clips(*pr, sequence, frame_rate, first, last);
   if (format == "png_sequence") { // a folder of numbered pictures: `output` is the folder
     const fs::path folder = fs::absolute(to_path(*output));

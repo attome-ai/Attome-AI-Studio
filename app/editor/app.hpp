@@ -236,6 +236,9 @@ private:
   bool export_sheet_ = false;
   int exp_res_ = 2, exp_quality_ = 1;        // the chosen resolution (see draw_export) and quality: 0 small, 1 standard, 2 high
   bool exp_sound_ = true;
+  static constexpr int kExportRates[] = {0, 24, 25, 30, 50, 60}; // the export sheet's frame rates; 0: the project's
+  int exp_fps_ = 0;     // which of kExportRates
+  bool exp_srt_ = true; // the captions also as an .srt beside the video, when the film has a Captions or Subtitles track
   int exp_format_ = 0;                       // 0 video (MP4), 1 the sound only (WAV), 2 one picture (JPEG, the frame at the playhead), 3 ProRes, 4 DNxHR (.mov)
   bool exp_prores_ = false, exp_dnxhr_ = false; // the FFmpeg of this computer was found (media.codecs) and has the encoder: the two formats are offered
   int exp_profile_ = 3;                      // the ProRes / DNxHR profile in the list of its format (the default is HQ)

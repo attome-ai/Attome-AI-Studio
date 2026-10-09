@@ -352,9 +352,20 @@ void App::draw_export() {
     {
       int w = 0, h = 0;
       export_size(exp_res_, w, h);
-      ImGui::TextColored(hexv(look::fg3), "%d x %d, %s frames a second", w & ~1, h & ~1, rate_.to_string().c_str());
+      ImGui::TextColored(hexv(look::fg3), "%d x %d, %s frames a second", w & ~1, h & ~1, exp_fps_ && exp_format_ != 2 ? std::to_string(kExportRates[exp_fps_]).c_str() : rate_.to_string().c_str());
     }
     ImGui::Spacing();
+    if (exp_format_ != 2) { // a picture has no frame rate
+      section_label("FRAME RATE");
+      for (int i = 0; i < int(std::size(kExportRates)); ++i) {
+        if (i)
+          ImGui::SameLine();
+        const std::string label = i ? std::to_string(kExportRates[i]) : "Project";
+        if (soft_button(("export_fps_" + label).c_str(), label.c_str(), ImVec2(i ? 52.0f : 82.0f, 30.0f), true, exp_fps_ == i))
+          exp_fps_ = i;
+      }
+      ImGui::Spacing();
+    }
 
     }
     if (exp_format_ == 0) {
@@ -399,6 +410,16 @@ void App::draw_export() {
     } else if (exp_format_ == 1) {
       const double seconds = double((exp_range_ == 1 && (mark_in_ >= 0 || mark_out_ >= 0)) ? play_end() - play_start() : total_frames_) / fps();
       ImGui::TextColored(hexv(look::fg3), "About %s: 48 kHz stereo, not compressed.", size_text(int64_t(seconds * 192000.0)).c_str());
+    }
+    // A video of a film with captions: they can go beside it as subtitles too.
+    if ((exp_format_ == 0 || exp_format_ >= 3) &&
+        std::any_of(tracks_.begin(), tracks_.end(), [](const TrackUi &t) { return t.name == "Captions" || t.name == "Subtitles"; })) {
+      bool srt = exp_srt_;
+      if (ImGui::Checkbox("The captions as an .srt file beside it", &srt))
+        exp_srt_ = srt;
+      ui_mark("check:export_srt");
+      if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("A subtitle file of the Captions (or Subtitles) track, with the video's name: for YouTube and players that show subtitles.");
     }
     ImGui::Spacing();
     // Generated clips of what is exported that are not made yet (nothing of their own is drawn: their place holds the picture before

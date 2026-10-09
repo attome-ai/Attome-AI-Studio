@@ -2221,8 +2221,18 @@ void App::start_export(const std::string &path) {
     params["from"] = at_frame(play_start());
     params["to"] = at_frame(play_end());
   }
+  if (exp_fps_ && exp_format_ != 2)
+    params["rate"] = kExportRates[exp_fps_];
   if (!rpc("render.sequence", params, result))
     return;
+  // The captions beside a video, as subtitles: the cues of the part, from its start.
+  if (exp_srt_ && (exp_format_ == 0 || exp_format_ >= 3) && std::any_of(tracks_.begin(), tracks_.end(), [](const TrackUi &t) { return t.name == "Captions" || t.name == "Subtitles"; })) {
+    json srt = {{"project", project_path_}, {"output", with_extension(result.value("output", path), ".srt")}};
+    if (params.contains("from"))
+      srt["offset"] = -double(play_start()) / fps();
+    json written;
+    rpc("subtitles.export", srt, written); // a failure is said; the video goes on
+  }
   save_export_choices();
   job_id_ = result.value("job_id", "");
   job_ = {{"state", "running"}, {"progress", 0.0}, {"output", result.value("output", path)}};

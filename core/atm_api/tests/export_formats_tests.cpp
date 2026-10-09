@@ -124,3 +124,29 @@ TEST_CASE("H.264 export takes a vertical 4K picture, and refuses one larger than
   REQUIRE_FALSE(too_big);
   CHECK(too_big.error().rule == "E_PARAM");
 }
+
+TEST_CASE("H.264 export at another frame rate: the film is made at that rate, as long as it was", "[export][media]") {
+  Project p; // a 1 s film at the project's 30 fps
+  for (const int rate : {60, 24}) {
+    INFO(rate << " fps");
+    const std::string out = (p.dir / ("at" + std::to_string(rate) + ".mp4")).string();
+    const auto started = p.engine.call("render.sequence", {{"project", p.path}, {"output", out}, {"rate", rate}});
+    REQUIRE(started);
+    CHECK(started->value("frames", 0) == rate); // one second of frames at the new rate
+    json state;
+    for (int i = 0; i < 3000; ++i) {
+      state = *p.engine.call("jobs.get", {{"job_id", started->at("job_id")}});
+      if (state["state"] != "running")
+        break;
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    REQUIRE(state["state"] == "done");
+    const auto probed = p.engine.call("media.probe", {{"path", out}});
+    REQUIRE(probed);
+    CHECK(probed->value("rate", std::string()) == std::to_string(rate));
+    CHECK(std::abs(probed->value("seconds", 0.0) - 1.0) < 0.05);
+  }
+  const auto bad = p.engine.call("render.sequence", {{"project", p.path}, {"output", (p.dir / "x.mp4").string()}, {"rate", "fast"}});
+  REQUIRE_FALSE(bad);
+  CHECK(bad.error().rule == "E_PARAM");
+}
