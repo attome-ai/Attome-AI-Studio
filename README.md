@@ -37,9 +37,17 @@ What exists today:
 - colour grade (brightness, contrast, saturation), vignette, sharpen (an unsharp mask on the luma), film grain (noise that is new on every frame and repeats exactly in an export), LUTs (a .cube colour table, 3D or 1D, at a strength from 0 to 1), a chroma key (with a detail control that keeps hair-thin lines in the keyed-out area) and a luma key (on a clip only: a green or blue screen, or the black or white of a picture, becomes transparent), on one clip or on an adjustment layer, from the Effects panel and the Inspector's effect cards
 - a Gaussian blur on one clip (its edges soften into what is below it) or on an adjustment layer, which changes everything on the tracks below it; the Effects panel and each clip's Blur card add them
 - linked picture and sound: a video with sound comes in as two linked clips, the picture and its sound on an audio track, so the sound can be cut, faded and mixed on its own while moving, trimming, splitting and deleting keep them together; Unlink separates them
+- animated titles: fade, pop, slide and typewriter in and out, and sound words that bounce in and fade out
+- speech to text with Whisper: auto captions from a clip's speech, with the words kept in the project, see [Speech to text](#speech-to-text-optional)
+- music: ducking under the voices (with keys of its own), beats shown on the clip with edges that catch on them, cuts on the beats, music fitted to a tempo, and "End with the video" for music longer than the picture; a sound's level keys are drawn on its clip
+- B-roll: a lane over the tracks that makes a new top layer, and tracks that move up and down
+- taking time out of the film (Shift+Delete, Delete gap, Q and W), J/K/L shuttle (J plays backwards, again goes faster), speed with the pitch kept, and clips played backwards
+- generated clips: a clip keeps its model, prompt and settings in an editable node graph (the Workflows view); a model that is not installed says so on its card, and Export names the generated clips that are not made yet and offers to make them first
+- rendering on the graphics card (Vulkan): H.264 decoded with Vulkan Video, effects, text, stills, the six transitions and the chroma key drawn on the GPU byte for byte as the CPU draws them; pick the device in Settings
+- export to H.264 + AAC, vertical 4K, PNG sequences, and ProRes or DNxHR when you have FFmpeg
 - an MCP server, `attome mcp --stdio`: an AI agent such as Claude can build a project, look at frames and a contact sheet of it, and render it, see [Connect an AI agent](#connect-an-ai-agent)
 
-Not built yet: AI generation, effects other than the blur, colour grade, vignette, sharpen, film grain, LUT, chroma key and luma key, transitions other than the dissolve, the wipe, the push, the zoom, the slide and the iris, the GPU compositor, JSON Schema validation, Suggested Edits and per-task undo. Decode and encode use the Windows media stack today, so import and export work on Windows only; the macOS and Linux code paths of the rest are written but have only been built and tested on Windows.
+Not built yet: the image and music workspaces, a finished own inference engine (in progress; ComfyUI is optional), JSON Schema validation, Suggested Edits and per-task undo. Decode and encode use the Windows media stack (and Vulkan Video) today, so import and export work on Windows only; the macOS and Linux code paths of the rest are written but have only been built and tested on Windows.
 
 ### The editor
 
