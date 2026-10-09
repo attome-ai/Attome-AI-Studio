@@ -118,6 +118,7 @@ struct Layers {
 // A DPB slot: the picture decoded into a layer of the image, as a reference and as a picture to show.
 struct Slot {
   bool reference = false, long_term = false;
+  uint64_t decoded = 0;  // the video timeline's value once its picture is decoded
   bool waiting = false; // decoded, not given out yet
   bool ready = false;   // may be given out: no picture shown before it can still come
   bool held = false;    // given out (next), not released yet
@@ -156,9 +157,18 @@ struct VideoDecoder::Impl {
   VkExtent2D coded{};
   int width = 0, height = 0, crop_x = 0, crop_y = 0; // the picture shown, and where it starts in the coded one
   int reorder = 16; // pictures that may wait to be shown
-  Buffer bitstream, download;
+  // Decoding goes on ahead of the drawing: a few decodes can be in flight, each with its own bitstream and commands.
+  static constexpr int kInFlight = 3;
+  struct Flight {
+    Buffer bitstream;
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    uint64_t done = 0; // the video timeline's value once this decode has finished with them
+  };
+  Flight flights[kInFlight];
+  int next_flight = 0;
+  Buffer download;
   VkCommandPool video_pool = VK_NULL_HANDLE, copy_pool = VK_NULL_HANDLE;
-  VkCommandBuffer video_cmd = VK_NULL_HANDLE, copy_cmd = VK_NULL_HANDLE;
+  VkCommandBuffer copy_cmd = VK_NULL_HANDLE;
   bool started = false;   // the session was reset and the image laid out
   std::vector<Slot> slots;
   int64_t period = 0;
@@ -172,6 +182,7 @@ struct VideoDecoder::Impl {
 
   ~Impl() {
     (void)vk.wait(vk.submitted);
+    (void)vk.wait_video(vk.video_submitted);
     if (parameters)
       fn.destroy_parameters(vk.device, parameters, nullptr);
     if (session)
@@ -183,7 +194,8 @@ struct VideoDecoder::Impl {
       vkDestroyImage(vk.device, l.image, nullptr);
       vkFreeMemory(vk.device, l.memory, nullptr);
     }
-    vk.release(bitstream);
+    for (Flight &f : flights)
+      vk.release(f.bitstream);
     vk.release(download);
     vkDestroyCommandPool(vk.device, video_pool, nullptr);
     vkDestroyCommandPool(vk.device, copy_pool, nullptr);
@@ -313,11 +325,15 @@ struct VideoDecoder::Impl {
     constexpr VkImageUsageFlags kDpb = VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR, kDst = VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR;
     constexpr VkImageUsageFlags kRead = VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     const auto both = (decode_caps.flags & VK_VIDEO_DECODE_CAPABILITY_DPB_AND_OUTPUT_COINCIDE_BIT_KHR) ? nv12_format(kDpb | kDst | kRead) : std::nullopt;
-    const bool coincide = both.has_value();
-    if (!coincide && !(decode_caps.flags & VK_VIDEO_DECODE_CAPABILITY_DPB_AND_OUTPUT_DISTINCT_BIT_KHR))
+    // Pictures apart from the references when the decoder can: then the drawing reads images the decoding never reads, and
+    // the two go on side by side. One image for both only where that is all the decoder does.
+    const auto apart_dpb = (decode_caps.flags & VK_VIDEO_DECODE_CAPABILITY_DPB_AND_OUTPUT_DISTINCT_BIT_KHR) ? nv12_format(kDpb) : std::nullopt;
+    const auto apart_output = apart_dpb ? nv12_format(kDst | kRead) : std::nullopt;
+    const bool coincide = !apart_output && both.has_value();
+    if (!coincide && !apart_output)
       return cannot("its decoder's pictures cannot be read out");
-    const auto dpb_format = coincide ? both : nv12_format(kDpb);
-    const auto output_format = coincide ? both : nv12_format(kDst | kRead);
+    const auto dpb_format = coincide ? both : apart_dpb;
+    const auto output_format = coincide ? both : apart_output;
     if (!dpb_format || !output_format)
       return cannot("its decoder does not give NV12 pictures that can be read out");
     slots.assign(std::min(caps.maxDpbSlots, kMaxSlots), Slot{});
@@ -368,7 +384,8 @@ struct VideoDecoder::Impl {
     cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
     cai.commandBufferCount = 1;
     cai.commandPool = video_pool;
-    VK_TRY("vkAllocateCommandBuffers", vkAllocateCommandBuffers(vk.device, &cai, &video_cmd));
+    for (Flight &f : flights)
+      VK_TRY("vkAllocateCommandBuffers", vkAllocateCommandBuffers(vk.device, &cai, &f.cmd));
     cai.commandPool = copy_pool;
     VK_TRY("vkAllocateCommandBuffers", vkAllocateCommandBuffers(vk.device, &cai, &copy_cmd));
     return {};
@@ -376,7 +393,7 @@ struct VideoDecoder::Impl {
 
   // The session parameters, remade with every parameter set known (after the work that uses the old ones).
   Result<void> make_parameters() {
-    ATM_CHECK(vk.wait(vk.submitted));
+    ATM_CHECK(vk.wait_video(vk.video_submitted)); // the old parameters are no longer in use
     for (const h264::Sps &s : sps)
       if (s.coded_width() > int(coded.width) || s.coded_height() > int(coded.height) || !h264::gpu_unsupported(s).empty())
         return cannot("the stream changes to pictures the session was not made for");
@@ -625,7 +642,11 @@ struct VideoDecoder::Impl {
       size += 3 + nal.bytes.size();
     const VkDeviceSize align = std::max<VkDeviceSize>(1, caps.minBitstreamBufferSizeAlignment);
     const VkDeviceSize range = (VkDeviceSize(size) + align - 1) / align * align;
-    ATM_CHECK(vk.wait(vk.submitted)); // the last decode has read the buffer, and its commands are done
+    Flight &flight = flights[next_flight];
+    next_flight = (next_flight + 1) % kInFlight;
+    ATM_CHECK(vk.wait_video(flight.done)); // the decode that used this bitstream and these commands last has finished
+    Buffer &bitstream = flight.bitstream;
+    const VkCommandBuffer video_cmd = flight.cmd;
     ATM_CHECK(vk.ensure(bitstream, range, VK_BUFFER_USAGE_VIDEO_DECODE_SRC_BIT_KHR, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, 0,
                         &profiles));
     std::vector<uint32_t> offsets;
@@ -737,7 +758,9 @@ struct VideoDecoder::Impl {
     VkVideoEndCodingInfoKHR end{VK_STRUCTURE_TYPE_VIDEO_END_CODING_INFO_KHR};
     fn.end(video_cmd, &end);
     VK_TRY("vkEndCommandBuffer", vkEndCommandBuffer(video_cmd));
-    ATM_CHECK(vk.submit(vk.video_queue, video_cmd));
+    // After the drawing that last read decoded pictures: the slot decoded into may be one it read.
+    ATM_CHECK(vk.submit(vk.video_queue, video_cmd, vk.pictures_read));
+    flight.done = vk.video_submitted;
     started = true;
 
     // The picture's place among the references and the pictures to show.
@@ -753,6 +776,7 @@ struct VideoDecoder::Impl {
     slot.period = period;
     slot.order = slot.poc.frame();
     slot.pts = pts;
+    slot.decoded = vk.video_submitted;
     bump();
     return {};
   }
@@ -779,7 +803,8 @@ struct VideoDecoder::Impl {
     VkCommandBufferBeginInfo cbi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     cbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     VK_TRY("vkBeginCommandBuffer", vkBeginCommandBuffer(copy_cmd, &cbi));
-    record_picture_copy(copy_cmd, picture_image(*this, picture.slot), download.buffer, 0, uint32_t(width));
+    const PictureImage image = picture_image(*this, picture.slot);
+    record_picture_copy(copy_cmd, image, download.buffer, 0, uint32_t(width));
     VkMemoryBarrier2 mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
     mb.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
     mb.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
@@ -790,7 +815,8 @@ struct VideoDecoder::Impl {
     dep.pMemoryBarriers = &mb;
     vkCmdPipelineBarrier2(copy_cmd, &dep);
     VK_TRY("vkEndCommandBuffer", vkEndCommandBuffer(copy_cmd));
-    ATM_CHECK(vk.submit(vk.queue, copy_cmd));
+    ATM_CHECK(vk.submit(vk.queue, copy_cmd, 0, image.shared ? vk.video_submitted : image.decoded));
+    vk.pictures_read = vk.submitted;
     ATM_CHECK(vk.wait(vk.submitted));
     std::memcpy(nv12, download.mapped, size_t(luma + luma / 2));
     return {};
@@ -806,7 +832,7 @@ struct VideoDecoder::Impl {
 };
 
 PictureImage picture_image(const VideoDecoder::Impl &d, int slot) {
-  return {d.shown().image, uint32_t(slot), d.output_layout, d.crop_x, d.crop_y, d.width, d.height};
+  return {d.shown().image, uint32_t(slot), d.output_layout, d.crop_x, d.crop_y, d.width, d.height, d.slots[size_t(slot)].decoded, !d.output.image};
 }
 
 void record_picture_copy(VkCommandBuffer cmd, const PictureImage &p, VkBuffer dst, VkDeviceSize offset, uint32_t pitch) {

@@ -233,35 +233,50 @@ Result<void> Vulkan::ensure(Buffer &buf, VkDeviceSize size, VkBufferUsageFlags u
   return {};
 }
 
-Result<void> Vulkan::submit(VkQueue on, VkCommandBuffer cmd) {
-  VkSemaphoreSubmitInfo after{VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO}, done{VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO};
-  after.semaphore = done.semaphore = timeline;
-  after.value = submitted;
-  done.value = submitted + 1;
-  after.stageMask = done.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+Result<void> Vulkan::submit(VkQueue on, VkCommandBuffer cmd, uint64_t after_compute, uint64_t after_video) {
+  const bool video = on == video_queue;
+  VkSemaphoreSubmitInfo waits[2]{}, done{VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO};
+  uint32_t wait_count = 0;
+  for (const auto &[semaphore, value] : {std::pair{timeline, after_compute}, std::pair{video_timeline, after_video}})
+    if (value) {
+      VkSemaphoreSubmitInfo &w = waits[wait_count++];
+      w.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+      w.semaphore = semaphore;
+      w.value = value;
+      w.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    }
+  uint64_t &count = video ? video_submitted : submitted;
+  done.semaphore = video ? video_timeline : timeline;
+  done.value = count + 1;
+  done.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
   VkCommandBufferSubmitInfo cbi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};
   cbi.commandBuffer = cmd;
   VkSubmitInfo2 si{VK_STRUCTURE_TYPE_SUBMIT_INFO_2};
-  si.waitSemaphoreInfoCount = 1;
-  si.pWaitSemaphoreInfos = &after;
+  si.waitSemaphoreInfoCount = wait_count;
+  si.pWaitSemaphoreInfos = waits;
   si.commandBufferInfoCount = 1;
   si.pCommandBufferInfos = &cbi;
   si.signalSemaphoreInfoCount = 1;
   si.pSignalSemaphoreInfos = &done;
   VK_TRY("vkQueueSubmit2", vkQueueSubmit2(on, 1, &si, VK_NULL_HANDLE));
-  ++submitted;
+  ++count;
   return {};
 }
 
-Result<void> Vulkan::wait(uint64_t value) {
+namespace {
+Result<void> wait_for(VkDevice device, VkSemaphore semaphore, uint64_t value) {
   ATM_PROFILE_SCOPE("gpu.wait");
   VkSemaphoreWaitInfo wi{VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO};
   wi.semaphoreCount = 1;
-  wi.pSemaphores = &timeline;
+  wi.pSemaphores = &semaphore;
   wi.pValues = &value;
   VK_TRY("vkWaitSemaphores", vkWaitSemaphores(device, &wi, 5'000'000'000ull));
   return {};
 }
+} // namespace
+
+Result<void> Vulkan::wait(uint64_t value) { return wait_for(device, timeline, value); }
+Result<void> Vulkan::wait_video(uint64_t value) { return wait_for(device, video_timeline, value); }
 
 void Vulkan::release(Buffer &buf) {
   if (buf.mapped)
@@ -376,6 +391,7 @@ struct Context::Impl : Vulkan {
       vkDestroyDescriptorSetLayout(device, set_layout, nullptr);
       vkDestroyQueryPool(device, queries, nullptr);
       vkDestroySemaphore(device, timeline, nullptr);
+      vkDestroySemaphore(device, video_timeline, nullptr);
       vkDestroyCommandPool(device, pool, nullptr);
       vkDestroyDevice(device, nullptr);
     }
@@ -501,7 +517,7 @@ struct Context::Impl : Vulkan {
     }
     const char *video_extensions[] = {VK_KHR_VIDEO_QUEUE_EXTENSION_NAME, VK_KHR_VIDEO_DECODE_QUEUE_EXTENSION_NAME, VK_KHR_VIDEO_DECODE_H264_EXTENSION_NAME};
     VkPhysicalDeviceVulkan12Features on12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
-    on12.timelineSemaphore = VK_TRUE; // the decoder orders its work on two queues with one (every 1.3 device has it)
+    on12.timelineSemaphore = VK_TRUE; // the two queues' work is ordered with them (every 1.3 device has it)
     VkPhysicalDeviceVulkan13Features on13{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
     on13.pNext = &on12;
     on13.synchronization2 = VK_TRUE; // the barriers and timestamps below are the synchronization2 kind
@@ -530,6 +546,7 @@ struct Context::Impl : Vulkan {
     VkSemaphoreCreateInfo sci{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
     sci.pNext = &type;
     VK_TRY("vkCreateSemaphore", vkCreateSemaphore(device, &sci, nullptr, &timeline));
+    VK_TRY("vkCreateSemaphore", vkCreateSemaphore(device, &sci, nullptr, &video_timeline));
     if (timestamps) {
       VkQueryPoolCreateInfo qpi{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
       qpi.queryType = VK_QUERY_TYPE_TIMESTAMP;
@@ -1260,7 +1277,19 @@ Result<void> Context::end_frame(uint8_t *nv12) {
   vkCmdCopyBuffer(m.cmd, m.frame.buffer, m.download.buffer, uint32_t(out.size()), out.data());
   m.barrier(VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_HOST_BIT, VK_ACCESS_2_HOST_READ_BIT);
   VK_TRY("vkEndCommandBuffer", vkEndCommandBuffer(m.cmd));
-  ATM_CHECK(m.submit(m.queue, m.cmd));
+  // The frame waits for the decoding of the pictures it draws (of all the decoding sent, when a picture shares its image
+  // with the decoder's references), not for the decoding of the next ones, which goes on meanwhile.
+  uint64_t decoded = 0;
+  bool reads_pictures = false;
+  for (const Impl::FrameOp &op : m.frame_ops)
+    for (const Impl::Drawing &d : op.drawings)
+      if (!d.source) {
+        reads_pictures = true;
+        decoded = std::max(decoded, d.picture.shared ? m.video_submitted : d.picture.decoded);
+      }
+  ATM_CHECK(m.submit(m.queue, m.cmd, 0, decoded));
+  if (reads_pictures)
+    m.pictures_read = m.submitted;
   ATM_CHECK(m.wait(m.submitted));
   if (send_lut)
     m.lut_loaded = lut_effect->lut_id;

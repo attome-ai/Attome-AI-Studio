@@ -38,14 +38,20 @@ struct Vulkan {
   int video_family = -1;
   VkQueue video_queue = VK_NULL_HANDLE;
   VkPhysicalDeviceMemoryProperties memory_props{};
-  // Every piece of work sent to the GPU, on either queue, runs after the one sent before it: a timeline semaphore counts
-  // them, and `submitted` is its value once the last one sent has finished.
-  VkSemaphore timeline = VK_NULL_HANDLE;
-  uint64_t submitted = 0;
+  // A timeline semaphore per queue counts the work sent to it: `submitted` (compute) and `video_submitted` are their
+  // values once the last work sent has finished. Work on one queue waits for what it needs from the other, no more, so
+  // decoding the next pictures goes on while a frame is drawn.
+  VkSemaphore timeline = VK_NULL_HANDLE, video_timeline = VK_NULL_HANDLE;
+  uint64_t submitted = 0, video_submitted = 0;
+  // The compute work that last read decoded pictures: a decode into a slot waits for it (the slot may be one it read).
+  uint64_t pictures_read = 0;
 
-  Result<void> submit(VkQueue on, VkCommandBuffer cmd);
-  // Until the timeline reaches `value`; fails when the GPU has not got there in 5 s (it is stuck).
+  // Sends `cmd` to `on` (the compute queue or the video queue), after the compute work up to `after_compute` and the
+  // video work up to `after_video` (0: none), and moves that queue's timeline on.
+  Result<void> submit(VkQueue on, VkCommandBuffer cmd, uint64_t after_compute = 0, uint64_t after_video = 0);
+  // Until a timeline reaches `value`; fails when the GPU has not got there in 5 s (it is stuck).
   Result<void> wait(uint64_t value);
+  Result<void> wait_video(uint64_t value);
   // The first memory type that `bits` allows with all of `want`; with `nice` too when there is one.
   int memory_type(uint32_t bits, VkMemoryPropertyFlags want, VkMemoryPropertyFlags nice = 0) const;
   // A buffer of at least `size` bytes; one that is already big enough is kept. `next` goes in its create info's pNext.
@@ -57,12 +63,16 @@ struct Vulkan {
 // The device of a Context (for the parts of atm_gpu that are not the effects).
 Vulkan &vulkan_of(Context::Impl &impl);
 
-// A decoded picture where it lies: a layer of an image, in the layout it is kept in, and the part of it that is shown.
+// A decoded picture where it lies: a layer of an image, in the layout it is kept in, and the part of it that is shown;
+// with the video timeline's value once it is decoded. `shared`: the image holds the decoder's references too (its
+// output and its references coincide), so reading it waits for all the decoding sent.
 struct PictureImage {
   VkImage image = VK_NULL_HANDLE;
   uint32_t layer = 0;
   VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
   int x = 0, y = 0, width = 0, height = 0;
+  uint64_t decoded = 0;
+  bool shared = false;
 };
 PictureImage picture_image(const VideoDecoder::Impl &decoder, int slot);
 
