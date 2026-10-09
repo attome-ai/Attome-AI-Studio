@@ -3,9 +3,11 @@
 
 namespace atm::api {
 
-  // asr.transcribe {project + clip | path, from?, duration?, language?}: starts a job that hears the sound and times its words (jobs.get has the
-  // result: {words: [{text, start, end}], language}). For a clip, the part of its file that it plays, with times counted from the clip's start in
+  // asr.transcribe {project + clip | path, from?, duration?, language?, again?}: starts a job that hears the sound and times its words (jobs.get has the
+  // result: {words: [{text, start, end}], language, cached}). For a clip, the part of its file that it plays, with times counted from the clip's start in
   // film time (a clip at another speed gives its words earlier or later accordingly); for a path, `from` and `duration` in seconds of the file.
+  // With a project the transcript is kept in it (its "transcripts", in the file's own time): asked again for a part it covers, the answer is there at
+  // once (cached: true), whatever the clip's trims, splits or speed now are; for more of the file, the part covered grows to hold both. again: true listens anew.
 Result<json> Engine::Impl::asr_transcribe(const json &params) {
   ATM_PROFILE_SCOPE("api.asr_transcribe");
   std::string path = params.value("path", std::string()), clip_id;
@@ -31,6 +33,7 @@ Result<json> Engine::Impl::asr_transcribe(const json &params) {
   if (path.empty())
     return bad_param("path", "is required: the sound or video file to listen to (or project and clip)");
   const std::string language = params.value("language", std::string("auto"));
+  const bool again = params.value("again", false);
   const bool code = !language.empty() && language.size() <= 3 &&
                     std::all_of(language.begin(), language.end(), [](unsigned char c) { return c >= 'a' && c <= 'z'; });
   if (language != "auto" && !code)
@@ -61,14 +64,64 @@ Result<json> Engine::Impl::asr_transcribe(const json &params) {
   if (!info.value("has_audio", false))
     return fail(ErrorCode::InvalidArgument, "E_ASR_NO_SOUND", "\"" + path + "\" has no sound.");
 
+  // The part of the file asked for, in seconds of the file.
+  const double file_seconds = info.value("seconds", 0.0);
+  AsrRun run;
+  run.path = path;
+  run.clip = clip_id;
+  run.speed = speed;
+  run.asked = language;
+  run.want_from = std::clamp(from, 0.0, std::max(0.0, file_seconds));
+  run.want_to = duration > 0.0 ? std::min(file_seconds, run.want_from + duration) : file_seconds;
+  run.from = run.want_from;
+  run.to = run.want_to;
+  std::error_code size_error;
+  run.file_size = int64_t(fs::file_size(to_path(path), size_error));
+  if (size_error)
+    run.file_size = 0;
+  if (params.contains("project")) {
+    ATM_TRY(Project *pr, project(params));
+    run.project = to_utf8(pr->dir);
+    const json &kept = pr->doc.root().contains("transcripts") && pr->doc.root()["transcripts"].is_object() ? pr->doc.root()["transcripts"] : json::object();
+    for (auto it = kept.begin(); it != kept.end(); ++it) {
+      if (it->value("media", std::string()) != path || it->value("asked", std::string()) != language || it->value("size", int64_t(0)) != run.file_size)
+        continue; // another file, another language asked, or the file changed
+      const double have_from = it->value("from", 0.0), have_to = it->value("to", 0.0);
+      if (!again && have_from <= run.want_from + 1e-6 && have_to >= run.want_to - 1e-6) { // all of it is there: answer at once
+        auto job = std::make_shared<Job>();
+        job->id = new_id("job");
+        job->kind = "asr.transcribe";
+        job->output = clip_id.empty() ? path : clip_id;
+        job->units_total.store(1000);
+        job->units_done.store(1000);
+        json words = asr_words_in((*it)["words"], run.want_from, run.want_to, speed);
+        job->detail = std::to_string(words.size()) + " words, kept from before";
+        job->result = {{"words", std::move(words)}, {"language", it->value("language", std::string())}, {"model", it->value("model", std::string())},
+                       {"path", path}, {"cached", true}};
+        if (!clip_id.empty())
+          job->result["clip"] = clip_id;
+        job->state.store(Job::done);
+        jobs[job->id] = job;
+        json out = {{"job_id", job->id}, {"path", path}, {"from", from}, {"duration", duration}, {"language", language}, {"cached", true}};
+        if (!clip_id.empty())
+          out["clip"] = clip_id;
+        return out;
+      }
+      if (!again) { // some of it: listen to what holds both, so the one transcript of the file keeps growing
+        run.from = std::min(run.from, have_from);
+        run.to = std::max(run.to, have_to);
+      }
+    }
+  }
+
   auto job = std::make_shared<Job>();
   job->id = new_id("job");
   job->kind = "asr.transcribe";
   job->output = clip_id.empty() ? path : clip_id;
   job->units_total.store(1000);
   jobs[job->id] = job;
-  job->thread = std::thread(run_asr, job, options, path, from, duration, speed, clip_id);
-  json out = {{"job_id", job->id}, {"path", path}, {"from", from}, {"duration", duration}, {"language", language}};
+  job->thread = std::thread(run_asr, job, options, run, finished);
+  json out = {{"job_id", job->id}, {"path", path}, {"from", from}, {"duration", duration}, {"language", language}, {"cached", false}};
   if (!clip_id.empty())
     out["clip"] = clip_id;
   return out;

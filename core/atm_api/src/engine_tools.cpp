@@ -234,13 +234,16 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
      "of the file the clip plays) or a path (a sound or video file, optionally from and duration in seconds). The job's result is {words: "
      "[{text, start, end}], language}: the times are seconds from the start of the clip (or of `from`). Runs on this computer with the "
      "whisper.small model (models.fetch whisper.small downloads it once, 488 MB) and the attome-whisper program; language \"auto\" finds it, or "
-     "give a code such as en or ar. To make captions from it: add_captions {clip, words: <the result's words>} (guide.get topic \"timeline\").",
+     "give a code such as en or ar. With project, what was heard is kept in the project (its \"transcripts\"), in the file's own time: asking again for a clip of the same "
+     "file, trimmed, split or at another speed, is answered at once (result.cached true) with no listening; again: true listens anew. To make captions from it: "
+     "add_captions {clip, words: <the result's words>} (guide.get topic \"timeline\").",
      R"({"type":"object","properties":{"project":{"type":"string","description":"With clip: path of the .attome project folder, or its prj_ ID"},
        "clip":{"type":"string","description":"A clip made from a sound or video file"},
        "path":{"type":"string","description":"A sound or video file, instead of a clip"},
        "from":{"type":"number","description":"With path: seconds into the file, default 0"},
        "duration":{"type":"number","description":"With path: seconds to listen to, default to the end"},
-       "language":{"type":"string","description":"auto (default), or a code such as en, ar, fr"}}})",
+       "language":{"type":"string","description":"auto (default), or a code such as en, ar, fr"},
+       "again":{"type":"boolean","description":"Listen anew even when the project already has what the file says"}}})",
      &Impl::asr_transcribe},
     {"audio.analyze", "core", false,
      "Where the beat is and how loud a sound is: bpm, the beat grid (first_beat and beats, in seconds of the file), confidence (3 and more is "

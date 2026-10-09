@@ -130,6 +130,7 @@ struct Job {
 struct Finished {
   std::string project, clip, name;
   json take;
+  json transcript; // not null: a transcription to keep in the project (asr.transcribe), and not a Take
 };
 
 struct FinishedQueue {
@@ -149,10 +150,23 @@ void run_gen(const std::shared_ptr<Job> &job, GenRun run, std::shared_ptr<Finish
 void run_fetch(const std::shared_ptr<Job> &job, models::CatalogEntry entry, fs::path dir, std::vector<fs::path> also,
                std::shared_ptr<net::Transport> transport);
 
-// A transcription as a job (asr.transcribe): the sound of [from_s, from_s + duration_s) of `path` goes to the speech program; the words, with
-// their times divided by `speed` (a clip's times are film time), are the job's result. `clip` is the clip they came from, or empty.
-void run_asr(const std::shared_ptr<Job> &job, asr::Options options, std::string path, double from_s, double duration_s, double speed,
-             std::string clip);
+// A transcription as a job (asr.transcribe): the sound of [run.from, run.to) of the file goes to the speech program. The job's result is the words
+// that start in [want_from, want_to), in the clip's time. With a project, the whole transcript (every word, in the file's time) is queued to be
+// kept there by the engine's own thread, at its next call.
+// What of a transcript's words (file seconds) starts in [from, to), as {text, start, end} in the clip's own time: counted from `from`, divided by
+// `speed`, to the millisecond.
+json asr_words_in(const json &words, double from, double to, double speed);
+
+struct AsrRun {
+  std::string path, clip;        // the file, and the clip the words are for (or empty)
+  double from = 0.0, to = 0.0;   // the part of the file that is listened to, in seconds
+  double want_from = 0.0, want_to = 0.0; // the part the caller asked for (inside from..to): what the job answers
+  double speed = 1.0;
+  std::string project;           // not empty: keep the transcript in this project
+  int64_t file_size = 0;
+  std::string asked;             // the language that was asked for ("auto" or a code)
+};
+void run_asr(const std::shared_ptr<Job> &job, asr::Options options, AsrRun run, std::shared_ptr<FinishedQueue> queue);
 
 
 

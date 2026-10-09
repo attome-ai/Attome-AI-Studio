@@ -91,6 +91,10 @@ struct AsrFixture {
     FAIL("the job did not finish");
     return {};
   }
+  std::string root_id() {
+    const json info = *engine->call("project.inspect", {{"project", project}});
+    return info["data"]["id"];
+  }
   std::string refused(json params) {
     const auto r = engine->call("asr.transcribe", std::move(params));
     REQUIRE_FALSE(r);
@@ -181,6 +185,84 @@ TEST_CASE("asr.transcribe: jobs.cancel stops a run that is going on", "[asr][eng
   const json state = f.wait(job);
   CHECK(state["state"] == "cancelled");
   CHECK(std::chrono::steady_clock::now() - begun < std::chrono::seconds(10));
+}
+
+TEST_CASE("asr.transcribe: what was heard is kept in the project, in the file's time, and answers the next ask at once", "[asr][engine]") {
+  AsrFixture f;
+  const std::string clip = f.add_clip({{"source_in", "1s"}, {"duration", "3s"}}); // file seconds 1 to 4
+  const json first = f.run({{"project", f.project}, {"clip", clip}});
+  REQUIRE(first["state"] == "done");
+  CHECK(first["result"]["cached"] == false);
+  REQUIRE(first["result"]["words"].size() == 3);
+
+  // The next call of the engine puts it in the project: one "transcripts" item, with the words in the file's time (1 s, 2 s, 3 s).
+  const json root = f.engine->call("project.get", {{"project", f.project}, {"id", f.root_id()}})->at("object");
+  REQUIRE(root.contains("transcripts"));
+  REQUIRE(root["transcripts"].size() == 1);
+  const json kept = *root["transcripts"].begin();
+  CHECK(kept["media"] == f.tone);
+  CHECK(kept["asked"] == "auto");
+  CHECK(kept["from"].get<double>() == Catch::Approx(1.0));
+  CHECK(kept["to"].get<double>() == Catch::Approx(4.0));
+  REQUIRE(kept["words"].size() == 3);
+  CHECK(kept["words"][0]["start"].get<double>() == Catch::Approx(1.0));
+  CHECK(kept["words"][2]["start"].get<double>() == Catch::Approx(3.0));
+  CHECK(f.engine->call("project.validate", {{"project", f.project}})->at("ok") == true);
+
+  // From now on the program is not needed for that part: with one that fails, the answer is the same and comes at once.
+  f.set_model("crash");
+  const json again = f.run({{"project", f.project}, {"clip", clip}});
+  REQUIRE(again["state"] == "done");
+  CHECK(again["result"]["cached"] == true);
+  CHECK(again["result"]["words"] == first["result"]["words"]);
+
+  // The clip may be trimmed, moved, split or sped up: its words are the ones of the part of the file it plays now, in its own time.
+  REQUIRE(f.engine->call("timeline.edit", {{"project", f.project}, {"ops", json::array({{{"op", "trim"}, {"clip", clip}, {"edge", "in"}, {"delta", "1s"}}})}}));
+  const json trimmed = f.run({{"project", f.project}, {"clip", clip}}); // now file seconds 2 to 4
+  REQUIRE(trimmed["state"] == "done");
+  CHECK(trimmed["result"]["cached"] == true);
+  REQUIRE(trimmed["result"]["words"].size() == 2);
+  CHECK(trimmed["result"]["words"][0]["start"].get<double>() == Catch::Approx(0.0)); // the word at 2 s of the file is the first of the clip
+  CHECK(trimmed["result"]["words"][1]["start"].get<double>() == Catch::Approx(1.0));
+  CHECK(f.run({{"path", f.tone}, {"project", f.project}, {"from", 2.0}, {"duration", 1.0}})["result"]["cached"] == true); // by path too
+
+  // A part that is not covered is listened to, and the one transcript grows to hold both (not a second item).
+  f.set_model("ok");
+  const json more = f.run({{"path", f.tone}, {"project", f.project}, {"from", 3.0}, {"duration", 2.0}}); // 3 s to 5 s: 4 s of the file is new
+  REQUIRE(more["state"] == "done");
+  CHECK(more["result"]["cached"] == false);
+  const json grown = f.engine->call("project.get", {{"project", f.project}, {"id", f.root_id()}})->at("object")["transcripts"];
+  // (the engine puts it in the project at its next call: any call will do)
+  const json grown2 = f.engine->call("project.get", {{"project", f.project}, {"id", f.root_id()}})->at("object")["transcripts"];
+  REQUIRE(grown2.size() == 1);
+  const json after = *grown2.begin();
+  CHECK(after["from"].get<double>() == Catch::Approx(1.0));
+  CHECK(after["to"].get<double>() == Catch::Approx(5.0));
+  CHECK(after["words"].size() == 4); // 1 s to 5 s: one word for each second the program was given
+  (void)grown;
+
+  // again: true listens anew even though it is all there; another language asked is another transcript; no project, nothing kept.
+  f.set_model("crash");
+  CHECK(f.run({{"project", f.project}, {"clip", clip}, {"again", true}})["state"] == "failed");
+  f.set_model("ok");
+  CHECK(f.run({{"project", f.project}, {"clip", clip}, {"language", "ar"}})["result"]["cached"] == false);
+  CHECK(f.run({{"path", f.tone}})["result"]["cached"] == false);
+  CHECK(f.engine->call("project.get", {{"project", f.project}, {"id", f.root_id()}})->at("object")["transcripts"].size() == 2);
+}
+
+TEST_CASE("asr.transcribe: a file that changed is listened to again", "[asr][engine]") {
+  AsrFixture f;
+  const json first = f.run({{"project", f.project}, {"path", f.tone}});
+  REQUIRE(first["state"] == "done");
+  CHECK(f.run({{"project", f.project}, {"path", f.tone}})["result"]["cached"] == true);
+  { // the same name, another sound (another size)
+    std::vector<float> pcm(size_t(3) * 48000 * 2, 0.2f);
+    REQUIRE(audio::write_wav(f.tone, pcm));
+  }
+  const json changed = f.run({{"project", f.project}, {"path", f.tone}});
+  REQUIRE(changed["state"] == "done");
+  CHECK(changed["result"]["cached"] == false);
+  CHECK(changed["result"]["words"].size() == 3);
 }
 
 TEST_CASE("asr.transcribe: an agent can find it and the way to captions", "[asr][engine][parity]") {

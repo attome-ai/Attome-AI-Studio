@@ -79,23 +79,43 @@ void run_fetch(const std::shared_ptr<Job> &job, models::CatalogEntry entry, fs::
   }
 }
 
-void run_asr(const std::shared_ptr<Job> &job, asr::Options options, std::string path, double from_s, double duration_s, double speed,
-             std::string clip) {
+json asr_words_in(const json &words, double from, double to, double speed) {
+  json out = json::array();
+  const auto thousandths = [&](double t) { return std::round(std::max(0.0, t - from) / speed * 1000.0) / 1000.0; };
+  for (const json &w : words) {
+    const double start = w.value("start", 0.0);
+    if (start >= from - 1e-6 && start < to)
+      out.push_back({{"text", w.value("text", std::string())}, {"start", thousandths(start)}, {"end", thousandths(w.value("end", start))}});
+  }
+  return out;
+}
+
+void run_asr(const std::shared_ptr<Job> &job, asr::Options options, AsrRun run, std::shared_ptr<FinishedQueue> queue) {
   prof::set_thread_name("atm-asr");
-  const auto result = asr::transcribe(options, path, from_s, duration_s,
+  const auto result = asr::transcribe(options, run.path, run.from, run.to - run.from,
                                       [&](double p) { job->units_done.store(int64_t(std::clamp(p, 0.0, 1.0) * 1000.0)); }, &job->cancel);
   std::lock_guard lock(job->mutex);
   job->seconds = std::chrono::duration<double>(Clock::now() - job->started).count();
   if (result) {
-    json words = json::array();
-    const auto thousandths = [&](double t) { return std::round(t / speed * 1000.0) / 1000.0; };
+    json all = json::array(); // every word heard, in the file's time
+    const auto thousandths = [](double t) { return std::round(t * 1000.0) / 1000.0; };
     for (const asr::Word &w : result->words)
-      words.push_back({{"text", w.text}, {"start", thousandths(w.start)}, {"end", thousandths(w.end)}});
-    job->result = {{"words", std::move(words)}, {"language", result->language}, {"model", "whisper.small"}, {"path", path}};
-    if (!clip.empty())
-      job->result["clip"] = clip;
+      all.push_back({{"text", w.text}, {"start", thousandths(run.from + w.start)}, {"end", thousandths(run.from + w.end)}});
+    json words = asr_words_in(all, run.want_from, run.want_to, run.speed);
+    job->result = {{"words", words}, {"language", result->language}, {"model", "whisper.small"}, {"path", run.path}, {"cached", false}};
+    if (!run.clip.empty())
+      job->result["clip"] = run.clip;
+    if (!run.project.empty() && queue) {
+      Finished f;
+      f.project = run.project;
+      f.name = "Transcript";
+      f.transcript = {{"media", run.path}, {"size", run.file_size}, {"asked", run.asked}, {"language", result->language}, {"model", "whisper.small"},
+                      {"from", run.from}, {"to", run.to}, {"words", std::move(all)}};
+      std::lock_guard queue_lock(queue->mutex);
+      queue->items.push_back(std::move(f));
+    }
     job->units_done.store(1000);
-    job->detail = std::to_string(result->words.size()) + " words";
+    job->detail = std::to_string(words.size()) + " words";
     job->state.store(Job::done);
   } else if (result.error().code == ErrorCode::Cancelled) {
     job->detail = "Stopped";

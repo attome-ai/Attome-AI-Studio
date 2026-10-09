@@ -413,6 +413,25 @@ void Engine::Impl::apply_finished() {
     items.swap(finished->items);
   }
   for (Finished &f : items) {
+    if (!f.transcript.is_null()) { // a transcription: kept in the project, as the one of that file (one for each file and language asked)
+      const auto pr = project({{"project", f.project}});
+      if (!pr)
+        continue; // the project was closed meanwhile
+      const json &have = (*pr)->doc.root().contains("transcripts") && (*pr)->doc.root()["transcripts"].is_object() ? (*pr)->doc.root()["transcripts"] : json::object();
+      std::string same;
+      for (auto t = have.begin(); t != have.end(); ++t)
+        if (t->value("media", std::string()) == f.transcript.value("media", std::string()) && t->value("asked", std::string()) == f.transcript.value("asked", std::string()))
+          same = t.key();
+      json ops = json::array();
+      if (same.empty()) {
+        ops.push_back({{"op", "add"}, {"path", (*pr)->doc.root().value("id", std::string()) + "/transcripts/$new:t"}, {"value", std::move(f.transcript)}});
+      } else {
+        for (auto it = f.transcript.begin(); it != f.transcript.end(); ++it)
+          ops.push_back({{"op", have[same].contains(it.key()) ? "replace" : "add"}, {"path", same + "/" + it.key()}, {"value", it.value()}});
+      }
+      (void)project_patch({{"project", f.project}, {"patch", {{"ops", std::move(ops)}, {"label", "Keep transcript"}}}});
+      continue;
+    }
     const auto pr = project({{"project", f.project}});
     const doc::NodeRef *ref = pr ? (*pr)->doc.find(f.clip) : nullptr;
     if (!ref)

@@ -25,6 +25,7 @@ constexpr CollectionInfo kCollections[] = {
     {"presets", "pre", false}, // saved input values of a Clip Workflow
     {"groups", "grp", false}, {"notes", "nte", false}, // frames and text notes on a workflow's canvas
     {"skills", "skl", false}, // how-to guides for agents kept by the project (atm_skills holds the built-in ones)
+    {"transcripts", "trs", false}, // what a media file says, word by word, in the file's own time (asr.transcribe keeps one for each file)
 };
 
 const CollectionInfo *collection_info(std::string_view name) {
