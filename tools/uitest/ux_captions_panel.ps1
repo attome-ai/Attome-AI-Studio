@@ -26,7 +26,7 @@ try {
     if (-not $r.ok) { throw "setup: $($r.error.message)" }
   } finally { Remove-Item Env:\ATTOME_ENDPOINT -ErrorAction SilentlyContinue }
   # What the engine answers: no speech program in this build, or no model in the empty folder.
-  $answer = if (Test-Path (Join-Path $bin 'attome-whisper.exe')) { 'No speech model is on this computer yet' } else { 'The speech program is not part of this build' }
+  $answer = if (Test-Path (Join-Path $bin 'attome-whisper.exe')) { 'No speech model is on this computer yet' } else { 'Auto captions need the speech program' }
   $toast = ('toast:' + $answer.Substring(0, 24)) -replace ' ', '_'
 
   $run = Invoke-EditorScript -Project $proj -TimeoutSeconds 200 -Script @(
