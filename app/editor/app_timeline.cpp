@@ -348,6 +348,9 @@ void App::draw_timeline() {
       if (attached_sound) {
         const float mid = cy + ch * 0.5f;
         dl->AddRectFilled(ImVec2(x0, mid - 2.5f), ImVec2(x1 - 1.0f, mid + 2.5f), hex(base, track.muted ? 90 : 190), 2.5f);
+      } else if (x1 - x0 < 8.0f && drag_id_ != c.id) { // too thin for a rounded block: square, and every other one a shade lighter, so the cuts read
+        const bool odd = ((&c - track.clips.data()) & 1) != 0;
+        dl->AddRectFilled(ImVec2(x0, cy), ImVec2(x1 - 1.0f, cy + ch), hex(base, odd ? alpha : int(alpha * 0.8f)));
       } else {
         dl->AddRectFilled(ImVec2(x0, cy), ImVec2(x1 - 1.0f, cy + ch), hex(base, alpha), 5.0f);
         dl->AddRectFilled(ImVec2(x0, cy), ImVec2(x1 - 1.0f, cy + 3.0f), IM_COL32(255, 255, 255, 70), 5.0f, ImDrawFlags_RoundCornersTop);
