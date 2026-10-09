@@ -25,6 +25,32 @@ Result<json> Engine::Impl::media_probe(const json &params) {
   return out;
 }
 
+// The generative clips of the part being exported that are not made yet (no Take: nothing of their own is drawn) or out of date
+// (their last Take is drawn), so whoever exports can make them first: render.sequence answers with them as "not_made".
+// A clip that is not made draws nothing, so where it is comes from its timing, not from the renderer's layers.
+json Engine::Impl::unmade_clips(const Project &pr, const std::string &sequence, Rational rate, int64_t first, int64_t last) const {
+  std::map<std::string, std::pair<int64_t, int64_t>> spans; // the exported sequence's clips, in frames
+  const auto frames_of = [&](const json &timing, const char *key) {
+    return Rational::parse(timing.value(key, std::string("0"))).and_then([&](Rational t) { return to_frames(t, rate, Round::nearest_even); }).value_or(0);
+  };
+  for_each_clip(pr.doc.root(), [&](const std::string &id, const json &c, const std::string &, const json &) {
+    if (sequence_holding(pr.doc.root(), id) != sequence)
+      return;
+    const json timing = c.value("timing", json::object());
+    const int64_t in = frames_of(timing, "record_in");
+    spans[id] = {in, in + frames_of(timing, "duration")};
+  });
+  json out = json::array();
+  for (const gen::ClipPlan &p : gen_plan(pr, {})) {
+    if (p.state != gen::ClipState::empty && p.state != gen::ClipState::dirty)
+      continue;
+    if (const auto s = spans.find(p.id); s == spans.end() || s->second.second <= first || s->second.first >= last)
+      continue; // in another sequence, or outside the part
+    out.push_back({{"clip", p.id}, {"name", p.name}, {"state", p.state == gen::ClipState::empty ? "not made" : "out of date"}});
+  }
+  return out;
+}
+
 Result<json> Engine::Impl::render_sequence(const json &params) {
   ATM_TRY(Project *pr, project(params));
   ATM_TRY(const std::string *output, string_param(params, "output"));
@@ -47,6 +73,10 @@ Result<json> Engine::Impl::render_sequence(const json &params) {
   }
   first = std::clamp<int64_t>(first, 0, comp.frames - 1);
   last = std::clamp<int64_t>(last, first + 1, comp.frames);
+  std::string sequence = params.value("sequence", std::string()); // the one compile() drew: the first when none is named
+  if (const json &order = pr->doc.root().value("sequence_order", json::array()); sequence.empty() && !order.empty() && order[0].is_string())
+    sequence = order[0].get<std::string>();
+  json not_made = unmade_clips(*pr, sequence, frame_rate, first, last);
   if (format == "png_sequence") { // a folder of numbered pictures: `output` is the folder
     const fs::path folder = fs::absolute(to_path(*output));
     if (folder.extension() == ".png" || folder.extension() == ".mp4")
@@ -72,7 +102,7 @@ Result<json> Engine::Impl::render_sequence(const json &params) {
     const int device = gpu_device_for(comp);
     job->thread = std::thread(run_png_sequence, job, std::move(comp), to_utf8(folder), name, first, last, w, h, device, gpu_pool);
     return json{{"job_id", job->id}, {"output", job->output}, {"frames", last - first}, {"format", format}, {"first_frame", first},
-                {"pattern", name + "_%06d.png"}, {"width", w & ~1}, {"height", h & ~1}};
+                {"pattern", name + "_%06d.png"}, {"width", w & ~1}, {"height", h & ~1}, {"not_made", std::move(not_made)}};
   }
   const bool piped = format == "prores" || format == "dnxhr"; // written by the user's FFmpeg, as .mov
   const char *extension = format == "mp4" ? ".mp4" : piped ? ".mov" : format == "wav" ? ".wav" : ".jpg";
@@ -125,7 +155,7 @@ Result<json> Engine::Impl::render_sequence(const json &params) {
   if (format != "mp4" && !piped) {
     job->units_total.store(1);
     job->thread = std::thread(run_extract, job, std::move(comp), settings.path, format == "wav", first, last, settings.width, settings.height);
-    return json{{"job_id", job->id}, {"output", job->output}, {"frames", last - first}, {"format", format}};
+    return json{{"job_id", job->id}, {"output", job->output}, {"frames", last - first}, {"format", format}, {"not_made", std::move(not_made)}};
   }
   job->units_total.store(last - first);
   const json device = render_device_now();
@@ -134,6 +164,7 @@ Result<json> Engine::Impl::render_sequence(const json &params) {
   json answer{{"job_id", job->id}, {"output", job->output}, {"frames", job->units_total.load()},
               {"width", settings.width & ~1}, {"height", settings.height & ~1}};
   answer["render_device"] = device; // the device chosen; jobs.get says where the effects really ran (rendered_on)
+  answer["not_made"] = std::move(not_made);
   return answer;
 }
 

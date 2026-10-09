@@ -343,6 +343,28 @@ TEST_CASE("generate: what a clip's Input nodes read decides when it is out of da
   CHECK(status["ready"] == true);
 }
 
+TEST_CASE("render.sequence names the generative clips of the part that are not made yet or out of date", "[gen][generate][render]") {
+  Film f;
+  // A title under them for 2 s: clips that are not made draw nothing, and a film of nothing is not exported at all.
+  ok(*f.engine, "timeline.edit", {{"project", f.project}, {"ops", json::array({{{"op", "add_text"}, {"text", "Film"}, {"duration", "2s"}}})}});
+  const auto not_made = [&](json extra) {
+    json params = {{"project", f.project}, {"output", (f.dir / "out.wav").string()}, {"format", "wav"}};
+    params.update(extra);
+    const json started = ok(*f.engine, "render.sequence", params);
+    std::string out;
+    for (const json &c : started["not_made"])
+      out += c["name"].get<std::string>() + "=" + c["state"].get<std::string>() + " ";
+    f.wait(started);
+    return out;
+  };
+  CHECK(not_made(json::object()) == "First=not made Second=not made ");
+  CHECK(not_made({{"from", "1s"}}) == "Second=not made "); // First is before the part
+  f.wait(f.run());
+  CHECK(not_made(json::object()).empty());
+  f.patch(json::array({{{"op", "replace"}, {"path", f.a + "/media_ref/inputs/prompt"}, {"value", "A robot runs"}}}));
+  CHECK(not_made(json::object()) == "First=out of date Second=out of date "); // Second starts from First's last frame
+}
+
 TEST_CASE("generate: a project that is moved keeps its Takes", "[gen][generate]") {
   Film f;
   REQUIRE(f.wait(f.run())["state"] == "done");

@@ -354,6 +354,7 @@ struct Engine::Impl {
   Result<json> daemon_shutdown(const json &);
   Result<json> media_probe(const json &params);
   Result<json> render_sequence(const json &params);
+  json unmade_clips(const Project &pr, const std::string &sequence, Rational rate, int64_t first, int64_t last) const;
   // ---- see.* (agent feedback, MODULES §M12): rendered frames as JPEG files in <project>/.attome/see/ --------------
 
   struct Still {

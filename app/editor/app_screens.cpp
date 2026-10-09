@@ -401,11 +401,48 @@ void App::draw_export() {
       ImGui::TextColored(hexv(look::fg3), "About %s: 48 kHz stereo, not compressed.", size_text(int64_t(seconds * 192000.0)).c_str());
     }
     ImGui::Spacing();
+    // Generated clips of what is exported that are not made yet (nothing of their own is drawn: their place holds the picture before
+    // them) or out of date (their last take is drawn): said before the export, with an offer to make them first.
+    std::string unmade, stale;
+    bool cannot_make = false;
+    {
+      const bool part = exp_range_ == 1 && (mark_in_ >= 0 || mark_out_ >= 0);
+      const int64_t from = exp_format_ == 2 ? playhead_ : part ? play_start() : 0, to = exp_format_ == 2 ? playhead_ + 1 : part ? play_end() : total_frames_;
+      for (const TrackUi &t : tracks_)
+        for (const ClipUi &c : t.clips) {
+          const auto st = gen_state_.find(c.id);
+          if (!c.is_generative || st == gen_state_.end() || c.start >= to || c.start + c.frames <= from)
+            continue;
+          const std::string state = st->second.value("state", "");
+          std::string &list = state == "empty" ? unmade : stale;
+          if (state == "empty" || state == "dirty") {
+            list += (list.empty() ? "" : ", ") + c.name;
+            cannot_make = cannot_make || gen_problems_.count(c.id) > 0;
+          }
+        }
+    }
+    if (!unmade.empty() || !stale.empty()) {
+      ImGui::PushTextWrapPos(0.0f);
+      if (!unmade.empty())
+        ImGui::TextColored(ImVec4(0.89f, 0.64f, 0.23f, 1.0f), "Not made yet: %s. The export will have no picture of theirs.", unmade.c_str());
+      if (!stale.empty())
+        ImGui::TextColored(ImVec4(0.89f, 0.64f, 0.23f, 1.0f), "Out of date: %s. Their last take is used.", stale.c_str());
+      if (cannot_make)
+        ImGui::TextColored(hexv(look::fg3), "Some cannot be made on this computer yet: see the clip's Generate card.");
+      ImGui::PopTextWrapPos();
+      if (soft_button("export_generate_first", "Generate them first", ImVec2(180.0f, 30.0f), !cannot_make)) {
+        export_sheet_ = false;
+        pending_ = [this] {
+          start_generation({{"scope", "dirty"}});
+          say("Generating: export when the clips are made");
+        };
+      }
+    }
     ImGui::Spacing();
     if (soft_button("export_cancel", "Cancel", ImVec2(110.0f, 34.0f)))
       export_sheet_ = false;
     ImGui::SameLine(ImGui::GetContentRegionAvail().x - 120.0f + ImGui::GetCursorPosX());
-    if (soft_button("export_start", "Export", ImVec2(120.0f, 34.0f), exp_path_[0] != 0, true)) {
+    if (soft_button("export_start", unmade.empty() ? "Export" : "Export anyway", ImVec2(120.0f, 34.0f), exp_path_[0] != 0, true)) {
       static const char *kExt3[] = {".mp4", ".wav", ".jpg", ".mov", ".mov"};
       std::string path = exp_path_;
       if (path.size() < 4 || path.substr(path.size() - 4) != kExt3[std::clamp(exp_format_, 0, 4)])
