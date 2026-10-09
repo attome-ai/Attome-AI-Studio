@@ -175,6 +175,10 @@ struct Footprint {
   }
 };
 
+// Whether the last item was pressed: by the mouse (at the press, as IsItemClicked), or by Enter or Space on a focused widget
+// (`pressed` is what InvisibleButton returned: it is also true when the mouse is let go, which IsItemClicked has already answered).
+inline bool item_hit(bool pressed) { return ImGui::IsItemClicked() || (pressed && !ImGui::IsMouseReleased(0)); }
+
 // A button drawn in the mockup's style. Returns true when clicked.
 inline bool soft_button(const char *id, const char *label, ImVec2 size, bool enabled = true, bool primary = false,
                  uint32_t fill = look::raised) {
@@ -182,7 +186,7 @@ inline bool soft_button(const char *id, const char *label, ImVec2 size, bool ena
   const ImVec2 p = ImGui::GetCursorScreenPos();
   if (size.x <= 0.0f)
     size.x = text_size(label).x + 24.0f;
-  ImGui::InvisibleButton("##b", size);
+  const bool pressed = ImGui::InvisibleButton("##b", size);
   ui_mark(std::string("button:") + id);
   const bool hovered = enabled && ImGui::IsItemHovered(), held = enabled && ImGui::IsItemActive();
   ImDrawList *dl = ImGui::GetWindowDrawList();
@@ -195,8 +199,9 @@ inline bool soft_button(const char *id, const char *label, ImVec2 size, bool ena
   const ImVec2 ts = text_size(label);
   dl->AddText(ImVec2(p.x + (size.x - ts.x) * 0.5f, p.y + (size.y - ts.y) * 0.5f),
               !enabled ? hex(look::fg3) : primary ? hex(look::accent_ink) : hex(look::fg), label);
+  const bool hit = enabled && item_hit(pressed);
   ImGui::PopID();
-  return enabled && ImGui::IsItemClicked();
+  return hit;
 }
 
 // A glyph button. `active` draws the orange tint of a selected tool.
@@ -204,7 +209,7 @@ inline bool icon_button(const char *id, Icon cp, bool enabled = true, bool activ
                  const char *tip = nullptr) {
   ImGui::PushID(id);
   const ImVec2 p = ImGui::GetCursorScreenPos();
-  ImGui::InvisibleButton("##i", ImVec2(size, size));
+  const bool pressed = ImGui::InvisibleButton("##i", ImVec2(size, size));
   ui_mark(std::string("icon:") + id);
   const bool hovered = enabled && ImGui::IsItemHovered();
   ImDrawList *dl = ImGui::GetWindowDrawList();
@@ -218,8 +223,9 @@ inline bool icon_button(const char *id, Icon cp, bool enabled = true, bool activ
               !enabled ? hex(look::fg3, 140) : active ? hex(look::accent) : hex(look::fg), g.c_str());
   if (tip && hovered)
     ImGui::SetTooltip("%s", tip);
+  const bool hit = enabled && item_hit(pressed);
   ImGui::PopID();
-  return enabled && ImGui::IsItemClicked();
+  return hit;
 }
 
 // What a slider and the number beside it share: the number is typed into, and the value it gives is handed to the slider on its next frame,
@@ -352,7 +358,7 @@ inline void slider_number(const char *fmt, float shown, float scale = 0.0f, floa
     char label[48];
     std::snprintf(label, sizeof label, fmt, double(shown));
     const ImVec2 at = ImGui::GetCursorScreenPos(), size = ImGui::CalcTextSize(label);
-    ImGui::InvisibleButton("##t", ImVec2(std::max(size.x, 30.0f), std::max(size.y, 18.0f)));
+    const bool pressed = ImGui::InvisibleButton("##t", ImVec2(std::max(size.x, 30.0f), std::max(size.y, 18.0f)));
     ui_mark("number:" + g_slider.name);
     const bool hovered = ImGui::IsItemHovered();
     ImDrawList *dl = ImGui::GetWindowDrawList();
@@ -364,7 +370,7 @@ inline void slider_number(const char *fmt, float shown, float scale = 0.0f, floa
       std::snprintf(range, sizeof range, "Click to type a value (%g to %g)", double(lo * scale), double(hi * scale));
       ImGui::SetTooltip("%s", range);
     }
-    if (ImGui::IsItemClicked()) {
+    if (item_hit(pressed)) {
       g_slider.editing = id;
       g_slider.focus = true;
       std::snprintf(g_slider.text, sizeof g_slider.text, "%.3f", double(g_slider.value * scale));
@@ -392,7 +398,7 @@ inline bool begin_card(const char *id, const char *title, const char *right = nu
   ImGui::PushStyleColor(ImGuiCol_Border, hexv(look::line));
   ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 12.0f);
   ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(14.0f, 12.0f));
-  const bool open = ImGui::BeginChild(id, ImVec2(0, 0), ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY,
+  const bool open = ImGui::BeginChild(id, ImVec2(0, 0), ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_NavFlattened,
                                       ImGuiWindowFlags_NoScrollbar);
   ImGui::PopStyleVar(2);
   ImGui::PopStyleColor(2);
@@ -401,10 +407,10 @@ inline bool begin_card(const char *id, const char *title, const char *right = nu
     static std::set<std::string> folded;
     const bool is_folded = folded.count(id) > 0;
     const ImVec2 at = ImGui::GetCursorScreenPos();
-    ImGui::InvisibleButton("##fold", ImVec2(ImGui::GetContentRegionAvail().x, 18.0f));
+    const bool pressed = ImGui::InvisibleButton("##fold", ImVec2(ImGui::GetContentRegionAvail().x, 18.0f));
     ui_mark(std::string("card:") + title);
     const bool hovered = ImGui::IsItemHovered();
-    if (ImGui::IsItemClicked()) {
+    if (item_hit(pressed)) {
       if (is_folded)
         folded.erase(id);
       else
@@ -487,10 +493,10 @@ inline void panel_tabs(const char *mark, std::span<const std::string> labels, in
     const ImVec2 p = ImGui::GetCursorScreenPos();
     const float tw = text_size(labels[size_t(i)].c_str()).x + 20.0f;
     ImGui::PushID(i);
-    ImGui::InvisibleButton(mark, ImVec2(tw, 28.0f));
+    const bool pressed = ImGui::InvisibleButton(mark, ImVec2(tw, 28.0f));
     ImGui::PopID();
     ui_mark(std::string(mark) + ":" + labels[size_t(i)]);
-    if (ImGui::IsItemClicked())
+    if (item_hit(pressed))
       selected = i;
     if (active)
       ImGui::GetWindowDrawList()->AddRectFilled(p, ImVec2(p.x + tw, p.y + 28.0f), hex(look::raised), 8.0f);
@@ -594,7 +600,7 @@ inline bool gallery_tile(TileGrid &g, const Tile &t) {
 inline bool key_diamond(const char *id, int state) {
   const ImVec2 p = ImGui::GetCursorScreenPos();
   const float size = 18.0f;
-  ImGui::InvisibleButton(id, ImVec2(size, size));
+  const bool pressed = ImGui::InvisibleButton(id, ImVec2(size, size));
   const bool hovered = ImGui::IsItemHovered();
   const ImVec2 c(p.x + size * 0.5f, p.y + size * 0.5f + 1.0f);
   const float r = 5.5f;
@@ -607,7 +613,7 @@ inline bool key_diamond(const char *id, int state) {
     dl->AddPolyline(quad, 4, line, ImDrawFlags_Closed, 1.6f);
   if (hovered)
     ImGui::SetTooltip("%s", state == 2 ? "Remove the keyframe here" : state == 1 ? "Add a keyframe here" : "Animate: add a keyframe here");
-  return ImGui::IsItemClicked();
+  return item_hit(pressed);
 }
 
 

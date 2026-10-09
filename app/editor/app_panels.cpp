@@ -342,7 +342,7 @@ void App::draw_library_panel() {
     return text;
   };
   const std::string wanted = lower(library_filter_);
-  ImGui::BeginChild("##library", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_NoBackground);
+  ImGui::BeginChild("##library", ImVec2(0, 0), ImGuiChildFlags_NavFlattened, ImGuiWindowFlags_NoBackground);
   const float avail = ImGui::GetContentRegionAvail().x;
   const int columns = std::max(1, int((avail + 10.0f) / (130.0f + 10.0f)));
   const float cell = (avail - 10.0f * float(columns - 1)) / float(columns), thumb_h = cell * 9.0f / 16.0f;

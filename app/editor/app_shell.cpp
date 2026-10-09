@@ -705,7 +705,7 @@ void App::draw_media() {
   ImGui::PopStyleColor();
   ImGui::Spacing();
 
-  ImGui::BeginChild("##grid", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_NoBackground);
+  ImGui::BeginChild("##grid", ImVec2(0, 0), ImGuiChildFlags_NavFlattened, ImGuiWindowFlags_NoBackground);
   // As many columns as fit: a card is never narrower than kMinCard, and never wider than kMaxCard, so a wide panel
   // shows more cards in a row rather than larger ones.
   constexpr float kMinCard = 130.0f, kMaxCard = 200.0f, kGap = 10.0f;

@@ -583,6 +583,7 @@ private:
   std::string focus_prompt_; // a generative clip was just added: its prompt (or a voice's words) box takes the keyboard
   bool assets_listed_ = false; // the project's own imported files are put in the media list once, when it is opened
   std::set<std::string> audio_only_; // media files without a picture
+  bool panel_keys_ = false;  // F6 put the keys in a panel (Media, Monitor, Inspector): the ring shows and its keys are the panel's
   char media_filter_[128] = {};
   char library_filter_[128] = {}; // the Library's search
   int media_kind_ = 0; // the Media panel's filter: 0 all, 1 video, 2 audio, 3 pictures

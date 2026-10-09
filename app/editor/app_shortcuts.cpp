@@ -2,7 +2,9 @@
 #include "app_support.hpp"
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <imgui.h>
+#include <imgui_internal.h>
 
 namespace atm::editor {
 
@@ -15,6 +17,50 @@ void App::shortcuts() {
     shortcuts_open_ = !shortcuts_open_;
   if (io.WantTextInput || project_path_.empty() || export_open_ || export_sheet_)
     return;
+  // F6 and Shift+F6 take the keys from panel to panel (Timeline, Media, Monitor, Inspector). In a panel a ring shows the widget the keys are
+  // on, the arrows, Tab, Space, Enter, Home and End are the panel's, and every other key is still the editor's. Esc, or a click, gives them back.
+  if (mode_ != 0 || io.MouseClicked[0])
+    panel_keys_ = false;
+  if (mode_ == 0) {
+    static const char *const panels[] = {"Timeline", "Media", "Monitor", "Inspector"};
+    static const char *const names[] = {"timeline", "Media panel", "Monitor", "Inspector"};
+    ImGuiContext &g = *ImGui::GetCurrentContext();
+    int at = 0;
+    for (int i = 0; i < 4 && g.NavWindow; ++i)
+      if (std::strcmp(g.NavWindow->RootWindow->Name, panels[i]) == 0)
+        at = i;
+    if (ImGui::IsKeyPressed(ImGuiKey_F6, false)) {
+      const int to = (at + (io.KeyShift ? 3 : 1)) % 4;
+      if (ImGuiWindow *w = ImGui::FindWindowByName(panels[to])) {
+        w->NavLastIds[0] = w->NavLastIds[1] = 0; // not where the keys were last time (that may be far down the panel): the first widget in view
+        ImGui::SetWindowFocus(panels[to]);
+        if (to != 0)
+          ImGui::NavInitWindow(w, true);
+      }
+      panel_keys_ = to != 0;
+      say(std::string("Keys go to the ") + names[to]);
+      return;
+    }
+    if (panel_keys_ && ImGui::IsKeyPressed(ImGuiKey_Escape, false)) { // Esc gives the keys back and does no more (Dear ImGui may already have moved the focus up)
+      ImGui::SetWindowFocus("Timeline");
+      panel_keys_ = false;
+      return;
+    }
+    if (panel_keys_ && at == 0)
+      panel_keys_ = false; // the focus went to the timeline some other way
+    if (panel_keys_) { // the ring stays while the keys are used, whatever the pointer does: one ring round whatever widget the keys are on
+      g.NavCursorVisible = true;
+      g.NavHighlightItemUnderNav = true;
+      if (g.NavWindow && g.NavId != 0) {
+        const ImRect box = ImGui::WindowRectRelToAbs(g.NavWindow, g.NavWindow->NavRectRel[g.NavLayer]);
+        ImDrawList *top = ImGui::GetForegroundDrawList();
+        top->PushClipRect(g.NavWindow->InnerClipRect.Min, g.NavWindow->InnerClipRect.Max, false);
+        top->AddRect(ImVec2(box.Min.x - 2.0f, box.Min.y - 2.0f), ImVec2(box.Max.x + 2.0f, box.Max.y + 2.0f), hex(look::accent), 8.0f, 0, 2.0f);
+        top->PopClipRect();
+      }
+    }
+  }
+  const bool panel_keys = panel_keys_;
   if (mode_ == 1) { // the workflow editor: Delete is for the graph, undo and redo are the project's
     if (ImGui::IsKeyPressed(ImGuiKey_Delete, false))
       pending_ = [this] { delete_in_workflow(); };
@@ -54,7 +100,7 @@ void App::shortcuts() {
     }
     return;
   }
-  if (ImGui::IsKeyPressed(ImGuiKey_Space, false))
+  if (!panel_keys && ImGui::IsKeyPressed(ImGuiKey_Space, false))
     play(!playing_);
   if (!io.KeyCtrl && !io.KeyAlt && ImGui::IsKeyPressed(ImGuiKey_K, false)) // J plays backwards, K stops, L plays; J and L again go faster
     play(false);
@@ -106,7 +152,7 @@ void App::shortcuts() {
     clear_marks();
   if (!io.KeyCtrl && !io.KeyAlt && ImGui::IsKeyPressed(ImGuiKey_D, false))
     select_at_playhead();
-  if (!io.KeyCtrl && !io.KeyAlt && ImGui::IsKeyPressed(ImGuiKey_Tab, false))
+  if (!io.KeyCtrl && !io.KeyAlt && !panel_keys && ImGui::IsKeyPressed(ImGuiKey_Tab, false))
     select_neighbour(!io.KeyShift);
   if (io.KeyAlt && !io.KeyCtrl) {
     const int64_t step = io.KeyShift ? int64_t(std::llround(fps())) : 1;
@@ -119,9 +165,9 @@ void App::shortcuts() {
     if (ImGui::IsKeyPressed(ImGuiKey_DownArrow, false))
       nudge_track(false);
   }
-  if (!io.KeyAlt && ImGui::IsKeyPressed(ImGuiKey_UpArrow, false))
+  if (!panel_keys && !io.KeyAlt && ImGui::IsKeyPressed(ImGuiKey_UpArrow, false))
     jump_cut(false);
-  if (!io.KeyAlt && ImGui::IsKeyPressed(ImGuiKey_DownArrow, false))
+  if (!panel_keys && !io.KeyAlt && ImGui::IsKeyPressed(ImGuiKey_DownArrow, false))
     jump_cut(true);
   if ((ImGui::IsKeyPressed(ImGuiKey_Equal, true) || ImGui::IsKeyPressed(ImGuiKey_KeypadAdd, true)) && !io.KeyCtrl)
     pps_ = std::clamp(pps_ * 1.25f, 4.0f, 800.0f);
@@ -151,13 +197,13 @@ void App::shortcuts() {
     ask_export();
   if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Comma, false))
     open_settings();
-  if (!io.KeyAlt && ImGui::IsKeyPressed(ImGuiKey_LeftArrow, true))
+  if (!panel_keys && !io.KeyAlt && ImGui::IsKeyPressed(ImGuiKey_LeftArrow, true))
     seek(playhead_ - (io.KeyShift ? int64_t(std::llround(fps())) : 1)); // Shift: a second
-  if (!io.KeyAlt && ImGui::IsKeyPressed(ImGuiKey_RightArrow, true))
+  if (!panel_keys && !io.KeyAlt && ImGui::IsKeyPressed(ImGuiKey_RightArrow, true))
     seek(playhead_ + (io.KeyShift ? int64_t(std::llround(fps())) : 1));
-  if (ImGui::IsKeyPressed(ImGuiKey_Home, false))
+  if (!panel_keys && ImGui::IsKeyPressed(ImGuiKey_Home, false))
     seek(0);
-  if (ImGui::IsKeyPressed(ImGuiKey_End, false))
+  if (!panel_keys && ImGui::IsKeyPressed(ImGuiKey_End, false))
     seek(total_frames_);
 }
 

@@ -1242,7 +1242,7 @@ void App::poll_models() {
 
 void App::draw_models_panel() {
   poll_models();
-  ImGui::BeginChild("##models_scroll", ImVec2(0.0f, 0.0f), ImGuiChildFlags_None, ImGuiWindowFlags_NoBackground); // the whole panel scrolls as one
+  ImGui::BeginChild("##models_scroll", ImVec2(0.0f, 0.0f), ImGuiChildFlags_NavFlattened, ImGuiWindowFlags_NoBackground); // the whole panel scrolls as one
   const auto gb = [](int64_t bytes) {
     char text[32];
     if (bytes >= 995000000)
@@ -1270,7 +1270,7 @@ void App::draw_models_panel() {
     ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 12.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12.0f, 10.0f));
     ImGui::BeginChild("##card", ImVec2(0.0f, 0.0f),
-                      ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_AlwaysUseWindowPadding);
+                      ImGuiChildFlags_Borders | ImGuiChildFlags_NavFlattened | ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_AlwaysUseWindowPadding);
     ImGui::PushTextWrapPos(0.0f);
     ImGui::PushFont(g_fonts.bold, 14.0f);
     ImGui::TextUnformatted(e.value("title", id).c_str());
@@ -1395,7 +1395,7 @@ void App::draw_models_panel() {
       ImGui::PushStyleColor(ImGuiCol_Border, hexv(look::line));
       ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 12.0f);
       ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12.0f, 10.0f));
-      ImGui::BeginChild("##engine_card", ImVec2(0.0f, 0.0f), ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_AlwaysUseWindowPadding);
+      ImGui::BeginChild("##engine_card", ImVec2(0.0f, 0.0f), ImGuiChildFlags_Borders | ImGuiChildFlags_NavFlattened | ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_AlwaysUseWindowPadding);
       ImGui::PushTextWrapPos(0.0f);
       ImGui::PushFont(g_fonts.bold, 14.0f);
       ImGui::TextUnformatted(m->value("title", id).c_str());

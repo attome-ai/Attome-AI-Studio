@@ -17,7 +17,7 @@
 //   drag <target> <dx> <dy>         press, move by (dx, dy) in steps, release; points, or 25% of the target's size
 //   slide @<slider> <fraction>      set a slim slider to a position from 0 (left) to 1 (right)
 //   wheel <target> <notches> [ctrl] turn the mouse wheel over the target (positive: away from you; Ctrl+wheel zooms the timeline)
-//   key <name> [ctrl] [shift]       press and release a key: A..Z, 0..9, Space, Delete, Enter, Escape, Left, Right, Up, Down, Home, End, Tab, F1, F2, Plus, Minus
+//   key <name> [ctrl] [shift]       press and release a key: A..Z, 0..9, Space, Delete, Enter, Escape, Left, Right, Up, Down, Home, End, Tab, F1, F2, F6, Plus, Minus
 //   type <text>                     type the rest of the line into the field that has the keyboard (click it first;
 //                                   `key A ctrl` before it selects what is there, so the text replaces it)
 //   shot <file.jpg>                 save what the window shows
