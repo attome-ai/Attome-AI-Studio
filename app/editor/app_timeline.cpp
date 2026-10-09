@@ -142,7 +142,11 @@ void App::draw_timeline() {
   const bool lanes_hovered = ImGui::IsWindowHovered() && drag_id_.empty() && !ImGui::GetDragDropPayload();
   const double total_s = std::max(double(total_frames_) / rate + 10.0, double(view_w - header_w) / pps_);
   const float content_w = header_w + float(total_s * pps_);
-  const float content_h = ruler_h + float(std::max<size_t>(1, tracks_.size())) * row_h;
+  // Over the rows, an empty lane of their height: a card or a picture clip let go there goes on a new track on top of the
+  // others, a layer over the main video (as in CapCut, where the space above the tracks takes overlays).
+  const float rows_top = ruler_h + (tracks_.empty() ? 0.0f : row_h);
+  bool lane_hot = false; // a clip or a card is held over that lane: its header says what letting go does
+  const float content_h = rows_top + float(std::max<size_t>(1, tracks_.size())) * row_h;
   const auto x_of = [&](double frame) { return origin.x + header_w + float(frame / rate * pps_); };
   const int rows = int(tracks_.size());
 
@@ -265,9 +269,17 @@ void App::draw_timeline() {
   }
   // Only the clips that are on the screen are drawn and given a button: a film of thousands of clips costs what the window shows, not what it holds.
   const float vis_l = win.x + header_w - 16.0f, vis_r = win.x + view_w + 16.0f, vis_t = win.y - 8.0f, vis_b = win.y + view_h + 8.0f;
+  if (rows > 0) { // the empty lane over the rows: a click there lets go of the selection, as on an empty row
+    ImGui::SetCursorScreenPos(ImVec2(origin.x + header_w, origin.y + ruler_h)); // as a row's: it scrolls with the content
+    ImGui::SetNextItemAllowOverlap();
+    if (ImGui::InvisibleButton("##top_lane", ImVec2(content_w - header_w, row_h)) && !ImGui::GetIO().KeyCtrl && !ImGui::GetIO().KeyShift) {
+      selected_clip_.clear();
+      picked_.clear();
+    }
+  }
   for (int ti = 0; ti < rows; ++ti) {
     const TrackUi &track = tracks_[size_t(ti)];
-    const float y = origin.y + ruler_h + float(ti) * row_h;
+    const float y = origin.y + rows_top + float(ti) * row_h;
     dl->AddRectFilled(ImVec2(win.x, y), ImVec2(win.x + view_w, y + row_h), ti % 2 ? hex(look::bg) : hex(0x10131b));
     dl->AddLine(ImVec2(win.x, y + row_h), ImVec2(win.x + view_w, y + row_h), hex(look::line, 120));
     ImGui::SetCursorScreenPos(ImVec2(origin.x + header_w, y));
@@ -308,8 +320,9 @@ void App::draw_timeline() {
       int row = ti;
       if (drag_id_ == c.id) {
         if (drag_mode_ == 1) { // where it will land
-          row = std::clamp(drag_track_, 0, rows - 1);
+          row = std::clamp(drag_track_, -1, rows - 1); // -1: in the lane over the rows, a new track on top
           start = drag_land_.start;
+          lane_hot = lane_hot || row < 0;
         } else if (drag_mode_ == 2) {
           frames = std::max<int64_t>(1, c.frames + drag_frames_);
           if (c.media_frames > 0)
@@ -323,7 +336,7 @@ void App::draw_timeline() {
         start = slid->second; // making room for what is being dragged
       }
       const float x0 = x_of(double(start)), x1 = std::max(x0 + 2.0f, x_of(double(start + frames)));
-      const float cy = origin.y + ruler_h + float(row) * row_h + 4.0f, ch = row_h - 8.0f;
+      const float cy = origin.y + rows_top + float(row) * row_h + 4.0f, ch = row_h - 8.0f;
       if (drag_id_ != c.id && (x1 < vis_l || x0 > vis_r || cy + ch < vis_t || cy > vis_b)) // not on the screen: nothing to draw, and nothing to click
         continue;
       const bool is_selected = c.id == selected_clip_;
@@ -604,8 +617,9 @@ void App::draw_timeline() {
         if (ImGui::IsItemActive() && drag_id_ == c.id) {
           drag_frames_ = std::llround(ImGui::GetMouseDragDelta(0, 0.0f).x / pps_ * rate);
           if (mode == 1 && rows > 0) {
-            drag_track_ = std::clamp(int(std::floor((mouse.y - origin.y - ruler_h) / row_h)), 0, rows - 1);
-            if ((tracks_[size_t(drag_track_)].kind == "audio") != (track.kind == "audio"))
+            // A picture taken up into the lane over the rows (-1) goes on a new track on top of the others.
+            drag_track_ = std::clamp(int(std::floor((mouse.y - origin.y - rows_top) / row_h)), track.kind == "audio" ? 0 : -1, rows - 1);
+            if (drag_track_ >= 0 && (tracks_[size_t(drag_track_)].kind == "audio") != (track.kind == "audio"))
               drag_track_ = ti; // a picture stays on picture tracks, a sound on audio tracks
             // Where it will land (see eval::land): on free space where it is; over another clip before or after it, by
             // the half the pointer is on, the clips after it sliding right. A press without a move changes nothing.
@@ -615,9 +629,13 @@ void App::draw_timeline() {
               const int64_t length = std::max(c.frames, c.end_ceil - c.start), raw = c.start + drag_frames_;
               const int64_t snapped = snap_frame(raw, length, c.id); // its edges catch on the playhead and on other clips
               const int64_t pointer = std::llround((mouse.x - origin.x - header_w) / pps_ * rate) + (snapped - std::max<int64_t>(0, raw));
-              drag_land_ = landing(tracks_[size_t(drag_track_)], pointer, snapped, length, c.id);
-              if (drag_land_.start != snapped)
-                snap_at_ = -1; // it lands beside a clip, not on the edge it caught
+              if (drag_track_ < 0) { // a new track: nothing is in the way
+                drag_land_ = {snapped, {}};
+              } else {
+                drag_land_ = landing(tracks_[size_t(drag_track_)], pointer, snapped, length, c.id);
+                if (drag_land_.start != snapped)
+                  snap_at_ = -1; // it lands beside a clip, not on the edge it caught
+              }
               show_pushes(drag_land_, pushed_next_);
               for (const ClipUi *m : linked_of(c)) // its own sound comes along
                 pushed_next_[m->id] = std::max<int64_t>(0, m->start + (drag_land_.start - c.start));
@@ -669,7 +687,7 @@ void App::draw_timeline() {
       if (to == track.clips.end() || drag_id_ == tr.to || drag_id_ == tr.from)
         continue;
       const float bx0 = x_of(double(to->start - tr.in)), bx1 = std::max(bx0 + 4.0f, x_of(double(to->start + tr.out)));
-      const float by0 = origin.y + ruler_h + float(ti) * row_h + 4.0f, by1 = by0 + row_h - 8.0f;
+      const float by0 = origin.y + rows_top + float(ti) * row_h + 4.0f, by1 = by0 + row_h - 8.0f;
       dl->AddRectFilled(ImVec2(bx0, by0), ImVec2(bx1, by1), IM_COL32(10, 12, 18, 150), 4.0f);
       if (tr.kind == eval::TransitionKind::zoom) { // a zoom: a frame inside a frame, the picture growing
         const ImVec2 mid((bx0 + bx1) * 0.5f, (by0 + by1) * 0.5f);
@@ -710,7 +728,7 @@ void App::draw_timeline() {
     }
   }
   // The empty space under the rows: a right click there has the empty timeline's menu too (paste, select all, a new track).
-  if (rows > 0 && ImGui::IsWindowHovered() && ImGui::IsMouseClicked(1) && mouse.y > origin.y + ruler_h + float(rows) * row_h && mouse.x > win.x + header_w) {
+  if (rows > 0 && ImGui::IsWindowHovered() && ImGui::IsMouseClicked(1) && mouse.y > origin.y + rows_top + float(rows) * row_h && mouse.x > win.x + header_w) {
     menu_frame_ = std::max<int64_t>(0, std::llround((mouse.x - origin.x - header_w) / pps_ * rate));
     menu_track_.clear();
     ImGui::OpenPopup("##belowctx");
@@ -732,7 +750,7 @@ void App::draw_timeline() {
       if (hi.x - lo.x > 3.0f || hi.y - lo.y > 3.0f) { // it was dragged: every clip it touches
         std::vector<std::string> ids;
         for (int ti = 0; ti < rows; ++ti) {
-          const float top = origin.y + ruler_h + float(ti) * row_h, bottom = top + row_h;
+          const float top = origin.y + rows_top + float(ti) * row_h, bottom = top + row_h;
           if (bottom < lo.y || top > hi.y)
             continue;
           for (const ClipUi &k : tracks_[size_t(ti)].clips)
@@ -749,7 +767,7 @@ void App::draw_timeline() {
     // An empty project still looks like a timeline: the two tracks the first clips will make, dimmed, with what to do.
     // They are not in the document; a drop on them makes the real track.
     for (int i = 0; i < 2; ++i) {
-      const float y = origin.y + ruler_h + float(i) * row_h;
+      const float y = origin.y + rows_top + float(i) * row_h;
       dl->AddRectFilled(ImVec2(win.x + header_w, y), ImVec2(win.x + view_w, y + row_h), i % 2 ? hex(look::bg) : hex(0x10131b));
       dl->AddLine(ImVec2(win.x + header_w, y + row_h), ImVec2(win.x + view_w, y + row_h), hex(look::line, 120));
       ImGui::SetCursorScreenPos(ImVec2(win.x + header_w, y)); // marked for the test driver: where a drop makes the first track
@@ -766,7 +784,7 @@ void App::draw_timeline() {
   // A card dragged over the tracks: the plan of what letting go would do, drawn as it will be, and carried out on release.
   if (const ImGuiPayload *held = ImGui::GetDragDropPayload(); held && held->IsDataType("ATM_CARD") &&
       ImGui::BeginDragDropTargetCustom(ImRect(ImVec2(win.x, win.y + ruler_h), ImVec2(win.x + view_w, win.y + view_h)), ImGui::GetID("##card_drop"))) {
-    const DropPlan plan = plan_drop(static_cast<const char *>(held->Data), int(std::floor((mouse.y - origin.y - ruler_h) / row_h)),
+    const DropPlan plan = plan_drop(static_cast<const char *>(held->Data), int(std::floor((mouse.y - origin.y - rows_top) / row_h)),
                                     std::llround((mouse.x - origin.x - header_w) / pps_ * rate));
     if (const ImGuiPayload *got = ImGui::AcceptDragDropPayload("ATM_CARD", ImGuiDragDropFlags_AcceptBeforeDelivery | ImGuiDragDropFlags_AcceptNoDrawDefaultRect)) {
       // In an empty project a sound is shown on the audio lane, the second of the two that are drawn.
@@ -774,12 +792,14 @@ void App::draw_timeline() {
       int shown_row = plan.row + (rows == 0 && plan.sound ? 1 : 0);
       if (plan.row >= rows && rows > 0 && !plan.sound)
         shown_row = int(std::count_if(tracks_.begin(), tracks_.end(), [](const TrackUi &t) { return t.kind != "audio"; }));
-      const float y = origin.y + ruler_h + float(std::max(0, shown_row)) * row_h;
-      const bool inserted = plan.row < 0 || (plan.row >= rows && rows > 0 && !plan.sound); // a new row goes in between the others
+      const bool on_top = plan.row < 0 && rows > 0; // the lane over the rows: a new track on top of the others
+      const float y = on_top ? origin.y + rows_top - row_h : origin.y + rows_top + float(std::max(0, shown_row)) * row_h;
+      const bool inserted = plan.row >= rows && rows > 0 && !plan.sound; // a new row goes in between the others
       if (inserted) { // where it goes in: a line between the rows (the clip's ghost is drawn just under it)
         dl->AddLine(ImVec2(win.x, y), ImVec2(win.x + view_w, y), hex(look::accent, 230), 3.0f);
         dl->AddCircleFilled(ImVec2(win.x + header_w, y), 4.5f, hex(look::accent));
-      } else if (plan.row >= rows) { // the band of the track that will be made, below the last
+      } else if (on_top || plan.row >= rows) { // the band of the track that will be made, over the first or below the last
+        lane_hot = lane_hot || on_top;
         dl->AddRectFilled(ImVec2(win.x, y), ImVec2(win.x + view_w, y + row_h), hex(look::accent, 18));
         dl->AddLine(ImVec2(win.x, y + row_h), ImVec2(win.x + view_w, y + row_h), hex(look::accent, 120));
       }
@@ -829,7 +849,7 @@ void App::draw_timeline() {
   // Track headers stay in place while the timeline scrolls sideways.
   for (int ti = 0; ti < rows; ++ti) {
     const TrackUi &track = tracks_[size_t(ti)];
-    const float y = origin.y + ruler_h + float(ti) * row_h;
+    const float y = origin.y + rows_top + float(ti) * row_h;
     dl->AddRectFilled(ImVec2(win.x, y), ImVec2(win.x + header_w, y + row_h), hex(look::panel));
     dl->AddLine(ImVec2(win.x, y + row_h), ImVec2(win.x + header_w, y + row_h), hex(look::line, 120));
     dl->AddLine(ImVec2(win.x + header_w, y), ImVec2(win.x + header_w, y + row_h), hex(look::line));
@@ -914,6 +934,23 @@ void App::draw_timeline() {
       } else if (menu_item(track.hidden ? "Show" : "Hide")) {
         pending_ = [this, tid2, on = !track.hidden] { set_track_flag(tid2, "hidden", on, on ? "Hide track" : "Show track"); };
       }
+      // Up and down among the tracks of its kind, as the rows show them: a picture track moved up is drawn over the one above it.
+      int kin = 0, place = 0;
+      for (const TrackUi &o : tracks_)
+        if ((o.kind == "audio") == audio) {
+          if (o.id == track.id)
+            place = kin;
+          ++kin;
+        }
+      const auto move_to = [this, tid2](const char *to, const char *label) {
+        pending_ = [this, tid2, to, label] { timeline_edit(json::array({{{"op", "move_track"}, {"track", tid2}, {"to", to}}}), label); };
+      };
+      if (menu_item("Move up", nullptr, false, place > 0))
+        move_to("up", "Move track up");
+      if (menu_item("Move down", nullptr, false, place < kin - 1))
+        move_to("down", "Move track down");
+      if (!audio && menu_item("Move to the top", nullptr, false, place > 0))
+        move_to("top", "Move track to the top");
       ImGui::Separator();
       if (menu_item("Add a video track"))
         pending_ = [this] { add_track(false); };
@@ -977,13 +1014,18 @@ void App::draw_timeline() {
       pending_ = [this, tid, on = !track.hidden] { set_track_flag(tid, "hidden", on, on ? "Hide track" : "Show track"); };
     }
   }
+  if (lane_hot) { // over the headers, which are drawn after the lanes
+    const float y = origin.y + rows_top - row_h;
+    dl->AddRectFilled(ImVec2(win.x, y), ImVec2(win.x + header_w, y + row_h), hex(look::accent, 30));
+    dl->AddText(ImVec2(win.x + 14.0f, y + (row_h - ImGui::GetFontSize()) * 0.5f), hex(look::accent), "New track on top");
+  }
   dl->AddRectFilled(ImVec2(win.x, origin.y), ImVec2(win.x + header_w, origin.y + ruler_h), hex(look::panel));
   dl->AddLine(ImVec2(win.x + header_w, origin.y), ImVec2(win.x + header_w, origin.y + ruler_h), hex(look::line));
   if (rows == 0) {
     // The headers of the two lanes of an empty project (their lanes are drawn above, under the drop preview).
     static const struct { const char *badge, *kind; uint32_t colour; } lanes[] = {{"V1", "Video", look::vid}, {"A1", "Audio", look::aud}};
     for (int i = 0; i < 2; ++i) {
-      const float y = origin.y + ruler_h + float(i) * row_h;
+      const float y = origin.y + rows_top + float(i) * row_h;
       dl->AddRectFilled(ImVec2(win.x, y), ImVec2(win.x + header_w, y + row_h), hex(look::panel));
       dl->AddLine(ImVec2(win.x, y + row_h), ImVec2(win.x + header_w, y + row_h), hex(look::line, 120));
       dl->AddLine(ImVec2(win.x + header_w, y), ImVec2(win.x + header_w, y + row_h), hex(look::line));
@@ -1020,7 +1062,7 @@ void App::draw_timeline() {
           const float scroll = ImGui::GetScrollX(), room = view_w - header_w;
           if (left < scroll || right > scroll + room)
             ImGui::SetScrollX(std::max(0.0f, left - room * 0.2f));
-          const float top = ruler_h + float(ti) * row_h;
+          const float top = rows_top + float(ti) * row_h;
           if (top < ImGui::GetScrollY() || top + row_h > ImGui::GetScrollY() + view_h)
             ImGui::SetScrollY(std::max(0.0f, top - view_h * 0.4f));
         }

@@ -1690,8 +1690,8 @@ App::DropPlan App::plan_drop(const std::string &payload, int row, int64_t frame)
   p.kind = payload.substr(0, colon);
   p.id = colon == std::string::npos ? std::string() : payload.substr(colon + 1);
   const int rows = int(tracks_.size());
-  p.row = std::clamp(row, 0, rows);
-  const TrackUi *track = p.row < rows ? &tracks_[size_t(p.row)] : nullptr;
+  p.row = std::clamp(row, rows > 0 ? -1 : 0, rows); // -1: the lane over the rows, a new track on top
+  const TrackUi *track = p.row >= 0 && p.row < rows ? &tracks_[size_t(p.row)] : nullptr;
   frame = std::max<int64_t>(0, frame);
   if (total_frames_ == 0 && (p.kind == "media" || p.kind == "lib")) // the first clip of an empty timeline starts at the beginning, wherever it is dropped
     frame = 0;
@@ -1794,6 +1794,8 @@ App::DropPlan App::plan_drop(const std::string &payload, int row, int64_t frame)
     p.why = p.sound ? "Sound goes on an audio track." : "A video goes on a video track.";
     return p;
   }
+  if (p.row < 0 && p.sound) // sound let go over the rows: on a new audio track, under the others
+    p.row = rows;
   p.start = snap_frame(frame, p.frames, {});
   if (track && (p.kind == "title" || p.kind == "fx")) {
     // A title or an adjustment layer belongs over the picture at that moment, not after it: when the place is taken it
@@ -1862,6 +1864,17 @@ void App::add_transition_at(const std::string &from, const std::string &to, cons
   timeline_edit(json::array({std::move(op)}), "Add transition");
 }
 
+// The first free name of a new track: V1, V2, ... or A1, A2, ...
+std::string App::new_track_name(bool sound) const {
+  std::string name;
+  for (int n = 1; n < 1000; ++n) {
+    name = (sound ? "A" : "V") + std::to_string(n);
+    if (std::none_of(tracks_.begin(), tracks_.end(), [&](const TrackUi &t) { return t.name == name; }))
+      break;
+  }
+  return name;
+}
+
 void App::commit_drop(const DropPlan &p) {
   if (p.kind == "tr") {
     const ClipUi *to = find_clip(p.clip);
@@ -1880,13 +1893,7 @@ void App::commit_drop(const DropPlan &p) {
   if (track.empty()) {
     // A new track where it was dropped: row -1 is over all the others (a title that found no room); the lane below the last row
     // makes the bottom picture layer (it shows just above the sound tracks, where it was dropped) or the last sound track.
-    std::string name;
-    for (int n = 1; n < 1000; ++n) {
-      name = (p.sound ? "A" : "V") + std::to_string(n);
-      if (std::none_of(tracks_.begin(), tracks_.end(), [&](const TrackUi &t) { return t.name == name; }))
-        break;
-    }
-    json op = {{"op", "add"}, {"path", seq_id_ + "/tracks/$new:t"}, {"value", {{"kind", p.sound ? "audio" : "video"}, {"name", name}}}};
+    json op = {{"op", "add"}, {"path", seq_id_ + "/tracks/$new:t"}, {"value", {{"kind", p.sound ? "audio" : "video"}, {"name", new_track_name(p.sound)}}}};
     if (!p.sound && p.row >= 0 && !tracks_.empty())
       op["anchor"] = {{"first", true}};
     json ids;
@@ -1939,12 +1946,15 @@ void App::commit_drag(const TrackUi &track, const ClipUi &c, int mode, int64_t d
     return;
   }
   if (mode == 1) {
-    const TrackUi &to = tracks_[size_t(std::clamp(target_track, 0, int(tracks_.size()) - 1))];
     // Where the drag showed it landing; the clips it showed sliding right are moved with it, in the same edit.
     const int64_t start = land.start;
     d = start - c.start; // linked clips follow by the same distance
-    if (to.id != track.id)
+    if (target_track < 0) { // taken up over the rows: a new track on top of the others (the last in track_order), in the same edit
+      ops.push_back({{"op", "add"}, {"path", seq_id_ + "/tracks/$new:top"}, {"value", {{"kind", "video"}, {"name", new_track_name(false)}}}});
+      ops.push_back({{"op", "move"}, {"path", c.id}, {"to", "$new:top/clips"}});
+    } else if (const TrackUi &to = tracks_[size_t(std::min(target_track, int(tracks_.size()) - 1))]; to.id != track.id) {
       ops.push_back({{"op", "move"}, {"path", c.id}, {"to", to.id + "/clips"}});
+    }
     if (start != c.start)
       ops.push_back({{"op", "replace"}, {"path", c.id + "/timing/record_in"}, {"value", frames_text(start)}});
   } else if (mode == 2) {

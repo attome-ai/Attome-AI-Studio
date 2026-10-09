@@ -159,6 +159,8 @@ public:
       return wrap(remove_keyframe());
     if (name == "fit_clip")
       return wrap(fit_clip());
+    if (name == "move_track")
+      return wrap(move_track());
     if (name == "delete_track")
       return wrap(delete_track());
     if (name == "add_marker")
@@ -187,7 +189,7 @@ public:
       return wrap(slide());
     return fail("E_OP", "\"" + name + "\" is not a timeline op.",
                 "Use add_track, add_clip, add_text, add_captions, sync_captions, add_adjustment, add_transition, make_room, delete, ripple_delete, move, trim, "
-                "split, duplicate, slip, roll, slide, add_effect, remove_effect, set_effect_enabled, link, unlink or "
+                "split, duplicate, slip, roll, slide, move_track, delete_track, add_effect, remove_effect, set_effect_enabled, link, unlink or "
                 "set_property (guide.get topic \"timeline\").");
   }
 
@@ -1784,6 +1786,39 @@ private:
       return fail("E_LOCKED", "The track " + t->value("name", id) + " is locked.",
                   "Unlock it first: set_property {target: the track, path: \"locked\", value: false}.");
     push({{"op", "remove"}, {"path", id}});
+    return {};
+  }
+
+  // move_track {track, to: up | down | top | bottom}: the track's place among the tracks of its kind, as the timeline shows them
+  // (top first). Picture tracks are shown from the top layer down, so a picture track moved up is drawn over the one that was over
+  // it, and "top" puts it over all of them (b-roll over the main video). Sound tracks are listed in their own order.
+  Result<void> move_track() {
+    const std::string id = op_.value("track", std::string());
+    const json *t = id.empty() ? nullptr : track(id);
+    if (!t)
+      return fail("E_UNKNOWN_TRACK", "\"track\" must be the ID of a track of this sequence, not \"" + id + "\".",
+                  "Read the track IDs with project.inspect level \"tracks\".");
+    const std::string to = op_.value("to", std::string());
+    if (to != "up" && to != "down" && to != "top" && to != "bottom")
+      return fail("E_PARAM", "\"to\" must be up, down, top or bottom, not \"" + to + "\".");
+    const bool sound = t->value("kind", std::string("video")) == "audio";
+    std::vector<std::string> shown; // the tracks of its kind as the timeline shows them, top first
+    for (const std::string &other : track_order())
+      if (const json *o = track(other); o && (o->value("kind", std::string("video")) == "audio") == sound)
+        shown.push_back(other);
+    if (!sound)
+      std::reverse(shown.begin(), shown.end()); // track_order runs from the bottom layer up
+    const size_t at = size_t(std::find(shown.begin(), shown.end(), id) - shown.begin()), last = shown.size() - 1;
+    const size_t want = to == "top" ? 0 : to == "bottom" ? last : to == "up" ? (at > 0 ? at - 1 : 0) : std::min(at + 1, last);
+    if (want == at) {
+      out_.notes.push_back("ops[" + std::to_string(index_) + "] (move_track): the track " + t->value("name", id) + " is already at the " +
+                           (want == 0 ? "top" : "bottom") + "; nothing moved.");
+      return {};
+    }
+    // Shown higher is later in track_order for a picture track (a higher layer) and earlier for a sound track.
+    const bool higher = want < at;
+    push({{"op", "move"}, {"path", id}, {"to", ctx_.sequence + "/tracks"},
+          {"anchor", {{higher != sound ? "after" : "before", shown[want]}}}});
     return {};
   }
 

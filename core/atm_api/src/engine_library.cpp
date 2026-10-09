@@ -538,6 +538,8 @@ Result<json> Engine::Impl::guide_get(const json &params) {
        "detach_audio {clip} - the sound of a video clip becomes a clip of its own on an audio track, and the video is silent from then on (add_clip makes ONE clip with "
        "its sound; separate_audio: true on add_clip makes the pair at once); "
        "delete_track {track} - the track and every clip on it (a locked track is refused); "
+       "move_track {track, to: up | down | top | bottom} - the track's place among the tracks of its kind as the timeline shows them: a picture "
+       "track moved up is drawn over the picture track that was over it (top: over all of them, e.g. b-roll over the main video); "
        "add_marker {at, name?} and remove_marker {marker} - markers on the ruler; "
        "freeze_frame {clip, at, duration? (2s)} - the picture at that time holds for the duration: the clip is cut there, a still of the frame "
        "goes in between, and what follows on its tracks (its sound too) moves later by the duration; "

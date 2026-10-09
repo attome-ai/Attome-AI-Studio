@@ -216,6 +216,7 @@ private:
   void draw_clip_menu(const ClipUi &clip);
   void draw_timeline_menu();
   void split_at_playhead();
+  std::string new_track_name(bool sound) const; // V1, V2, ... or A1, A2, ...: the first not taken
   const ClipUi *clip_to_cut(const TrackUi **track) const; // the clip a cut at the playhead works on
   void history_step(bool undo);
   void start_export(const std::string &path);

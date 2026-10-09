@@ -59,7 +59,7 @@ try {
   if (-not $failed) {
     $de = Invoke-EditorScript -Project $proj -Endpoint $run.Endpoint -Script @(
       'click @clip:One', 'wait 400', 'expect @field:text_content'
-      'click @media:v.mp4@0.5,4', 'wait 400'           # the panel's empty space, below the card
+      'click @media:v.mp4@0.5,2.5', 'wait 400'         # the panel's empty space, below the card
       'absent @field:text_content', 'expect @button:shape_9x16'
       'click @clip:One', 'wait 400', 'key Backspace', 'wait 800', 'absent @clip:One'
       'key Z ctrl', 'wait 800', 'expect @clip:One')

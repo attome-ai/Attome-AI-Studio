@@ -74,6 +74,38 @@ TEST_CASE("timeline.edit: titles and a blur land on their own tracks, with fades
   CHECK(f.tracks().empty());
 }
 
+TEST_CASE("timeline.edit: move_track puts a track up, down, on top or at the bottom of its kind", "[timeline]") {
+  Fixture f;
+  const json r = f.ok(json::array({{{"op", "add_track"}, {"id", "$new:v1"}, {"kind", "video"}, {"name", "V1"}},
+                                   {{"op", "add_track"}, {"id", "$new:v2"}, {"kind", "video"}, {"name", "V2"}},
+                                   {{"op", "add_track"}, {"id", "$new:v3"}, {"kind", "video"}, {"name", "V3"}},
+                                   {{"op", "add_track"}, {"id", "$new:a1"}, {"kind", "audio"}, {"name", "A1"}},
+                                   {{"op", "add_track"}, {"id", "$new:a2"}, {"kind", "audio"}, {"name", "A2"}}}));
+  const std::string v1 = r["id_map"]["$new:v1"], a2 = r["id_map"]["$new:a2"];
+  const auto order = [&] { // track_order: the first is the bottom layer
+    std::string names;
+    for (const json &t : f.tracks())
+      names += (names.empty() ? "" : " ") + t.value("name", std::string());
+    return names;
+  };
+  REQUIRE(order() == "V1 V2 V3 A1 A2");
+  const auto move = [&](const std::string &track, const char *to) { return f.ok(json::array({{{"op", "move_track"}, {"track", track}, {"to", to}}})); };
+  move(v1, "up");                                   // over V2
+  CHECK(order() == "V2 V1 V3 A1 A2");
+  move(v1, "top");                                  // over all the pictures: b-roll over the main video
+  CHECK(order() == "V2 V3 V1 A1 A2");
+  move(v1, "bottom");
+  CHECK(order() == "V1 V2 V3 A1 A2");
+  move(v1, "down");                                 // already at the bottom: nothing, and a note says so
+  CHECK(order() == "V1 V2 V3 A1 A2");
+  move(a2, "up");                                   // sound tracks in the order they are listed
+  CHECK(order() == "V1 V2 V3 A2 A1");
+  REQUIRE(f.engine.call("project.undo", {{"project", f.project}}));
+  CHECK(order() == "V1 V2 V3 A1 A2");
+  CHECK(f.fail_rule(json::array({{{"op", "move_track"}, {"track", v1}, {"to", "left"}}})) == "E_PARAM");
+  CHECK(f.fail_rule(json::array({{{"op", "move_track"}, {"track", "trk_nope"}, {"to", "up"}}})) == "E_UNKNOWN_TRACK");
+}
+
 TEST_CASE("timeline.edit: add_text takes how the text comes in and goes", "[timeline]") {
   Fixture f;
   const json r = f.ok(json::array({{{"op", "add_text"}, {"id", "$new:t"}, {"text", "Hi"}, {"animate_in", "pop"},
