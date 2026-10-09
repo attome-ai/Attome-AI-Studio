@@ -52,8 +52,8 @@ int main(int argc, char **argv) {
 #if defined(_WIN32)
   _setmode(_fileno(stdin), _O_BINARY);
   _setmode(_fileno(stdout), _O_BINARY);
-  // The arguments as UTF-8: argv is in the system's own code page, which loses a model path or a prompt in another script (whisper.cpp
-  // takes its paths as UTF-8).
+  // The arguments as UTF-8: argv is in the system's own code page, which loses a model path in another script (whisper.cpp takes its paths
+  // as UTF-8).
   std::vector<std::string> utf8_args;
   std::vector<char *> utf8_argv;
   int wide_count = 0;
@@ -74,13 +74,6 @@ int main(int argc, char **argv) {
 #endif
   std::string model, language = "auto";
   bool gpu = false; // --gpu 1: the graphics card through Vulkan (with flash attention), when the build has it and a device takes the model
-  // --timing dtw (the default): word times from the decoder's attention (dynamic time warping); --timing segments: one-word segments.
-  // Measured against a voice whose word positions are known (8 recordings, 172 words): with DTW 97-98 % of the words start within 0.2 s of the
-  // truth, with segments 73-83 %.
-  std::string timing = "dtw";
-  std::string prompt; // --prompt <text>: words given to the decoder before it starts, which steer its spelling and style
-  int beam = 1;       // --beam N: beam search with N candidate texts (1: greedy, the fastest)
-  std::string vad; // --vad <Silero ggml file>: only the speech is decoded (whisper.cpp's voice activity detection); silence and music are skipped
   for (int i = 1; i + 1 < argc; i += 2) {
     if (!std::strcmp(argv[i], "--model"))
       model = argv[i + 1];
@@ -88,14 +81,6 @@ int main(int argc, char **argv) {
       gpu = std::strcmp(argv[i + 1], "0") != 0;
     else if (!std::strcmp(argv[i], "--language"))
       language = argv[i + 1];
-    else if (!std::strcmp(argv[i], "--timing"))
-      timing = argv[i + 1];
-    else if (!std::strcmp(argv[i], "--vad"))
-      vad = argv[i + 1];
-    else if (!std::strcmp(argv[i], "--prompt"))
-      prompt = argv[i + 1];
-    else if (!std::strcmp(argv[i], "--beam"))
-      beam = std::clamp(std::atoi(argv[i + 1]), 1, 10);
   }
   if (model.empty())
     return fail("no --model given");
@@ -111,14 +96,18 @@ int main(int argc, char **argv) {
   whisper_context_params cparams = whisper_context_default_params();
   cparams.use_gpu = gpu;
   cparams.flash_attn = gpu;
-  const bool dtw = timing == "dtw";
-  if (dtw) { // the alignment heads of the model, known by its file name
-    const std::string name = model.substr(model.find_last_of("/\\") == std::string::npos ? 0 : model.find_last_of("/\\") + 1);
+  // Word times come from the decoder's attention (dynamic time warping, DTW) when the model's alignment heads are known, which is by its
+  // file name: against a voice whose word positions are known, 97-98 % of the words then start within 0.2 s of the truth, and 65-78 % with
+  // the other way, one-word segments, which is what a model of another name gets (tools/asr_timing_eval.py).
+  const std::string name = model.substr(model.find_last_of("/\\") == std::string::npos ? 0 : model.find_last_of("/\\") + 1);
+  const whisper_alignment_heads_preset heads = name.find("large-v3-turbo") != std::string::npos ? WHISPER_AHEADS_LARGE_V3_TURBO
+                                               : name.find("large-v3") != std::string::npos     ? WHISPER_AHEADS_LARGE_V3
+                                               : name.find("small") != std::string::npos        ? WHISPER_AHEADS_SMALL
+                                                                                                : WHISPER_AHEADS_NONE;
+  const bool dtw = heads != WHISPER_AHEADS_NONE;
+  if (dtw) {
     cparams.dtw_token_timestamps = true;
-    cparams.dtw_aheads_preset = name.find("large-v3-turbo") != std::string::npos ? WHISPER_AHEADS_LARGE_V3_TURBO
-                                : name.find("large-v3") != std::string::npos       ? WHISPER_AHEADS_LARGE_V3
-                                : name.find("small") != std::string::npos          ? WHISPER_AHEADS_SMALL
-                                                                                   : WHISPER_AHEADS_N_TOP_MOST;
+    cparams.dtw_aheads_preset = heads;
     cparams.flash_attn = false; // DTW reads the attention weights, which flash attention does not keep
   }
   whisper_context *ctx = whisper_init_from_file_with_params(model.c_str(), cparams);
@@ -130,22 +119,13 @@ int main(int argc, char **argv) {
   if (!ctx)
     return fail("the model could not be loaded: " + model);
 
-  whisper_full_params params = whisper_full_default_params(beam > 1 ? WHISPER_SAMPLING_BEAM_SEARCH : WHISPER_SAMPLING_GREEDY);
-  if (beam > 1)
-    params.beam_search.beam_size = beam;
-  if (!prompt.empty())
-    params.initial_prompt = prompt.c_str();
+  whisper_full_params params = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
   params.n_threads = int(std::max(1u, std::thread::hardware_concurrency() / 2));
   params.print_progress = params.print_realtime = params.print_timestamps = params.print_special = false;
-  params.token_timestamps = true; // token times: with DTW they carry a word's time back from the speech-only timeline that VAD decodes
   if (!dtw) { // a segment of one word each (the same as whisper-cli -ml 1 -sow)
+    params.token_timestamps = true;
     params.max_len = 1;
     params.split_on_word = true;
-  }
-  if (!vad.empty()) {
-    params.vad = true;
-    params.vad_model_path = vad.c_str();
-    params.vad_params = whisper_vad_default_params();
   }
   params.no_context = true;
   params.language = language.c_str();
@@ -170,10 +150,7 @@ int main(int argc, char **argv) {
         if (whisper_full_get_token_id(ctx, i, k) >= eot)
           continue; // timestamps and other special tokens
         const std::string piece = whisper_full_get_token_text(ctx, i, k);
-        // With VAD the decoder sees the speech only, joined up: its times are on that shorter timeline. whisper.cpp maps a token's start
-        // back to the file's time but not its DTW time; inside one stretch of speech the shift is the same for both, so it is applied to it.
-        const whisper_token_data data = whisper_full_get_token_data(ctx, i, k);
-        const double at = double(whisper_full_get_token_t0(ctx, i, k) + (data.t_dtw - data.t0)) / 100.0;
+        const double at = double(whisper_full_get_token_data(ctx, i, k).t_dtw) / 100.0;
         if (found.empty() || (!piece.empty() && piece.front() == ' '))
           found.push_back({piece, at});
         else

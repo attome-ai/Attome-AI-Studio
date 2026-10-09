@@ -14,6 +14,15 @@ MediaSpeech (set=mediaspeech), 200 clips of real Arabic broadcast speech, 5594 w
 20.9 % of words wrong, the full large-v3 20.4 %. About a fifth of that is not hearing: the references write the conjunction apart ("و كان"), numbers
 in words, and the clips are cut in mid-sentence; with conjunctions joined and the two words at each end left out, 16.6 % and 16.0 %. So real speech,
 much of it dialect, is about twice as hard as FLEURS's read speech, and a larger general model does not help.
+
+norm=leaderboard scores with the rules of the Open Universal Arabic ASR Leaderboard, to set a number beside the published ones (which have large-v3
+turbo at 17.8 % on MGB-2's broadcast speech). FLEURS gives the same 8.6 % with them. MediaSpeech gives 33.9 %, which is spelling and not hearing: its
+transcripts write ta marbuta as ha and alef maqsura as ya, which the leaderboard's rules do not fold and the default rules here do.
+
+Tried on the 200 MediaSpeech clips and not kept, each against 1170 words wrong for attome-whisper as it is: beam search 5 (1155, a third slower), the
+sound's level brought up (1181 to 1211), silence added around (1257, 1279), no retry at a higher temperature (1197), retrying sooner (1170),
+suppressing non-speech tokens (1170), a prompt in Arabic (1364, 1638). On FLEURS: beam search 167 against 166, two prompts 171 and 174. Voice activity
+detection changed nothing on speech with silence and music around it. The options that measured them are no longer in the program.
 """
 import json, re, struct, subprocess, sys, time, wave
 from pathlib import Path
@@ -24,9 +33,6 @@ fleurs = root / ".deps/fleurs_ar"
 model, language, count, out = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
 use_cli = len(sys.argv) > 5 and sys.argv[5] == "cli"  # control: whisper.cpp's own whisper-cli with its defaults
 gpu_args = ["--gpu", "1"] if "gpu" in sys.argv[5:] else []  # attome-whisper on the graphics card
-for a in sys.argv[5:]:  # any other option of attome-whisper, as name=value: beam=5, prompt=..., timing=segments
-    if "=" in a and not a.startswith("set="):
-        gpu_args += ["--" + a.split("=", 1)[0], a.split("=", 1)[1]]
 cli = root / ".deps/whisper.cpp/build/bin/whisper-cli.exe"
 
 # Arabic diacritics (tashkeel), tatweel, punctuation
@@ -40,6 +46,22 @@ def normal(text: str) -> list[str]:
     text = PUNCT.sub(" ", text)
     text = text.replace("أ", "ا").replace("إ", "ا").replace("آ", "ا").replace("ى", "ي").replace("ة", "ه")  # the usual letter variants
     return text.split()
+
+def leaderboard(text: str) -> list[str]:
+    """The normalization of the Open Universal Arabic ASR Leaderboard (eval.py of Natural-Language-Processing-Elm/open_universal_arabic_asr_leaderboard,
+    commit 8fce859), rule for rule, so a number here can be set beside the published ones: punctuation and diacritics out, hamzas and maddas folded,
+    Eastern numerals to Western, and the conjunction waw joined to the word after it."""
+    text = re.sub(r'[!"#$%&\'()*+,\-./:;<=>?@\[\\\]^_`{|}~،؛؟]', "", text)
+    text = re.sub(r"[\u064B-\u0652]", "", text)
+    text = text.replace("پ", "ب").replace("ڤ", "ف")
+    text = re.sub(r"[آأإ]", "ا", text)
+    text = text.replace("ؤ", "و").replace("ئ", "ي").replace("ء", "")
+    text = text.translate(INDIC)
+    text = re.sub(r"(^|\s)و\s+", r"\1و", text)
+    return re.sub(r"\s+", " ", text).strip().split()
+
+if "norm=leaderboard" in sys.argv[5:]:
+    normal = leaderboard
 
 def edits(ref: list[str], hyp: list[str]) -> int:
     d = list(range(len(hyp) + 1))

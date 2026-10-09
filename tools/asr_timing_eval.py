@@ -1,10 +1,11 @@
-"""How close attome-whisper's word start times are to the true ones, for each model and timing method.
+"""How close attome-whisper's word start times are to the true ones, for each model.
 
 usage: powershell -File tools/asr_timing_truth.ps1 -Out <folder>   (8 recordings by the Windows voices, with each word's true start)
        python -I tools/asr_timing_eval.py <folder>
 
-Results of 2026-10-09 (180 words, on the GPU): one-word segments put 51 % (small) and 39 % (large-v3 turbo) of the words within 0.1 s of the truth;
-DTW, 0.2 s earlier as attome-whisper now gives it, 76 % and 63 %, and 98 % and 97 % within 0.2 s. A clean synthetic voice: real speech is harder.
+Results of 2026-10-09 (180 words, on the GPU), with the DTW timing attome-whisper uses for the models it knows: 76 % (small) and 63 % (large-v3
+turbo) of the words within 0.1 s of the truth, 98 % and 97 % within 0.2 s. One-word segments, which a model of another name gets, had given 51 % and
+39 %, and 78 % and 65 %. A clean synthetic voice: real speech is harder.
 """
 import json, re, struct, subprocess, sys, difflib, statistics
 from pathlib import Path
@@ -29,12 +30,12 @@ def pcm16(path):
 norm = lambda w: re.sub(r"[^a-z0-9']", "", w.lower())
 
 for model in ("ggml-small.bin", "ggml-large-v3-turbo-q5_0.bin"):
-    for timing in ("segments", "dtw"):
+    for timing in ("as shipped",):
         errs = []
         for rec in truth:
             samples = pcm16(data / rec["file"])
             payload = struct.pack("<I", len(samples)) + struct.pack("<%df" % len(samples), *samples)
-            p = subprocess.run([str(exe), "--model", str(root / "models" / model), "--language", "en", "--gpu", "1", "--timing", timing],
+            p = subprocess.run([str(exe), "--model", str(root / "models" / model), "--language", "en", "--gpu", "1"],
                                input=payload, capture_output=True)
             heard = [json.loads(l) for l in p.stdout.decode().splitlines() if '"words"' in l][0]["words"]
             ref = [(norm(w["t"]), w["s"]) for w in rec["words"]]
