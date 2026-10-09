@@ -68,13 +68,17 @@ function Invoke-EditorScript {
 # `attome sample <path> <args>` (a synthetic clip), encoded once and copied afterwards: the same clip is asked for by many
 # tests and encoding it takes more than half a second.
 function New-Sample([string]$Path, [string]$SampleArgs) {
-  $cache = Join-Path $env:TEMP 'attome-uitest-cache'
+  $cache = Join-Path $env:TEMP 'attome-uitest-cache2'
   New-Item -ItemType Directory -Force $cache | Out-Null
   $key = ($SampleArgs -replace '[^0-9a-z]+', '_').Trim('_')
-  $cached = Join-Path $cache ("$key" + [IO.Path]::GetExtension($Path))
+  $name = "$key" + [IO.Path]::GetExtension($Path)
+  $cached = Join-Path $cache $name
   if (-not (Test-Path $cached)) {
+    # The picture's colour is a hash of the file name as `attome sample` is given it. Made from inside the cache folder with a relative
+    # name, it is the same wherever %TEMP% is, so a test that looks for a colour in it (chroma_key) does not depend on the folder it runs from.
     $env:ATTOME_ENDPOINT = "\\.\pipe\attome-uitest-sample-$PID"
-    try { & (Join-Path (Get-BinDir) 'attome.exe') sample $cached @($SampleArgs -split ' ' | Where-Object { $_ }) | Out-Null } finally { Remove-Item Env:\ATTOME_ENDPOINT -ErrorAction SilentlyContinue }
+    Push-Location $cache
+    try { & (Join-Path (Get-BinDir) 'attome.exe') sample $name @($SampleArgs -split ' ' | Where-Object { $_ }) | Out-Null } finally { Pop-Location; Remove-Item Env:\ATTOME_ENDPOINT -ErrorAction SilentlyContinue }
   }
   Copy-Item $cached $Path -Force
 }
