@@ -300,6 +300,31 @@ TEST_CASE("timeline.edit + media.import: clips, dissolves, music and edits by na
   CHECK(f.get(cb)["transform"]["keyframes"]["opacity"].size() == 2);
   CHECK(e["notes"].size() >= 1); // the dissolve on a was dropped, and said so
 }
+TEST_CASE("timeline.edit: set_speed keep_pitch goes to the clip and its sound, with a new speed or the one it has, and false takes it away",
+          "[timeline][media]") {
+  Fixture f;
+  const std::string file = (f.dir / "v.mp4").string();
+  write_video(file, 6);
+  const json r = f.ok(json::array({{{"op", "add_clip"}, {"separate_audio", true}, {"id", "$new:a"}, {"path", file}, {"duration", "2s"}}}));
+  const std::string a = r["id_map"]["$new:a"], sa = r["id_map"]["$new:a.audio"];
+
+  f.ok(json::array({{{"op", "set_speed"}, {"clip", a}, {"speed", 2}, {"keep_pitch", true}}})); // with the new speed
+  CHECK(f.get(a)["timing"]["speed"] == 2.0);
+  CHECK(f.get(a)["timing"]["keep_pitch"] == true);
+  CHECK(f.get(sa)["timing"]["keep_pitch"] == true);
+  CHECK(f.get(a)["timing"]["duration"] == "1"); // the speed still did its part
+
+  f.ok(json::array({{{"op", "set_speed"}, {"clip", a}, {"speed", 2}, {"keep_pitch", false}}})); // with the speed it has: only the pitch changes
+  CHECK_FALSE(f.get(a)["timing"].contains("keep_pitch"));
+  CHECK_FALSE(f.get(sa)["timing"].contains("keep_pitch"));
+  CHECK(f.get(a)["timing"]["speed"] == 2.0);
+  CHECK(f.get(a)["timing"]["duration"] == "1");
+
+  f.ok(json::array({{{"op", "set_speed"}, {"clip", a}, {"speed", 2}, {"keep_pitch", true}}}));
+  f.ok(json::array({{{"op", "set_speed"}, {"clip", a}, {"speed", 2}, {"keep_pitch", true}}})); // said twice: still one field, no error
+  CHECK(f.get(sa)["timing"]["keep_pitch"] == true);
+  CHECK(f.fail_rule(json::array({{{"op", "set_speed"}, {"clip", a}, {"speed", 2}, {"keep_pitch", "yes"}}})) == "E_PARAM");
+}
 TEST_CASE("timeline.edit: set_speed plays a clip and its sound faster or slower, moves its keys, and slides what it runs into",
           "[timeline][media]") {
   Fixture f;

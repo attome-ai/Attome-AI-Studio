@@ -526,7 +526,7 @@ Result<json> Engine::Impl::guide_get(const json &params) {
        "get shorter, one that starts inside the trimmed part loses its head, and a clip with media that spans it is left alone "
        "with a note. add_transition with \"make_room\": true (and \"ripple\") does both in one step\n"
        "- add_track {kind (video | audio), name?, position? (top | bottom), below? / above? (track ID), sync_lock? (true: the track's clips follow make_room and ripple_delete)}\n"
-       "- delete {clip} or {transition}; ripple_delete {clip} (closes the gap, on the tracks locked to the cut too); move {clip, to?, track?}; trim {clip, edge (in | out), to or delta}; set_speed {clip, speed (0.1..10, 2 = twice as fast)} - the clip and its linked sound play faster or slower, and get shorter or longer; "
+       "- delete {clip} or {transition}; ripple_delete {clip} (closes the gap, on the tracks locked to the cut too); move {clip, to?, track?}; trim {clip, edge (in | out), to or delta}; set_speed {clip, speed (0.1..10, 2 = twice as fast), keep_pitch? (true | false)} - the clip and its linked sound play faster or slower, and get shorter or longer; keep_pitch true keeps the sound's pitch at another speed (otherwise it plays like a tape, higher when faster), false goes back to the tape sound, and it can be given with the speed the clip already has; "
        "set_reverse {clip, reverse (true | false)} - the clip and its linked sound play backwards, or forwards again; "
        "fade {clip, in?, out?, sound? (true)} - a picture fades up from nothing over `in` and down over `out` (opacity keys), and the sound it carries fades with it unless sound is false; a sound clip's own sound fades the same way; "
        "a side left out keeps its fade, 0 takes it away; "

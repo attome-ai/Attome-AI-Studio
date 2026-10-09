@@ -1377,9 +1377,11 @@ private:
     return {};
   }
 
-  // set_speed {clip, speed}: the clip plays its file `speed` times as fast (0.1 .. 10; 1 = as recorded). It keeps its start and plays the same
+  // set_speed {clip, speed, keep_pitch?}: the clip plays its file `speed` times as fast (0.1 .. 10; 1 = as recorded). It keeps its start and plays the same
   // part of the file, so it gets shorter when faster and longer when slower; its keys (fades, animation) are moved with it. Its linked sound
-  // changes with it. Clips after it on its track that it would now run into slide right; a gap it leaves is kept.
+  // changes with it. Clips after it on its track that it would now run into slide right; a gap it leaves is kept. keep_pitch (true | false) says
+  // whether the sound keeps its pitch at another speed instead of playing like a tape; it goes to the clip and its linked sound, and can be
+  // given with the speed the clip already has.
   Result<void> set_speed() {
     ATM_TRY(auto c, clip("clip"));
     const std::string id = op_.value("clip", std::string());
@@ -1388,6 +1390,8 @@ private:
     const double speed = op_["speed"].get<double>();
     if (!(speed >= 0.1 && speed <= 10.0))
       return fail("E_PARAM", "\"speed\" must be between 0.1 and 10.", "1 plays the file as it was recorded.");
+    if (op_.contains("keep_pitch") && !op_["keep_pitch"].is_boolean())
+      return fail("E_PARAM", "\"keep_pitch\" must be true or false.");
     const Rational to = *Rational::make(std::llround(speed * 1000.0), 1000);
     std::vector<std::pair<std::string, std::string>> members = {{id, c.second}};
     for (const Member &m : linked(id))
@@ -1395,6 +1399,13 @@ private:
     for (const auto &[mid, tid] : members) {
       const json &node = node_of(mid);
       const json timing = node.value("timing", json::object());
+      if (op_.contains("keep_pitch")) { // true is stored, false takes the field away
+        const bool keep = op_["keep_pitch"].get<bool>();
+        if (keep)
+          push({{"op", timing.contains("keep_pitch") ? "replace" : "add"}, {"path", mid + "/timing/keep_pitch"}, {"value", true}});
+        else if (timing.contains("keep_pitch"))
+          push({{"op", "remove"}, {"path", mid + "/timing/keep_pitch"}});
+      }
       const double was_d = std::clamp(timing.value("speed", 1.0), 0.1, 10.0);
       const Rational was = *Rational::make(std::llround(was_d * 1000.0), 1000);
       if (compare(was, to) == 0)
