@@ -367,6 +367,10 @@ private:
   bool playing_ = false;
   double play_accum_ = 0.0;
   float pps_ = 90.0f; // pixels per second
+  float pps_drawn_ = 90.0f;      // the zoom the timeline was last drawn at: a change keeps a moment in place on screen
+  float zoom_anchor_px_ = -1.0f; // where in the lanes the wheel zoomed (pixels from their left), -1 for the playhead
+  float scroll_want_ = 0.0f;     // a scroll asked for again on the next frame, once the content has its new width
+  int scroll_tries_ = 0;
   std::vector<std::string> recent_;      // recent projects, newest first
   char new_name_[128] = "My Short";       // the welcome page's new project: its name, shape (0 9:16, 1 16:9, 2 1:1) and frame rate (0 24, 1 30, 2 60)
   int new_shape_ = 0, new_rate_ = 1;

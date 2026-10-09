@@ -235,15 +235,23 @@ struct SliderState {
   ImGuiID typed_for = 0;
   float typed = 0.0f;
   ImGuiID reset_hold = 0; // a double click set the value back: the drag that goes with the click is ignored until the button is up
+  bool fine = false;      // Shift is held: the drag moves a tenth as fast, on from where the value was when Shift went down
+  float grab_t = 0.0f, grab_x = 0.0f;
 };
 inline SliderState g_slider;
 
 // The mockup's slider: a thin track filled in orange and a round knob. Returns true while the value changes. With `def`, a double click
 // sets the value back to it. slider_done() says the value is to be saved; slider_number() draws the number, which can be typed into.
-inline bool slim_slider(const char *id, float *value, float lo, float hi, float width, const char *fmt, float def = NAN) {
+// Shift drags a tenth as fast. `log_scale` spreads a range such as 10%..400% evenly by ratio (lo above 0); the knob sticks to `stick`
+// (0 dB, the centre, 100 %) when it comes near it, unless Shift is held, and a tick on the track shows where.
+inline bool slim_slider(const char *id, float *value, float lo, float hi, float width, const char *fmt, float def = NAN,
+                        bool log_scale = false, float stick = NAN) {
   ImGui::PushID(id);
   const float h = 20.0f;
   const ImVec2 p = ImGui::GetCursorScreenPos();
+  const ImGuiIO &io = ImGui::GetIO();
+  const auto to_t = [&](float v) { return log_scale ? std::log(std::max(v, lo) / lo) / std::log(hi / lo) : (v - lo) / (hi - lo); };
+  const auto from_t = [&](float t) { return log_scale ? lo * std::pow(hi / lo, t) : lo + t * (hi - lo); };
   ImGui::InvisibleButton("##s", ImVec2(width, h));
   const ImGuiID item = ImGui::GetItemID();
   ui_mark(std::string("slider:") + id);
@@ -260,8 +268,17 @@ inline bool slim_slider(const char *id, float *value, float lo, float hi, float 
     g_slider.reset_hold = item;
     ImGui::MarkItemEdited(item);
   } else if (ImGui::IsItemActive() && g_slider.reset_hold != item) {
-    const float t = std::clamp((ImGui::GetIO().MousePos.x - p.x - 8.0f) / (width - 16.0f), 0.0f, 1.0f);
-    const float v = lo + t * (hi - lo);
+    if (ImGui::IsItemActivated() || io.KeyShift != g_slider.fine) { // pressed, or Shift went down or up on the way: go on from here
+      g_slider.fine = io.KeyShift;
+      g_slider.grab_t = to_t(*value);
+      g_slider.grab_x = io.MousePos.x;
+    }
+    float t = (io.MousePos.x - p.x - 8.0f) / (width - 16.0f);
+    if (g_slider.fine)
+      t = g_slider.grab_t + (io.MousePos.x - g_slider.grab_x) / (width - 16.0f) * 0.1f;
+    float v = from_t(std::clamp(t, 0.0f, 1.0f));
+    if (!std::isnan(stick) && !g_slider.fine && std::fabs(to_t(v) - to_t(stick)) < 0.03f)
+      v = stick;
     if (v != *value) {
       *value = v;
       changed = true;
@@ -270,12 +287,16 @@ inline bool slim_slider(const char *id, float *value, float lo, float hi, float 
   }
   done = done || ImGui::IsItemDeactivatedAfterEdit();
   if (!std::isnan(def) && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal) && !ImGui::IsItemActive())
-    ImGui::SetTooltip("Drag to change. Double-click to set it back.");
-  const float t = std::clamp((*value - lo) / (hi - lo), 0.0f, 1.0f); // a typed value may lie past the end of the track
+    ImGui::SetTooltip("Drag to change, with Shift for small steps. Double-click to set it back.");
+  const float t = std::clamp(to_t(*value), 0.0f, 1.0f); // a typed value may lie past the end of the track
   const float x = p.x + 8.0f + t * (width - 16.0f), y = p.y + h * 0.5f;
   ImDrawList *dl = ImGui::GetWindowDrawList();
   dl->AddRectFilled(ImVec2(p.x + 4.0f, y - 2.0f), ImVec2(p.x + width - 4.0f, y + 2.0f), hex(look::raised), 2.0f);
   dl->AddRectFilled(ImVec2(p.x + 4.0f, y - 2.0f), ImVec2(x, y + 2.0f), hex(look::accent), 2.0f);
+  if (!std::isnan(stick)) { // a tick where the knob sticks
+    const float sx = p.x + 8.0f + std::clamp(to_t(stick), 0.0f, 1.0f) * (width - 16.0f);
+    dl->AddRectFilled(ImVec2(sx - 0.75f, y - 5.0f), ImVec2(sx + 0.75f, y + 5.0f), hex(look::fg3));
+  }
   dl->AddCircleFilled(ImVec2(x, y), 7.0f, hex(look::fg));
   dl->AddCircle(ImVec2(x, y), 7.0f, hex(look::accent), 0, 2.0f);
   (void)fmt;

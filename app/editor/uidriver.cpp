@@ -443,6 +443,38 @@ void UiDriver::before_frame() {
         d.frames.push_back([](ImGuiIO &) {});
         }
       }
+    } else if (op == "wheel") { // "wheel <target> <notches> [ctrl]": the mouse wheel over a widget (Ctrl+wheel zooms the timeline)
+      const auto p = d.resolve(arg(1), error);
+      if (!error.empty()) {
+        fail(c.line, error);
+        return;
+      }
+      if (!p) {
+        finished = false;
+        if (Clock::now() > d.deadline) {
+          fail(c.line, arg(1) + " did not appear");
+          return;
+        }
+      } else {
+        const ImVec2 at = *p;
+        const float notches = float(std::atof(arg(2).c_str()));
+        const bool ctrl = std::find(c.words.begin() + 1, c.words.end(), "ctrl") != c.words.end();
+        // One event a frame, with a frame between: Dear ImGui trickles events that come together over the next frames, so a
+        // key let go right after the wheel could arrive first.
+        d.frames.push_back([&d, at](ImGuiIO &) { d.mouse = at; });
+        d.frames.push_back([ctrl](ImGuiIO &in) {
+          if (ctrl)
+            in.AddKeyEvent(ImGuiMod_Ctrl, true);
+        });
+        d.frames.push_back([](ImGuiIO &) {});
+        d.frames.push_back([notches](ImGuiIO &in) { in.AddMouseWheelEvent(0.0f, notches); });
+        d.frames.push_back([](ImGuiIO &) {});
+        d.frames.push_back([ctrl](ImGuiIO &in) {
+          if (ctrl)
+            in.AddKeyEvent(ImGuiMod_Ctrl, false);
+        });
+        d.frames.push_back([](ImGuiIO &) {});
+      }
     } else if (op == "release") { // lets go of a drag that was held
       d.frames.push_back([](ImGuiIO &in) { in.AddMouseButtonEvent(0, false); });
       d.frames.push_back([](ImGuiIO &) {});

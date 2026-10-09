@@ -527,6 +527,8 @@ void App::draw_viewer() {
   ImGui::SetCursorScreenPos(ImVec2(cx - 22.0f, cy - 22.0f));
   ImGui::InvisibleButton("##play", ImVec2(44.0f, 44.0f));
   ui_mark("transport:play");
+  if (playing_)
+    ui_mark("transport:playing"); // a UI test can see that it plays
   const bool play_hover = ImGui::IsItemHovered();
   if (ImGui::IsItemClicked() && total_frames_ > 0)
     play(!playing_);

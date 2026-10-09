@@ -581,14 +581,14 @@ void App::draw_shortcuts_sheet() {
       std::vector<Row> rows;
     };
     static const std::vector<Group> groups = {
-        {"Playing", {{"Space", "Play or pause"}, {"Left / Right", "One frame back or forward"}, {"Shift+Left / Right", "One second back or forward"},
+        {"Playing", {{"Space", "Play or pause"}, {"K / L", "Stop, play"}, {"Left / Right", "One frame back or forward"}, {"Shift+Left / Right", "One second back or forward"},
                      {"Up / Down", "The previous or next cut or marker"}, {"Home / End", "The start or the end"}, {"Ctrl+L", "Loop playback"}, {"Ctrl+F", "Full screen preview (Esc leaves)"},
                      {"I / O", "Mark In and Out at the playhead: play, loop and export just that part"}, {"Alt+X", "Clear In and Out"}}},
         {"Clips", {{"Click, Ctrl+click, Shift+click", "Select one, add or remove one, a range on the track"}, {"Drag on empty space", "A box that selects what it touches"},
                    {"Ctrl+A", "Select all clips"}, {"S", "Split at the playhead"}, {"Delete or Backspace", "Delete the selected clips"}, {"Click on empty space", "Select nothing"},
-                   {"Ctrl+C / X / V", "Copy, cut, paste at the playhead"}, {"Ctrl+D", "Duplicate after the clips"}, {"Esc", "Select nothing"}, {"Right click", "The menu of a clip or of the empty timeline"}}},
+                   {"Ctrl+C / X / V", "Copy, cut, paste at the playhead"}, {"Ctrl+D", "Duplicate after the clips"}, {"Esc", "Select nothing; while dragging, let go without the change"}, {"Right click", "The menu of a clip or of the empty timeline"}}},
         {"Project", {{"Ctrl+Z / Ctrl+Y", "Undo, redo (Ctrl+Shift+Z also redoes)"}, {"Ctrl+S", "Save now"}, {"Ctrl+I", "Import media"}, {"Ctrl+E", "Export"}, {"Ctrl+,", "Settings: where rendering runs"}, {"F1", "This list"}}},
-        {"Timeline", {{"Shift+Z", "Fit the whole film in the window"}, {"+ / -", "Zoom in or out"}, {"Ctrl+mouse wheel", "Zoom about the pointer"}, {"M", "A marker at the playhead (again: remove it)"}, {"N", "Snapping on or off"}, {"Alt while dragging", "The opposite of the Snap switch, for one drag"}, {"Ctrl+plus / minus / 0", "Make the whole editor larger, smaller, or 100 %"}}},
+        {"Timeline", {{"Shift+Z", "Fit the whole film in the window"}, {"+ / -", "Zoom in or out"}, {"Ctrl+mouse wheel", "Zoom about the pointer"}, {"M", "A marker at the playhead (again: remove it)"}, {"N", "Snapping on or off"}, {"Alt while dragging", "The opposite of the Snap switch, for one drag"}, {"Shift while dragging a slider", "Small steps"}, {"Ctrl+plus / minus / 0", "Make the whole editor larger, smaller, or 100 %"}}},
         {"Workflows", {{"Double click", "Open the workflow of a clip; a search to add a node on the canvas"}, {"Ctrl+C / V / D", "Copy, paste, duplicate nodes"}, {"Ctrl+A", "Select all nodes"},
                        {"Delete", "Delete the selected node or link"}, {"Shift+drag", "A box that selects nodes"}, {"Esc", "Clear the selection, then leave the canvas"}}}};
     ImGui::PushFont(g_fonts.bold, 18.0f);

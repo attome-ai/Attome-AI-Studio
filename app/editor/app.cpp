@@ -1681,6 +1681,7 @@ void App::commit_drop(const DropPlan &p) {
 void App::commit_drag(const TrackUi &track, const ClipUi &c, int mode, int64_t d, int target_track, const TrackLanding &land) {
   json ops = json::array();
   const char *label = "Move clip";
+  int64_t trimmed = c.frames; // the clip's length after a trim, for its fades and its linked clips
   if (mode == 1 && picked_.size() > 1 && picked_.count(c.id)) { // a group: every selected clip (and what is linked to it) moves the same distance
     int64_t shift = land.start - c.start;
     const std::vector<const ClipUi *> group = picked_clips();
@@ -1711,6 +1712,7 @@ void App::commit_drag(const TrackUi &track, const ClipUi &c, int mode, int64_t d
       frames = std::min(frames, c.media_frames - c.source_frames);
     if (frames != c.frames)
       ops.push_back({{"op", "replace"}, {"path", c.id + "/timing/duration"}, {"value", frames_text(frames)}});
+    trimmed = frames;
   } else {
     label = "Trim clip";
     d = std::clamp<int64_t>(d, -std::min(c.source_frames, c.start), c.frames - 1);
@@ -1719,16 +1721,12 @@ void App::commit_drag(const TrackUi &track, const ClipUi &c, int mode, int64_t d
       ops.push_back({{"op", "replace"}, {"path", c.id + "/timing/duration"}, {"value", frames_text(c.frames - d)}});
       ops.push_back({{"op", "replace"}, {"path", c.id + "/timing/source_in"}, {"value", frames_text(c.source_frames + d)}});
     }
+    trimmed = c.frames - d;
   }
   if (ops.empty() && (mode != 1 || land.pushed.empty()))
     return;
   if (mode != 1 && !c.opacity_keys.empty() && c.fades_only) { // fades stay at the clip's ends
-    int64_t frames = c.frames;
-    for (const json &op : ops)
-      if (op["path"] == c.id + "/timing/duration")
-        if (const auto t = Rational::parse(op["value"].get<std::string>()))
-          frames = to_frames(*t, rate_, Round::nearest_even).value_or(frames);
-    for (json &op : fade_ops(c, c.fade_in, c.fade_out, frames, c.opacity))
+    for (json &op : fade_ops(c, c.fade_in, c.fade_out, trimmed, c.opacity))
       ops.push_back(std::move(op));
   }
   drop_transitions(c.id, ops); // the cut moves, so a dissolve on it would no longer fit
@@ -1739,14 +1737,9 @@ void App::commit_drag(const TrackUi &track, const ClipUi &c, int mode, int64_t d
       if (start != m->start)
         ops.push_back({{"op", "replace"}, {"path", m->id + "/timing/record_in"}, {"value", frames_text(start)}});
     } else if (mode == 2) {
-      int64_t frames = 0;
-      for (const json &op : ops)
-        if (op["path"] == c.id + "/timing/duration")
-          if (const auto t = Rational::parse(op["value"].get<std::string>()))
-            frames = to_frames(*t, rate_, Round::nearest_even).value_or(c.frames);
-      if (frames > 0 && frames != c.frames)
+      if (trimmed != c.frames)
         ops.push_back({{"op", "replace"}, {"path", m->id + "/timing/duration"},
-                       {"value", frames_text(std::max<int64_t>(1, m->frames + (frames - c.frames)))}});
+                       {"value", frames_text(std::max<int64_t>(1, m->frames + (trimmed - c.frames)))}});
     } else if (d != 0) {
       ops.push_back({{"op", "replace"}, {"path", m->id + "/timing/record_in"}, {"value", frames_text(m->start + d)}});
       ops.push_back({{"op", "replace"}, {"path", m->id + "/timing/duration"}, {"value", frames_text(m->frames - d)}});

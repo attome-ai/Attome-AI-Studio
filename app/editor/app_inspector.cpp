@@ -455,7 +455,7 @@ void App::draw_inspector() {
     diamond("scale", c->scale_keys);
     ImGui::SameLine(88.0f);
     const float sw = ImGui::GetContentRegionAvail().x - 52.0f;
-    if (slim_slider("scale", &scale_, 0.1f, 4.0f, sw, "", 1.0f)) {
+    if (slim_slider("scale", &scale_, 0.1f, 4.0f, sw, "", 1.0f, true, 1.0f)) {
       render::Transform xf = transform_of(*c);
       xf.scale_x = xf.scale_y = scale_;
       preview_.set_transform(id, xf);
@@ -511,7 +511,7 @@ void App::draw_inspector() {
     ImGui::TextColored(hexv(look::fg2), "Rotation");
     diamond("rotation", c->rotation_keys);
     ImGui::SameLine(88.0f);
-    if (slim_slider("rotation", &rotation_, -180.0f, 180.0f, sw, "", 0.0f)) {
+    if (slim_slider("rotation", &rotation_, -180.0f, 180.0f, sw, "", 0.0f, false, 0.0f)) {
       render::Transform xf = transform_of(*c);
       xf.rotation = rotation_;
       preview_.set_transform(id, xf);
@@ -656,10 +656,10 @@ void App::draw_inspector() {
   if (show_audio && begin_card("##sound", "Audio", ac != c ? "its sound" : nullptr)) {
     // One row: label, slider, value. The edit is sent when the slider is let go.
     const auto row = [&](const char *label, const char *slider, float *value, float lo, float hi, const char *fmt,
-                         const char *key, const char *what, bool is_time) {
+                         const char *key, const char *what, bool is_time, float stick = NAN) {
       ImGui::TextColored(hexv(look::fg2), "%s", label);
       ImGui::SameLine(88.0f);
-      if (slim_slider(slider, value, lo, hi, ImGui::GetContentRegionAvail().x - 60.0f, "", 0.0f)) { // heard while it moves
+      if (slim_slider(slider, value, lo, hi, ImGui::GetContentRegionAvail().x - 60.0f, "", 0.0f, false, stick)) { // heard while it moves
         const json v = is_time ? json(frames_text(std::llround(double(*value) * fps()))) : json(std::round(*value * 10.0f) / 10.0f);
         preview_ops(json::array({{{"op", "replace"}, {"path", aid + "/audio/" + key}, {"value", v}}}), true);
       }
@@ -673,8 +673,8 @@ void App::draw_inspector() {
       }
       slider_number(fmt, *value, 1.0f, lo, is_time ? float(double(ac->frames) / fps()) : hi);
     };
-    row("Gain", "gain", &gain_db_, -40.0f, 12.0f, "%+.1f dB", "gain_db", "Change gain", false);
-    row("Pan", "pan", &pan_, -1.0f, 1.0f, "%+.1f", "pan", "Change pan", false);
+    row("Gain", "gain", &gain_db_, -40.0f, 12.0f, "%+.1f dB", "gain_db", "Change gain", false, 0.0f);
+    row("Pan", "pan", &pan_, -1.0f, 1.0f, "%+.1f", "pan", "Change pan", false, 0.0f);
     const float max_fade = float(std::min(10.0, double(ac->frames) / fps())); // the slider; a longer fade is typed
     row("Fade in", "afadein", &audio_fade_in_s_, 0.0f, max_fade, "%.2fs", "fade_in", "Sound fade in", true);
     row("Fade out", "afadeout", &audio_fade_out_s_, 0.0f, max_fade, "%.2fs", "fade_out", "Sound fade out", true);

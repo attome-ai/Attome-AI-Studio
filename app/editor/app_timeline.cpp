@@ -114,8 +114,32 @@ void App::draw_timeline() {
   if (fit_pending_ && total_frames_ > 0 && view_w - header_w > 300.0f) { // the whole film across the timeline, with a little room at the end; once the panel has its size
     pps_ = std::clamp((view_w - header_w - 28.0f) / float(double(total_frames_) / rate), 4.0f, 800.0f);
     fit_pending_ = false;
+    pps_drawn_ = pps_;
     ImGui::SetScrollX(0.0f);
   }
+  if (pps_ != pps_drawn_) {
+    // The zoom changed: the moment under the pointer (the wheel) or at the playhead (the slider, the keys) stays where it is on
+    // screen. Without the playhead in view, the middle of the view stays.
+    float anchor = zoom_anchor_px_;
+    if (anchor < 0.0f) {
+      const float head = float(double(playhead_) / rate * pps_drawn_) - ImGui::GetScrollX();
+      anchor = head >= 0.0f && head <= view_w - header_w ? head : (view_w - header_w) * 0.5f;
+    }
+    scroll_want_ = std::max(0.0f, float(double(ImGui::GetScrollX() + anchor) / pps_drawn_ * pps_) - anchor);
+    scroll_tries_ = 2; // the content is as wide as it was until the frame after: asked again then
+    pps_drawn_ = pps_;
+    zoom_anchor_px_ = -1.0f;
+  }
+  if (scroll_tries_ > 0) {
+    ImGui::SetScrollX(scroll_want_);
+    --scroll_tries_;
+  }
+  if (!drag_id_.empty() && ImGui::IsKeyPressed(ImGuiKey_Escape, false)) { // Esc lets go of a drag without the edit
+    drag_id_.clear();
+    pushed_view_.clear();
+    pushed_next_.clear();
+  }
+  const bool lanes_hovered = ImGui::IsWindowHovered() && drag_id_.empty() && !ImGui::GetDragDropPayload();
   const double total_s = std::max(double(total_frames_) / rate + 10.0, double(view_w - header_w) / pps_);
   const float content_w = header_w + float(total_s * pps_);
   const float content_h = ruler_h + float(std::max<size_t>(1, tracks_.size())) * row_h;
@@ -183,7 +207,7 @@ void App::draw_timeline() {
     char label[32];
     const int sec = int(t);
     if (step < 1.0)
-      std::snprintf(label, sizeof label, "00:%02d.%d", sec, int(std::lround((t - sec) * 10)) % 10);
+      std::snprintf(label, sizeof label, "%02d:%02d.%d", sec / 60, sec % 60, int(std::lround((t - sec) * 10)) % 10); // past a minute too
     else
       std::snprintf(label, sizeof label, "%02d:%02d", sec / 60, sec % 60);
     dl->AddLine(ImVec2(x, origin.y + ruler_h * 0.6f), ImVec2(x, origin.y + ruler_h), hex(look::line2));
@@ -383,6 +407,13 @@ void App::draw_timeline() {
             }
           }
         }
+      }
+      // Under the pointer: the clip lightens and its two ends show the grips that trim it.
+      if (lanes_hovered && !attached_sound && ImGui::IsMouseHoveringRect(ImVec2(std::max(x0, win.x + header_w), cy), ImVec2(x1, cy + ch))) {
+        dl->AddRectFilled(ImVec2(x0, cy), ImVec2(x1 - 1.0f, cy + ch), IM_COL32(255, 255, 255, 20), 5.0f);
+        if (x1 - x0 > 30.0f)
+          for (const float gx : {x0 + 3.0f, x1 - 6.0f})
+            dl->AddRectFilled(ImVec2(gx, cy + ch * 0.28f), ImVec2(gx + 2.0f, cy + ch * 0.72f), IM_COL32(255, 255, 255, 190), 1.0f);
       }
       if (const auto st = gen_state_.find(c.id); c.is_generative && !blocked && st != gen_state_.end()) {
         const std::string state = st->second.value("state", ""); // an amber bar along the bottom: out of date or not made yet
@@ -590,7 +621,18 @@ void App::draw_timeline() {
               show_pushes(drag_land_, pushed_next_);
               for (const ClipUi *m : linked_of(c)) // its own sound comes along
                 pushed_next_[m->id] = std::max<int64_t>(0, m->start + (drag_land_.start - c.start));
+              ImGui::SetTooltip("%s", timecode(drag_land_.start).c_str());
             }
+          } else if (mode != 1 && drag_frames_ != 0) {
+            // A trimmed end catches on the playhead, markers and other clips' edges, as a moved clip does (Alt turns it off).
+            const int64_t edge0 = mode == 2 ? c.start + c.frames : c.start;
+            drag_frames_ = snap_frame(edge0 + drag_frames_, 0, c.id) - edge0;
+            int64_t length = std::max<int64_t>(1, c.frames + drag_frames_);
+            if (mode == 2 && c.media_frames > 0)
+              length = std::min(length, c.media_frames - c.source_frames);
+            if (mode == 3)
+              length = c.frames - std::clamp<int64_t>(drag_frames_, -std::min(c.source_frames, c.start), c.frames - 1);
+            ImGui::SetTooltip("%s  (%+lld frames)", timecode(length).c_str(), static_cast<long long>(length - c.frames));
           }
         }
         if (ImGui::IsItemDeactivated() && drag_id_ == c.id) {
@@ -952,8 +994,10 @@ void App::draw_timeline() {
   }
   if (playing_ && (px > win.x + view_w - 40.0f || px < win.x + header_w)) // follow the playhead
     ImGui::SetScrollX(float(double(playhead_) / rate * pps_) - 60.0f);
-  if (ImGui::IsWindowHovered() && ImGui::GetIO().KeyCtrl && ImGui::GetIO().MouseWheel != 0.0f)
+  if (ImGui::IsWindowHovered() && ImGui::GetIO().KeyCtrl && ImGui::GetIO().MouseWheel != 0.0f) {
     pps_ = std::clamp(pps_ * std::pow(1.15f, ImGui::GetIO().MouseWheel), 4.0f, 800.0f);
+    zoom_anchor_px_ = std::max(0.0f, mouse.x - win.x - header_w); // the moment under the pointer stays under it
+  }
 
   if (!reveal_clip_.empty()) { // a clip just added: bring it into view (across and down)
     const std::string wanted = std::exchange(reveal_clip_, std::string());

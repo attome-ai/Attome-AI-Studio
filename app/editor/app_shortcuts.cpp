@@ -75,6 +75,10 @@ void App::shortcuts() {
   }
   if (ImGui::IsKeyPressed(ImGuiKey_Space, false))
     play(!playing_);
+  if (!io.KeyCtrl && !io.KeyAlt && ImGui::IsKeyPressed(ImGuiKey_K, false)) // K stops, L plays, as in other editors
+    play(false);
+  if (!io.KeyCtrl && !io.KeyAlt && ImGui::IsKeyPressed(ImGuiKey_L, false))
+    play(true);
   if (ImGui::IsKeyPressed(ImGuiKey_Delete, false) || ImGui::IsKeyPressed(ImGuiKey_Backspace, false))
     delete_selected();
   if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_C, false))
@@ -117,7 +121,7 @@ void App::shortcuts() {
     pps_ = std::clamp(pps_ * 1.25f, 4.0f, 800.0f);
   if ((ImGui::IsKeyPressed(ImGuiKey_Minus, true) || ImGui::IsKeyPressed(ImGuiKey_KeypadSubtract, true)) && !io.KeyCtrl)
     pps_ = std::clamp(pps_ / 1.25f, 4.0f, 800.0f);
-  if (ImGui::IsKeyPressed(ImGuiKey_Escape, false) && !menu_was_open && !menu_seen_) {
+  if (ImGui::IsKeyPressed(ImGuiKey_Escape, false) && !menu_was_open && !menu_seen_ && drag_id_.empty()) { // during a drag Esc only lets it go (the timeline)
     if (mon_full_) {
       mon_full_ = false;
       return;
