@@ -168,7 +168,8 @@ Result<json> Engine::Impl::music_cuts(const json &params) {
 }
 
   // audio.duck {project, clip, over, db?, ramp?}: the clip's level goes down by `db` (default 12) under the clips in `over` (clip IDs, or a track ID for all its clips) and
-  // comes back after them, over `ramp` seconds (default 0.12). It is the clip's audio.keyframes.gain_db around its own gain_db; the keys it had are replaced. One edit.
+  // comes back after them, over `ramp` seconds (default 0.12). It is the clip's audio.keyframes.duck_db (0, then -db), added to its level, which stays its own
+  // (gain_db or its gain_db keys); the ducking keys it had are replaced. One edit.
 Result<json> Engine::Impl::audio_duck(const json &params) {
   ATM_PROFILE_SCOPE("api.audio_duck");
   ATM_TRY(Project *pr, project(params));
@@ -186,7 +187,7 @@ Result<json> Engine::Impl::audio_duck(const json &params) {
   };
   const json timing = ref->node->value("timing", json::object());
   const double start = seconds_of(timing, "record_in"), length = seconds_of(timing, "duration");
-  const double base = ref->node->value("audio", json::object()).value("gain_db", 0.0);
+  constexpr double base = 0.0; // ducking is added to the level: 0 is the sound as it is
   std::vector<std::string> over;
   for (const json &o : params["over"])
     if (o.is_string())
@@ -209,8 +210,8 @@ Result<json> Engine::Impl::audio_duck(const json &params) {
       merged.push_back(s);
   const auto sec = [](double v) { return std::to_string(int64_t(std::llround(v * 1000000.0))) + "/1000000"; };
   json ops = json::array();
-  if (const json audio = ref->node->value("audio", json::object()); audio.contains("keyframes") && audio["keyframes"].contains("gain_db") && !audio["keyframes"]["gain_db"].empty())
-    ops.push_back({{"op", "remove_keyframe"}, {"clip", id}, {"property", "gain_db"}});
+  if (const json audio = ref->node->value("audio", json::object()); audio.contains("keyframes") && audio["keyframes"].contains("duck_db") && !audio["keyframes"]["duck_db"].empty())
+    ops.push_back({{"op", "remove_keyframe"}, {"clip", id}, {"property", "duck_db"}});
   std::vector<std::pair<double, double>> keys; // (seconds, dB), in order, one per time
   const auto key = [&](double t, double v) {
     t = std::clamp(t, 0.0, length);
@@ -228,7 +229,7 @@ Result<json> Engine::Impl::audio_duck(const json &params) {
   if (!keys.empty() && keys.front().first > 1e-6) // the level the clip starts at
     keys.insert(keys.begin(), {0.0, base});
   for (const auto &[t, v] : keys)
-    ops.push_back({{"op", "set_keyframe"}, {"clip", id}, {"property", "gain_db"}, {"at", sec(t)}, {"value", v}});
+    ops.push_back({{"op", "set_keyframe"}, {"clip", id}, {"property", "duck_db"}, {"at", sec(t)}, {"value", v}});
   if (ops.empty())
     return json{{"ducked", json::array()}, {"keys", 0}};
   ATM_TRY(json done, timeline_edit({{"project", params["project"]}, {"ops", std::move(ops)}, {"label", "Duck the music"}, {"sequence", sequence_holding(pr->doc.root(), id)}}));

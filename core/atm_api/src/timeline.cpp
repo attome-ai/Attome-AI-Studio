@@ -1567,8 +1567,8 @@ private:
           maps.push_back(&*kf);
     return maps;
   }
-  // Where a property's keys live: gain_db is the sound's, the rest the picture's.
-  static const char *key_owner(const std::string &prop) { return prop == "gain_db" ? "audio" : "transform"; }
+  // Where a property's keys live: gain_db and duck_db are the sound's, the rest the picture's.
+  static const char *key_owner(const std::string &prop) { return prop == "gain_db" || prop == "duck_db" ? "audio" : "transform"; }
 
   std::vector<Key> keys_of(const json &clip, const std::string &prop) const {
     std::vector<Key> keys;
@@ -1673,8 +1673,9 @@ private:
 
   Result<std::string> key_property() const {
     const std::string prop = op_.value("property", std::string());
-    if (prop != "position" && prop != "scale" && prop != "rotation" && prop != "opacity" && prop != "gain_db")
-      return fail("E_PARAM", "\"property\" must be position, scale, rotation, opacity or gain_db (the sound's level in dB).");
+    if (prop != "position" && prop != "scale" && prop != "rotation" && prop != "opacity" && prop != "gain_db" && prop != "duck_db")
+      return fail("E_PARAM", "\"property\" must be position, scale, rotation, opacity, gain_db (the sound's level in dB) or duck_db (how far ducking "
+                             "takes it down, in dB, on top of its level).");
     return prop;
   }
 
@@ -1731,7 +1732,7 @@ private:
                   "The keys are from " + keys.front().t.to_string() + " to " + keys.back().t.to_string() + " (counted from the clip's start).");
     for (const Key &k : gone)
       push({{"op", "remove"}, {"path", k.id}});
-    if (gone.size() == keys.size() && !gone.back().v.is_null()) {
+    if (gone.size() == keys.size() && !gone.back().v.is_null() && prop != "duck_db") { // ducking has no plain value: without keys it is off
       const bool had = node_of(id).value(key_owner(prop), json::object()).contains(prop);
       push({{"op", had ? "replace" : "add"}, {"path", id + "/" + key_owner(prop) + "/" + prop}, {"value", gone.back().v}});
     }

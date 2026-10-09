@@ -316,8 +316,8 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
      &Impl::music_cuts},
     {"audio.duck", "core", true,
      "Lower a music clip's level under other clips (the voice) and bring it back after them: `over` lists clip IDs, or a track ID for all its clips; `db` is how far "
-     "it goes down (default 12), `ramp` the seconds it takes each way (default 0.12). Writes audio.keyframes.gain_db on the music clip (replacing its keys), so the "
-     "levels stay editable with timeline.edit set_keyframe/remove_keyframe (property gain_db). One edit; Undo takes it back.",
+     "it goes down (default 12), `ramp` the seconds it takes each way (default 0.12). Writes audio.keyframes.duck_db on the music clip (replacing its ducking keys), added "
+     "to its level, which stays its own (gain_db, or its gain_db keys); timeline.edit remove_keyframe {property duck_db} takes the ducking away. One edit; Undo takes it back.",
      R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},"clip":{"type":"string"},
        "over":{"type":"array","items":{"type":"string"}},"db":{"type":"number"},"ramp":{"type":"number"}},"required":["project","clip","over"]})",
      &Impl::audio_duck},

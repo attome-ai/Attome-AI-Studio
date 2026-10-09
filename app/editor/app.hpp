@@ -80,6 +80,9 @@ struct ClipUi {
   bool own_sound = false;                   // a video clip with its sound inside it (the usual import): one clip, one track
   std::vector<EffectUi> effects;            // its effects (blur, colour grade, vignette)
   int64_t audio_fade_in = 0, audio_fade_out = 0; // frames
+  json gain_keyframes = json::object();     // audio.keyframes.gain_db: the level over time, clip-local (the Gain diamond)
+  eval::Curve gain_keys;                    // the same, to read the level at a time
+  bool ducked = false;                      // audio.keyframes.duck_db: lowered under the other sounds (audio.duck)
 };
 
 struct TransitionUi { // a dissolve, wipe, push, zoom, slide or iris over [cut - in, cut + out), where `to` starts

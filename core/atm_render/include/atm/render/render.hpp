@@ -141,6 +141,8 @@ struct Layer {
   eval::Curve opacity_keys, position_keys, scale_keys, rotation_keys, anchor_keys;
   // audio.keyframes.gain_db: the clip's level in dB over its length (replaces audio.gain_db while it exists); the track's volume_db adds.
   eval::Curve gain_keys;
+  eval::Curve duck_keys; // audio.keyframes.duck_db: ducking, dB added to the level (its keys or gain_db) while it plays
+  float level_db = 0.0f; // gain_db with the track's volume_db: `gain` in dB
   float track_db = 0.0f;
 };
 

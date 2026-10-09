@@ -1,6 +1,7 @@
 # UI test: ducking (UX review 4, P3). A 4 s talking clip with its sound and 8 s of music, both from 0. The music's Audio card has
-# "Lower under the voices": the music goes 12 dB down while the talk plays and back up after it (keys of its level). Its Gain
-# then moves the keys with it, "Again" and "Remove" are offered, and Remove takes the keys away. Virtual input only (uitest.psm1).
+# "Lower under the voices": the music goes 12 dB down while the talk plays and back up after it (ducking keys, apart from its
+# level). Its Gain still changes its level and leaves the ducking as it is; "Again" and "Remove" are offered, and Remove takes the
+# ducking keys away. Virtual input only (uitest.psm1).
 # Needs a build. Exit code 0 = pass.
 #   .\tools\uitest\ux_ducking.ps1
 
@@ -27,11 +28,11 @@ try {
 } finally { Remove-Item Env:\ATTOME_ENDPOINT -ErrorAction SilentlyContinue }
 
 function Music($run) { foreach ($t in @(Get-Tracks $run)) { foreach ($c in @($t.clip_list)) { if ($c.name -eq 'music') { return Get-Object $run $c.id } } } }
-# The music's level keys as "t:v" (seconds:dB), in time order.
+# The music's ducking keys as "t:v" (seconds:dB), in time order.
 function Keys($run) {
   $m = Music $run
-  if (-not $m.audio.keyframes -or -not $m.audio.keyframes.gain_db) { return '' }
-  (@($m.audio.keyframes.gain_db.PSObject.Properties | ForEach-Object { [pscustomobject]@{ T = (ConvertFrom-Rational $_.Value.t); V = [double]$_.Value.v } } |
+  if (-not $m.audio.keyframes -or -not $m.audio.keyframes.duck_db) { return '' }
+  (@($m.audio.keyframes.duck_db.PSObject.Properties | ForEach-Object { [pscustomobject]@{ T = (ConvertFrom-Rational $_.Value.t); V = [double]$_.Value.v } } |
       Sort-Object T | ForEach-Object { '{0:0.##}:{1:0.#}' -f $_.T, $_.V })) -join ' '
 }
 
@@ -51,13 +52,15 @@ try {
     # down to -12 from 0 to 4 s (the talk), back to 0 a ramp after it
     if ($k -notmatch '^0:-12 4(\.0\d?)?:-12 4\.1\d?:0$') { $failed = "the music's keys are '$k', not down 12 dB under the talk (0..4 s) and back after" }
   }
-  if (-not $failed) { # Gain moves the keys with it
+  if (-not $failed) { # Gain changes the level and leaves the ducking
     $g = Invoke-EditorScript -Project $proj -Endpoint $run.Endpoint -Script @('wait 600', 'click @clip:music', 'wait 400', 'click @number:gain', 'wait 200', 'type -6', 'key Enter', 'wait 900')
     $failed = $g.Errors
     if (-not $failed) {
       $k = Keys $run
-      "keys after Gain -6: $k"
-      if ($k -notmatch '^0:-18 4(\.0\d?)?:-18 4\.1\d?:-6$') { $failed = "after Gain -6 the keys are '$k', not moved 6 dB down" }
+      $gain = (Music $run).audio.gain_db
+      "after Gain -6: gain_db $gain, keys $k"
+      if ($gain -ne -6) { $failed = "Gain -6 left gain_db at $gain" }
+      elseif ($k -notmatch '^0:-12 4(\.0\d?)?:-12 4\.1\d?:0$') { $failed = "Gain changed the ducking keys: '$k'" }
     }
   }
   if (-not $failed) { # Remove takes the keys away
@@ -68,5 +71,5 @@ try {
 } finally { Stop-Daemon $run }
 
 if ($failed) { Write-Host "FAIL: $failed" -ForegroundColor Red; exit 1 }
-Write-Host "PASS: the music ducks under the talk, Gain moves its keys, Remove takes them away (captures in $work)" -ForegroundColor Green
+Write-Host "PASS: the music ducks under the talk, Gain still sets its level, Remove takes the ducking away (captures in $work)" -ForegroundColor Green
 exit 0

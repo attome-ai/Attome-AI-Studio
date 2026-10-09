@@ -797,6 +797,7 @@ Result<Composition> compile(const json &project, std::string_view sequence_id, c
           const json audio = clip.value("audio", json::object());
           const double db = (audio.is_object() ? number(audio, "gain_db", 0.0) : 0.0) + track_db;
           l.gain = db <= -96.0 ? 0.0f : float(std::pow(10.0, std::min(db, 24.0) / 20.0));
+          l.level_db = float(db);
           l.pan = std::clamp(float((audio.is_object() ? number(audio, "pan", 0.0) : 0.0) + track_pan), -1.0f, 1.0f);
           if (audio.is_object()) {
             ATM_TRY(Rational fade_in, rational_field(audio, "fade_in", "0"));
@@ -804,12 +805,16 @@ Result<Composition> compile(const json &project, std::string_view sequence_id, c
             l.fade_in_hns = std::max<int64_t>(0, int64_t(fade_in.to_seconds_lossy() * double(media::kHnsPerSecond) + 0.5));
             l.fade_out_hns = std::max<int64_t>(0, int64_t(fade_out.to_seconds_lossy() * double(media::kHnsPerSecond) + 0.5));
             l.fade_linear = audio.value("fade_curve", std::string("equal_power")) == "linear";
-            if (const auto kfs = audio.find("keyframes"); kfs != audio.end() && kfs->is_object())
+            if (const auto kfs = audio.find("keyframes"); kfs != audio.end() && kfs->is_object()) {
               if (const auto m = kfs->find("gain_db"); m != kfs->end())
                 if (auto keys = eval::parse_curve(*m, 1)) {
                   l.gain_keys = std::move(*keys);
                   l.track_db = float(track_db);
                 }
+              if (const auto m = kfs->find("duck_db"); m != kfs->end())
+                if (auto keys = eval::parse_curve(*m, 1))
+                  l.duck_keys = std::move(*keys);
+            }
           }
         }
         l.source_in_hns = int64_t(source_in.to_seconds_lossy() * double(media::kHnsPerSecond) + 0.5);
@@ -2989,20 +2994,22 @@ Result<std::vector<float>> mix_audio(const Composition &c) {
       return l.fade_linear ? u : std::sin(u * 1.5707963267948966);
     };
     const float side[2] = {std::min(1.0f, 1.0f - l.pan), std::min(1.0f, 1.0f + l.pan)};
-    // A level that moves (audio.keyframes.gain_db): looked up every 2.5 ms of the mix and held between, which is finer than any ramp worth hearing.
+    // A level that moves (audio.keyframes.gain_db, and ducking on top of it): looked up every 2.5 ms of the mix and held between, which is
+    // finer than any ramp worth hearing.
     constexpr int64_t kKeyStep = media::kAudioRate / 400;
+    const bool moves = !l.gain_keys.empty() || !l.duck_keys.empty();
     float keyed = l.gain;
     int64_t keyed_for = -1;
     for (size_t i = 0; i < n; ++i) {
       const size_t at = offset + i;
       const int64_t s = int64_t(at / 2);
-      if (!l.gain_keys.empty() && std::max<int64_t>(0, s - clip_from) / kKeyStep != keyed_for) {
+      if (moves && std::max<int64_t>(0, s - clip_from) / kKeyStep != keyed_for) {
         keyed_for = std::max<int64_t>(0, s - clip_from) / kKeyStep;
-        const auto t = Rational::make(keyed_for * kKeyStep, media::kAudioRate);
-        const double db = (t ? l.gain_keys.at(*t)[0] : 0.0) + l.track_db;
+        const auto t = Rational::make(keyed_for * kKeyStep, media::kAudioRate).value_or(Rational());
+        const double db = (l.gain_keys.empty() ? double(l.level_db) : l.gain_keys.at(t)[0] + l.track_db) + (l.duck_keys.empty() ? 0.0 : l.duck_keys.at(t)[0]);
         keyed = db <= -96.0 ? 0.0f : float(std::pow(10.0, std::min(db, 24.0) / 20.0));
       }
-      float gain = l.volume * (l.gain_keys.empty() ? l.gain : keyed) * side[at & 1];
+      float gain = l.volume * (moves ? keyed : l.gain) * side[at & 1];
       if (fade_in > 0 && s - clip_from < fade_in)
         gain *= float(curve(double(s - clip_from) / double(fade_in)));
       if (fade_out > 0 && clip_to - s < fade_out)

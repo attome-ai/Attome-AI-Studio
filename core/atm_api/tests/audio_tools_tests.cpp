@@ -256,9 +256,17 @@ TEST_CASE("audio.duck lowers the music under the voice and brings it back, as ke
 
   // Again: the keys are replaced, not added to.
   CHECK(engine.call("audio.duck", {{"project", project}, {"clip", music}, {"over", json::array({speech})}, {"db", 6}}));
-  const json node = engine.call("project.get", {{"project", project}, {"id", music}}).value();
-  CHECK(node.dump().find("gain_db") != std::string::npos);
+  const json node = engine.call("project.get", {{"project", project}, {"id", music}}).value().at("object");
+  CHECK(node["audio"]["keyframes"]["duck_db"].size() == 5); // ducking keys of their own: the level (gain_db) is left as it is
+  CHECK_FALSE(node["audio"]["keyframes"].contains("gain_db"));
   CHECK(engine.call("project.validate", {{"project", project}})->at("ok") == true);
+  { // the level still works under the ducking: 6 dB down everywhere, and under the voice 6 dB more
+    REQUIRE(engine.call("timeline.edit", {{"project", project}, {"ops", json::array({{{"op", "set_property"}, {"target", music}, {"path", "audio.gain_db"}, {"value", -6}}})}}));
+    const double half = before * std::pow(10.0, -6.0 / 20.0);
+    CHECK(rms("e.wav", 1.0, 3.0) == Catch::Approx(half).margin(0.01));
+    CHECK(rms("e.wav", 4.5, 5.5) == Catch::Approx(half * std::pow(10.0, -6.0 / 20.0) + 0.1 / std::sqrt(2.0)).margin(0.015));
+    REQUIRE(engine.call("timeline.edit", {{"project", project}, {"ops", json::array({{{"op", "set_property"}, {"target", music}, {"path", "audio.gain_db"}, {"value", 0}}})}}));
+  }
 
   // The keys follow the clip: cut in the middle of the voice, the mix sounds the same, as the right half counts its keys from its own start.
   const double under = rms("c.wav", 4.2, 5.8), after_voice = rms("c.wav", 6.4, 8.0);

@@ -489,6 +489,14 @@ void App::refresh() {
             c.pan = au->value("pan", 0.0f);
             c.audio_fade_in = frames_of(*au, "fade_in", rate_);
             c.audio_fade_out = frames_of(*au, "fade_out", rate_);
+            if (const auto kfs = au->find("keyframes"); kfs != au->end() && kfs->is_object()) {
+              if (const auto g = kfs->find("gain_db"); g != kfs->end() && g->is_object() && !g->empty())
+                if (auto curve = eval::parse_curve(*g, 1)) {
+                  c.gain_keyframes = *g;
+                  c.gain_keys = std::move(*curve);
+                }
+              c.ducked = kfs->contains("duck_db") && !(*kfs)["duck_db"].empty();
+            }
           }
           if (track.kind == "audio" && !c.path.empty() && c.stream != "audio") // a linked sound uses a video file
             audio_only_.insert(c.path);
@@ -1377,6 +1385,13 @@ void App::draw_clip_menu(const ClipUi &c) {
       pending_ = [this, id, v = c.volume <= 0.0f ? 1.0f : 0.0f] {
         patch(json::array({{{"op", "replace"}, {"path", id + "/volume"}, {"value", v}}}), v > 0.0f ? "Unmute" : "Mute");
       };
+    if (sound && menu_item("Fade in and out", nullptr, false, !locked)) { // a second each (a third of a short clip); the Audio card changes them
+      const int64_t f = std::max<int64_t>(1, std::min<int64_t>(std::llround(fps()), c.frames / 3));
+      pending_ = [this, id, f] {
+        if (timeline_edit(json::array({{{"op", "fade"}, {"clip", id}, {"in", frames_text(f)}, {"out", frames_text(f)}}}), "Sound fade in and out"))
+          say("The sound fades in and out over " + std::to_string(std::round(double(f) / fps() * 10.0) / 10.0).substr(0, 3) + " s: change it on its Audio card", false, true);
+      };
+    }
     if (past_pictures(c) > 0 && menu_item("End with the video", nullptr, false, !locked))
       pending_ = [this, id] { end_with_pictures(id); };
     if (!sound && !c.is_adjustment && menu_item("Fade in and out...", nullptr, false, !locked))

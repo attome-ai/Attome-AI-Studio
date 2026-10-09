@@ -531,8 +531,9 @@ Result<json> Engine::Impl::guide_get(const json &params) {
        "set_reverse {clip, reverse (true | false)} - the clip and its linked sound play backwards, or forwards again; "
        "fade {clip, in?, out?, sound? (true)} - a picture fades up from nothing over `in` and down over `out` (opacity keys), and the sound it carries fades with it unless sound is false; a sound clip's own sound fades the same way; "
        "a side left out keeps its fade, 0 takes it away; "
-       "set_keyframe {clip, property (position | scale | rotation | opacity), at (counted from the clip's start), value} - a key that animates the property: "
-       "position [x, y] in canvas fractions (0.5, 0.5 is the centre), scale [x, y] or one number, rotation in degrees, opacity 0..1; a key at that time takes the new value; "
+       "set_keyframe {clip, property (position | scale | rotation | opacity | gain_db | duck_db), at (counted from the clip's start), value} - a key that animates the property: "
+       "position [x, y] in canvas fractions (0.5, 0.5 is the centre), scale [x, y] or one number, rotation in degrees, opacity 0..1, gain_db the sound's level in dB, "
+       "duck_db how far ducking takes it down (dB, 0 or less, added to the level; audio.duck writes these); a key at that time takes the new value; "
        "remove_keyframe {clip, property, at?} - the key at `at`, or every key of the property (the last one's value stays as the plain value); "
        "fit_clip {clip, mode (fit | fill)} - fit shows the whole picture centred, fill covers the canvas (two sides cut off); "
        "detach_audio {clip} - the sound of a video clip becomes a clip of its own on an audio track, and the video is silent from then on (add_clip makes ONE clip with "
@@ -604,7 +605,7 @@ Result<json> Engine::Impl::guide_get(const json &params) {
        "up what is missing instead. To fade one clip to or from black, use opacity keyframes instead."},
       {"keyframes",
        "The short way, with timeline.edit ops: fade {clip, in?, out?} fades a picture up and down (a sound clip's own sound too), "
-       "set_keyframe {clip, property (position | scale | rotation | opacity), at, value} adds or changes one key, "
+       "set_keyframe {clip, property (position | scale | rotation | opacity | gain_db | duck_db), at, value} adds or changes one key, "
        "remove_keyframe {clip, property, at?} takes one or all away. The rest of this topic is the long way, with patch paths, "
        "which also reaches anchor and effect parameters.\n"
        "Animate opacity, position, scale, rotation or anchor with keyframes inside the clip's transform (crop stays "

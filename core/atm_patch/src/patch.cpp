@@ -380,22 +380,30 @@ void check_audio(const json &clip, const std::string &clip_id, const Rational &d
   }
   check_number(*it, "gain_db", -96.0, 24.0, clip_id, path, problems);
   check_number(*it, "pan", -1.0, 1.0, clip_id, path, problems);
-  if (const auto kfs = it->find("keyframes"); kfs != it->end()) { // the level over time: {"gain_db": {"$new:k1": {"t": "0s", "v": -6}, …}}
-    const auto gain = kfs->is_object() ? kfs->find("gain_db") : kfs->end();
-    if (!kfs->is_object() || kfs->size() > 1 || (kfs->size() == 1 && gain == kfs->end())) {
+  // The level over time, {"gain_db": {"$new:k1": {"t": "0s", "v": -6}, …}}, and ducking, "duck_db": how far down, on top of the level.
+  if (const auto kfs = it->find("keyframes"); kfs != it->end()) {
+    bool known = kfs->is_object();
+    for (auto k = known ? kfs->begin() : kfs->end(); k != kfs->end(); ++k)
+      known = known && (k.key() == "gain_db" || k.key() == "duck_db");
+    if (!known) {
       problems.push_back(problem("KEYFRAME_PROPERTY_UNSUPPORTED", path + "/keyframes", clip_id,
-                                 "audio.keyframes of clip " + clip_id + " can only hold gain_db.",
+                                 "audio.keyframes of clip " + clip_id + " can only hold gain_db and duck_db.",
                                  "Write {\"gain_db\": {\"$new:k1\": {\"t\": \"0s\", \"v\": -12}, …}}."));
-    } else if (gain != kfs->end()) {
-      if (auto curve = eval::parse_curve(*gain, 1); !curve)
-        problems.push_back(problem(curve.error().rule, curve.error().path.empty() ? path + "/keyframes/gain_db" : path + "/keyframes/gain_db/" + curve.error().path,
-                                   clip_id, curve.error().message, curve.error().hint));
-      else
-        for (const auto &[kid, key] : gain->items())
-          if (key.is_object() && key.contains("v") && key["v"].is_number() && (key["v"].get<double>() < -96.0 || key["v"].get<double>() > 24.0))
-            problems.push_back(problem("AUDIO_TYPE_MISMATCH", path + "/keyframes/gain_db/" + kid + "/v", clip_id,
-                                       "A gain_db key of clip " + clip_id + " is " + key["v"].dump() + ".",
-                                       "Gain in decibels, from -96 to 24."));
+    } else {
+      for (const auto &[prop, lo, hi, what] : {std::tuple{"gain_db", -96.0, 24.0, "Gain in decibels, from -96 to 24."},
+                                               std::tuple{"duck_db", -96.0, 0.0, "How far ducking takes the sound down, in decibels, from -96 to 0."}}) {
+        const auto keys = kfs->find(prop);
+        if (keys == kfs->end())
+          continue;
+        const std::string at = path + "/keyframes/" + prop;
+        if (auto curve = eval::parse_curve(*keys, 1); !curve)
+          problems.push_back(problem(curve.error().rule, curve.error().path.empty() ? at : at + "/" + curve.error().path, clip_id, curve.error().message, curve.error().hint));
+        else
+          for (const auto &[kid, key] : keys->items())
+            if (key.is_object() && key.contains("v") && key["v"].is_number() && (key["v"].get<double>() < lo || key["v"].get<double>() > hi))
+              problems.push_back(problem("AUDIO_TYPE_MISMATCH", at + "/" + kid + "/v", clip_id,
+                                         std::string("A ") + prop + " key of clip " + clip_id + " is " + key["v"].dump() + ".", what));
+      }
     }
   }
   const std::string curve = it->value("fade_curve", std::string("equal_power"));

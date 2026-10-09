@@ -104,7 +104,13 @@ void App::draw_inspector() {
   // is held, so a field that is being typed in is not written over.
   if (insp_for_ != c->id && live_commit_) // a field was being typed in for the clip that was selected: its edit is made
     pending_ = std::exchange(live_commit_, nullptr);
-  const bool keyed = !c->position_keys.empty() || !c->scale_keys.empty() || !c->rotation_keys.empty() || (!c->opacity_keys.empty() && !c->fades_only);
+  const ClipUi *snd = c; // the clip that holds the sound: this one, or the linked sound of a picture
+  if (c->stream == "video")
+    for (const ClipUi *m : linked_of(*c))
+      if (m->stream == "audio")
+        snd = m;
+  const bool keyed = !c->position_keys.empty() || !c->scale_keys.empty() || !c->rotation_keys.empty() || (!c->opacity_keys.empty() && !c->fades_only) ||
+                     !snd->gain_keys.empty();
   if (insp_for_ != c->id || (insp_rev_ != revision_ && !ImGui::IsAnyItemActive()) || (keyed && insp_play_ != playhead_ && !ImGui::IsAnyItemActive())) {
     insp_for_ = c->id;
     insp_rev_ = revision_;
@@ -117,12 +123,9 @@ void App::draw_inspector() {
     if (!c->opacity_keys.empty() && !c->fades_only) // keyed by hand: the value at the playhead
       opacity_ = float(c->opacity_keys.at(Rational::make(std::clamp<int64_t>(playhead_ - c->start, 0, std::max<int64_t>(0, c->frames - 1)) * rate_.den(), rate_.num()).value_or(Rational()))[0]);
     fade_in_s_ = float(double(c->fade_in) / fps());
-    const ClipUi *snd = c; // the clip that holds the sound: this one, or the linked sound of a picture
-    if (c->stream == "video")
-      for (const ClipUi *m : linked_of(*c))
-        if (m->stream == "audio")
-          snd = m;
     gain_db_ = snd->gain_db;
+    if (!snd->gain_keys.empty()) // keyed: the level at the playhead
+      gain_db_ = float(snd->gain_keys.at(Rational::make(std::clamp<int64_t>(playhead_ - snd->start, 0, std::max<int64_t>(0, snd->frames - 1)) * rate_.den(), rate_.num()).value_or(Rational()))[0]);
     amount_ = c->opacity;
     pan_ = snd->pan;
     audio_fade_in_s_ = float(double(snd->audio_fade_in) / fps());
@@ -654,35 +657,51 @@ void App::draw_inspector() {
   const bool show_audio = ac != nullptr;
   const std::string aid = ac ? ac->id : std::string();
   if (show_audio && begin_card("##sound", "Audio", ac != c ? "its sound" : nullptr)) {
-    // A ducked sound has keys of its level (audio.keyframes.gain_db), which play instead of gain_db: a change of Gain moves every key by as
-    // much, in the same edit, so the slider still does what it says.
-    json gain_keys = json::object();
-    if (const json *cj = clip_json(aid); cj && cj->contains("audio"))
-      if (const json &au = (*cj)["audio"]; au.contains("keyframes") && au["keyframes"].contains("gain_db") && au["keyframes"]["gain_db"].is_object())
-        gain_keys = au["keyframes"]["gain_db"];
-    const auto with_gain_keys = [aid, gain_keys, base = ac->gain_db](json ops, const std::string &key, float v) {
-      if (key == "gain_db")
-        for (auto k = gain_keys.begin(); k != gain_keys.end(); ++k)
-          if (k->contains("v") && (*k)["v"].is_number())
-            ops.push_back({{"op", "replace"}, {"path", aid + "/audio/keyframes/gain_db/" + k.key() + "/v"},
-                           {"value", std::round(((*k)["v"].get<float>() + v - base) * 10.0f) / 10.0f}});
-      return ops;
+    // Gain animates as the picture's properties do: the diamond puts a key of the level at the playhead (or takes it away), and while the
+    // level has keys a change of Gain sets the key at the playhead. The keys are audio.keyframes.gain_db, clip-local.
+    const int64_t arel = std::clamp<int64_t>(playhead_ - ac->start, 0, std::max<int64_t>(0, ac->frames - 1));
+    std::string gain_key_here;
+    for (auto k = ac->gain_keyframes.begin(); k != ac->gain_keyframes.end(); ++k)
+      if (const auto t = Rational::parse(k->value("t", "0")); t && std::llround(t->to_seconds_lossy() * fps()) == arel)
+        gain_key_here = k.key();
+    const auto value_ops = [aid, keyed = !ac->gain_keys.empty(), here = gain_key_here, t = frames_text(arel)](const std::string &key, const json &value) {
+      if (key != "gain_db" || !keyed)
+        return json::array({{{"op", "replace"}, {"path", aid + "/audio/" + key}, {"value", value}}});
+      if (!here.empty())
+        return json::array({{{"op", "replace"}, {"path", here + "/v"}, {"value", value}}});
+      return json::array({{{"op", "add"}, {"path", aid + "/audio/keyframes/gain_db/$new:k"}, {"value", {{"t", t}, {"v", value}}}}});
+    };
+    const auto gain_diamond = [&] {
+      ImGui::SameLine(64.0f);
+      ImGui::BeginDisabled(playhead_ < ac->start || playhead_ >= ac->start + ac->frames);
+      if (key_diamond("##tkey_gain_db", ac->gain_keys.empty() ? 0 : gain_key_here.empty() ? 1 : 2))
+        pending_ = [this, aid, here = gain_key_here, t = frames_text(arel), now = std::round(gain_db_ * 10.0f) / 10.0f] {
+          if (here.empty()) // the level as it is now becomes a key here
+            patch(json::array({{{"op", "add"}, {"path", aid + "/audio/keyframes/gain_db/$new:k"}, {"value", {{"t", t}, {"v", now}}}}}), "Add keyframe");
+          else // the engine keeps the last key's level as the plain one
+            timeline_edit(json::array({{{"op", "remove_keyframe"}, {"clip", aid}, {"property", "gain_db"}, {"at", t}}}), "Remove keyframe");
+          insp_rev_ = 0;
+        };
+      ui_mark("key:gain_db");
+      ImGui::EndDisabled();
     };
     // One row: label, slider, value. The edit is sent when the slider is let go.
     const auto row = [&](const char *label, const char *slider, float *value, float lo, float hi, const char *fmt,
                          const char *key, const char *what, bool is_time, float stick = NAN) {
       ImGui::TextColored(hexv(look::fg2), "%s", label);
+      if (std::string(key) == "gain_db")
+        gain_diamond();
       ImGui::SameLine(88.0f);
       if (slim_slider(slider, value, lo, hi, ImGui::GetContentRegionAvail().x - 60.0f, "", 0.0f, false, stick)) { // heard while it moves
         const json v = is_time ? json(frames_text(std::llround(double(*value) * fps()))) : json(std::round(*value * 10.0f) / 10.0f);
-        preview_ops(with_gain_keys(json::array({{{"op", "replace"}, {"path", aid + "/audio/" + key}, {"value", v}}}), key, *value), true);
+        preview_ops(value_ops(key, v), true);
       }
       if (slider_done()) {
         const float v = *value;
         const std::string k = key, w = what;
-        pending_ = [this, id = aid, v, k, w, is_time, with_gain_keys] {
+        pending_ = [this, v, k, w, is_time, value_ops] {
           const json value = is_time ? json(frames_text(std::llround(double(v) * fps()))) : json(std::round(v * 10.0f) / 10.0f);
-          patch(with_gain_keys(json::array({{{"op", "replace"}, {"path", id + "/audio/" + k}, {"value", value}}}), k, v), w.c_str());
+          patch(value_ops(k, value), w.c_str());
         };
       }
       slider_number(fmt, *value, 1.0f, lo, is_time ? float(double(ac->frames) / fps()) : hi);
@@ -710,7 +729,7 @@ void App::draw_inspector() {
       ImGui::TextColored(hexv(look::fg2), "Ducking");
       ImGui::SameLine(88.0f);
       const std::string sid = ac->id;
-      if (gain_keys.empty()) {
+      if (!ac->ducked) {
         if (soft_button("duck", "Lower under the voices", ImVec2(ImGui::GetContentRegionAvail().x, 26.0f)))
           pending_ = [this, sid] { duck_under_voices(sid); };
         if (ImGui::IsItemHovered())
@@ -723,7 +742,7 @@ void App::draw_inspector() {
           ImGui::SetTooltip("Lower it again under the sounds where they are now (after an edit)");
         ImGui::SameLine(0.0f, 6.0f);
         if (soft_button("duck_off", "Remove", ImVec2(w, 26.0f)))
-          pending_ = [this, sid] { timeline_edit(json::array({{{"op", "remove_keyframe"}, {"clip", sid}, {"property", "gain_db"}}}), "Ducking removed"); };
+          pending_ = [this, sid] { timeline_edit(json::array({{{"op", "remove_keyframe"}, {"clip", sid}, {"property", "duck_db"}}}), "Ducking removed"); };
       }
     }
     if (const int64_t past = past_pictures(*ac); past > 0) { // music longer than the video
