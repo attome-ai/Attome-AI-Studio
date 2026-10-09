@@ -59,7 +59,18 @@ void App::add_generative_clip(const std::string &model, const std::string &track
   json made;
   if (!rpc("gen.create_clip", params, made))
     return;
-  say("Add generative clip");
+  // A model that cannot run here yet still gets its clip (it can be written and placed now), and says why it cannot be made.
+  std::string note;
+  for (const json &m : gen_models_)
+    if (m.value("id", std::string()) == model) {
+      const std::string title = m.value("title", model);
+      const std::string name = title.substr(0, title.find(':'));
+      if (!m.value("installed", false))
+        note = name + " is not on this computer yet: the clip's Generate card downloads it.";
+      else if (!m.value("engine", false))
+        note = "Nothing runs " + name + " here yet: set ComfyUI in the Models panel.";
+    }
+  say(note.empty() ? "Add generative clip" : "Added a clip. " + note, false, note.empty());
   refresh();
   selected_clip_ = made.value("clip", "");
   focus_prompt_ = selected_clip_; // the next thing to do is to write what it should make
@@ -141,6 +152,8 @@ void App::draw_generate_panel() {
       t.payload = "gen:" + id;
       t.art = [type, is_installed, has_engine](ImDrawList *dl, ImVec2 p, ImVec2 q) {
         dl->AddCircleFilled(ImVec2(q.x - 12.0f, p.y + 12.0f), 4.5f, hex(!is_installed ? 0xef5f5f : !has_engine ? 0xe3a33a : look::ok)); // ready, no engine, not installed
+        if (!is_installed || !has_engine) // in words too, at the top left (the dot is at the top right)
+          dl->AddText(ImVec2(p.x + 8.0f, p.y + 5.0f), hex(!is_installed ? 0xef5f5f : 0xe3a33a), !is_installed ? "Not installed" : "No engine");
         const ImVec2 c((p.x + q.x) * 0.5f, p.y + (q.y - p.y) * 0.42f);
         dl->AddRect(ImVec2(c.x - 26.0f, c.y - 18.0f), ImVec2(c.x + 26.0f, c.y + 18.0f), hex(look::gen), 6.0f, 0, 2.2f);
         if (type == "video") { // a frame with a play triangle

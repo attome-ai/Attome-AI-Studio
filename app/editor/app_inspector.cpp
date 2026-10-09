@@ -298,8 +298,8 @@ void App::draw_inspector() {
   }
 
   if (c->is_generative) {
+    draw_generate_card(*c); // first: whether it is made, the button that makes it, or why it cannot be made here
     draw_workflow_card(*c);
-    draw_generate_card(*c);
     if (track->kind == "audio" && !c->takes.empty() && clip_json(c->id) &&
         clip_json(c->id)->value("media_ref", json::object()).value("inputs", json::object()).contains("text")) { // a voice: its words as captions
       if (begin_card("##captions", "Captions")) {
