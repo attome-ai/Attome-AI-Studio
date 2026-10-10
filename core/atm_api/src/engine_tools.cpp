@@ -448,7 +448,8 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
        "workflow":{"type":"string","description":"Instead of a model: the ID of a Clip Workflow of the project's library, a key of its workflows"},"seconds":{"type":"number"},
        "seed":{"type":"integer"},"name":{"type":"string"},
        "start_from":{"type":"string","description":"\"previous\" or a generative clip's ID"},"at":{"type":"string"},
-       "track":{"type":"string"},"sequence":{"type":"string"}},"required":["project","prompt"]})",
+       "track":{"type":"string"},"sequence":{"type":"string"},
+       "with_audio":{"type":"boolean","description":"Default false: a video model's own guessed ambience (not every model has one) is left out of the mix, the same as with_audio on add_clip. true keeps it."}},"required":["project","prompt"]})",
      &Impl::gen_create_clip},
     {"gen.save_to_library", "gen", true,
      "Publish a generative clip's own workflow to the project's library as a new Clip Workflow (a card in the Generate panel). "

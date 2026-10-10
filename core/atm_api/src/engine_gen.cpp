@@ -733,6 +733,11 @@ Result<json> Engine::Impl::gen_create_clip(const json &params) {
     clip_value["media_ref"]["width"] = width;
     clip_value["media_ref"]["height"] = height;
     clip_value["transform"] = {{"position", {0.5, 0.5}}, {"scale", {fill, fill}}, {"opacity", 1}};
+    // Some video models (MiniMax H3) write their own guessed ambience into the take's file alongside the picture. It stays there (detach_audio
+    // still finds it, and the clip is not marked streamless) but is muted in the mix by default (gain_db -96, same as any other clip's): a
+    // short's scenes almost always carry a voice or music track of their own, not the model's guess. with_audio: true leaves it at 0 dB.
+    if (!params.value("with_audio", false))
+      clip_value["audio"] = {{"gain_db", -96.0}};
   }
   ops.push_back({{"op", "add"}, {"path", track + "/clips/$new:clip"}, {"value", std::move(clip_value)}});
   ATM_TRY(json applied, project_patch({{"project", project_ref}, {"patch", {{"ops", std::move(ops)}, {"label", "Add generative clip"}}}}));

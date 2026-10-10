@@ -1186,6 +1186,35 @@ TEST_CASE("generate: detach_audio makes the sound of a generated clip a clip of 
   fs::remove_all(dir, ec);
 }
 
+TEST_CASE("generate: a video clip's own sound (a model that writes some into its take, as MiniMax H3 does) is muted by default, with_audio keeps it, "
+         "and detach_audio still works either way", "[gen][generate][parity]") {
+  auto mock = std::make_shared<MockProvider>();
+  const fs::path dir = fs::temp_directory_path() / atm::new_id("attome-gen-audio-default");
+  fs::create_directories(dir);
+  const std::string project = (dir / "M.attome").string();
+  atm::api::EngineConfig cfg;
+  cfg.models_dir = (dir / "models").string();
+  cfg.providers = {mock};
+  Engine engine(cfg);
+  ok(engine, "project.create", {{"path", project}, {"rate", "30"}, {"canvas", "320x176"}});
+
+  const json quiet = ok(engine, "gen.create_clip", {{"project", project}, {"prompt", "a kite"}, {"model", "attome-mock"}, {"seconds", 1}});
+  CHECK(ok(engine, "project.get", {{"project", project}, {"id", quiet["clip"]}})["object"]["audio"]["gain_db"] == -96.0);
+  // Not silenced: a Voice (kokoro-like) clip wants its own sound, and with_audio: true keeps a video clip's.
+  const json kept = ok(engine, "gen.create_clip", {{"project", project}, {"prompt", "a kite"}, {"model", "attome-mock"}, {"seconds", 1}, {"with_audio", true}});
+  CHECK_FALSE(ok(engine, "project.get", {{"project", project}, {"id", kept["clip"]}})["object"].contains("audio"));
+
+  // detach_audio still finds and pulls out the sound of a muted clip - muted is not the same as "has none" (E_PARAM, checked above).
+  const json started = ok(engine, "gen.run", {{"project", project}, {"scope", "all"}});
+  for (int i = 0; i < 3000 && ok(engine, "jobs.get", {{"job_id", started["job_id"]}})["state"] == "running"; ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  const auto done = engine.call("timeline.edit", {{"project", project}, {"ops", json::array({{{"op", "detach_audio"}, {"id", "$new:d"}, {"clip", quiet["clip"]}}})}});
+  INFO((done ? "" : done.error().message + " | " + done.error().hint));
+  REQUIRE(done);
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}
+
 TEST_CASE("script.scenes makes the Variables and the picture clips of a planned script, with transitions, and gen.run makes them", "[gen][generate][script][parity]") {
   auto mock = std::make_shared<MockProvider>();
   const fs::path dir = fs::temp_directory_path() / atm::new_id("attome-script-scenes");
