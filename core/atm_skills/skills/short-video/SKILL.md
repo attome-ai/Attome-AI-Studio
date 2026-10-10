@@ -14,6 +14,10 @@ description: Make a 30-40 s vertical (9:16) YouTube Short with Attome from a top
 Use this when the user gives a **topic** ("What if you were invisible for 24 hours?") and wants a finished Short.
 It works for any topic with a hook, 6-9 numbered/ordered beats, a twist and a call to follow.
 
+**A niche leads.** If the user names a niche, pastes a style, or says "like this video", read `niche-rules` first and follow it: the
+user's text is the brief, `niche-funny-short` fills the gaps, say it back in five lines before generating, check before "done".
+When no niche is named, use `niche-funny-short` as the default and still say it back.
+
 Run the steps in order. Each is its own skill; read it when you reach it.
 
 | # | Skill | What it makes |

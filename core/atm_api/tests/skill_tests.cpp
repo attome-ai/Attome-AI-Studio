@@ -49,6 +49,13 @@ TEST_CASE("Skills: the built-in ones are listed and readable, and a project keep
   CHECK(body.find("short-video-concept") != std::string::npos);
   CHECK(body.rfind("---", 0) != 0); // the front matter is not part of the body
 
+  // The niche skills: the rules and the default niche are built in, and the Short entry point sends the agent to them.
+  CHECK(body.find("niche-rules") != std::string::npos);
+  REQUIRE(find_skill(listed["skills"], "niche-rules"));
+  REQUIRE(find_skill(listed["skills"], "niche-funny-short"));
+  const json niche = ok(e, "skill.get", {{"id", "niche-funny-short"}});
+  CHECK(niche.value("body", std::string()).find("CHECKS") != std::string::npos);
+
   const json file = ok(e, "skill.get", {{"id", "short-video-voice"}, {"file", "scripts/sync_captions_to_voice.ps1"}});
   const std::string text = file.value("text", std::string());
   CHECK(text.find("param(") != std::string::npos);
