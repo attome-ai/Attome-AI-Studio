@@ -642,6 +642,7 @@ private:
   char niche_link_[512] = {};
   std::string niche_cookies_, dialog_niche_cookies_, niche_cookies_text_, niche_cookies_temp_; // a cookies.txt the user chose (the last entry of the sign-in list)
   int niche_browser_ = 0; // 0 none, then Chrome, Edge, Firefox, Brave: the browser whose sign-in the downloader may use
+  bool niche_keep_sound_ = false; // "Learn from a video" / "From a link" also imports the video's sound as an asset of the open project
   std::string niche_job_, niche_job_what_; // a job id; "install" or "fetch"
   json niche_job_state_;
   double next_niche_poll_ = 0.0;

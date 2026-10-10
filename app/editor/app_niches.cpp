@@ -214,6 +214,11 @@ void App::niche_learn(const std::string &file) {
   niche_dirty_ = true;
   niche_editing_ = true;
   say("A draft niche was written from the video. Check it, then save it.");
+  if (niche_keep_sound_ && !project_path_.empty()) { // before any deletion of a link-fetched file: niche_learn runs first either way
+    json sound;
+    if (rpc("video.extract_audio", {{"path", file}, {"project", project_path_}}, sound))
+      say("Also kept its sound (" + two(sound.value("seconds", 0.0)) + " s) in this project's media.", false, true);
+  }
 }
 
 // What a finished job of the link section did: the downloader is installed, or the video is saved and is analysed (then it is deleted: only
@@ -460,6 +465,15 @@ void App::draw_niches_panel() {
     ask_niche_video();
   if (ImGui::IsItemHovered())
     ImGui::SetTooltip("Pick a video: its cuts, pace, look and sound are measured and written as a draft niche.");
+  if (!project_path_.empty()) {
+    ImGui::Checkbox("##niche_keep_sound", &niche_keep_sound_);
+    ui_mark("check:niche_keep_sound");
+    ImGui::SameLine();
+    ImGui::TextColored(hexv(look::fg3), "Also keep this video's sound (a niche sometimes fits one piece of music or one voice, not just its pace)");
+    if (ImGui::IsItemHovered())
+      ImGui::SetTooltip("Added to this project's media as its own file, ready to drag onto the timeline. Off by default: the video's "
+                        "picture is never kept, only measured.");
+  }
   ImGui::Spacing();
   draw_niche_link();
 

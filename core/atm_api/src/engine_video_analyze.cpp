@@ -161,4 +161,48 @@ Result<json> Engine::Impl::video_analyze(const json &params) {
   return out;
 }
 
+  // video.extract_audio {path, project?, output?, from?, to?}: the sound of a video (or sound) file, as its own WAV - a niche often fits
+  // one piece of music or one voice, not just its pace, so this keeps the actual sound to reuse. With `project` and no `output` it is
+  // imported as the project's own asset (asset_id comes back, ready for timeline.edit add_clip); with `output` it is written there instead.
+  // At most 10 minutes; from..to (seconds) take a part of it.
+Result<json> Engine::Impl::video_extract_audio(const json &params) {
+  ATM_PROFILE_SCOPE("api.video_extract_audio");
+  const std::string path = params.value("path", std::string());
+  if (path.empty())
+    return bad_param("path", "is required: the video or sound file to take the sound from");
+  const std::string output = params.value("output", std::string());
+  if (output.empty() && !params.contains("project"))
+    return bad_param("output", "is required (a file to write) unless project is given");
+  ATM_TRY(json info, media_probe({{"path", path}}));
+  if (!info.value("has_audio", false))
+    return fail(ErrorCode::InvalidArgument, "E_PARAM", "\"" + path + "\" has no sound.");
+  const double file_seconds = info.value("seconds", 0.0);
+  double from = std::clamp(params.value("from", 0.0), 0.0, std::max(0.0, file_seconds));
+  double to = params.value("to", 0.0);
+  if (to <= from)
+    to = file_seconds;
+  to = std::min({to, file_seconds, from + 600.0});
+  if (to - from < 0.1)
+    return fail(ErrorCode::InvalidArgument, "E_PARAM", "There is less than a tenth of a second of sound to take.");
+  ATM_TRY(std::vector<float> pcm, media::read_audio(path, int64_t(from * double(media::kHnsPerSecond)), int64_t((to - from) * double(media::kHnsPerSecond))));
+  const audio::Level level = audio::measure(pcm);
+  std::string dest = output;
+  std::optional<std::string> imported;
+  if (dest.empty()) {
+    ATM_TRY(Project *pr, project(params));
+    const std::u8string stem = to_path(path).stem().u8string();
+    dest = to_utf8(pr->dir / ".attome" / "audio" / (std::string(stem.begin(), stem.end()) + "_sound.wav"));
+    ATM_CHECK(audio::write_wav(dest, pcm));
+    ATM_TRY(json added, media_import({{"project", params["project"]}, {"paths", json::array({dest})}}));
+    if (added.contains("assets") && added["assets"].is_array() && !added["assets"].empty())
+      imported = added["assets"][0].value("id", std::string());
+  } else {
+    ATM_CHECK(audio::write_wav(dest, pcm));
+  }
+  json out = {{"path", dest}, {"seconds", double(pcm.size() / 2) / double(media::kAudioRate)}, {"peak_db", level.peak_db}, {"lufs", level.lufs}};
+  if (imported)
+    out["asset_id"] = *imported;
+  return out;
+}
+
 } // namespace atm::api

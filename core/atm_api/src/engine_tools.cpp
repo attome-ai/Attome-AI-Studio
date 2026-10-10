@@ -256,6 +256,15 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
        "from":{"type":"number","description":"Seconds"},"to":{"type":"number","description":"Seconds"},
        "min_bpm":{"type":"number","description":"Default 80"},"max_bpm":{"type":"number","description":"Default 180"}}})",
      &Impl::audio_analyze},
+    {"video.extract_audio", "core", true,
+     "The sound of a video (or sound) file, as its own WAV: a niche often fits one piece of music or one voice, not just its pace, so this "
+     "keeps the actual sound to reuse. With project and no output it is imported as the project's own asset (asset_id, ready for "
+     "timeline.edit add_clip); with output it is written there instead. At most 10 minutes; from..to (seconds) take a part of it.",
+     R"({"type":"object","properties":{"path":{"type":"string","description":"A video or sound file"},
+       "project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID; imports the sound as an asset"},
+       "output":{"type":"string","description":"A .wav path to write instead of importing"},
+       "from":{"type":"number","description":"Seconds"},"to":{"type":"number","description":"Seconds"}},"required":["path"]})",
+     &Impl::video_extract_audio},
     {"ytdlp.status", "core", false,
      "Whether the optional video downloader (yt-dlp, open source, Unlicense) is on this computer: found, path, tools_dir, and what ytdlp.install would fetch. "
      "It is needed only to save a video from a link (video.fetch).",

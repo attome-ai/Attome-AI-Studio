@@ -118,6 +118,25 @@ public static class FakeYtDlp {
   }
   Stop-Daemon $run4
 }
+
+# 5. "Also keep this video's sound": checked, a local "Learn from a video" also imports the sound as the project's own media asset
+if (-not $failed) {
+  $steps = @('wait 1200', 'click @rail:Niches', 'wait 400', 'click @check:niche_keep_sound', 'wait 200', 'click @button:niche_learn', 'wait 1500',
+             "shot $work\with_sound.jpg", 'wait 600')
+  $env:ATTOME_EDITOR_PICK_NICHE_VIDEO = $video
+  try { $run5 = Invoke-EditorScript -Project $proj -Endpoint $ep -TimeoutSeconds 240 -Script $steps }
+  finally { Remove-Item Env:\ATTOME_EDITOR_PICK_NICHE_VIDEO -ErrorAction SilentlyContinue }
+  $failed = $run5.Errors
+  if (-not $failed) {
+    $info = (Invoke-Attome $run5 --json inspect $proj | ConvertFrom-Json).result.data
+    $obj = (Invoke-Attome $run5 --json get $proj $info.id | ConvertFrom-Json).result.object
+    $assets = @($obj.assets.PSObject.Properties)
+    "assets after keeping the sound: $($assets.Count)"
+    if ($assets.Count -lt 1) { $failed = "the video's sound was not imported into the project's media" }
+    elseif (-not ($assets.Value.name -match '\.wav$')) { $failed = "the imported asset is not a sound file" }
+  }
+  Stop-Daemon $run5
+}
 Stop-Daemon $run
 if ($failed) { Write-Host "FAIL: $failed" -ForegroundColor Red; exit 1 }
 Write-Host "PASS: the Niches panel lists, edits, keeps, learns from a video and deletes; look at the captures in $work" -ForegroundColor Green
