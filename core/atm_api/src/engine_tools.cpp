@@ -256,6 +256,19 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
        "from":{"type":"number","description":"Seconds"},"to":{"type":"number","description":"Seconds"},
        "min_bpm":{"type":"number","description":"Default 80"},"max_bpm":{"type":"number","description":"Default 180"}}})",
      &Impl::audio_analyze},
+    {"ytdlp.status", "core", false,
+     "Whether the optional video downloader (yt-dlp, open source, Unlicense) is on this computer: found, path, tools_dir, and what ytdlp.install would fetch. "
+     "It is needed only to save a video from a link (video.fetch).",
+     R"({"type":"object","properties":{}})", &Impl::ytdlp_status},
+    {"ytdlp.install", "core", false,
+     "Fetch the video downloader (yt-dlp, about 18 MB) once from its own GitHub release into Attome's tools folder, checked against the release's checksum list. "
+     "Ask the user first: it is optional, and what a link may be used for is theirs to check. A job (jobs.get).",
+     R"({"type":"object","properties":{}})", &Impl::ytdlp_install},
+    {"video.fetch", "core", false,
+     "Save the video of a web link (at most 720 p, one video, no playlist) to a folder as a job; the result has path and title. Needs ytdlp.install first. "
+     "Meant for studying a style (video.analyze, niche-from-video) of a video the user may use; it is not for copying or re-uploading someone else's work.",
+     R"({"type":"object","properties":{"url":{"type":"string","description":"https:// link of one video"},"folder":{"type":"string","description":"Where to save it; default Attome's downloads folder"}},"required":["url"]})",
+     &Impl::video_fetch},
     {"video.analyze", "core", false,
      "The numbers of a finished video's style: shot cuts (cut_times, in seconds of the file) and their rhythm (cuts per second, average, shortest and longest shot), "
      "brightness and contrast (0 to 1), the five main colours with their share, and its sound (loudness LUFS, peak, bpm and what share of the cuts fall on the beat). "

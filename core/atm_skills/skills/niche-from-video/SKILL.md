@@ -8,6 +8,10 @@ description: Learn the style of any video (a Short, a music video, a film clip) 
 
 # Steps
 
+0. **A link instead of a file.** `ytdlp.status` says whether the optional downloader is on this computer. If not, tell the user what it is
+   (yt-dlp, free and open source, about 18 MB, fetched from its own GitHub page) and that a link is theirs to check: only videos they may
+   use. Run `ytdlp.install` only after a clear yes; the editor's Niches panel has the same button. Then `video.fetch {url}` (a job; the
+   result has `path`). Use the file for the steps below and delete it afterwards: only the numbers and your notes are kept.
 1. **Measure.** `video.analyze {path}` (at most 180 s; `from`/`to` for a part). It gives `cut_times`, `rhythm` (cuts per second,
    average, shortest and longest shot), `brightness`, `contrast`, `palette` (five colours with their share) and `sound`
    (LUFS, peak, bpm, `cuts_on_beat`: the share of cuts within 60 ms of a beat). The cut detector finds hard cuts and large jumps

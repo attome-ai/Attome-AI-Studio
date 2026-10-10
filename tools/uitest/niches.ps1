@@ -76,7 +76,48 @@ if (-not $failed) {
     if ($left.Count -ne 1) { $failed = "expected 1 niche after the delete, found $($left.Count)" }
   }
 }
+# 4. a link: with the optional downloader present (a fake one here: a script that copies a sample video to the folder it is given), the video
+#    is "fetched", measured and deleted, and the draft is kept like any other
+if (-not $failed) {
+  Stop-Daemon $run
+  $fakeDir = Join-Path $work 'fake'
+  New-Item -ItemType Directory -Force $fakeDir | Out-Null
+  # a tiny program standing in for yt-dlp: copies the sample to the folder it is given (-P) and writes the --print-to-file targets
+  $source = @'
+using System; using System.IO; using System.Collections.Generic;
+public static class FakeYtDlp {
+  public static int Main(string[] a) {
+    string folder = null; var targets = new List<string[]>();
+    for (int i = 0; i < a.Length; i++) {
+      if (a[i] == "-P") folder = a[i + 1];
+      if (a[i] == "--print-to-file") targets.Add(new[] { a[i + 1], a[i + 2] });
+    }
+    string file = Path.Combine(folder, "fake.mp4");
+    File.Copy(Environment.GetEnvironmentVariable("FAKE_YTDLP_SAMPLE"), file, true);
+    foreach (var t in targets) File.WriteAllText(t[1], t[0].Contains("filepath") ? file : "Fake title");
+    Console.WriteLine("[download]  50.0% of 1.00MiB");
+    return 0;
+  }
+}
+'@
+  if (-not (Test-Path "$fakeDir\yt-dlp.exe")) { Add-Type -TypeDefinition $source -OutputAssembly "$fakeDir\yt-dlp.exe" -OutputType ConsoleApplication }
+  $saved = @{ ATTOME_YTDLP = $env:ATTOME_YTDLP; FAKE_YTDLP_SAMPLE = $env:FAKE_YTDLP_SAMPLE; ATTOME_MODELS_DIR = $env:ATTOME_MODELS_DIR }
+  $env:ATTOME_YTDLP = "$fakeDir\yt-dlp.exe"; $env:FAKE_YTDLP_SAMPLE = $video; $env:ATTOME_MODELS_DIR = "$work\appdata\models"
+  $ep4 = "\\.\pipe\attome-uitest-niches4-$PID"
+  try {
+    $steps = @('wait 1200', 'click @rail:Niches', 'wait 400', 'click @field:niche_link', 'type https://example.com/watch?v=abc', 'wait 200',
+               "shot $work\link.jpg", 'click @button:niche_get_link', 'wait 5000', "shot $work\link_done.jpg", 'click @button:niche_save', 'wait 600')
+    $run4 = Invoke-EditorScript -Project $proj -Endpoint $ep4 -TimeoutSeconds 240 -Script $steps
+  } finally { foreach ($k in $saved.Keys) { if ($saved[$k]) { Set-Item "Env:\$k" $saved[$k] } else { Remove-Item "Env:\$k" -ErrorAction SilentlyContinue } } }
+  $failed = $run4.Errors
+  if (-not $failed) {
+    $mine = @(Get-ProjectNiches $run4)
+    "after the link: $($mine.Count) niche(s): $($mine.title -join ' | ')"
+    if (-not ($mine.title -match 'Learned from Fake title')) { $failed = 'the niche learned from the link was not kept under the video title' }
+    elseif (Get-ChildItem "$work\appdata" -Recurse -Filter 'fake.mp4' -ErrorAction SilentlyContinue) { $failed = 'the downloaded video was not deleted after it was measured' }
+  }
+  Stop-Daemon $run4
+}
 Stop-Daemon $run
 if ($failed) { Write-Host "FAIL: $failed" -ForegroundColor Red; exit 1 }
 Write-Host "PASS: the Niches panel lists, edits, keeps, learns from a video and deletes; look at the captures in $work" -ForegroundColor Green
-

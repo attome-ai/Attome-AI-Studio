@@ -50,7 +50,7 @@ Result<json> Engine::Impl::jobs_get(const json &params) {
               {"frames_total", total},
               {"units_done", done},
               {"units_total", total},
-              {"unit", job->kind == "models.fetch" ? "bytes" : job->kind == "gen.run" ? "steps" : job->kind == "asr.transcribe" ? "thousandths" : "frames"},
+              {"unit", job->kind == "models.fetch" || job->kind == "ytdlp.install" ? "bytes" : job->kind == "gen.run" ? "steps" : job->kind == "asr.transcribe" || job->kind == "video.fetch" ? "thousandths" : "frames"},
               {"output", job->output}};
   std::lock_guard lock(job->mutex);
   const double seconds = state == Job::running
@@ -58,7 +58,7 @@ Result<json> Engine::Impl::jobs_get(const json &params) {
                              : job->seconds;
   out["seconds"] = seconds;
   out["fps"] = seconds > 0.0 ? double(done) / seconds : 0.0;
-  if (job->kind == "models.fetch")
+  if (job->kind == "models.fetch" || job->kind == "ytdlp.install")
     out["bytes_per_second"] = seconds > 0.0 ? double(job->fetched.load()) / seconds : 0.0;
   if (state == Job::failed)
     out["error"] = error_to_json(job->error);

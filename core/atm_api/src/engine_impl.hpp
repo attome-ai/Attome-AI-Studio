@@ -313,6 +313,9 @@ struct Engine::Impl {
   Result<json> media_remove(const json &params);
   Result<json> audio_analyze(const json &params);
   Result<json> video_analyze(const json &params);
+  Result<json> ytdlp_status(const json &params);
+  Result<json> ytdlp_install(const json &params);
+  Result<json> video_fetch(const json &params);
   Result<json> asr_transcribe(const json &params);
   Result<json> music_fit(const json &params);
   Result<json> clip_motion(const json &params);

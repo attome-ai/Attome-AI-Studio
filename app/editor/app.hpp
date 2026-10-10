@@ -637,6 +637,14 @@ private:
   void niche_learn(const std::string &file);
   std::string niche_draft(const json &analysis, const std::string &file) const;
   void ask_niche_video();
+  // A link as the source: the optional downloader (yt-dlp) and the job that installs it or saves the video.
+  bool ytdlp_known_ = false, ytdlp_found_ = false;
+  char niche_link_[512] = {};
+  std::string niche_job_, niche_job_what_; // a job id; "install" or "fetch"
+  json niche_job_state_;
+  double next_niche_poll_ = 0.0;
+  void poll_niche_job();
+  void draw_niche_link();
   void add_to_library(bool with_linked = true, const std::string &only = {}, const std::string &part = {});            // the selected clips (and, unless with_linked is false, what is linked to them) become one item
   void insert_library(const std::string &id, int64_t at, const std::string &track = {}, bool follow = false); // an item at `at`, its clips on tracks of their kind; follow: select them, playhead to their end
   char text_buf_[1024] = {};

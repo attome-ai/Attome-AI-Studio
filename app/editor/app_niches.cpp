@@ -214,6 +214,113 @@ void App::niche_learn(const std::string &file) {
   say("A draft niche was written from the video. Check it, then save it.");
 }
 
+// What a finished job of the link section did: the downloader is installed, or the video is saved and is analysed (then it is deleted: only
+// the numbers are kept).
+void App::poll_niche_job() {
+  if (niche_job_.empty() || clock_ < next_niche_poll_)
+    return;
+  next_niche_poll_ = clock_ + 0.25;
+  json state;
+  RpcError error;
+  if (!client_.call("jobs.get", {{"job_id", niche_job_}}, state, error)) {
+    niche_job_.clear();
+    say(error.message, true);
+    return;
+  }
+  niche_job_state_ = state;
+  const std::string what = state.value("state", std::string());
+  if (what == "running")
+    return;
+  const std::string kind = niche_job_what_;
+  niche_job_.clear();
+  if (what == "done" && kind == "install") {
+    ytdlp_known_ = false; // asked again
+    say("The video downloader is installed.");
+  } else if (what == "done" && kind == "fetch") {
+    const json result = state.value("result", json::object());
+    const std::string path = result.value("path", std::string());
+    if (!path.empty()) {
+      niche_learn(path);
+      std::error_code ec;
+      std::filesystem::remove(std::filesystem::path(std::u8string(path.begin(), path.end())), ec); // only the numbers are kept
+      const std::string title = result.value("title", std::string());
+      if (!title.empty())
+        copy_to(niche_title_, sizeof niche_title_, "Learned from " + title.substr(0, 60));
+    }
+  } else if (what == "failed") {
+    const json e = state.value("error", json::object());
+    say(e.value("message", std::string("It did not work.")) + (e.contains("data") ? "  " + e["data"].value("hint", std::string()) : std::string()), true);
+  } else if (what == "cancelled") {
+    say("Stopped.");
+  }
+}
+
+// "From a link": a video of a web link is saved, measured and deleted. It needs the optional downloader, which the user installs here once.
+void App::draw_niche_link() {
+  if (!ytdlp_known_) {
+    ytdlp_known_ = true;
+    json status;
+    RpcError error;
+    ytdlp_found_ = client_.call("ytdlp.status", json::object(), status, error) && status.value("found", false);
+  }
+  const bool working = !niche_job_.empty();
+  section_label("FROM A LINK  (optional)");
+  ImGui::PushTextWrapPos(0.0f);
+  if (!ytdlp_found_ && !working) {
+    ImGui::TextColored(hexv(look::fg3), "A link needs a small free program, yt-dlp (about 18 MB, from its own GitHub page). It is not part of Attome, "
+                                        "and you can leave it out: files on this computer work without it.");
+    ImGui::PopTextWrapPos();
+    ImGui::Spacing();
+    if (soft_button("niche_install_ytdlp", "Download yt-dlp", ImVec2(0.0f, 30.0f), true, false)) {
+      json started;
+      if (rpc("ytdlp.install", json::object(), started)) {
+        niche_job_ = started.value("job_id", std::string());
+        niche_job_what_ = "install";
+        niche_job_state_ = json::object();
+      }
+    }
+    ImGui::Spacing();
+    return;
+  }
+  ImGui::PopTextWrapPos();
+  if (working) {
+    const double progress = niche_job_state_.value("progress", 0.0);
+    ImGui::PushStyleColor(ImGuiCol_PlotHistogram, hexv(look::accent));
+    ImGui::ProgressBar(float(progress), ImVec2(-1.0f, 8.0f), "");
+    ImGui::PopStyleColor();
+    ImGui::PushTextWrapPos(0.0f);
+    const std::string detail = niche_job_state_.value("detail", std::string(niche_job_what_ == "install" ? "Downloading yt-dlp" : "Getting the video"));
+    ImGui::TextColored(hexv(look::fg2), "%s", detail.c_str());
+    ImGui::PopTextWrapPos();
+    if (soft_button("niche_job_stop", "Stop", ImVec2(0.0f, 28.0f))) {
+      json ignored;
+      rpc("jobs.cancel", {{"job_id", niche_job_}}, ignored);
+    }
+    ImGui::Spacing();
+    return;
+  }
+  ImGui::SetNextItemWidth(-1.0f);
+  ImGui::PushStyleColor(ImGuiCol_FrameBg, hexv(look::raised));
+  ImGui::InputTextWithHint("##niche_link", "Paste a video link, https://...", niche_link_, sizeof niche_link_);
+  ui_mark("field:niche_link");
+  ImGui::PopStyleColor();
+  ImGui::Spacing();
+  const bool has_link = niche_link_[0] != 0;
+  if (soft_button("niche_get_link", "Get the video and learn its style", ImVec2(0.0f, 30.0f), has_link, true)) {
+    json started;
+    if (rpc("video.fetch", {{"url", std::string(niche_link_)}}, started)) {
+      niche_job_ = started.value("job_id", std::string());
+      niche_job_what_ = "fetch";
+      niche_job_state_ = json::object();
+    }
+  }
+  ImGui::PushTextWrapPos(0.0f);
+  ImGui::TextColored(hexv(look::fg3), "Use videos you are allowed to use. Attome measures the pace, look and sound, then deletes the file; "
+                                      "it does not copy or keep it.");
+  ImGui::PopTextWrapPos();
+  ImGui::Spacing();
+}
+
 void App::ask_niche_video() {
   if (const char *picked = std::getenv("ATTOME_EDITOR_PICK_NICHE_VIDEO")) { // a UI test: a script cannot drive the native dialog
     std::lock_guard lock(dialog_mutex_);
@@ -235,6 +342,7 @@ void App::draw_niches_panel() {
   ATM_PROFILE_SCOPE("ui.niches");
   if (niches_stale_)
     niches_refresh();
+  poll_niche_job();
   ImGui::BeginChild("##niches_scroll", ImVec2(0.0f, 0.0f), ImGuiChildFlags_NavFlattened, ImGuiWindowFlags_NoBackground);
   section_label("NICHES");
   ImGui::PushTextWrapPos(0.0f);
@@ -285,6 +393,7 @@ void App::draw_niches_panel() {
   if (ImGui::IsItemHovered())
     ImGui::SetTooltip("Pick a video: its cuts, pace, look and sound are measured and written as a draft niche.");
   ImGui::Spacing();
+  draw_niche_link();
 
   if (!niche_editing_) {
     ImGui::PushTextWrapPos(0.0f);
