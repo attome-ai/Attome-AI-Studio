@@ -306,12 +306,12 @@ void App::draw_niche_link() {
   ImGui::PopStyleColor();
   ImGui::Spacing();
   {
-    static const char *kNames[] = {"Not signed in", "Chrome", "Edge", "Firefox", "Brave"};
+    static const char *kNames[] = {"Not signed in", "Chrome", "Edge", "Firefox", "Brave", "A cookies.txt file"};
     ImGui::TextColored(hexv(look::fg3), "Sign-in from");
     ImGui::SameLine();
     ImGui::SetNextItemWidth(-1.0f);
     if (ImGui::BeginCombo("##niche_browser", kNames[niche_browser_])) {
-      for (int i = 0; i < 5; ++i)
+      for (int i = 0; i < 6; ++i)
         if (ImGui::Selectable(kNames[i], i == niche_browser_))
           niche_browser_ = i;
       ImGui::EndCombo();
@@ -319,7 +319,23 @@ void App::draw_niche_link() {
     ui_mark("field:niche_browser");
     if (ImGui::IsItemHovered())
       ImGui::SetTooltip("Some sites (YouTube) ask a program to prove it is not a bot. Choose the browser you are signed in with; the "
-                        "downloader reads that browser's sign-in for this one request.");
+                        "downloader reads that browser's sign-in for this one request. If the browser's own file cannot be read, export a "
+                        "cookies.txt with a browser add-on and choose it here.");
+    if (niche_browser_ == 5) {
+      if (soft_button("niche_cookies", niche_cookies_.empty() ? "Choose cookies.txt..." : "Choose another cookies.txt...", ImVec2(0.0f, 28.0f))) {
+        static const SDL_DialogFileFilter filters[] = {{"Cookies", "txt"}, {"All files", "*"}};
+        SDL_ShowOpenFileDialog(
+            [](void *self, const char *const *files, int) {
+              App *app = static_cast<App *>(self);
+              std::lock_guard lock(app->dialog_mutex_);
+              if (files && *files)
+                app->dialog_niche_cookies_ = *files;
+            },
+            this, window_, filters, 2, user_folder(SDL_FOLDER_DOWNLOADS).c_str(), false);
+      }
+      if (!niche_cookies_.empty())
+        ImGui::TextColored(hexv(look::fg2), "%s", std::filesystem::path(std::u8string(niche_cookies_.begin(), niche_cookies_.end())).filename().string().c_str());
+    }
   }
   ImGui::Spacing();
   const bool has_link = niche_link_[0] != 0;
@@ -329,6 +345,8 @@ void App::draw_niche_link() {
     static const char *kBrowsers[] = {"", "chrome", "edge", "firefox", "brave"};
     if (niche_browser_ > 0 && niche_browser_ < 5)
       fetch["cookies_from_browser"] = kBrowsers[niche_browser_];
+    else if (niche_browser_ == 5 && !niche_cookies_.empty())
+      fetch["cookies_file"] = niche_cookies_;
     if (rpc("video.fetch", fetch, started)) {
       niche_job_ = started.value("job_id", std::string());
       niche_job_what_ = "fetch";

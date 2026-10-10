@@ -247,10 +247,10 @@ void run_install_body(const std::shared_ptr<Job> &job, const fs::path &tools, co
   finish(job, Job::failed, "", &e);
 }
 
-void run_fetch_video(const std::shared_ptr<Job> &job, fs::path exe, std::string url, fs::path folder, std::string browser) {
+void run_fetch_video(const std::shared_ptr<Job> &job, fs::path exe, std::string url, fs::path folder, std::string browser, fs::path cookies_file) {
   prof::set_thread_name("atm-video-fetch");
 #if !defined(_WIN32)
-  (void)exe, (void)url, (void)folder, (void)browser;
+  (void)exe, (void)url, (void)folder, (void)browser, (void)cookies_file;
   const Error e{ErrorCode::Unsupported, "Y_UNSUPPORTED", "Getting a video from a link runs on Windows in this version.", {}, {}};
   finish(job, Job::failed, "", &e);
 #else
@@ -266,6 +266,10 @@ void run_fetch_video(const std::shared_ptr<Job> &job, fs::path exe, std::string 
   if (!browser.empty()) { // the sign-in of a browser the user chose, so a site that asks for one can answer
     args.insert(args.begin(), L"--cookies-from-browser");
     args.insert(args.begin() + 1, std::wstring(browser.begin(), browser.end()));
+  }
+  if (!cookies_file.empty()) { // a cookies.txt the user exported from their browser
+    args.insert(args.begin(), L"--cookies");
+    args.insert(args.begin() + 1, cookies_file.wstring());
   }
   std::string last_error;
   const int code = run_process(exe, args, job->cancel, [&](const std::string &line) {
@@ -353,6 +357,13 @@ Result<json> Engine::Impl::video_fetch(const json &params) {
   const std::string browser = params.value("cookies_from_browser", std::string());
   if (!browser.empty() && browser != "chrome" && browser != "edge" && browser != "firefox" && browser != "brave" && browser != "opera" && browser != "vivaldi")
     return bad_param("cookies_from_browser", "must be chrome, edge, firefox, brave, opera or vivaldi");
+  fs::path cookies_file;
+  if (params.contains("cookies_file") && params["cookies_file"].is_string() && !params.value("cookies_file", std::string()).empty()) {
+    cookies_file = to_path(params.value("cookies_file", std::string()));
+    std::error_code exists_error;
+    if (!fs::is_regular_file(cookies_file, exists_error))
+      return bad_param("cookies_file", "must be a file that exists");
+  }
   fs::path folder = params.contains("folder") ? to_path(params.value("folder", std::string())) : tools_dir_of(models_dir()).parent_path() / "downloads";
   std::error_code ec;
   fs::create_directories(folder, ec);
@@ -364,7 +375,7 @@ Result<json> Engine::Impl::video_fetch(const json &params) {
   job->output = *url;
   job->units_total.store(1000);
   jobs[job->id] = job;
-  job->thread = std::thread(run_fetch_video, job, exe, *url, folder, browser);
+  job->thread = std::thread(run_fetch_video, job, exe, *url, folder, browser, cookies_file);
   return json{{"job_id", job->id}, {"url", *url}, {"folder", to_utf8(folder)}};
 }
 
