@@ -570,6 +570,34 @@ void App::wf_add_from_search(const std::string &kind_id) {
   }
 }
 
+// The links that touch the chosen node, one after another: the selected link is the one Delete removes, as when a link is clicked.
+void App::wf_key_link(int dir) {
+  const json *workflow = workflow_json();
+  if (!workflow || wf_node_.empty())
+    return;
+  const json &links = object_in(*workflow, "links");
+  std::vector<std::string> mine;
+  std::map<std::string, std::string> words;
+  for (auto l = links.begin(); l != links.end(); ++l) {
+    if (!l->is_object() || !l->contains("from") || !l->contains("to") || !(*l)["from"].is_array() || !(*l)["to"].is_array() || (*l)["from"].size() < 2 || (*l)["to"].size() < 2)
+      continue;
+    const json &from = (*l)["from"], &to = (*l)["to"];
+    if (from[0].get<std::string>() != wf_node_ && to[0].get<std::string>() != wf_node_)
+      continue;
+    mine.push_back(l.key());
+    words[l.key()] = from[1].get<std::string>() + " to " + to[1].get<std::string>();
+  }
+  if (mine.empty()) {
+    say("This node has no links.");
+    return;
+  }
+  const auto at = std::find(mine.begin(), mine.end(), wf_link_);
+  size_t pick = at == mine.end() ? (dir > 0 ? 0 : mine.size() - 1) : (size_t(std::ptrdiff_t(at - mine.begin()) + dir + std::ptrdiff_t(mine.size())) % mine.size());
+  wf_link_ = mine[pick];
+  wf_row_.clear();
+  say("Link " + std::to_string(pick + 1) + " of " + std::to_string(mine.size()) + ": " + words[wf_link_] + ". Delete removes it; [ and ] go on.");
+}
+
 // The chosen nodes moved by a step, as one saved edit (the same op as a drag that ends).
 void App::wf_nudge(float dx, float dy) {
   const json *workflow = workflow_json();

@@ -137,6 +137,10 @@ void App::shortcuts() {
         wf_key_select(io.KeyShift ? 5 : 4);
       if (ImGui::IsKeyPressed(ImGuiKey_A, false) || ImGui::IsKeyPressed(ImGuiKey_Slash, false))
         wf_search_key_ = true;
+      if (ImGui::IsKeyPressed(ImGuiKey_LeftBracket, false))
+        wf_key_link(-1);
+      if (ImGui::IsKeyPressed(ImGuiKey_RightBracket, false))
+        wf_key_link(1);
       if (ImGui::IsKeyPressed(ImGuiKey_L, false))
         wf_ports_request_ = 'L';
       if (ImGui::IsKeyPressed(ImGuiKey_I, false))

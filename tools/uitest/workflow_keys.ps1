@@ -54,6 +54,8 @@ try {
     "shot $work\keys_added.jpg"
     'key Delete', 'wait 800'                                                             # the node just added is the chosen one: it goes again
     "shot $work\keys_deleted.jpg"
+    'key Home', 'wait 300', 'key BracketRight', 'wait 400', "shot $work\keys_link.jpg"    # [ and ]: a link of the chosen node is the selected one
+    'key Delete', 'wait 800', "shot $work\keys_link_cut.jpg"                              # Delete takes that link away, not the node
   )
   $failed = $run.Errors
   try {
@@ -61,6 +63,9 @@ try {
       $w = Get-Workflow $run
       "after the moves, the added node and Delete: $(Shape $w)"
       if (@($w.nodes.PSObject.Properties).Count -ne 4) { $failed = 'adding a node by key and deleting it should leave the four nodes' }
+      $cuts = @((Invoke-Attome $run --json history $proj | ConvertFrom-Json).result.changesets | Where-Object { $_.label -eq 'Remove link' })
+      "Remove link edits: $($cuts.Count)"
+      if (-not $failed -and $cuts.Count -ne 1) { $failed = "] then Delete made $($cuts.Count) Remove link edits, not 1" }
       $links = @((Invoke-Attome $run --json history $proj | ConvertFrom-Json).result.changesets | Where-Object { $_.label -eq 'Link' })
       "Link edits: $($links.Count)"
       if (-not $failed -and $links.Count -ne 1) { $failed = "L, Enter, I, Enter made $($links.Count) Link edits, not 1" }

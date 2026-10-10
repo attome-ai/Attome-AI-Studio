@@ -290,6 +290,7 @@ void App::draw_toasts() {
   ImGui::Begin("##toasts", nullptr,
                ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings |
                    ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoDocking);
+  ImGui::BringWindowToDisplayFront(ImGui::GetCurrentWindow()); // a panel the keys were sent to (F6) must not cover the notes
   const bool hovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows);
   bool undo_clicked = false;
   size_t drop = toasts_.size();

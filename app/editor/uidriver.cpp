@@ -42,7 +42,7 @@ std::optional<ImGuiKey> key_named(const std::string &name) {
       {"Space", ImGuiKey_Space}, {"Delete", ImGuiKey_Delete}, {"Enter", ImGuiKey_Enter}, {"Escape", ImGuiKey_Escape},
       {"Left", ImGuiKey_LeftArrow}, {"Right", ImGuiKey_RightArrow}, {"Backspace", ImGuiKey_Backspace},
       {"Home", ImGuiKey_Home}, {"End", ImGuiKey_End}, {"Up", ImGuiKey_UpArrow}, {"Down", ImGuiKey_DownArrow}, {"Tab", ImGuiKey_Tab},
-      {"F1", ImGuiKey_F1}, {"F2", ImGuiKey_F2}, {"Slash", ImGuiKey_Slash}, {"F6", ImGuiKey_F6}, {"Plus", ImGuiKey_Equal}, {"Minus", ImGuiKey_Minus}, {"Comma", ImGuiKey_Comma}};
+      {"F1", ImGuiKey_F1}, {"F2", ImGuiKey_F2}, {"BracketLeft", ImGuiKey_LeftBracket}, {"BracketRight", ImGuiKey_RightBracket}, {"Slash", ImGuiKey_Slash}, {"F6", ImGuiKey_F6}, {"Plus", ImGuiKey_Equal}, {"Minus", ImGuiKey_Minus}, {"Comma", ImGuiKey_Comma}};
   for (const auto &[n, k] : keys)
     if (name == n)
       return k;
