@@ -5,7 +5,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <imgui.h>
+#include "atm/base/id.hpp"
 #include "atm/base/profiler.hpp"
 #include "uidriver.hpp"
 
@@ -233,6 +235,12 @@ void App::poll_niche_job() {
     return;
   const std::string kind = niche_job_what_;
   niche_job_.clear();
+  if (!niche_cookies_temp_.empty()) { // a pasted cookie's temp file is never kept past the one fetch it was made for
+    std::error_code ec;
+    std::filesystem::remove(std::filesystem::path(std::u8string(niche_cookies_temp_.begin(), niche_cookies_temp_.end())), ec);
+    niche_cookies_temp_.clear();
+    niche_cookies_text_.clear();
+  }
   if (what == "done" && kind == "install") {
     ytdlp_known_ = false; // asked again
     say("The video downloader is installed.");
@@ -306,22 +314,34 @@ void App::draw_niche_link() {
   ImGui::PopStyleColor();
   ImGui::Spacing();
   {
-    static const char *kNames[] = {"Not signed in", "Chrome", "Edge", "Firefox", "Brave", "A cookies.txt file"};
+    static const char *kNames[] = {"Not signed in", "Chrome", "Edge", "Firefox", "Brave", "Paste cookies", "A cookies.txt file"};
     ImGui::TextColored(hexv(look::fg3), "Sign-in from");
     ImGui::SameLine();
     ImGui::SetNextItemWidth(-1.0f);
     if (ImGui::BeginCombo("##niche_browser", kNames[niche_browser_])) {
-      for (int i = 0; i < 6; ++i)
+      for (int i = 0; i < 7; ++i) {
         if (ImGui::Selectable(kNames[i], i == niche_browser_))
           niche_browser_ = i;
+        ui_mark(std::string("item:") + kNames[i]);
+      }
       ImGui::EndCombo();
     }
     ui_mark("field:niche_browser");
     if (ImGui::IsItemHovered())
       ImGui::SetTooltip("Some sites (YouTube) ask a program to prove it is not a bot. Choose the browser you are signed in with; the "
-                        "downloader reads that browser's sign-in for this one request. If the browser's own file cannot be read, export a "
-                        "cookies.txt with a browser add-on and choose it here.");
-    if (niche_browser_ == 5) {
+                        "downloader reads that browser's sign-in for this one request. Newer Chrome, Edge and Brave on Windows often refuse "
+                        "this (\"Failed to decrypt with DPAPI\"): use Paste cookies instead.");
+    if (niche_browser_ == 5) { // paste, no file to find: a cookie export extension's own "copy" button goes straight into this box
+      ImGui::PushTextWrapPos(0.0f);
+      ImGui::TextColored(hexv(look::fg3), "In the browser, on youtube.com, signed in: add a cookie export extension (\"Get cookies.txt LOCALLY\" "
+                                          "or similar), open it, Copy, then paste here. Nothing is saved after this gets the video.");
+      ImGui::PopTextWrapPos();
+      ImGui::PushStyleColor(ImGuiCol_FrameBg, hexv(look::raised));
+      ImGui::InputTextMultiline("##niche_cookies_paste", niche_cookies_text_.data(), niche_cookies_text_.capacity() + 1, ImVec2(-1.0f, 70.0f),
+                                ImGuiInputTextFlags_WordWrap | ImGuiInputTextFlags_CallbackResize, resize_text, &niche_cookies_text_);
+      ui_mark("field:niche_cookies_paste");
+      ImGui::PopStyleColor();
+    } else if (niche_browser_ == 6) {
       if (soft_button("niche_cookies", niche_cookies_.empty() ? "Choose cookies.txt..." : "Choose another cookies.txt...", ImVec2(0.0f, 28.0f))) {
         static const SDL_DialogFileFilter filters[] = {{"Cookies", "txt"}, {"All files", "*"}};
         SDL_ShowOpenFileDialog(
@@ -343,10 +363,19 @@ void App::draw_niche_link() {
     json started;
     json fetch = {{"url", std::string(niche_link_)}};
     static const char *kBrowsers[] = {"", "chrome", "edge", "firefox", "brave"};
-    if (niche_browser_ > 0 && niche_browser_ < 5)
+    if (niche_browser_ > 0 && niche_browser_ < 5) {
       fetch["cookies_from_browser"] = kBrowsers[niche_browser_];
-    else if (niche_browser_ == 5 && !niche_cookies_.empty())
+    } else if (niche_browser_ == 5 && !niche_cookies_text_.empty()) {
+      std::error_code ec;
+      const std::filesystem::path temp = std::filesystem::temp_directory_path(ec) / ("attome-cookies-" + atm::new_id("tmp") + ".txt");
+      std::ofstream out(temp, std::ios::binary);
+      out << niche_cookies_text_;
+      out.close();
+      niche_cookies_temp_ = temp.string();
+      fetch["cookies_file"] = niche_cookies_temp_;
+    } else if (niche_browser_ == 6 && !niche_cookies_.empty()) {
       fetch["cookies_file"] = niche_cookies_;
+    }
     if (rpc("video.fetch", fetch, started)) {
       niche_job_ = started.value("job_id", std::string());
       niche_job_what_ = "fetch";

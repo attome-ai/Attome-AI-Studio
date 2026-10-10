@@ -247,6 +247,11 @@ void run_install_body(const std::shared_ptr<Job> &job, const fs::path &tools, co
   finish(job, Job::failed, "", &e);
 }
 
+bool looks_blocked(const std::string &error) {
+  return error.find("not a bot") != std::string::npos || error.find("Sign in") != std::string::npos ||
+         error.find("cookie database") != std::string::npos || error.find("DPAPI") != std::string::npos;
+}
+
 void run_fetch_video(const std::shared_ptr<Job> &job, fs::path exe, std::string url, fs::path folder, std::string browser, fs::path cookies_file) {
   prof::set_thread_name("atm-video-fetch");
 #if !defined(_WIN32)
@@ -255,47 +260,59 @@ void run_fetch_video(const std::shared_ptr<Job> &job, fs::path exe, std::string 
   finish(job, Job::failed, "", &e);
 #else
   const fs::path path_file = folder / "path.txt", title_file = folder / "title.txt";
-  std::error_code ec;
-  fs::remove(path_file, ec);
-  fs::remove(title_file, ec);
-  // One file of at most 720 p (a style is read from that), joined by FFmpeg when it has to, no playlist.
-  std::vector<std::wstring> args = {L"--no-playlist", L"--no-warnings", L"--newline", L"--progress", L"--no-simulate", L"-f",
-                                          L"bv*[height<=720]+ba/b[height<=720]/b", L"--merge-output-format", L"mp4", L"-P", folder.wstring(),
-                                          L"-o", L"%(id)s.%(ext)s", L"--print-to-file", L"after_move:filepath", path_file.wstring(),
-                                          L"--print-to-file", L"after_move:%(title)s", title_file.wstring(), L"--", std::wstring(url.begin(), url.end())};
-  if (!browser.empty()) { // the sign-in of a browser the user chose, so a site that asks for one can answer
-    args.insert(args.begin(), L"--cookies-from-browser");
-    args.insert(args.begin() + 1, std::wstring(browser.begin(), browser.end()));
-  }
-  if (!cookies_file.empty()) { // a cookies.txt the user exported from their browser
-    args.insert(args.begin(), L"--cookies");
-    args.insert(args.begin() + 1, cookies_file.wstring());
-  }
+  // One file of at most 720 p (a style is read from that), joined by FFmpeg when it has to, no playlist. Two tries, no sign-in needed for
+  // either: the site's normal page first, then, only if that is refused ("confirm you're not a bot"), the phone app's own API, which answers
+  // without a sign-in. A browser's sign-in (picked by the user) is used only when both of those are refused.
+  const auto build = [&](bool android) {
+    std::vector<std::wstring> a = {L"--no-playlist", L"--no-warnings", L"--newline", L"--progress", L"--no-simulate", L"-f",
+                                   L"bv*[height<=720]+ba/b[height<=720]/b", L"--merge-output-format", L"mp4", L"-P", folder.wstring(),
+                                   L"-o", L"%(id)s.%(ext)s", L"--print-to-file", L"after_move:filepath", path_file.wstring(),
+                                   L"--print-to-file", L"after_move:%(title)s", title_file.wstring()};
+    if (android)
+      a.insert(a.end(), {L"--extractor-args", L"youtube:player_client=android"});
+    if (!browser.empty())
+      a.insert(a.end(), {L"--cookies-from-browser", std::wstring(browser.begin(), browser.end())});
+    if (!cookies_file.empty())
+      a.insert(a.end(), {L"--cookies", cookies_file.wstring()});
+    a.insert(a.end(), {L"--", std::wstring(url.begin(), url.end())});
+    return a;
+  };
   std::string last_error;
-  const int code = run_process(exe, args, job->cancel, [&](const std::string &line) {
-    const size_t pct = line.find('%');
-    if (line.rfind("[download]", 0) == 0 && pct != std::string::npos && pct > 0) {
-      size_t start = pct;
-      while (start > 0 && (std::isdigit(static_cast<unsigned char>(line[start - 1])) || line[start - 1] == '.'))
-        --start;
-      const double value = std::atof(line.substr(start, pct - start).c_str());
-      job->units_done.store(int64_t(std::clamp(value, 0.0, 100.0) * 10.0));
-    }
-    if (line.rfind("ERROR", 0) == 0)
-      last_error = clean_utf8(line, 400);
-    std::lock_guard lock(job->mutex);
-    job->detail = clean_utf8(line, 160);
-  });
-  if (job->cancel.load())
-    return finish(job, Job::cancelled, "Stopped");
-  const std::string path = fs::exists(path_file) ? read_text(path_file) : std::string();
+  int code = -1;
+  std::string path;
+  for (const bool android : {false, true}) {
+    std::error_code ec;
+    fs::remove(path_file, ec);
+    fs::remove(title_file, ec);
+    last_error.clear();
+    code = run_process(exe, build(android), job->cancel, [&](const std::string &line) {
+      const size_t pct = line.find('%');
+      if (line.rfind("[download]", 0) == 0 && pct != std::string::npos && pct > 0) {
+        size_t start = pct;
+        while (start > 0 && (std::isdigit(static_cast<unsigned char>(line[start - 1])) || line[start - 1] == '.'))
+          --start;
+        const double value = std::atof(line.substr(start, pct - start).c_str());
+        job->units_done.store(int64_t(std::clamp(value, 0.0, 100.0) * 10.0));
+      }
+      if (line.rfind("ERROR", 0) == 0)
+        last_error = clean_utf8(line, 400);
+      std::lock_guard lock(job->mutex);
+      job->detail = clean_utf8(line, 160);
+    });
+    if (job->cancel.load())
+      return finish(job, Job::cancelled, "Stopped");
+    path = fs::exists(path_file) ? read_text(path_file) : std::string();
+    const bool ok = code == 0 && !path.empty() && fs::exists(to_path(path));
+    if (ok || android || !looks_blocked(last_error) || !browser.empty() || !cookies_file.empty())
+      break; // done, or the second try is pointless (not a bot-check, or the user already gave a sign-in to use)
+  }
   if (code != 0 || path.empty() || !fs::exists(to_path(path))) {
     const Error e{ErrorCode::IoError, "Y_FETCH", last_error.empty() ? "The video could not be fetched (the program ended with code " + std::to_string(code) + ")." : last_error,
                   {}, last_error.find("cookie database") != std::string::npos || last_error.find("DPAPI") != std::string::npos
                           ? "The browser keeps its sign-in file locked or encrypted. Close that browser completely (also in the tray) and try again, or choose Firefox, "
                             "which can be read while it is open. Chrome and Edge often cannot be read at all by newer versions."
                           : last_error.find("not a bot") != std::string::npos || last_error.find("Sign in") != std::string::npos
-                          ? "The site asks for a sign-in. In the Niches panel pick the browser you are signed in with (\"Sign-in from\"), then try again."
+                          ? "The site still asks for a sign-in. In the Niches panel pick the browser you are signed in with (\"Sign-in from\"), then try again."
                           : "Check the link, and that the video is public. yt-dlp changes often: a newer one may be needed (Download yt-dlp again)."};
     return finish(job, Job::failed, "", &e);
   }
