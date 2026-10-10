@@ -7,7 +7,9 @@ description: How to follow a niche - a free-text playbook for a kind of video (a
 
 A **niche** is free text that says how a kind of video is made. It may be one sentence or ten pages, it may have the headings
 of the default niche (`niche-funny-short`) or none, and the user may have deleted any part of it or all of it. Find the
-built-in ones with `skill.list` (ids that start with `niche-`); a project may keep its own (`skill.save`).
+built-in ones with `skill.list` (`niche-funny-short`, `niche-music-video`, `niche-skeleton`); the user's own are skills of the
+project whose description starts with "Niche" (the editor's Niches panel keeps them with `skill.save`). When the user names a niche
+by its title, find it there first.
 
 ## Four rules
 
@@ -36,6 +38,6 @@ If the kind is not written, assume `short`.
 
 ## Learning a niche from a video
 
-There is no single tool for it yet. By hand: `probe`, `audio.analyze` (loudness, tempo), `see.contact_sheet` (shots and look),
-`asr.transcribe` (words and timing), then write a **draft niche** in the headings of the default one, put "DRAFT: check before
-use" on the first line, and give it to the user. It learns a style (pace, look, tone, structure), not scripts or footage.
+Read `niche-from-video`: `video.analyze` measures the cuts, look and sound, `asr.transcribe` gives the words, frames give the
+tone and the look; the result is a **draft niche** the user checks. It learns a style (pace, look, tone, structure), not scripts
+or footage. The editor's Niches panel has "Learn from a video", which writes the measured half.

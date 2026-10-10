@@ -53,6 +53,9 @@ TEST_CASE("Skills: the built-in ones are listed and readable, and a project keep
   CHECK(body.find("niche-rules") != std::string::npos);
   REQUIRE(find_skill(listed["skills"], "niche-rules"));
   REQUIRE(find_skill(listed["skills"], "niche-funny-short"));
+  REQUIRE(find_skill(listed["skills"], "niche-skeleton"));
+  REQUIRE(find_skill(listed["skills"], "niche-music-video"));
+  REQUIRE(find_skill(listed["skills"], "niche-from-video"));
   const json niche = ok(e, "skill.get", {{"id", "niche-funny-short"}});
   CHECK(niche.value("body", std::string()).find("CHECKS") != std::string::npos);
 

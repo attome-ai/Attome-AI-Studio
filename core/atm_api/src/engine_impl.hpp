@@ -312,6 +312,7 @@ struct Engine::Impl {
   Result<json> library_insert(const json &params);
   Result<json> media_remove(const json &params);
   Result<json> audio_analyze(const json &params);
+  Result<json> video_analyze(const json &params);
   Result<json> asr_transcribe(const json &params);
   Result<json> music_fit(const json &params);
   Result<json> clip_motion(const json &params);

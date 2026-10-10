@@ -256,6 +256,14 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
        "from":{"type":"number","description":"Seconds"},"to":{"type":"number","description":"Seconds"},
        "min_bpm":{"type":"number","description":"Default 80"},"max_bpm":{"type":"number","description":"Default 180"}}})",
      &Impl::audio_analyze},
+    {"video.analyze", "core", false,
+     "The numbers of a finished video's style: shot cuts (cut_times, in seconds of the file) and their rhythm (cuts per second, average, shortest and longest shot), "
+     "brightness and contrast (0 to 1), the five main colours with their share, and its sound (loudness LUFS, peak, bpm and what share of the cuts fall on the beat). "
+     "Reads at most 180 s (from..to in seconds). The words come from asr.transcribe; the look and the tone are read from see.contact_sheet. The niche-from-video skill "
+     "turns all of it into a draft niche.",
+     R"({"type":"object","properties":{"path":{"type":"string","description":"A video file"},
+       "from":{"type":"number","description":"Seconds"},"to":{"type":"number","description":"Seconds"}},"required":["path"]})",
+     &Impl::video_analyze},
     {"music.fit", "core", true,
      "Fit a music clip to the film: find its tempo and beat (audio.analyze), set its speed so the tempo becomes bpm (within half and double), cut its start to the "
      "first beat at or after `from` (seconds of the file), put that beat at `at` (seconds of the film; default where the clip is now), and with `until` end the clip "

@@ -2406,7 +2406,7 @@ namespace {
 
 void App::take_dialog_results() {
   std::vector<std::string> import;
-  std::string out, project, lut, models_folder, input, wf_import, wf_export;
+  std::string out, project, lut, models_folder, input, wf_import, wf_export, niche_video;
   {
     std::lock_guard lock(dialog_mutex_);
     import.swap(dialog_import_);
@@ -2417,7 +2417,10 @@ void App::take_dialog_results() {
     input.swap(dialog_input_);
     wf_import.swap(dialog_wf_import_);
     wf_export.swap(dialog_wf_export_);
+    niche_video.swap(dialog_niche_video_);
   }
+  if (!niche_video.empty())
+    niche_learn(niche_video);
   if (!wf_import.empty()) { // a workflow file into the library: Attome's own, or a ComfyUI one (what has no node here is named)
     json done;
     if (rpc("gen.import_workflow", {{"project", project_path_}, {"path", wf_import}}, done)) {

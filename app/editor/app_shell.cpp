@@ -566,7 +566,7 @@ void App::draw_rail() {
       Icon cp;
     };
     static const Item items[] = {{"Media", icon::video}, {"Text", icon::text}, {"Effects", icon::star},
-                                 {"Generate", icon::bolt}, {"Library", icon::library}, {"Models", icon::models}};
+                                 {"Generate", icon::bolt}, {"Library", icon::library}, {"Niches", icon::chat}, {"Models", icon::models}};
     const ImVec2 origin = ImGui::GetWindowPos();
     ImDrawList *dl = ImGui::GetWindowDrawList();
     float y = 8.0f;
@@ -600,7 +600,7 @@ void App::draw_rail() {
     };
     for (const Item &it : items) {
       const std::string name = it.label;
-      const int tab = name == "Media" ? 0 : name == "Text" ? 2 : name == "Effects" ? 3 : name == "Generate" ? 4 : name == "Library" ? 7 : 6; // 6: Models
+      const int tab = name == "Media" ? 0 : name == "Text" ? 2 : name == "Effects" ? 3 : name == "Generate" ? 4 : name == "Library" ? 7 : name == "Niches" ? 8 : 6; // 6: Models
       if (place(it, rail_tab_ == tab, nullptr))
         rail_tab_ = tab;
     }
@@ -626,8 +626,10 @@ void App::draw_media() {
   solo_panel();
   ImGui::PopStyleVar();
   ImGui::PopStyleColor();
-  if (rail_tab_ == 2 || rail_tab_ == 3 || rail_tab_ == 4 || rail_tab_ == 6 || rail_tab_ == 7) {
-    if (rail_tab_ == 7)
+  if (rail_tab_ == 2 || rail_tab_ == 3 || rail_tab_ == 4 || rail_tab_ == 6 || rail_tab_ == 7 || rail_tab_ == 8) {
+    if (rail_tab_ == 8)
+      draw_niches_panel();
+    else if (rail_tab_ == 7)
       draw_library_panel();
     else if (rail_tab_ == 2)
       draw_text_panel();

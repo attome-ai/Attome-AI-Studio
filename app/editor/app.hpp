@@ -615,13 +615,28 @@ private:
   int media_kind_ = 0; // the Media panel's filter: 0 all, 1 video, 2 audio, 3 pictures
   int text_tab_ = 0, fx_tab_ = 0, gen_tab_ = 0; // the tab chosen in the Text, Effects and Generate panels; 0 is All
   int inspector_tab_ = 0;
-  int rail_tab_ = 0; // 0 Media, 2 Text, 3 Effects, 4 Generate, 6 Models, 7 Library
+  int rail_tab_ = 0; // 0 Media, 2 Text, 3 Effects, 4 Generate, 6 Models, 7 Library, 8 Niches
   // The user's clip library (library.*), the same in every project.
   json library_items_ = json::array();
   bool library_stale_ = true;
   std::string library_renaming_;
   char library_name_buf_[128] = {};
   void draw_library_panel();
+  // The Niches panel (rail tab 8): niches are skills; see docs/plan/NICHES.md.
+  json niches_ = json::array(); // {id, title, builtin}
+  bool niches_stale_ = true;
+  std::string niche_sel_, niche_text_, dialog_niche_video_;
+  char niche_title_[128] = {};
+  bool niche_builtin_ = false, niche_dirty_ = false, niche_editing_ = false;
+  void draw_niches_panel();
+  void niches_refresh();
+  void niche_open(const std::string &id);
+  void niche_new(bool from_default);
+  void niche_save();
+  void niche_delete();
+  void niche_learn(const std::string &file);
+  std::string niche_draft(const json &analysis, const std::string &file) const;
+  void ask_niche_video();
   void add_to_library(bool with_linked = true, const std::string &only = {}, const std::string &part = {});            // the selected clips (and, unless with_linked is false, what is linked to them) become one item
   void insert_library(const std::string &id, int64_t at, const std::string &track = {}, bool follow = false); // an item at `at`, its clips on tracks of their kind; follow: select them, playhead to their end
   char text_buf_[1024] = {};
