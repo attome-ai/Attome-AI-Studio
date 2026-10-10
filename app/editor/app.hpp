@@ -493,6 +493,12 @@ private:
   json new_node_value(const std::string &kind_id) const;
   json remove_nodes_ops(const json &workflow, const std::set<std::string> &ids) const;
   void wf_copy();
+  // The keyboard on the Workflow Canvas (plan KEYBOARD_WORKFLOW.md): choose a node by the arrows (0 left, 1 right, 2 up, 3 down), by Tab
+  // and Shift+Tab (4 next, 5 previous) or by Home and End (6 first, 7 last); the canvas pans to keep it in view.
+  void wf_key_select(int how);
+  std::map<std::string, float> wf_height_;         // each node's height in canvas units, as of the last frame (its width is kNodeW)
+  std::string wf_reveal_;                          // a node to bring into view on the next frame
+  int wf_zone_ = 1;                                // where F6 put the keys: 0 the list at the left, 1 the canvas, 2 the side panel
   void wf_paste(float offset);
   void wf_add_from_search(const std::string &kind_id);
   std::string wf_deco_;                           // the selected group or note of the canvas

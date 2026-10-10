@@ -422,6 +422,58 @@ json App::remove_nodes_ops(const json &workflow, const std::set<std::string> &id
 }
 
 // Ctrl+C: the selected nodes, with where they are and the links among them (a link to a node that is not copied is left behind).
+// Which node the keys choose: from the selected one (else from the first, the leftmost), by direction or in reading order.
+void App::wf_key_select(int how) {
+  if (wf_pos_.empty())
+    return;
+  constexpr float kW = 230.0f; // a node's width in canvas units, near enough for choosing between nodes (kNodeW is drawn at the zoom)
+  struct N { std::string id; ImVec2 centre; };
+  std::vector<N> all;
+  for (const auto &[id, pos] : wf_pos_) {
+    const auto h = wf_height_.find(id);
+    all.push_back({id, ImVec2(pos.x + kW * 0.5f, pos.y + (h != wf_height_.end() ? h->second : 80.0f) * 0.5f)});
+  }
+  std::sort(all.begin(), all.end(), [](const N &a, const N &b) { return a.centre.x != b.centre.x ? a.centre.x < b.centre.x : a.centre.y < b.centre.y; }); // reading order: the graph flows to the right
+  size_t at = all.size();
+  for (size_t i = 0; i < all.size(); ++i)
+    if (all[i].id == wf_node_ || (wf_node_.empty() && wf_sel_.size() == 1 && all[i].id == *wf_sel_.begin()))
+      at = i;
+  size_t pick = all.size();
+  if (how == 6 || (at == all.size() && how != 7)) {
+    pick = 0;
+  } else if (how == 7) {
+    pick = all.size() - 1;
+  } else if (how == 4) {
+    pick = (at + 1) % all.size();
+  } else if (how == 5) {
+    pick = (at + all.size() - 1) % all.size();
+  } else {
+    float best = 1e30f; // the nearest in that direction: far across counts for more than far along
+    const ImVec2 from = all[at].centre;
+    for (size_t i = 0; i < all.size(); ++i) {
+      if (i == at)
+        continue;
+      const float dx = all[i].centre.x - from.x, dy = all[i].centre.y - from.y;
+      const float along = how == 0 ? -dx : how == 1 ? dx : how == 2 ? -dy : dy, across = (how <= 1) ? std::fabs(dy) : std::fabs(dx);
+      if (along <= 4.0f)
+        continue;
+      const float score = along + 2.0f * across;
+      if (score < best) {
+        best = score;
+        pick = i;
+      }
+    }
+  }
+  if (pick >= all.size())
+    return; // nothing in that direction: the selection stays
+  wf_sel_ = {all[pick].id};
+  wf_node_ = all[pick].id;
+  wf_link_.clear();
+  wf_row_.clear();
+  wf_deco_.clear();
+  wf_reveal_ = all[pick].id;
+}
+
 void App::wf_copy() {
   const json *workflow = workflow_json();
   std::set<std::string> ids = wf_sel_;
@@ -643,6 +695,7 @@ void App::draw_workflow_canvas(const json &library) {
   std::vector<Box> boxes;
   std::map<std::string, size_t> index;
   wf_pos_.clear(); // the positions of this workflow only (the mini-map draws them)
+  wf_height_.clear();
   for (auto it = nodes.begin(); it != nodes.end(); ++it) {
     Box b;
     b.id = it.key();
@@ -687,6 +740,23 @@ void App::draw_workflow_canvas(const json &library) {
     if (const auto moved = wf_moved_.find(b.id); moved != wf_moved_.end())
       b.pos = moved->second;
     wf_pos_[b.id] = b.pos;
+    wf_height_[b.id] = b.height;
+  }
+  if (!wf_reveal_.empty()) { // a node chosen by key: pan the view so that it is on the screen
+    if (const auto at = wf_pos_.find(wf_reveal_); at != wf_pos_.end()) {
+      const float margin = 40.0f, left = wf_pan_.x + at->second.x * z, right = left + node_w;
+      const float top = wf_pan_.y + at->second.y * z, bottom = top + wf_height_[wf_reveal_] * z;
+      if (left < margin)
+        wf_pan_.x += margin - left;
+      else if (right > size.x - margin)
+        wf_pan_.x -= right - (size.x - margin);
+      if (top < margin)
+        wf_pan_.y += margin - top;
+      else if (bottom > size.y - margin)
+        wf_pan_.y -= bottom - (size.y - margin);
+      wf_fit_ = false;
+    }
+    wf_reveal_.clear();
   }
   std::erase_if(wf_sel_, [&](const std::string &id) { return !nodes.contains(id); });
   wf_nodes_total_ = int(nodes.size());

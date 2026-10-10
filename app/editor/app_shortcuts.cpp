@@ -62,6 +62,65 @@ void App::shortcuts() {
   }
   const bool panel_keys = panel_keys_;
   if (mode_ == 1) { // the workflow editor: Delete is for the graph, undo and redo are the project's
+    // F6 and Shift+F6 take the keys from the canvas to the side panel and the list, and round again. In the canvas the arrows, Tab and Home
+    // and End choose a node; in the others a ring shows the widget and Dear ImGui's keys work it (as in the video editor). Esc, or a click,
+    // goes back to the canvas.
+    ImGuiContext &g = *ImGui::GetCurrentContext();
+    if (io.MouseClicked[0] && wf_zone_ != 1) {
+      wf_zone_ = 1;
+      panel_keys_ = false;
+    }
+    if (ImGui::IsKeyPressed(ImGuiKey_F6, false)) {
+      static const char *const tags[] = {"##wf_left", "##wf_canvas", "##wf_side"};
+      static const char *const names[] = {"list of workflows", "canvas", "side panel"};
+      const int to = (wf_zone_ + (io.KeyShift ? 2 : 1)) % 3; // canvas -> side -> list -> canvas
+      wf_zone_ = to;
+      panel_keys_ = to != 1;
+      for (ImGuiWindow *w : g.Windows)
+        if (w->ParentWindow && std::strstr(w->Name, tags[to]) != nullptr) {
+          w->NavLastIds[0] = w->NavLastIds[1] = 0;
+          ImGui::FocusWindow(w);
+          if (to != 1)
+            ImGui::NavInitWindow(w, true);
+          break;
+        }
+      say(std::string("Keys go to the ") + names[to]);
+      return;
+    }
+    if (wf_zone_ != 1) {
+      if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+        wf_zone_ = 1;
+        panel_keys_ = false;
+        return;
+      }
+      g.NavCursorVisible = true;
+      g.NavHighlightItemUnderNav = true;
+      if (g.NavWindow && g.NavId != 0) {
+        const ImRect box = ImGui::WindowRectRelToAbs(g.NavWindow, g.NavWindow->NavRectRel[g.NavLayer]);
+        ImDrawList *top = ImGui::GetForegroundDrawList();
+        top->PushClipRect(g.NavWindow->InnerClipRect.Min, g.NavWindow->InnerClipRect.Max, false);
+        top->AddRect(ImVec2(box.Min.x - 2.0f, box.Min.y - 2.0f), ImVec2(box.Max.x + 2.0f, box.Max.y + 2.0f), hex(look::accent), 8.0f, 0, 2.0f);
+        top->PopClipRect();
+      }
+      if (!io.KeyCtrl)
+        return; // the panel's own keys
+    } else if (!io.KeyCtrl && !io.KeyAlt && !wf_search_.open) {
+      g.NavCursorVisible = false; // the chosen node is the cursor here, not Dear ImGui's blue frame round the canvas
+      if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow, true))
+        wf_key_select(0);
+      if (ImGui::IsKeyPressed(ImGuiKey_RightArrow, true))
+        wf_key_select(1);
+      if (ImGui::IsKeyPressed(ImGuiKey_UpArrow, true))
+        wf_key_select(2);
+      if (ImGui::IsKeyPressed(ImGuiKey_DownArrow, true))
+        wf_key_select(3);
+      if (ImGui::IsKeyPressed(ImGuiKey_Tab, false))
+        wf_key_select(io.KeyShift ? 5 : 4);
+      if (ImGui::IsKeyPressed(ImGuiKey_Home, false))
+        wf_key_select(6);
+      if (ImGui::IsKeyPressed(ImGuiKey_End, false))
+        wf_key_select(7);
+    }
     if (ImGui::IsKeyPressed(ImGuiKey_Delete, false))
       pending_ = [this] { delete_in_workflow(); };
     if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_C, false))
