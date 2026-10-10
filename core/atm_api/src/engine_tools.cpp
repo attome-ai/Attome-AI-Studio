@@ -267,7 +267,7 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
     {"video.fetch", "core", false,
      "Save the video of a web link (at most 720 p, one video, no playlist) to a folder as a job; the result has path and title. Needs ytdlp.install first. "
      "Meant for studying a style (video.analyze, niche-from-video) of a video the user may use; it is not for copying or re-uploading someone else's work.",
-     R"({"type":"object","properties":{"url":{"type":"string","description":"https:// link of one video"},"folder":{"type":"string","description":"Where to save it; default Attome's downloads folder"}},"required":["url"]})",
+     R"({"type":"object","properties":{"url":{"type":"string","description":"https:// link of one video"},"folder":{"type":"string","description":"Where to save it; default Attome's downloads folder"},"cookies_from_browser":{"type":"string","enum":["chrome","edge","firefox","brave","opera","vivaldi"],"description":"For a site that asks for a sign-in (YouTube: not a bot): use the sign-in of this browser. Ask the user first."}},"required":["url"]})",
      &Impl::video_fetch},
     {"video.analyze", "core", false,
      "The numbers of a finished video's style: shot cuts (cut_times, in seconds of the file) and their rhythm (cuts per second, average, shortest and longest shot), "

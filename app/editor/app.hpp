@@ -640,6 +640,7 @@ private:
   // A link as the source: the optional downloader (yt-dlp) and the job that installs it or saves the video.
   bool ytdlp_known_ = false, ytdlp_found_ = false;
   char niche_link_[512] = {};
+  int niche_browser_ = 0; // 0 none, then Chrome, Edge, Firefox, Brave: the browser whose sign-in the downloader may use
   std::string niche_job_, niche_job_what_; // a job id; "install" or "fetch"
   json niche_job_state_;
   double next_niche_poll_ = 0.0;

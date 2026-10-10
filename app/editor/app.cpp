@@ -137,7 +137,7 @@ void App::shutdown() {
 }
 
 bool App::busy() const {
-  return playing_ || !drag_id_.empty() || !job_id_.empty() || !niche_job_.empty() || audio_mixer_.busy() || !gen_job_.empty() || !toasts_.empty() || box_active_ ||
+  return playing_ || !drag_id_.empty() || !job_id_.empty() || !niche_job_.empty() || audio_mixer_.busy() || !gen_job_.empty() || std::any_of(toasts_.begin(), toasts_.end(), [](const Toast &t) { return !t.error; }) || box_active_ ||
          (rail_tab_ == 3 && fx_tab_ == 4 && mode_ == 0) || // the transition cards play
          (models_busy_ && (rail_tab_ == 6 || gen_problems_.contains(selected_clip_)));
 }

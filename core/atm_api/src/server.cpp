@@ -105,7 +105,7 @@ void Server::serve_stream(Stream &stream) {
         // A result that is already JSON text (project.get with raw_json): put it in the reply as it is.
         text = "{\"jsonrpc\":\"2.0\",\"id\":" + response.value("id", json()).dump() + ",\"result\":" + (*result)["$raw"].get<std::string>() + "}";
       } else {
-        text = response.dump();
+        text = response.dump(-1, ' ', false, json::error_handler_t::replace); // text that is not UTF-8 (a program's output) must not stop the daemon
       }
     }
     ATM_PROFILE_SCOPE("rpc.write");

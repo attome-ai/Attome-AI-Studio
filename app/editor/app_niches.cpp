@@ -305,10 +305,31 @@ void App::draw_niche_link() {
   ui_mark("field:niche_link");
   ImGui::PopStyleColor();
   ImGui::Spacing();
+  {
+    static const char *kNames[] = {"Not signed in", "Chrome", "Edge", "Firefox", "Brave"};
+    ImGui::TextColored(hexv(look::fg3), "Sign-in from");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(-1.0f);
+    if (ImGui::BeginCombo("##niche_browser", kNames[niche_browser_])) {
+      for (int i = 0; i < 5; ++i)
+        if (ImGui::Selectable(kNames[i], i == niche_browser_))
+          niche_browser_ = i;
+      ImGui::EndCombo();
+    }
+    ui_mark("field:niche_browser");
+    if (ImGui::IsItemHovered())
+      ImGui::SetTooltip("Some sites (YouTube) ask a program to prove it is not a bot. Choose the browser you are signed in with; the "
+                        "downloader reads that browser's sign-in for this one request.");
+  }
+  ImGui::Spacing();
   const bool has_link = niche_link_[0] != 0;
   if (soft_button("niche_get_link", "Get the video and learn its style", ImVec2(0.0f, 30.0f), has_link, true)) {
     json started;
-    if (rpc("video.fetch", {{"url", std::string(niche_link_)}}, started)) {
+    json fetch = {{"url", std::string(niche_link_)}};
+    static const char *kBrowsers[] = {"", "chrome", "edge", "firefox", "brave"};
+    if (niche_browser_ > 0 && niche_browser_ < 5)
+      fetch["cookies_from_browser"] = kBrowsers[niche_browser_];
+    if (rpc("video.fetch", fetch, started)) {
       niche_job_ = started.value("job_id", std::string());
       niche_job_what_ = "fetch";
       niche_job_state_ = json::object();

@@ -138,6 +138,27 @@ int run_process(const fs::path &exe, const std::vector<std::wstring> &args, cons
 }
 #endif
 
+// Text from a program that may not be UTF-8: bad bytes become '?', and a cut never lands inside a character.
+std::string clean_utf8(const std::string &text, size_t max_bytes = std::string::npos) {
+  std::string out;
+  for (size_t i = 0; i < text.size();) {
+    const unsigned char c = static_cast<unsigned char>(text[i]);
+    const size_t n = c < 0x80 ? 1 : (c >> 5) == 0x6 ? 2 : (c >> 4) == 0xE ? 3 : (c >> 3) == 0x1E ? 4 : 0;
+    bool ok = n > 0 && i + n <= text.size();
+    for (size_t k = 1; ok && k < n; ++k)
+      ok = (static_cast<unsigned char>(text[i + k]) & 0xC0) == 0x80;
+    const size_t add = ok ? n : 1;
+    if (out.size() + add > max_bytes)
+      break;
+    if (ok)
+      out.append(text, i, n);
+    else
+      out += '?';
+    i += add;
+  }
+  return out;
+}
+
 std::string read_text(const fs::path &file) {
   std::ifstream in(file, std::ios::binary);
   std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
@@ -226,10 +247,10 @@ void run_install_body(const std::shared_ptr<Job> &job, const fs::path &tools, co
   finish(job, Job::failed, "", &e);
 }
 
-void run_fetch_video(const std::shared_ptr<Job> &job, fs::path exe, std::string url, fs::path folder) {
+void run_fetch_video(const std::shared_ptr<Job> &job, fs::path exe, std::string url, fs::path folder, std::string browser) {
   prof::set_thread_name("atm-video-fetch");
 #if !defined(_WIN32)
-  (void)exe, (void)url, (void)folder;
+  (void)exe, (void)url, (void)folder, (void)browser;
   const Error e{ErrorCode::Unsupported, "Y_UNSUPPORTED", "Getting a video from a link runs on Windows in this version.", {}, {}};
   finish(job, Job::failed, "", &e);
 #else
@@ -238,10 +259,14 @@ void run_fetch_video(const std::shared_ptr<Job> &job, fs::path exe, std::string 
   fs::remove(path_file, ec);
   fs::remove(title_file, ec);
   // One file of at most 720 p (a style is read from that), joined by FFmpeg when it has to, no playlist.
-  const std::vector<std::wstring> args = {L"--no-playlist", L"--no-warnings", L"--newline", L"--progress", L"--no-simulate", L"-f",
+  std::vector<std::wstring> args = {L"--no-playlist", L"--no-warnings", L"--newline", L"--progress", L"--no-simulate", L"-f",
                                           L"bv*[height<=720]+ba/b[height<=720]/b", L"--merge-output-format", L"mp4", L"-P", folder.wstring(),
                                           L"-o", L"%(id)s.%(ext)s", L"--print-to-file", L"after_move:filepath", path_file.wstring(),
                                           L"--print-to-file", L"after_move:%(title)s", title_file.wstring(), L"--", std::wstring(url.begin(), url.end())};
+  if (!browser.empty()) { // the sign-in of a browser the user chose, so a site that asks for one can answer
+    args.insert(args.begin(), L"--cookies-from-browser");
+    args.insert(args.begin() + 1, std::wstring(browser.begin(), browser.end()));
+  }
   std::string last_error;
   const int code = run_process(exe, args, job->cancel, [&](const std::string &line) {
     const size_t pct = line.find('%');
@@ -253,21 +278,23 @@ void run_fetch_video(const std::shared_ptr<Job> &job, fs::path exe, std::string 
       job->units_done.store(int64_t(std::clamp(value, 0.0, 100.0) * 10.0));
     }
     if (line.rfind("ERROR", 0) == 0)
-      last_error = line;
+      last_error = clean_utf8(line, 400);
     std::lock_guard lock(job->mutex);
-    job->detail = line.substr(0, 160);
+    job->detail = clean_utf8(line, 160);
   });
   if (job->cancel.load())
     return finish(job, Job::cancelled, "Stopped");
   const std::string path = fs::exists(path_file) ? read_text(path_file) : std::string();
   if (code != 0 || path.empty() || !fs::exists(to_path(path))) {
     const Error e{ErrorCode::IoError, "Y_FETCH", last_error.empty() ? "The video could not be fetched (the program ended with code " + std::to_string(code) + ")." : last_error,
-                  {}, "Check the link, and that the video is public. yt-dlp is kept up to date by installing it again."};
+                  {}, last_error.find("not a bot") != std::string::npos || last_error.find("Sign in") != std::string::npos
+                          ? "The site asks for a sign-in. In the Niches panel pick the browser you are signed in with (\"Sign-in from\"), then try again."
+                          : "Check the link, and that the video is public. yt-dlp changes often: a newer one may be needed (Download yt-dlp again)."};
     return finish(job, Job::failed, "", &e);
   }
   {
     std::lock_guard lock(job->mutex);
-    job->result = {{"path", path}, {"title", fs::exists(title_file) ? read_text(title_file) : std::string()}, {"url", url}};
+    job->result = {{"path", clean_utf8(path)}, {"title", fs::exists(title_file) ? clean_utf8(read_text(title_file)) : std::string()}, {"url", url}};
   }
   job->units_done.store(1000);
   finish(job, Job::done, "Saved");
@@ -320,6 +347,9 @@ Result<json> Engine::Impl::video_fetch(const json &params) {
   if (exe.empty())
     return fail(ErrorCode::WorkerUnavailable, "Y_NOT_INSTALLED", "The video downloader (yt-dlp) is not on this computer.", {},
                 "ytdlp.install fetches it (about 18 MB) once; it is optional.");
+  const std::string browser = params.value("cookies_from_browser", std::string());
+  if (!browser.empty() && browser != "chrome" && browser != "edge" && browser != "firefox" && browser != "brave" && browser != "opera" && browser != "vivaldi")
+    return bad_param("cookies_from_browser", "must be chrome, edge, firefox, brave, opera or vivaldi");
   fs::path folder = params.contains("folder") ? to_path(params.value("folder", std::string())) : tools_dir_of(models_dir()).parent_path() / "downloads";
   std::error_code ec;
   fs::create_directories(folder, ec);
@@ -331,7 +361,7 @@ Result<json> Engine::Impl::video_fetch(const json &params) {
   job->output = *url;
   job->units_total.store(1000);
   jobs[job->id] = job;
-  job->thread = std::thread(run_fetch_video, job, exe, *url, folder);
+  job->thread = std::thread(run_fetch_video, job, exe, *url, folder, browser);
   return json{{"job_id", job->id}, {"url", *url}, {"folder", to_utf8(folder)}};
 }
 

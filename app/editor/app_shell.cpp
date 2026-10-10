@@ -277,7 +277,7 @@ void App::build_layout(unsigned dock_id, bool force) {
 // Toasts: what the app did, in the lower middle of the window for a few seconds. An edit that can be undone has the button;
 // the pointer over them keeps them there.
 void App::draw_toasts() {
-  std::erase_if(toasts_, [&](const Toast &t) { return clock_ - t.born > (t.error ? 7.0 : 4.0); });
+  std::erase_if(toasts_, [&](const Toast &t) { return !t.error && clock_ - t.born > 4.0; }); // an error stays until it is closed
   if (toasts_.empty())
     return;
   ImGuiViewport *vp = ImGui::GetMainViewport();
@@ -293,7 +293,7 @@ void App::draw_toasts() {
   ImGui::BringWindowToDisplayFront(ImGui::GetCurrentWindow()); // a panel the keys were sent to (F6) must not cover the notes
   const bool hovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows);
   bool undo_clicked = false;
-  size_t drop = toasts_.size();
+  size_t drop = toasts_.size(), drop_error = toasts_.size();
   for (size_t i = 0; i < toasts_.size(); ++i) {
     Toast &t = toasts_[i];
     if (hovered)
@@ -304,13 +304,32 @@ void App::draw_toasts() {
     ImGui::AlignTextToFramePadding();
     const ImVec4 ink = t.error ? ImVec4(0.94f, 0.37f, 0.37f, 1.0f) : hexv(look::fg);
     ImGui::PushStyleColor(ImGuiCol_Text, ink);
-    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 460.0f * s_);
-    ImGui::TextUnformatted(t.text.c_str());
-    ImGui::PopTextWrapPos();
+    if (t.error) {
+      // An error stays until it is closed, and its words can be selected or copied (they say what went wrong and what to do).
+      const float width = 460.0f * s_;
+      const ImVec2 need = ImGui::CalcTextSize(t.text.c_str(), nullptr, false, width - 2.0f * ImGui::GetStyle().FramePadding.x);
+      std::string shown = t.text; // read-only: the box never changes it
+      ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+      ImGui::InputTextMultiline("##error_text", shown.data(), shown.size() + 1,
+                                ImVec2(width, need.y + 2.0f * ImGui::GetStyle().FramePadding.y + 4.0f),
+                                ImGuiInputTextFlags_ReadOnly | ImGuiInputTextFlags_WordWrap);
+      ImGui::PopStyleColor();
+    } else {
+      ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 460.0f * s_);
+      ImGui::TextUnformatted(t.text.c_str());
+      ImGui::PopTextWrapPos();
+    }
     ImGui::PopStyleColor();
     std::string mark = "toast:" + t.text.substr(0, 24);
     std::replace(mark.begin(), mark.end(), ' ', '_');
     ui_mark(mark);
+    if (t.error) {
+      if (soft_button("toast_copy", "Copy", ImVec2(64.0f, 26.0f)))
+        ImGui::SetClipboardText(t.text.c_str());
+      ImGui::SameLine(0.0f, 8.0f);
+      if (soft_button("toast_close", "Close", ImVec2(64.0f, 26.0f)))
+        drop_error = i;
+    }
     if (t.undo) {
       ImGui::SameLine(0.0f, 14.0f);
       if (soft_button("toast_undo", "Undo", ImVec2(58.0f, 26.0f))) {
@@ -323,6 +342,8 @@ void App::draw_toasts() {
   ImGui::End();
   ImGui::PopStyleVar(3);
   ImGui::PopStyleColor(2);
+  if (drop_error < toasts_.size())
+    toasts_.erase(toasts_.begin() + std::ptrdiff_t(drop_error));
   if (undo_clicked) {
     toasts_.erase(toasts_.begin() + std::ptrdiff_t(drop));
     pending_ = [this] { history_step(true); };
