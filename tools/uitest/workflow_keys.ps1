@@ -43,6 +43,10 @@ try {
     'key Tab', 'wait 200', 'key Tab', 'wait 300', "shot $work\keys_tab.jpg"
     'key F6', 'wait 300', "shot $work\keys_side.jpg"
     'key Escape', 'wait 300'
+    'key Home', 'key Right', 'wait 300'                                                    # Sample
+    'key L', 'wait 300', 'expect @wf_port:latent', "shot $work\keys_ports.jpg"           # L: its outputs; Enter holds latent
+    'key Enter', 'wait 400', 'key Right', 'wait 300', 'key I', 'wait 300'                  # the next node (Decode); I: the inputs that fit
+    'expect @wf_port:latent', "shot $work\keys_ports2.jpg", 'key Enter', 'wait 800'       # Enter links: what fed Decode's latent gives way
     'key Home', 'wait 200', 'key Right alt', 'wait 500', 'key Right alt', 'wait 500'      # two grid steps: two edits
     "shot $work\keys_moved.jpg"
     'key A', 'wait 400', 'expect @field:wf_search'                                      # A: the search opens
@@ -57,6 +61,9 @@ try {
       $w = Get-Workflow $run
       "after the moves, the added node and Delete: $(Shape $w)"
       if (@($w.nodes.PSObject.Properties).Count -ne 4) { $failed = 'adding a node by key and deleting it should leave the four nodes' }
+      $links = @((Invoke-Attome $run --json history $proj | ConvertFrom-Json).result.changesets | Where-Object { $_.label -eq 'Link' })
+      "Link edits: $($links.Count)"
+      if (-not $failed -and $links.Count -ne 1) { $failed = "L, Enter, I, Enter made $($links.Count) Link edits, not 1" }
       $moves = @((Invoke-Attome $run --json history $proj | ConvertFrom-Json).result.changesets | Where-Object { $_.label -eq 'Move node' })
       "Move node edits: $($moves.Count)"
       if (-not $failed -and $moves.Count -lt 2) { $failed = "Alt+Right twice made $($moves.Count) Move node edits, not 2" }

@@ -1677,11 +1677,114 @@ void App::draw_workflow_canvas(const json &library) {
       wf_row_.clear();
     }
   }
+  // L and I with the keys on the canvas: the chosen node's outputs or inputs as a list; Enter holds one, or (a port is held) links it to the held one.
+  if (const char request = std::exchange(wf_ports_request_, '\0'); request != 0) {
+    wf_ports_ = {};
+    const auto found = nodes.find(wf_node_);
+    if (wf_node_.empty() || found == nodes.end()) {
+      say("Choose a node first (the arrows or Tab).");
+    } else if (wf_hold_.active && wf_hold_.source == (request == 'L')) {
+      say(wf_hold_.source ? "An output is held: choose the other node and press I for its inputs." : "An input is held: choose the other node and press L for its outputs.");
+    } else {
+      const gen::Ports mine = gen::node_ports(library, *found);
+      const bool want_outputs = request == 'L';
+      wf_ports_.outputs = want_outputs;
+      wf_ports_.node = wf_node_;
+      for (const gen::Port &port : want_outputs ? mine.outputs : mine.inputs) {
+        if (wf_hold_.active && wf_hold_.node == wf_node_)
+          continue; // not to itself
+        if (wf_hold_.active) { // only what fits the held end
+          const gen::Port holding{wf_hold_.port, gen::PortType(wf_hold_.type), false, false};
+          if (!(want_outputs ? gen::can_link(port, holding) : gen::can_link(holding, port)))
+            continue;
+        }
+        wf_ports_.rows.emplace_back(port.name, int(port.type));
+      }
+      if (wf_ports_.rows.empty())
+        say(wf_hold_.active ? "No port of this node fits the held one." : "This node has no such ports.");
+      else
+        wf_ports_.open = true;
+    }
+  }
+  if (wf_ports_.open) {
+    const auto at = wf_pos_.find(wf_ports_.node);
+    if (at == wf_pos_.end() || wf_ports_.rows.empty()) {
+      wf_ports_.open = false;
+    } else {
+      if (ImGui::IsKeyPressed(ImGuiKey_DownArrow, true))
+        wf_ports_.pick = std::min(wf_ports_.pick + 1, int(wf_ports_.rows.size()) - 1);
+      if (ImGui::IsKeyPressed(ImGuiKey_UpArrow, true))
+        wf_ports_.pick = std::max(wf_ports_.pick - 1, 0);
+      const float w = 250.0f, row = 28.0f, head = 34.0f, h = head + float(wf_ports_.rows.size()) * row + 8.0f;
+      ImVec2 box(win.x + wf_pan_.x + (at->second.x + kNodeW + 16.0f) * z, win.y + wf_pan_.y + at->second.y * z);
+      box.x = std::clamp(box.x, win.x + 8.0f, win.x + size.x - w - 8.0f);
+      box.y = std::clamp(box.y, win.y + 8.0f, win.y + size.y - h - 8.0f);
+      ImGui::SetCursorScreenPos(box);
+      ImGui::SetNextItemAllowOverlap();
+      ImGui::InvisibleButton("##wf_ports_block", ImVec2(w, h)); // nothing under the box gets its clicks
+      dl->AddRectFilled(box, ImVec2(box.x + w, box.y + h), hex(look::panel), 10.0f);
+      dl->AddRect(box, ImVec2(box.x + w, box.y + h), hex(look::line2), 10.0f, 0, 1.3f);
+      const char *title = wf_hold_.active ? (wf_ports_.outputs ? "Link from one of these" : "Link to one of these") : (wf_ports_.outputs ? "Outputs: hold one" : "Inputs: hold one");
+      dl->AddText(ImVec2(box.x + 12.0f, box.y + 8.0f), hex(look::fg3), title);
+      int chosen = -1;
+      for (size_t i = 0; i < wf_ports_.rows.size(); ++i) {
+        const ImVec2 rp(box.x + 6.0f, box.y + head + float(i) * row);
+        ImGui::SetCursorScreenPos(rp);
+        ImGui::InvisibleButton(("##wf_port_" + std::to_string(i)).c_str(), ImVec2(w - 12.0f, row - 2.0f));
+        ui_mark("wf_port:" + wf_ports_.rows[i].first);
+        if (ImGui::IsItemHovered() || int(i) == wf_ports_.pick)
+          dl->AddRectFilled(rp, ImVec2(rp.x + w - 12.0f, rp.y + row - 2.0f), hex(look::raised), 6.0f);
+        dl->AddText(ImVec2(rp.x + 10.0f, rp.y + 5.0f), hex(look::fg), wf_ports_.rows[i].first.c_str());
+        const char *type = gen::port_type_name(gen::PortType(wf_ports_.rows[i].second));
+        dl->AddText(ImVec2(rp.x + w - 24.0f - text_size(type).x, rp.y + 5.0f), hex(look::fg3), type);
+        if (ImGui::IsItemClicked())
+          chosen = int(i);
+      }
+      if (ImGui::IsKeyPressed(ImGuiKey_Enter, false) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false))
+        chosen = wf_ports_.pick;
+      if (ImGui::IsKeyPressed(ImGuiKey_Escape, false))
+        wf_ports_.open = false;
+      if (chosen >= 0 && chosen < int(wf_ports_.rows.size())) {
+        const std::string port = wf_ports_.rows[size_t(chosen)].first;
+        const int type = wf_ports_.rows[size_t(chosen)].second;
+        const std::string node = wf_ports_.node;
+        const bool outputs = wf_ports_.outputs;
+        wf_ports_.open = false;
+        if (!wf_hold_.active) { // hold it
+          wf_hold_ = {true, outputs, node, port, type};
+          say(std::string("Holding ") + port + ": choose the other node, then press " + (outputs ? "I" : "L") + ". A adds a new node that fits. Esc lets go.");
+        } else { // link it to the held one
+          const std::string from_node = outputs ? node : wf_hold_.node, from_port = outputs ? port : wf_hold_.port;
+          const std::string to_node = outputs ? wf_hold_.node : node, to_port = outputs ? wf_hold_.port : port;
+          wf_hold_ = {};
+          if (set_by.count({to_node, to_port})) {
+            say("That input is fed by the clip: disconnect it in the side panel first.", true);
+          } else {
+            json ops = json::array();
+            if (const auto old = fed.find({to_node, to_port}); old != fed.end()) // what fed the input gives way
+              ops.push_back({{"op", "remove"}, {"path", old->second}});
+            if (object_in(nodes[to_node], "inputs").contains(to_port)) // so does a value typed into it
+              ops.push_back({{"op", "remove"}, {"path", to_node + "/inputs/" + to_port}});
+            ops.push_back({{"op", "add"}, {"path", wf_base() + "/links/$new:l"}, {"value", {{"from", {from_node, from_port}}, {"to", {to_node, to_port}}}}});
+            pending_ = [this, ops] { patch(ops, "Link"); };
+          }
+        }
+      }
+    }
+  }
   // A or / with the keys on the canvas: the same search, at the right of the chosen node (else in the middle of the view).
   if (wf_search_key_) {
     wf_search_key_ = false;
     wf_search_ = {};
     wf_search_.open = wf_search_.focus = true;
+    if (wf_hold_.active) { // a port is held: only the nodes that can take it (or give to it) are listed, and the new one is linked
+      wf_search_.linked = true;
+      wf_search_.from_output = wf_hold_.source;
+      wf_search_.node = wf_hold_.node;
+      wf_search_.port = wf_hold_.port;
+      wf_search_.type = wf_hold_.type;
+      wf_hold_ = {};
+    }
     const auto at = wf_pos_.find(wf_node_);
     wf_search_.canvas = at != wf_pos_.end() ? ImVec2(at->second.x + kNodeW + 50.0f, at->second.y)
                                             : ImVec2((size.x * 0.5f - wf_pan_.x) / z, (size.y * 0.35f - wf_pan_.y) / z);

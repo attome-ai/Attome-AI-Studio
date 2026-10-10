@@ -483,6 +483,20 @@ private:
     int pick = 0;             // the row the arrows are on (Enter adds it); the first again when the words change
     std::string last;         // the words of the last frame
   } wf_search_;
+  // A connection made by key: L lists the chosen node's outputs, I its inputs; the one chosen is held until another node's port is chosen
+  // (the list then shows only the ports that fit) or A adds a new node that fits. Esc lets go.
+  struct WfHold {
+    bool active = false, source = false; // source: an output is held (it gives); else an input (it takes)
+    std::string node, port;
+    int type = 0;
+  } wf_hold_;
+  struct WfPorts {
+    bool open = false, outputs = false;
+    std::string node;
+    std::vector<std::pair<std::string, int>> rows; // port name, Data Type
+    int pick = 0;
+  } wf_ports_;
+  char wf_ports_request_ = 0;                     // 'L' or 'I': the key was pressed; the canvas opens the list on the next frame
   bool wf_search_key_ = false;                    // A or / asked for the search: it opens beside the chosen node on the next frame
   std::set<std::string> wf_sel_;                  // every selected node; wf_node_ is the one the side panel shows, when there is one
   std::map<std::string, ImVec2> wf_pos_;          // where each node is, in canvas units, as of the last frame

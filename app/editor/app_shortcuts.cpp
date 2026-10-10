@@ -115,8 +115,16 @@ void App::shortcuts() {
         wf_nudge(0.0f, -step);
       if (ImGui::IsKeyPressed(ImGuiKey_DownArrow, false))
         wf_nudge(0.0f, step);
+    } else if (wf_ports_.open) {
+      g.NavCursorVisible = false; // the list has the arrows, Enter and Esc (the canvas draws it)
+      return;
     } else if (!io.KeyCtrl && !io.KeyAlt && !wf_search_.open) {
-      g.NavCursorVisible = false; // the chosen node is the cursor here, not Dear ImGui's blue frame round the canvas
+      g.NavCursorVisible = false;
+      if (wf_hold_.active && ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+        wf_hold_ = {};
+        say("Let go.");
+        return;
+      } // the chosen node is the cursor here, not Dear ImGui's blue frame round the canvas
       if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow, true))
         wf_key_select(0);
       if (ImGui::IsKeyPressed(ImGuiKey_RightArrow, true))
@@ -129,6 +137,10 @@ void App::shortcuts() {
         wf_key_select(io.KeyShift ? 5 : 4);
       if (ImGui::IsKeyPressed(ImGuiKey_A, false) || ImGui::IsKeyPressed(ImGuiKey_Slash, false))
         wf_search_key_ = true;
+      if (ImGui::IsKeyPressed(ImGuiKey_L, false))
+        wf_ports_request_ = 'L';
+      if (ImGui::IsKeyPressed(ImGuiKey_I, false))
+        wf_ports_request_ = 'I';
       if (ImGui::IsKeyPressed(ImGuiKey_Home, false))
         wf_key_select(6);
       if (ImGui::IsKeyPressed(ImGuiKey_End, false))
