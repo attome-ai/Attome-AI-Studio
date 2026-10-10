@@ -56,6 +56,12 @@ try {
     "shot $work\keys_deleted.jpg"
     'key Home', 'wait 300', 'key BracketRight', 'wait 400', "shot $work\keys_link.jpg"    # [ and ]: a link of the chosen node is the selected one
     'key Delete', 'wait 800', "shot $work\keys_link_cut.jpg"                              # Delete takes that link away, not the node
+    'click @button:wf_add_group', 'wait 600'                                              # a frame, chosen as it is made
+    'key Right alt', 'wait 500', 'key Down alt', 'wait 500', "shot $work\keys_frame_moved.jpg"   # Alt+arrows move it
+    'key Delete', 'wait 800'                                                              # and Delete removes it
+    'click @button:wf_add_note', 'wait 600', 'key Delete', 'wait 800'                     # a note, the same
+    'key Home', 'wait 200'
+    'key Tab', 'key Tab', 'key Tab', 'key Tab', 'key Tab', 'key Tab', 'key Tab', 'wait 300', "shot $work\keys_row.jpg"   # on past the nodes: the rows of the clip's inputs
   )
   $failed = $run.Errors
   try {
@@ -66,6 +72,9 @@ try {
       $cuts = @((Invoke-Attome $run --json history $proj | ConvertFrom-Json).result.changesets | Where-Object { $_.label -eq 'Remove link' })
       "Remove link edits: $($cuts.Count)"
       if (-not $failed -and $cuts.Count -ne 1) { $failed = "] then Delete made $($cuts.Count) Remove link edits, not 1" }
+      $gone = @((Invoke-Attome $run --json history $proj | ConvertFrom-Json).result.changesets | Where-Object { $_.label -in 'Remove frame', 'Remove note' })
+      "Remove frame or note edits: $($gone.Count)"
+      if (-not $failed -and $gone.Count -ne 2) { $failed = "Delete on a frame and a note made $($gone.Count) removals, not 2" }
       $links = @((Invoke-Attome $run --json history $proj | ConvertFrom-Json).result.changesets | Where-Object { $_.label -eq 'Link' })
       "Link edits: $($links.Count)"
       if (-not $failed -and $links.Count -ne 1) { $failed = "L, Enter, I, Enter made $($links.Count) Link edits, not 1" }

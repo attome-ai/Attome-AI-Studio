@@ -513,6 +513,7 @@ private:
   // The keyboard on the Workflow Canvas (plan KEYBOARD_WORKFLOW.md): choose a node by the arrows (0 left, 1 right, 2 up, 3 down), by Tab
   // and Shift+Tab (4 next, 5 previous) or by Home and End (6 first, 7 last); the canvas pans to keep it in view.
   void wf_key_select(int how);
+  void wf_key_tab(bool next);         // Tab: the nodes in reading order, then the frames, the notes and the rows of the clip's inputs and outputs
   void wf_key_link(int dir);          // [ and ]: the previous or next link that touches the chosen node becomes the selected link (Delete removes it)
   void wf_nudge(float dx, float dy);  // Alt+arrows: the chosen nodes by a step on the canvas (one saved edit)
   std::map<std::string, float> wf_height_;         // each node's height in canvas units, as of the last frame (its width is kNodeW)

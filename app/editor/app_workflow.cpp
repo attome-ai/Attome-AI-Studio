@@ -424,6 +424,10 @@ json App::remove_nodes_ops(const json &workflow, const std::set<std::string> &id
 // Ctrl+C: the selected nodes, with where they are and the links among them (a link to a node that is not copied is left behind).
 // Which node the keys choose: from the selected one (else from the first, the leftmost), by direction or in reading order.
 void App::wf_key_select(int how) {
+  if (how == 4 || how == 5) {
+    wf_key_tab(how == 4);
+    return;
+  }
   if (wf_pos_.empty())
     return;
   constexpr float kW = 230.0f; // a node's width in canvas units, near enough for choosing between nodes (kNodeW is drawn at the zoom)
@@ -570,6 +574,62 @@ void App::wf_add_from_search(const std::string &kind_id) {
   }
 }
 
+// Tab and Shift+Tab: what can be chosen, one after another: the nodes in reading order, then the frames, the notes, the inputs of the clip
+// and its outputs (the rows of the two boxes at the sides). The side panel then shows what was chosen.
+void App::wf_key_tab(bool next) {
+  const json *workflow = workflow_json();
+  if (!workflow)
+    return;
+  struct Target {
+    int kind; // 0 node, 1 frame, 2 note, 3 row
+    std::string id, words;
+  };
+  std::vector<Target> all;
+  std::vector<std::pair<ImVec2, std::string>> nodes;
+  for (const auto &[id, pos] : wf_pos_)
+    nodes.emplace_back(pos, id);
+  std::sort(nodes.begin(), nodes.end(), [](const auto &a, const auto &b) { return a.first.x != b.first.x ? a.first.x < b.first.x : a.first.y < b.first.y; });
+  for (const auto &[pos, id] : nodes)
+    all.push_back({0, id, ""});
+  const json &groups = object_in(*workflow, "groups"), &notes = object_in(*workflow, "notes");
+  for (auto g = groups.begin(); g != groups.end(); ++g)
+    all.push_back({1, g.key(), "Frame \"" + g->value("title", std::string("Group")) + "\""});
+  for (auto n = notes.begin(); n != notes.end(); ++n)
+    all.push_back({2, n.key(), "Note"});
+  const json &library = object_in(doc_, "workflows");
+  for (const gen::ExposedInput &e : gen::exposed_inputs(library, *workflow))
+    all.push_back({3, "in:" + e.name, "Input of the clip: " + e.name});
+  for (const gen::ExposedOutput &o : gen::exposed_outputs(*workflow))
+    all.push_back({3, "out:" + o.name, "Output of the clip: " + o.name});
+  if (all.empty())
+    return;
+  size_t at = all.size();
+  for (size_t i = 0; i < all.size(); ++i) {
+    const Target &t = all[i];
+    if ((t.kind == 0 && (t.id == wf_node_ || (wf_node_.empty() && wf_sel_.size() == 1 && t.id == *wf_sel_.begin()))) || (t.kind <= 2 && t.kind >= 1 && t.id == wf_deco_) ||
+        (t.kind == 3 && t.id == wf_row_))
+      at = i;
+  }
+  const size_t pick = at == all.size() ? (next ? 0 : all.size() - 1) : (next ? (at + 1) % all.size() : (at + all.size() - 1) % all.size());
+  const Target &t = all[pick];
+  wf_sel_.clear();
+  wf_node_.clear();
+  wf_deco_.clear();
+  wf_row_.clear();
+  wf_link_.clear();
+  if (t.kind == 0) {
+    wf_sel_ = {t.id};
+    wf_node_ = t.id;
+  } else if (t.kind == 3) {
+    wf_row_ = t.id;
+  } else {
+    wf_deco_ = t.id;
+  }
+  wf_reveal_ = t.id;
+  if (!t.words.empty())
+    say(t.words);
+}
+
 // The links that touch the chosen node, one after another: the selected link is the one Delete removes, as when a link is clicked.
 void App::wf_key_link(int dir) {
   const json *workflow = workflow_json();
@@ -601,9 +661,36 @@ void App::wf_key_link(int dir) {
 // The chosen nodes moved by a step, as one saved edit (the same op as a drag that ends).
 void App::wf_nudge(float dx, float dy) {
   const json *workflow = workflow_json();
-  if (!workflow || wf_sel_.empty())
+  if (!workflow)
     return;
   const json &nodes = object_in(*workflow, "nodes");
+  if (!wf_deco_.empty()) { // a frame or a note: it moves (a frame takes the nodes whose middle is inside it, as a drag does)
+    const json &groups = object_in(*workflow, "groups"), &notes = object_in(*workflow, "notes");
+    const bool is_group = groups.contains(wf_deco_);
+    if (!is_group && !notes.contains(wf_deco_))
+      return;
+    const json &was = is_group ? groups[wf_deco_] : notes[wf_deco_];
+    const float x = was.value("x", 0.0f), y = was.value("y", 0.0f), w = was.value("w", 320.0f), h = was.value("h", 200.0f);
+    json ops = json::array();
+    const auto set = [&](const char *field, double value) {
+      ops.push_back({{"op", was.contains(field) ? "replace" : "add"}, {"path", wf_deco_ + "/" + field}, {"value", value}});
+    };
+    set("x", std::round(x + dx));
+    set("y", std::round(y + dy));
+    if (is_group)
+      for (const auto &[id, pos] : wf_pos_) {
+        const auto node = nodes.find(id);
+        const auto height = wf_height_.find(id);
+        const ImVec2 mid(pos.x + kNodeW * 0.5f, pos.y + (height != wf_height_.end() ? height->second : 80.0f) * 0.5f);
+        if (node != nodes.end() && mid.x >= x && mid.x <= x + w && mid.y >= y && mid.y <= y + h)
+          ops.push_back({{"op", node->contains("ui") ? "replace" : "add"}, {"path", id + "/ui"}, {"value", {{"x", std::round(pos.x + dx)}, {"y", std::round(pos.y + dy)}}}});
+      }
+    patch(std::move(ops), ops.size() > 2 ? "Move frame" : "Move");
+    wf_reveal_ = wf_deco_;
+    return;
+  }
+  if (wf_sel_.empty())
+    return;
   json ops = json::array();
   for (const std::string &id : wf_sel_) {
     const auto node = nodes.find(id);
@@ -626,6 +713,10 @@ void App::delete_in_workflow() {
   if (!wf_link_.empty()) {
     const std::string link = std::exchange(wf_link_, {});
     patch(json::array({{{"op", "remove"}, {"path", link}}}), "Remove link");
+  } else if (!wf_deco_.empty() && wf_node_.empty() && wf_sel_.empty()) { // a frame or a note
+    const std::string id = std::exchange(wf_deco_, {});
+    const bool is_group = object_in(*workflow, "groups").contains(id);
+    patch(json::array({{{"op", "remove"}, {"path", id}}}), is_group ? "Remove frame" : "Remove note");
   } else if (!wf_node_.empty() || !wf_sel_.empty()) {
     std::set<std::string> ids = std::exchange(wf_sel_, {});
     if (!wf_node_.empty())
@@ -792,10 +883,28 @@ void App::draw_workflow_canvas(const json &library) {
     wf_pos_[b.id] = b.pos;
     wf_height_[b.id] = b.height;
   }
-  if (!wf_reveal_.empty()) { // a node chosen by key: pan the view so that it is on the screen
+  if (!wf_reveal_.empty()) { // a node, frame or note chosen by key: pan the view so that it is on the screen
+    ImVec2 where(0.0f, 0.0f);
+    float across = kNodeW, down = 0.0f;
+    bool found = false;
     if (const auto at = wf_pos_.find(wf_reveal_); at != wf_pos_.end()) {
-      const float margin = 40.0f, left = wf_pan_.x + at->second.x * z, right = left + node_w;
-      const float top = wf_pan_.y + at->second.y * z, bottom = top + wf_height_[wf_reveal_] * z;
+      where = at->second;
+      down = wf_height_[wf_reveal_];
+      found = true;
+    } else if (const json &gs = object_in(workflow, "groups"); gs.contains(wf_reveal_)) {
+      where = ImVec2(gs[wf_reveal_].value("x", 0.0f), gs[wf_reveal_].value("y", 0.0f));
+      across = gs[wf_reveal_].value("w", 320.0f);
+      down = gs[wf_reveal_].value("h", 200.0f);
+      found = true;
+    } else if (const json &ns = object_in(workflow, "notes"); ns.contains(wf_reveal_)) {
+      where = ImVec2(ns[wf_reveal_].value("x", 0.0f), ns[wf_reveal_].value("y", 0.0f));
+      across = 190.0f;
+      down = 60.0f;
+      found = true;
+    }
+    if (found) {
+      const float margin = 40.0f, left = wf_pan_.x + where.x * z, right = left + across * z;
+      const float top = wf_pan_.y + where.y * z, bottom = top + down * z;
       if (left < margin)
         wf_pan_.x += margin - left;
       else if (right > size.x - margin)
