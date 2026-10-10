@@ -287,7 +287,10 @@ void run_fetch_video(const std::shared_ptr<Job> &job, fs::path exe, std::string 
   const std::string path = fs::exists(path_file) ? read_text(path_file) : std::string();
   if (code != 0 || path.empty() || !fs::exists(to_path(path))) {
     const Error e{ErrorCode::IoError, "Y_FETCH", last_error.empty() ? "The video could not be fetched (the program ended with code " + std::to_string(code) + ")." : last_error,
-                  {}, last_error.find("not a bot") != std::string::npos || last_error.find("Sign in") != std::string::npos
+                  {}, last_error.find("cookie database") != std::string::npos || last_error.find("DPAPI") != std::string::npos
+                          ? "The browser keeps its sign-in file locked or encrypted. Close that browser completely (also in the tray) and try again, or choose Firefox, "
+                            "which can be read while it is open. Chrome and Edge often cannot be read at all by newer versions."
+                          : last_error.find("not a bot") != std::string::npos || last_error.find("Sign in") != std::string::npos
                           ? "The site asks for a sign-in. In the Niches panel pick the browser you are signed in with (\"Sign-in from\"), then try again."
                           : "Check the link, and that the video is public. yt-dlp changes often: a newer one may be needed (Download yt-dlp again)."};
     return finish(job, Job::failed, "", &e);
