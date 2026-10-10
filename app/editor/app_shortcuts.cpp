@@ -104,6 +104,17 @@ void App::shortcuts() {
       }
       if (!io.KeyCtrl)
         return; // the panel's own keys
+    } else if (io.KeyAlt && !io.KeyCtrl && !wf_search_.open) { // Alt+arrows: move the chosen nodes a grid step (Shift: ten)
+      g.NavCursorVisible = false;
+      const float step = (io.KeyShift ? 280.0f : 28.0f);
+      if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow, false))
+        wf_nudge(-step, 0.0f);
+      if (ImGui::IsKeyPressed(ImGuiKey_RightArrow, false))
+        wf_nudge(step, 0.0f);
+      if (ImGui::IsKeyPressed(ImGuiKey_UpArrow, false))
+        wf_nudge(0.0f, -step);
+      if (ImGui::IsKeyPressed(ImGuiKey_DownArrow, false))
+        wf_nudge(0.0f, step);
     } else if (!io.KeyCtrl && !io.KeyAlt && !wf_search_.open) {
       g.NavCursorVisible = false; // the chosen node is the cursor here, not Dear ImGui's blue frame round the canvas
       if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow, true))
@@ -116,6 +127,8 @@ void App::shortcuts() {
         wf_key_select(3);
       if (ImGui::IsKeyPressed(ImGuiKey_Tab, false))
         wf_key_select(io.KeyShift ? 5 : 4);
+      if (ImGui::IsKeyPressed(ImGuiKey_A, false) || ImGui::IsKeyPressed(ImGuiKey_Slash, false))
+        wf_search_key_ = true;
       if (ImGui::IsKeyPressed(ImGuiKey_Home, false))
         wf_key_select(6);
       if (ImGui::IsKeyPressed(ImGuiKey_End, false))

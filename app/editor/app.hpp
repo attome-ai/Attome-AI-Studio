@@ -480,7 +480,10 @@ private:
     bool from_output = false; // the held end was an output (the new node takes it) or an input (the new node gives to it)
     std::string node, port;   // the held port
     int type = 0;             // its Data Type (gen::PortType)
+    int pick = 0;             // the row the arrows are on (Enter adds it); the first again when the words change
+    std::string last;         // the words of the last frame
   } wf_search_;
+  bool wf_search_key_ = false;                    // A or / asked for the search: it opens beside the chosen node on the next frame
   std::set<std::string> wf_sel_;                  // every selected node; wf_node_ is the one the side panel shows, when there is one
   std::map<std::string, ImVec2> wf_pos_;          // where each node is, in canvas units, as of the last frame
   json wf_clipboard_;                             // copied nodes and the links among them
@@ -496,6 +499,7 @@ private:
   // The keyboard on the Workflow Canvas (plan KEYBOARD_WORKFLOW.md): choose a node by the arrows (0 left, 1 right, 2 up, 3 down), by Tab
   // and Shift+Tab (4 next, 5 previous) or by Home and End (6 first, 7 last); the canvas pans to keep it in view.
   void wf_key_select(int how);
+  void wf_nudge(float dx, float dy);  // Alt+arrows: the chosen nodes by a step on the canvas (one saved edit)
   std::map<std::string, float> wf_height_;         // each node's height in canvas units, as of the last frame (its width is kNodeW)
   std::string wf_reveal_;                          // a node to bring into view on the next frame
   int wf_zone_ = 1;                                // where F6 put the keys: 0 the list at the left, 1 the canvas, 2 the side panel

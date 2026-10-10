@@ -43,15 +43,23 @@ try {
     'key Tab', 'wait 200', 'key Tab', 'wait 300', "shot $work\keys_tab.jpg"
     'key F6', 'wait 300', "shot $work\keys_side.jpg"
     'key Escape', 'wait 300'
-    'key Home', 'wait 200', 'key Delete', 'wait 800'
+    'key Home', 'wait 200', 'key Right alt', 'wait 500', 'key Right alt', 'wait 500'      # two grid steps: two edits
+    "shot $work\keys_moved.jpg"
+    'key A', 'wait 400', 'expect @field:wf_search'                                      # A: the search opens
+    'type deco', 'wait 300', "shot $work\keys_search.jpg", 'key Enter', 'wait 800'      # and Enter adds the first node it shows
+    "shot $work\keys_added.jpg"
+    'key Delete', 'wait 800'                                                             # the node just added is the chosen one: it goes again
     "shot $work\keys_deleted.jpg"
   )
   $failed = $run.Errors
   try {
     if (-not $failed) {
       $w = Get-Workflow $run
-      "after Home and Delete: $(Shape $w)"
-      if (@($w.nodes.PSObject.Properties).Count -ne 3) { $failed = 'Home then Delete did not take exactly one node away' }
+      "after the moves, the added node and Delete: $(Shape $w)"
+      if (@($w.nodes.PSObject.Properties).Count -ne 4) { $failed = 'adding a node by key and deleting it should leave the four nodes' }
+      $moves = @((Invoke-Attome $run --json history $proj | ConvertFrom-Json).result.changesets | Where-Object { $_.label -eq 'Move node' })
+      "Move node edits: $($moves.Count)"
+      if (-not $failed -and $moves.Count -lt 2) { $failed = "Alt+Right twice made $($moves.Count) Move node edits, not 2" }
     }
   } finally { Stop-Daemon $run }
 } finally { Remove-Item Env:\ATTOME_MOCK_ENGINE -ErrorAction SilentlyContinue }

@@ -566,7 +566,29 @@ void App::wf_add_from_search(const std::string &kind_id) {
     wf_sel_ = {wf_node_};
     wf_link_.clear();
     wf_row_.clear();
+    wf_reveal_ = wf_node_;
   }
+}
+
+// The chosen nodes moved by a step, as one saved edit (the same op as a drag that ends).
+void App::wf_nudge(float dx, float dy) {
+  const json *workflow = workflow_json();
+  if (!workflow || wf_sel_.empty())
+    return;
+  const json &nodes = object_in(*workflow, "nodes");
+  json ops = json::array();
+  for (const std::string &id : wf_sel_) {
+    const auto node = nodes.find(id);
+    const auto at = wf_pos_.find(id);
+    if (node == nodes.end() || at == wf_pos_.end())
+      continue;
+    ops.push_back({{"op", node->contains("ui") ? "replace" : "add"}, {"path", id + "/ui"},
+                   {"value", {{"x", std::round(at->second.x + dx)}, {"y", std::round(at->second.y + dy)}}}});
+  }
+  if (!ops.empty())
+    patch(std::move(ops), ops.size() == 1 ? "Move node" : "Move nodes");
+  if (!wf_node_.empty())
+    wf_reveal_ = wf_node_;
 }
 
 void App::delete_in_workflow() {
@@ -1655,6 +1677,17 @@ void App::draw_workflow_canvas(const json &library) {
       wf_row_.clear();
     }
   }
+  // A or / with the keys on the canvas: the same search, at the right of the chosen node (else in the middle of the view).
+  if (wf_search_key_) {
+    wf_search_key_ = false;
+    wf_search_ = {};
+    wf_search_.open = wf_search_.focus = true;
+    const auto at = wf_pos_.find(wf_node_);
+    wf_search_.canvas = at != wf_pos_.end() ? ImVec2(at->second.x + kNodeW + 50.0f, at->second.y)
+                                            : ImVec2((size.x * 0.5f - wf_pan_.x) / z, (size.y * 0.35f - wf_pan_.y) / z);
+    wf_search_.screen = ImVec2(win.x + wf_pan_.x + wf_search_.canvas.x * z, win.y + wf_pan_.y + wf_search_.canvas.y * z);
+    wf_link_.clear();
+  }
   // Double click or right click on the background: the Node Library as a search, where the pointer is.
   if ((bg_dbl || bg_right) && ImGui::GetCurrentContext()->HoveredId == bg_id && !wf_drag_.active) {
     wf_search_ = {};
@@ -1689,6 +1722,17 @@ void App::draw_workflow_canvas(const json &library) {
       }
       shown.emplace_back(kid, title);
     }
+    if (needle != wf_search_.last) { // the words changed: the first row again
+      wf_search_.last = needle;
+      wf_search_.pick = 0;
+    }
+    if (!shown.empty()) {
+      if (ImGui::IsKeyPressed(ImGuiKey_DownArrow, true))
+        wf_search_.pick = std::min(wf_search_.pick + 1, int(shown.size()) - 1);
+      if (ImGui::IsKeyPressed(ImGuiKey_UpArrow, true))
+        wf_search_.pick = std::max(wf_search_.pick - 1, 0);
+      wf_search_.pick = std::clamp(wf_search_.pick, 0, int(shown.size()) - 1);
+    }
     const float w = 250.0f, row = 28.0f, head = 46.0f;
     const float h = head + std::max(1.0f, float(shown.size())) * row + 10.0f;
     ImVec2 at = wf_search_.screen;
@@ -1716,7 +1760,7 @@ void App::draw_workflow_canvas(const json &library) {
       ImGui::SetCursorScreenPos(rp);
       ImGui::InvisibleButton(("##wf_search_" + shown[i].first).c_str(), ImVec2(w - 12.0f, row - 2.0f));
       ui_mark("wf_search:" + shown[i].first);
-      if (ImGui::IsItemHovered() || (i == 0 && !needle.empty()))
+      if (ImGui::IsItemHovered() || int(i) == wf_search_.pick)
         dl->AddRectFilled(rp, ImVec2(rp.x + w - 12.0f, rp.y + row - 2.0f), hex(look::raised), 6.0f);
       dl->AddText(ImVec2(rp.x + 10.0f, rp.y + 5.0f), hex(look::fg), shown[i].second.c_str());
       if (ImGui::IsItemClicked())
@@ -1725,7 +1769,7 @@ void App::draw_workflow_canvas(const json &library) {
     if (shown.empty())
       dl->AddText(ImVec2(at.x + 16.0f, at.y + head + 5.0f), hex(look::fg3), "No node fits.");
     if (entered && !shown.empty())
-      chosen = shown.front().first;
+      chosen = shown[size_t(std::clamp(wf_search_.pick, 0, int(shown.size()) - 1))].first;
     if (!chosen.empty())
       pending_ = [this, chosen] { wf_add_from_search(chosen); };
     if (ImGui::IsKeyPressed(ImGuiKey_Escape, false))
