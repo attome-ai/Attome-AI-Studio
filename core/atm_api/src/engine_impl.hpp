@@ -420,6 +420,7 @@ struct Engine::Impl {
   Result<json> gen_set_comfyui(const json &params);
   Result<json> gen_models(const json &);
   Result<json> gen_create_clip(const json &params);
+  Result<json> gen_dialogue_prompt(const json &params);
   Result<json> gen_save_to_library(const json &params);
   Result<json> gen_reset_clip(const json &params);
   Result<json> gen_save_preset(const json &params);

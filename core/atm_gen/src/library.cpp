@@ -47,6 +47,10 @@ json shot_workflow(const ModelDecl &model) {
       const std::string label = std::string(name) == "start_image" ? "Start image" : std::string(name) == "end_image" ? "End image" : "References";
       inputs[name] = exposed_input("image", label.c_str(), order++, gen, name);
     }
+  if (model.takes("voice")) // a sound whose timbre the speaker takes
+    inputs["voice"] = exposed_input("audio", "Voice", order++, gen, "voice");
+  if (model.takes("continue_from")) // an earlier clip this one carries on from, seamlessly
+    inputs["continue_from"] = exposed_input("video", "Continue from", order++, gen, "continue_from");
   inputs["seed"] = exposed_input("integer", "Seed", order++, gen, "seed");
 
   // Where they sit: the model next to what feeds it, so the whole graph is no wider than a view at a size the text can be read.
@@ -93,6 +97,26 @@ bool start_from(json &workflow, std::string_view reference) {
   links[placeholders ? "$new:l_ref" : new_id("lnk")] = {{"from", json::array({ref, "video"})}, {"to", json::array({frame, "video"})}};
   links[placeholders ? "$new:l_frame" : new_id("lnk")] = {{"from", json::array({frame, "image"})}, {"to", json::array({gen, "start_image"})}};
   inputs["start_image"].erase("to");
+  return true;
+}
+
+bool continue_from(json &workflow, std::string_view reference) {
+  if (!workflow.is_object() || !workflow.contains("nodes") || !workflow["nodes"].is_object() || !workflow.contains("exposed"))
+    return false;
+  json &nodes = workflow["nodes"];
+  std::string gen;
+  for (auto it = nodes.begin(); it != nodes.end(); ++it)
+    if (const std::string kind = it->value("kind", std::string()); kind == "attome.generate_video")
+      gen = it.key();
+  json &inputs = workflow["exposed"]["inputs"];
+  if (gen.empty() || !inputs.contains("continue_from"))
+    return false;
+  const bool placeholders = gen.rfind("$new:", 0) == 0;
+  const std::string ref = placeholders ? "$new:continue_reference" : new_id("nod");
+  nodes[ref] = {{"kind", "attome.clip_reference"}, {"settings", {{"clip", std::string(reference)}}}, {"ui", {{"x", -520}, {"y", 340}}}};
+  workflow["links"][placeholders ? "$new:l_continue" : new_id("lnk")] = {{"from", json::array({ref, "video"})},
+                                                                         {"to", json::array({gen, "continue_from"})}};
+  inputs["continue_from"].erase("to");
   return true;
 }
 

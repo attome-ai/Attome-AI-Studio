@@ -26,7 +26,7 @@ using json = nlohmann::json;
 
 // The catalog models this provider has a graph for: MiniMax H3 with its Turbo add-on, and FastH3, which is the same
 // graph with another checkpoint and no add-on.
-constexpr std::string_view kModels[] = {"minimax-h3.fl2va.turbo8-int8", "fasth3.8step-v2.int8"};
+constexpr std::string_view kModels[] = {"minimax-h3.fl2va.turbo8-int8", "fasth3.8step-v2.int8", "minimax-h3.singularity-ref2va.int8"};
 bool known(std::string_view model) { return std::find(std::begin(kModels), std::end(kModels), model) != std::end(kModels); }
 
 // Speech: OmniVoice (k2-fsa, 0.6 B, 600+ languages, voice design from words) through the "omnivoice_comfy" node pack. Its two weight
@@ -223,7 +223,12 @@ json h3_graph(const gen::StepRequest &r, const H3Media &media, const std::string
     model = {"sparse", 0};
   }
   const int width = r.inputs.value("width", 1280), height = r.inputs.value("height", 704);
-  const int length = frames_for(r.inputs.value("seconds", 5.0));
+  // A continuation is made kOverlapFrames longer than the clip asks: the clip skips those first frames (its source_in), which
+  // repeat the end of the clip before. The model's longest clip is 15 s.
+  double seconds = r.inputs.value("seconds", 5.0);
+  if (!media.continue_from.empty())
+    seconds = std::min(seconds + double(kOverlapFrames) / 24.0, 15.0);
+  const int length = frames_for(seconds);
   if (!media.voice.empty()) { // reference to video: the voice, and the start picture as the first reference
     json cond = {{"clip", {"clip", 0}}, {"vae", {"vae", 0}}, {"audio_vae", {"avae", 0}}, {"prompt", r.inputs.value("prompt", std::string())},
                  {"width", width}, {"height", height}, {"length", length}, {"ref_image_size", "max"}};
@@ -435,6 +440,13 @@ Result<gen::StepResult> ComfyProvider::run(const gen::StepRequest &r) {
       return engine_error("E_MODEL_FILE", "ComfyUI has no OmniVoice nodes.",
                           "Install the omnivoice_comfy node pack in ComfyUI's custom_nodes, put model.safetensors and audio_tokenizer.safetensors in "
                           "ComfyUI/models/tts/omnivoice, and restart ComfyUI.");
+    if (r.settings.value("stage", std::string("preview")) == "final" && text.find(kLatentUpscaler) != std::string::npos)
+      return engine_error("E_MODEL_FILE", "ComfyUI cannot see the latent upscaler for the final stage.",
+                          "Download \"MiniMax H3 latent upscaler\" in the Models panel into ComfyUI's models/latent_upscale_models, put the "
+                          "Comfyui_Minimax_h3_latent_Upscaler node pack in custom_nodes, and restart ComfyUI.");
+    if (text.find("MinimaxH3LatentUpscaler3D") != std::string::npos && text.find("missing_node_type") != std::string::npos)
+      return engine_error("E_MODEL_FILE", "ComfyUI has no node for the final stage's latent upscaler.",
+                          "Put the Comfyui_Minimax_h3_latent_Upscaler node pack in ComfyUI's custom_nodes, and restart ComfyUI.");
     if (text.find("not in") != std::string::npos || text.find("value_not_in_list") != std::string::npos)
       return engine_error("E_MODEL_FILE", "ComfyUI cannot see the files of the model " + r.model + ".",
                           "ComfyUI only looks in its own models folder. In the Models panel, choose ComfyUI's models folder as the folder for "

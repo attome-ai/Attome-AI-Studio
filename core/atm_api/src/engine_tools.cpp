@@ -448,9 +448,25 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
        "workflow":{"type":"string","description":"Instead of a model: the ID of a Clip Workflow of the project's library, a key of its workflows"},"seconds":{"type":"number"},
        "seed":{"type":"integer"},"name":{"type":"string"},
        "start_from":{"type":"string","description":"\"previous\" or a generative clip's ID"},"at":{"type":"string"},
+       "continue_from":{"type":"string","description":"\"previous\" or a generative clip's ID (MiniMax H3): carry on from that clip seamlessly. The last 22 frames and the sound under them lead into this clip; it starts where that one ends and skips its first 22 frames, so playback is one take. At most 14.08 s."},
+       "settings":{"type":"object","description":"Settings of the model, by name (gen.nodes lists them): for MiniMax H3 stage (preview | final: the latent upscaler and a refine pass), final_megapixels, sparse_keep_percent (0 = off), low_memory (on | off), steps, sampler, attention."},
+       "voice":{"type":"string","description":"The path of a sound file (MiniMax H3): the speaker takes its timbre; cite it in the prompt as <Audio 1> (gen.dialogue_prompt writes that)."},
        "track":{"type":"string"},"sequence":{"type":"string"},
        "with_audio":{"type":"boolean","description":"Default false: a video model's own guessed ambience (not every model has one) is left out of the mix, the same as with_audio on add_clip. true keeps it."}},"required":["project","prompt"]})",
      &Impl::gen_create_clip},
+    {"gen.dialogue_prompt", "gen", false,
+     "Write the structured prompt MiniMax H3 reads for scenes with people who speak, from a plain description: subjects "
+     "(<Subject N>, each with an optional voice), shots with their camera, action and lines {subject, text, tone, language}, the look, "
+     "the setting, the soundscape and the music. Returns {prompt}, to give to gen.create_clip. Nothing is generated.",
+     R"({"type":"object","properties":{
+       "style":{"type":"string","description":"The look of the whole scene, e.g. \"2d anime style, clean linework, soft cel shading\""},
+       "setting":{"type":"string","description":"The place and the light"},
+       "subjects":{"type":"array","items":{"oneOf":[{"type":"string"},{"type":"object","properties":{"description":{"type":"string"},"voice":{"type":"boolean","description":"true: this subject takes the timbre of the clip's voice sound, cited as <Audio N>"}},"required":["description"]}]}},
+       "shots":{"type":"array","items":{"type":"object","properties":{"camera":{"type":"string"},"action":{"type":"string"},
+         "lines":{"type":"array","items":{"type":"object","properties":{"subject":{"type":"integer","description":"1 = <Subject 1>"},"text":{"type":"string"},"tone":{"type":"string"},"language":{"type":"string"}},"required":["subject","text"]}}}}},
+       "continuous":{"type":"boolean","description":"Default true: one shot from beginning to end, no cuts"},
+       "soundscape":{"type":"string"},"music":{"type":"string"}},"required":["shots"]})",
+     &Impl::gen_dialogue_prompt},
     {"gen.save_to_library", "gen", true,
      "Publish a generative clip's own workflow to the project's library as a new Clip Workflow (a card in the Generate panel). "
      "The clip keeps its own; its input values are not part of the copy. name: the library's name for it (default: the workflow's).",

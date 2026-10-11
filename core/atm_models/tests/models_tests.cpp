@@ -349,8 +349,11 @@ TEST_CASE("models: the built-in catalog parses, and every file is pinned, hashed
       INFO(f.path);
       CHECK(f.sha256.size() == 64);
       CHECK(f.url.find("/resolve/main/") == std::string::npos); // a revision, not a branch that can move
-      CHECK(f.url.size() > f.path.size());
-      CHECK(f.url.compare(f.url.size() - f.path.size(), f.path.size(), f.path) == 0);
+      // The URL names the file the path says: the whole path, or (for a repository that keeps the file elsewhere than the folder
+      // ComfyUI reads it from) at least its file name.
+      const std::string name = f.path.substr(f.path.find_last_of('/') + 1);
+      CHECK(f.url.size() > name.size());
+      CHECK(f.url.compare(f.url.size() - name.size(), name.size(), name) == 0);
     }
   CHECK(models::find_entry(catalog, "nope") == nullptr);
 }

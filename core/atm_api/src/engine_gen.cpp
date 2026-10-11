@@ -1,6 +1,8 @@
 // Generation Tools: gen.* (plan, run, status, takes, presets, workflows), engines and readiness checks.
 #include "engine_impl.hpp"
 
+#include "atm/gen/dialogue.hpp"
+
 namespace atm::api {
 
 const json &Engine::Impl::library_of(const Project &pr) {
@@ -559,10 +561,24 @@ Result<json> Engine::Impl::gen_create_clip(const json &params) {
     }
     seconds = std::max(1.0, std::round(double(words) / 2.6 * 10.0) / 10.0);
   }
+  const bool continuing = !params.value("continue_from", std::string()).empty();
+  std::string note;
   if (decl && !voice) {
     seconds = std::max(seconds, decl->seconds_min);
-    if (decl->seconds_max > 0.0)
-      seconds = std::min(seconds, decl->seconds_max);
+    if (decl->seconds_max > 0.0) {
+      // A continuation is generated 22 frames longer than it shows (its first frames repeat the clip before), so what it shows is
+      // at most that much less than the model's longest clip.
+      const double longest = decl->seconds_max - (continuing ? gen::kContinueOverlapSeconds : 0.0);
+      if (seconds > longest) {
+        if (continuing) {
+          char limit[16];
+          std::snprintf(limit, sizeof limit, "%.2f", std::floor(longest * 100.0) / 100.0);
+          note = std::string("A continuation shows at most ") + limit +
+                 " s: the model makes 15 s, and the first 22 frames repeat the clip before. Its length was shortened to that.";
+        }
+        seconds = longest;
+      }
+    }
   }
   static std::atomic<uint32_t> counter{uint32_t(std::chrono::steady_clock::now().time_since_epoch().count())};
   const int64_t seed = params.value("seed", int64_t((counter.fetch_add(2654435761u) >> 8) % 1000000));
@@ -677,6 +693,51 @@ Result<json> Engine::Impl::gen_create_clip(const json &params) {
   if (!start_reference.empty() && !gen::start_from(instance, start_reference))
     return fail(ErrorCode::InvalidArgument, "G_SETTING", "This workflow has no start picture to start on a clip's last frame.", {},
                 "Use a workflow with a node that takes a start_image, exposed as \"start_image\".");
+
+  // Carrying on from another clip: one Clip Reference node, its video into the node's "continue_from". The new clip starts where the
+  // clip before ends, and its first 22 frames (which repeat the end of that clip) are skipped: source_in.
+  if (continuing) {
+    const std::string from = params.value("continue_from", std::string());
+    const std::string source = from == "previous" ? before : from;
+    const doc::NodeRef *ref = source.empty() ? nullptr : pr->doc.find(source);
+    if (!ref || ref->node->value("media_ref", json::object()).value("type", std::string()) != "workflow")
+      return fail(ErrorCode::InvalidArgument, "G_CLIP_LINK",
+                  from == "previous" ? "There is no generative clip before this one on the track to continue from."
+                                     : "\"" + from + "\" is not a generative clip.",
+                  {}, "Add the first clip without continue_from, or name a generative clip.");
+    if (!gen::continue_from(instance, from))
+      return fail(ErrorCode::InvalidArgument, "G_SETTING", "The model " + (decl ? decl->id : std::string("of this workflow")) + " cannot continue a clip.", {},
+                  "Pick a model that accepts continue_from (MiniMax H3).");
+  }
+
+  // Settings of the model the clip's node runs: only those the model declares, each held to what it says.
+  if (params.contains("settings")) {
+    if (!params["settings"].is_object())
+      return bad_param("settings", "must be an object of setting names and values");
+    json *gen_node = nullptr;
+    if (instance.contains("nodes") && instance["nodes"].is_object())
+      for (auto it = instance["nodes"].begin(); it != instance["nodes"].end(); ++it)
+        if (it->value("kind", std::string()) == "attome.generate_video")
+          gen_node = &*it;
+    if (!gen_node || !decl)
+      return fail(ErrorCode::InvalidArgument, "G_SETTING", "This workflow has no model node to set.", {}, "Use a model, or a workflow with a generate video node.");
+    for (auto it = params["settings"].begin(); it != params["settings"].end(); ++it) {
+      const gen::SettingDecl *declared = decl->setting(it.key());
+      if (!declared)
+        return fail(ErrorCode::InvalidArgument, "G_SETTING", "The model " + decl->id + " has no setting \"" + it.key() + "\".", {},
+                    "Its settings: " + decl->setting_names() + ".");
+      if (const std::string problem = gen::setting_problem(*declared, it.value()); !problem.empty())
+        return fail(ErrorCode::InvalidArgument, "G_SETTING", "The setting \"" + it.key() + "\" " + problem + ".", {},
+                    "Give it a value its model accepts (gen.models lists them).");
+      (*gen_node)["settings"][it.key()] = it.value();
+    }
+  }
+  if (params.contains("voice")) {
+    if (!params["voice"].is_string() || !face.contains("voice"))
+      return fail(ErrorCode::InvalidArgument, "G_SETTING", "This model does not take a voice to follow, or the voice is not a file path.", {},
+                  "Pass the path of a sound file, for a model that lists voice in its inputs (MiniMax H3).");
+    inputs["voice"] = params["voice"];
+  }
   std::string name = params.value("name", std::string());
   if (name.empty()) { // "Shot N": the next number no generative clip of the project has. A prompt makes a poor name: it
     int next = 1;     // often starts with the style, and any cut of it reads as broken.
@@ -725,7 +786,8 @@ Result<json> Engine::Impl::gen_create_clip(const json &params) {
   const double across = cw / double(width), down = ch / double(height);
   const double fill = std::round(std::max(across, down) / std::min(across, down) * 10000.0) / 10000.0;
   json clip_value = {{"name", name},
-                     {"timing", {{"record_in", record_in}, {"duration", length}, {"source_in", "0"}}},
+                     {"timing", {{"record_in", record_in}, {"duration", length},
+                                 {"source_in", continuing ? std::to_string(gen::kContinueOverlapFrames) + "/24" : std::string("0")}}},
                      {"media_ref", {{"type", "workflow"}, {"workflow", std::move(instance)}, {"inputs", std::move(inputs)}}}};
   if (voice) { // as long as what is said: the length comes from the speech after each run
     clip_value["media_ref"]["length_from"] = "length";
@@ -742,9 +804,22 @@ Result<json> Engine::Impl::gen_create_clip(const json &params) {
   ops.push_back({{"op", "add"}, {"path", track + "/clips/$new:clip"}, {"value", std::move(clip_value)}});
   ATM_TRY(json applied, project_patch({{"project", project_ref}, {"patch", {{"ops", std::move(ops)}, {"label", "Add generative clip"}}}}));
   const json &ids = applied["id_map"];
-  return json{{"clip", ids.value("$new:clip", std::string())},
-              {"track", ids.value("$new:track", track)}, {"width", width}, {"height", height}, {"seconds", seconds},
-              {"seed", seed}, {"revision", applied["revision"]}};
+  json made = {{"clip", ids.value("$new:clip", std::string())},
+               {"track", ids.value("$new:track", track)}, {"width", width}, {"height", height}, {"seconds", seconds},
+               {"seed", seed}, {"revision", applied["revision"]}};
+  if (!note.empty())
+    made["note"] = note;
+  return made;
+}
+
+  // The structured prompt MiniMax H3 reads for scenes with speaking people, written from a plain description (gen/dialogue.hpp).
+Result<json> Engine::Impl::gen_dialogue_prompt(const json &params) {
+  std::string problem;
+  std::string prompt = gen::dialogue_prompt(params, problem);
+  if (prompt.empty())
+    return fail(ErrorCode::InvalidArgument, "G_DIALOGUE", problem, {},
+                "Give subjects (a description each) and shots (camera, action, and lines {subject, text, tone, language}).");
+  return json{{"prompt", std::move(prompt)}};
 }
 
   // Publishes a clip's own workflow to the project's library: a new Clip Workflow, a copy with IDs of its own, that the Generate

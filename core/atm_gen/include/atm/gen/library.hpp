@@ -58,4 +58,13 @@ json voice_workflow(const ModelDecl &model);
 // workflow's own are, else fresh ones. False when the workflow has no generate video node with a start_image input.
 bool start_from(json &workflow, std::string_view reference);
 
+// Makes a workflow carry on from another clip: adds a Clip Reference node (`reference`, as in start_from) and links its video to
+// the "continue_from" of the generate video node, so the clip's last 22 frames and the sound under them lead into this one. The
+// "continue_from" Exposed Input is left unlinked. False when the workflow has no generate video node with a continue_from input.
+bool continue_from(json &workflow, std::string_view reference);
+
+// The 22 frames a continuation takes over from the clip before, and the length of that overlap in seconds (at 24 frames a second).
+constexpr int kContinueOverlapFrames = 22;
+constexpr double kContinueOverlapSeconds = double(kContinueOverlapFrames) / 24.0;
+
 } // namespace atm::gen
