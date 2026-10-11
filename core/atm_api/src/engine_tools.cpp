@@ -452,7 +452,7 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
        "settings":{"type":"object","description":"Settings of the model, by name (gen.nodes lists them): for MiniMax H3 stage (preview | final: the latent upscaler and a refine pass), final_megapixels, sparse_keep_percent (0 = off), low_memory (on | off), steps, sampler, attention."},
        "voice":{"type":"string","description":"The path of a sound file (MiniMax H3): the speaker takes its timbre; cite it in the prompt as <Audio 1> (gen.dialogue_prompt writes that)."},
        "track":{"type":"string"},"sequence":{"type":"string"},
-       "with_audio":{"type":"boolean","description":"Default false: a video model's own guessed ambience (not every model has one) is left out of the mix, the same as with_audio on add_clip. true keeps it."}},"required":["project","prompt"]})",
+       "with_audio":{"type":"boolean","description":"Default false: a video model's own guessed ambience (not every model has one) is left out of the mix, the same as with_audio on add_clip. true keeps it. The default is true for a scene with spoken lines of its own (a <d>...</d> tag in the prompt, or a voice): the model's sound is then the dialogue."}},"required":["project","prompt"]})",
      &Impl::gen_create_clip},
     {"gen.dialogue_prompt", "gen", false,
      "Write the structured prompt MiniMax H3 reads for scenes with people who speak, from a plain description: subjects "

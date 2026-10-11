@@ -798,7 +798,10 @@ Result<json> Engine::Impl::gen_create_clip(const json &params) {
     // Some video models (MiniMax H3) write their own guessed ambience into the take's file alongside the picture. It stays there (detach_audio
     // still finds it, and the clip is not marked streamless) but is muted in the mix by default (gain_db -96, same as any other clip's): a
     // short's scenes almost always carry a voice or music track of their own, not the model's guess. with_audio: true leaves it at 0 dB.
-    if (!params.value("with_audio", false))
+    // The exception is a scene that has spoken lines of its own (a <d>...</d> tag in the prompt, or a voice to follow): those lines ARE
+    // the model's sound, so the sound is kept unless with_audio says false.
+    const bool speaks = prompt->find("<d>") != std::string::npos || params.contains("voice");
+    if (!(params.contains("with_audio") ? params.value("with_audio", false) : speaks))
       clip_value["audio"] = {{"gain_db", -96.0}};
   }
   ops.push_back({{"op", "add"}, {"path", track + "/clips/$new:clip"}, {"value", std::move(clip_value)}});

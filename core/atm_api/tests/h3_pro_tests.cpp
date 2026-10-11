@@ -134,3 +134,27 @@ TEST_CASE("gen.create_clip: a continuation starts where the clip before ends, sk
   std::error_code ec;
   fs::remove_all(dir, ec);
 }
+
+TEST_CASE("gen.create_clip keeps the model's sound for a scene that speaks, and mutes its guessed ambience otherwise", "[gen][h3]") {
+  const fs::path dir = fs::temp_directory_path() / atm::new_id("attome-h3-sound");
+  fs::create_directories(dir);
+  const std::string project = (dir / "Sound.attome").string();
+  atm::api::EngineConfig cfg;
+  cfg.models_dir = (dir / "models").string();
+  Engine engine(cfg);
+  ok(engine, "project.create", {{"path", project}, {"rate", "24"}, {"canvas", "480x832"}});
+  const auto muted = [&](json extra) {
+    json params = {{"project", project}, {"model", kH3}, {"seconds", 3}};
+    params.update(extra);
+    const json made = ok(engine, "gen.create_clip", params);
+    const json clip = ok(engine, "project.get", {{"project", project}, {"id", made["clip"]}})["object"];
+    return clip.contains("audio") && clip["audio"].value("gain_db", 0.0) <= -90.0;
+  };
+  CHECK(muted({{"prompt", "A fox runs through snow"}}));                                  // guessed ambience: out of the mix
+  CHECK_FALSE(muted({{"prompt", "She says: <d>[English] You came.</d>"}}));               // spoken lines: the sound is the dialogue
+  CHECK_FALSE(muted({{"prompt", "A woman talks"}, {"voice", (dir / "v.wav").string()}})); // a voice to follow
+  CHECK(muted({{"prompt", "She says: <d>[English] You came.</d>"}, {"with_audio", false}})); // asked for explicitly
+  CHECK_FALSE(muted({{"prompt", "A fox runs through snow"}, {"with_audio", true}}));
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}
