@@ -26,13 +26,17 @@ constexpr const char *kCatalog = R"json({
       "notes": "33 B video and sound model, pruned int8 build, with the official 8-step Turbo add-on. Needs a 24 GB GPU or larger.",
       "declares": {
         "kinds": ["generate_video", "encode_prompt", "sample", "decode"],
-        "accepts": ["start_image", "end_image"],
+        "accepts": ["start_image", "end_image", "voice", "continue_from"],
         "seconds": {"min": 1, "max": 15},
         "sizes": {"multiple": 32, "max_pixels": 2088960},
         "settings": {
           "steps": {"type": "integer", "min": 1, "max": 50, "default": 8},
           "sampler": {"type": "choice", "options": ["res_multistep", "euler"], "default": "res_multistep"},
-          "attention": {"type": "choice", "options": ["int8", "default"], "default": "int8"}
+          "attention": {"type": "choice", "options": ["int8", "default"], "default": "int8"},
+          "stage": {"type": "choice", "options": ["preview", "final"], "default": "preview"},
+          "final_megapixels": {"type": "number", "min": 0.5, "max": 4.0, "default": 2.0},
+          "sparse_keep_percent": {"type": "integer", "min": 0, "max": 100, "default": 0},
+          "low_memory": {"type": "choice", "options": ["off", "on"], "default": "off"}
         }
       },
       "files": [
@@ -65,13 +69,17 @@ constexpr const char *kCatalog = R"json({
       "notes": "MiniMax H3 distilled to 8 steps as one model, with no add-on. Shares its text encoder and VAEs with MiniMax H3. Needs a 24 GB GPU or larger.",
       "declares": {
         "kinds": ["generate_video", "encode_prompt", "sample", "decode"],
-        "accepts": ["start_image", "end_image"],
+        "accepts": ["start_image", "end_image", "voice", "continue_from"],
         "seconds": {"min": 1, "max": 15},
         "sizes": {"multiple": 32, "max_pixels": 2088960},
         "settings": {
           "steps": {"type": "integer", "min": 1, "max": 50, "default": 8},
           "sampler": {"type": "choice", "options": ["res_multistep", "euler"], "default": "res_multistep"},
-          "attention": {"type": "choice", "options": ["int8", "default"], "default": "int8"}
+          "attention": {"type": "choice", "options": ["int8", "default"], "default": "int8"},
+          "stage": {"type": "choice", "options": ["preview", "final"], "default": "preview"},
+          "final_megapixels": {"type": "number", "min": 0.5, "max": 4.0, "default": 2.0},
+          "sparse_keep_percent": {"type": "integer", "min": 0, "max": 100, "default": 0},
+          "low_memory": {"type": "choice", "options": ["off", "on"], "default": "off"}
         }
       },
       "files": [

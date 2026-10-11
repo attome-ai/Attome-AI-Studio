@@ -8,6 +8,7 @@
 #include "atm/api/gen_comfy.hpp"
 #include "atm/base/id.hpp"
 #include "atm/storage/file.hpp"
+#include "../../atm_media/tests/test_clip.hpp"
 
 namespace fs = std::filesystem;
 using json = nlohmann::json;
@@ -40,7 +41,7 @@ struct FakeComfy final : atm::net::Transport {
       body = R"({"system":{"comfyui_version":"0.38.0"},"devices":[{"name":"cuda:0 TEST","vram_total":34190458880}]})";
     } else if (path == "/upload/image") {
       CHECK(request.content_type.rfind("multipart/form-data; boundary=", 0) == 0);
-      CHECK(request.body.find("PICTURE") != std::string::npos);
+      CHECK((request.body.find("PICTURE") != std::string::npos || request.body.find("ftyp") != std::string::npos)); // a file, or an MP4
       body = R"({"name":"up.jpg","subfolder":"","type":"input"})";
     } else if (path == "/prompt") {
       graph = json::parse(request.body)["prompt"];
@@ -159,6 +160,80 @@ TEST_CASE("comfyui: one generate_video step becomes one ComfyUI graph, and its v
   REQUIRE_FALSE(stopped);
   CHECK(stopped.error().rule == "E_CANCELLED");
   CHECK(server->urls.back() == "/interrupt");
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}
+
+TEST_CASE("comfyui: continuation, voice, the final stage and the memory options change the H3 graph", "[gen][comfyui]") {
+  const fs::path dir = fs::temp_directory_path() / atm::new_id("attome-comfy-h3");
+  fs::create_directories(dir);
+  auto server = std::make_shared<FakeComfy>();
+  atm::api::ComfyProvider comfy("127.0.0.1:8188", server);
+  comfy.poll_ms = 0;
+  write_clip((dir / "before.mp4").string(), 320, 240, 36); // 36 frames at 30 fps: 1.2 s
+  REQUIRE(atm::storage::atomic_write(dir / "voice.wav", "PICTURE"));
+  REQUIRE(atm::storage::atomic_write(dir / "start.jpg", "PICTURE"));
+  const auto request = [&](json settings, json inputs) {
+    atm::gen::StepRequest r;
+    r.run_id = "run_h3";
+    r.kind = "generate_video";
+    r.model = "minimax-h3.fl2va.turbo8-int8";
+    r.settings = std::move(settings);
+    r.inputs = std::move(inputs);
+    r.outputs = {{"video", (dir / "video.mp4").string()}};
+    return r;
+  };
+  const json base = {{"prompt", "Two people talk"}, {"seed", 3}, {"seconds", 15}, {"width", 480}, {"height", 832}};
+  // The default is still the plain template graph: nothing of the new options is in it.
+  server->history_calls = 0;
+  REQUIRE(comfy.run(request({{"steps", 8}}, base)));
+  for (const char *absent : {"guide", "cv", "voice", "sep", "up", "sample2", "sparse", "chunk", "lowvram"})
+    CHECK_FALSE(server->graph.contains(absent));
+  CHECK(server->graph["dec"]["inputs"]["samples"] == json::array({"sample", 0}));
+  CHECK(server->graph["cond"]["class_type"] == "MiniMaxH3ImageToVideo");
+
+  // A continuation: the last 22 frames and the sound under them anchor frame 0, and the sampler follows the guided prompt.
+  json cont = base;
+  cont["continue_from"] = (dir / "before.mp4").string();
+  server->history_calls = 0;
+  REQUIRE(comfy.run(request({{"steps", 8}}, cont)));
+  const json &g = server->graph;
+  CHECK(g["cv"]["class_type"] == "LoadVideo");
+  CHECK(g["ci"]["inputs"]["length"] == 22);
+  CHECK(g["ci"]["inputs"]["batch_index"] == 7); // 1.2 s at 24 fps is 29 frames: the last 22 start at 7
+  CHECK(g["guide"]["class_type"] == "MiniMaxH3AddGuide");
+  CHECK(g["guide"]["inputs"]["frame_idx"] == 0);
+  CHECK(g["guide"]["inputs"]["positive"] == json::array({"cond", 0}));
+  CHECK(g["guider"]["inputs"]["conditioning"] == json::array({"guide", 0}));
+  CHECK(g["cond"]["inputs"]["length"] == 362); // 15 s: 360 frames, up to the 17k + 5 grid
+
+  // The final stage: enlarge the latent, refine it with a short second pass, decode that.
+  server->history_calls = 0;
+  REQUIRE(comfy.run(request({{"steps", 8}, {"stage", "final"}, {"final_megapixels", 2.0}}, base)));
+  CHECK(server->graph["up"]["class_type"] == "MinimaxH3LatentUpscaler3D");
+  CHECK(server->graph["up"]["inputs"]["latent"] == json::array({"sep", 0}));
+  CHECK(server->graph["sample2"]["inputs"]["latent_image"] == json::array({"cat", 0}));
+  CHECK(server->graph["sigmas2"]["inputs"]["denoise"] == 0.4);
+  CHECK(server->graph["dec"]["inputs"]["samples"] == json::array({"sample2", 0}));
+  CHECK(server->graph["adec"]["inputs"]["samples"] == json::array({"sample2", 0}));
+
+  // A voice makes it a reference-to-video step, the start picture its first reference.
+  json voiced = base;
+  voiced["voice"] = (dir / "voice.wav").string();
+  voiced["start_image"] = (dir / "start.jpg").string();
+  server->history_calls = 0;
+  REQUIRE(comfy.run(request({{"steps", 8}}, voiced)));
+  CHECK(server->graph["cond"]["class_type"] == "MiniMaxH3ReferenceToVideo");
+  CHECK(server->graph["cond"]["inputs"]["ref_audios.ref_audio_0"] == json::array({"voice", 0}));
+  CHECK(server->graph["cond"]["inputs"]["ref_images.ref_image_0"] == json::array({"first", 0}));
+
+  // Sparse attention and the memory savers sit in the model chain, in front of both samplers.
+  server->history_calls = 0;
+  REQUIRE(comfy.run(request({{"steps", 8}, {"sparse_keep_percent", 10}, {"low_memory", "on"}, {"stage", "final"}}, base)));
+  CHECK(server->graph["sparse"]["inputs"]["selection.keep_percent"] == 10);
+  CHECK(server->graph["lora"]["inputs"]["model"] == json::array({"lowvram", 0}));
+  CHECK(server->graph["sigmas"]["inputs"]["model"] == json::array({"sparse", 0}));
+  CHECK(server->graph["sigmas2"]["inputs"]["model"] == json::array({"sparse", 0}));
   std::error_code ec;
   fs::remove_all(dir, ec);
 }

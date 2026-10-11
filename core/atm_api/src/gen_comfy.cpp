@@ -176,8 +176,24 @@ int frames_for(double seconds) { // 24 frames per second, up to the model's 17k 
   return n + (5 - n % 17 + 17) % 17;
 }
 
-// The graph of ComfyUI's own template video_minimax_h3_t2v, flattened, with the Turbo 8-step add-on.
-json h3_graph(const gen::StepRequest &r, const std::string &start_image, const std::string &end_image, const std::string &prefix) {
+// The latent upscaler's file (ComfyUI's models/latent_upscale_models); used only by the "final" stage.
+constexpr const char *kLatentUpscaler = "minimax_h3_latent_upscaler_3d_conv_v1_fp16.safetensors";
+// MiniMax H3 anchors 5, 22, 39, 56 ... (17k + 5) frames; 22 is what a continuation carries over from the clip before.
+constexpr int kOverlapFrames = 22;
+
+// What the graph needs besides the step's request: the names ComfyUI gave the uploaded files, and the clip continued from.
+struct H3Media {
+  std::string start_image, end_image, voice, continue_from;
+  int continue_frames = 0;       // frames in the clip continued from
+  double continue_seconds = 0.0; // its length
+};
+
+// The graph of ComfyUI's own template video_minimax_h3_t2v, flattened, with the Turbo 8-step add-on. Beyond the template:
+//  - continue_from: the last 22 frames and sound of an earlier clip are anchored at frame 0 (a seamless continuation);
+//  - voice: a sound whose timbre the speaker takes (the prompt cites it as <Audio 1>);
+//  - stage "final": the latent is enlarged by the latent upscaler and refined by a short second sampling pass;
+//  - sparse_keep_percent: block-sparse attention (faster, softer); low_memory: chunked feed-forward and attention.
+json h3_graph(const gen::StepRequest &r, const H3Media &media, const std::string &prefix) {
   const H3Files f = h3_files(r.model);
   const auto node = [](const char *type, json inputs) { return json{{"class_type", type}, {"inputs", std::move(inputs)}}; };
   json g = json::object();
@@ -186,6 +202,11 @@ json h3_graph(const gen::StepRequest &r, const std::string &start_image, const s
   g["vae"] = node("VAELoader", {{"vae_name", f.video_vae}});
   g["avae"] = node("VAELoader", {{"vae_name", f.audio_vae}});
   json model = {"unet", 0};
+  if (r.settings.value("low_memory", std::string("off")) == "on") { // KJNodes: trades speed for memory, the picture is the same
+    g["chunk"] = node("MiniMaxChunkFeedForward", {{"model", model}, {"chunks", 4}, {"seq_threshold", 2048}});
+    g["lowvram"] = node("MiniMaxLowVRAMAttention", {{"model", {"chunk", 0}}, {"head_chunks", 4}});
+    model = {"lowvram", 0};
+  }
   if (!f.lora.empty()) { // the few-step add-on, for a model that has one
     g["lora"] = node("LoraLoaderModelOnly", {{"model", model}, {"lora_name", f.lora}, {"strength_model", 1.0}});
     model = {"lora", 0};
@@ -194,26 +215,75 @@ json h3_graph(const gen::StepRequest &r, const std::string &start_image, const s
     g["attn"] = node("ModelAttentionBackend", {{"model", model}, {"attention", "comfy kitchen attention"}});
     model = {"attn", 0};
   }
-  json cond = {{"clip", {"clip", 0}}, {"vae", {"vae", 0}}, {"prompt", r.inputs.value("prompt", std::string())},
-               {"width", r.inputs.value("width", 1280)}, {"height", r.inputs.value("height", 704)},
-               {"length", frames_for(r.inputs.value("seconds", 5.0))}};
-  if (!start_image.empty()) {
-    g["first"] = node("LoadImage", {{"image", start_image}});
-    cond["first_frame"] = {"first", 0};
+  if (const int keep = r.settings.value("sparse_keep_percent", 0); keep > 0) {
+    g["sparse"] = node("BlockSparseAttention", {{"model", model}, {"selection", "sla"}, {"selection.keep_percent", keep},
+                                                {"start_percent", 0.2}, {"end_percent", 1.0}, {"dense_blocks", ""},
+                                                {"min_tokens", 12288}, {"extra_tokens", 256},
+                                                {"sink_conditioning", "exact_kv_and_rows"}, {"verbose", false}});
+    model = {"sparse", 0};
   }
-  if (!end_image.empty()) {
-    g["last"] = node("LoadImage", {{"image", end_image}});
-    cond["last_frame"] = {"last", 0};
+  const int width = r.inputs.value("width", 1280), height = r.inputs.value("height", 704);
+  const int length = frames_for(r.inputs.value("seconds", 5.0));
+  if (!media.voice.empty()) { // reference to video: the voice, and the start picture as the first reference
+    json cond = {{"clip", {"clip", 0}}, {"vae", {"vae", 0}}, {"audio_vae", {"avae", 0}}, {"prompt", r.inputs.value("prompt", std::string())},
+                 {"width", width}, {"height", height}, {"length", length}, {"ref_image_size", "max"}};
+    g["voice"] = node("LoadAudio", {{"audio", media.voice}});
+    cond["ref_audios.ref_audio_0"] = {"voice", 0};
+    if (!media.start_image.empty()) {
+      g["first"] = node("LoadImage", {{"image", media.start_image}});
+      cond["ref_images.ref_image_0"] = {"first", 0};
+    }
+    g["cond"] = node("MiniMaxH3ReferenceToVideo", std::move(cond));
+  } else {
+    json cond = {{"clip", {"clip", 0}}, {"vae", {"vae", 0}}, {"prompt", r.inputs.value("prompt", std::string())},
+                 {"width", width}, {"height", height}, {"length", length}};
+    if (!media.start_image.empty()) {
+      g["first"] = node("LoadImage", {{"image", media.start_image}});
+      cond["first_frame"] = {"first", 0};
+    }
+    if (!media.end_image.empty()) {
+      g["last"] = node("LoadImage", {{"image", media.end_image}});
+      cond["last_frame"] = {"last", 0};
+    }
+    g["cond"] = node("MiniMaxH3ImageToVideo", std::move(cond));
   }
-  g["cond"] = node("MiniMaxH3ImageToVideo", std::move(cond));
+  json conditioning = {"cond", 0};
+  if (!media.continue_from.empty()) {
+    const int frames = std::max(media.continue_frames, kOverlapFrames);
+    const double tail = double(kOverlapFrames) / 24.0;
+    g["cv"] = node("LoadVideo", {{"file", media.continue_from}});
+    g["cc"] = node("GetVideoComponents", {{"video", {"cv", 0}}});
+    g["ci"] = node("ImageFromBatch", {{"image", {"cc", 0}}, {"batch_index", frames - kOverlapFrames}, {"length", kOverlapFrames}});
+    g["ca"] = node("TrimAudioDuration", {{"audio", {"cc", 1}},
+                                         {"start_index", std::max(0.0, std::round((media.continue_seconds - tail) * 1e4) / 1e4)},
+                                         {"duration", std::round(tail * 1e4) / 1e4}});
+    g["guide"] = node("MiniMaxH3AddGuide", {{"positive", {"cond", 0}}, {"latent", {"cond", 1}}, {"frame_idx", 0},
+                                            {"vae", {"vae", 0}}, {"audio_vae", {"avae", 0}}, {"image", {"ci", 0}}, {"audio", {"ca", 0}}});
+    conditioning = {"guide", 0};
+  }
   g["noise"] = node("RandomNoise", {{"noise_seed", r.inputs.value("seed", int64_t(0))}});
   g["select"] = node("KSamplerSelect", {{"sampler_name", r.settings.value("sampler", std::string("res_multistep"))}});
   g["sigmas"] = node("BasicScheduler", {{"model", model}, {"scheduler", "simple"}, {"steps", r.settings.value("steps", 8)}, {"denoise", 1.0}});
-  g["guider"] = node("BasicGuider", {{"model", model}, {"conditioning", {"cond", 0}}});
+  g["guider"] = node("BasicGuider", {{"model", model}, {"conditioning", conditioning}});
   g["sample"] = node("SamplerCustomAdvanced", {{"noise", {"noise", 0}}, {"guider", {"guider", 0}}, {"sampler", {"select", 0}},
                                                {"sigmas", {"sigmas", 0}}, {"latent_image", {"cond", 1}}});
-  g["dec"] = node("VAEDecode", {{"samples", {"sample", 0}}, {"vae", {"vae", 0}}});
-  g["adec"] = node("VAEDecodeAudio", {{"samples", {"sample", 0}}, {"vae", {"avae", 0}}});
+  json samples = {"sample", 0};
+  if (r.settings.value("stage", std::string("preview")) == "final") {
+    g["sep"] = node("LTXVSeparateAVLatent", {{"av_latent", samples}});
+    g["up"] = node("MinimaxH3LatentUpscaler3D", {{"latent", {"sep", 0}}, {"model_name", kLatentUpscaler}, {"mode", "megapixels"},
+                                                 {"mode.megapixels", r.settings.value("final_megapixels", 2.0)}, {"align", 32},
+                                                 {"enable_temporal_chunking", true}, {"force_unload", false},
+                                                 {"device", "cuda"}, {"precision", "fp16"}});
+    g["cat"] = node("LTXVConcatAVLatent", {{"video_latent", {"up", 0}}, {"audio_latent", {"sep", 1}}});
+    g["noise2"] = node("RandomNoise", {{"noise_seed", r.inputs.value("seed", int64_t(0))}});
+    g["sigmas2"] = node("BasicScheduler", {{"model", model}, {"scheduler", "linear_quadratic"}, {"steps", 2}, {"denoise", 0.4}});
+    g["guider2"] = node("BasicGuider", {{"model", model}, {"conditioning", conditioning}});
+    g["sample2"] = node("SamplerCustomAdvanced", {{"noise", {"noise2", 0}}, {"guider", {"guider2", 0}}, {"sampler", {"select", 0}},
+                                                  {"sigmas", {"sigmas2", 0}}, {"latent_image", {"cat", 0}}});
+    samples = {"sample2", 0};
+  }
+  g["dec"] = node("VAEDecode", {{"samples", samples}, {"vae", {"vae", 0}}});
+  g["adec"] = node("VAEDecodeAudio", {{"samples", samples}, {"vae", {"avae", 0}}});
   g["video"] = node("CreateVideo", {{"images", {"dec", 0}}, {"audio", {"adec", 0}}, {"fps", 24.0}, {"bit_depth", 8}});
   g["save"] = node("SaveVideo", {{"video", {"video", 0}}, {"filename_prefix", prefix}, {"format", "auto"}, {"format.codec", "auto"}});
   return g;
@@ -290,10 +360,19 @@ Result<gen::StepResult> ComfyProvider::run(const gen::StepRequest &r) {
     return (sub.empty() ? "" : sub + "/") + answer["name"].get<std::string>();
   };
   const bool speech = r.kind == "generate_speech";
-  std::string first, last;
+  H3Media media;
   if (!speech) {
-    ATM_TRY(first, upload("start_image"));
-    ATM_TRY(last, upload("end_image"));
+    ATM_TRY(media.start_image, upload("start_image"));
+    ATM_TRY(media.end_image, upload("end_image"));
+    ATM_TRY(media.voice, upload("voice"));
+    ATM_TRY(media.continue_from, upload("continue_from"));
+    if (!media.continue_from.empty()) { // the clip continued from: its length picks the last 22 frames and the sound under them
+      const auto info = media::probe(r.inputs.value("continue_from", std::string()));
+      if (!info || info->duration_hns <= 0)
+        return engine_error("E_INPUT_RANGE", "The clip to continue from could not be read.", "Give continue_from a video file made earlier.");
+      media.continue_seconds = double(info->duration_hns) / double(media::kHnsPerSecond);
+      media.continue_frames = int(std::lround(media.continue_seconds * 24.0));
+    }
   }
 
   // ComfyUI tells the client that queued a prompt which node runs and how far the sampler is, over its WebSocket.
@@ -317,14 +396,17 @@ Result<gen::StepResult> ComfyProvider::run(const gen::StepRequest &r) {
                      const std::string type = m.value("type", std::string());
                      const json data = m.value("data", json::object());
                      const std::string node = data.is_object() && data.contains("node") && data["node"].is_string() ? data["node"].get<std::string>() : "";
-                     if (type == "progress" && node == "sample") {
+                     if (type == "progress" && (node == "sample" || node == "sample2")) {
                        heard.store(true);
-                       r.progress("sampling", data.value("value", 0), data.value("max", 0));
+                       r.progress(node == "sample2" ? "refining" : "sampling", data.value("value", 0), data.value("max", 0));
                      } else if (type == "executing" && !node.empty()) {
                        heard.store(true);
                        const char *phase = node == "t"                                             ? "speaking"
                                            : node == "s"                                           ? "saving"
                                            : node == "sample"                                      ? "sampling"
+                                           : node == "sample2"                                     ? "refining"
+                                           : node == "up"                                          ? "upscaling"
+                                           : node == "guide" || node == "cv"                       ? "reading the clip it continues"
                                            : node == "dec" || node == "adec"                       ? "decoding"
                                            : node == "video" || node == "save"                     ? "saving"
                                            : node == "cond"                                        ? "encoding the prompt"
@@ -338,7 +420,7 @@ Result<gen::StepResult> ComfyProvider::run(const gen::StepRequest &r) {
              stop_listening};
 
   const std::string prefix = "attome/" + r.run_id;
-  const json request = {{"prompt", speech ? speech_graph(r, prefix) : h3_graph(r, first, last, prefix)}, {"client_id", r.run_id}};
+  const json request = {{"prompt", speech ? speech_graph(r, prefix) : h3_graph(r, media, prefix)}, {"client_id", r.run_id}};
   const auto queued = net::fetch(*transport_, address_ + "/prompt", request.dump());
   if (!queued)
     return unreachable(queued.error());

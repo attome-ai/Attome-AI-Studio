@@ -19,6 +19,7 @@ using T = PortType;
 constexpr PortDef kShotInputs[] = {
     {"prompt", T::text, true},  {"start_image", T::image},  {"end_image", T::image}, {"references", T::image, false, true},
     {"seed", T::integer},       {"seconds", T::number},     {"width", T::integer},   {"height", T::integer},
+    {"voice", T::audio},        {"continue_from", T::video},
 };
 constexpr PortDef kShotOutputs[] = {{"video", T::video}, {"audio", T::audio}};
 constexpr PortDef kEncodeInputs[] = {{"prompt", T::text, true}};
