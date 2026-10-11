@@ -612,8 +612,8 @@ void App::draw_workflow_card(const ClipUi &c) {
   for (const gen::ExposedInput &e : rows)
     next_order = std::max<int64_t>(next_order, e.order + 1);
   const auto draw_row = [&](const gen::ExposedInput &e) {
-    if (e.name == "start_image")
-      return; // what it starts from has its own row below
+    if (e.name == "start_image" || e.name == "continue_from")
+      return; // what it starts from, and what it carries on from, have rows of their own below
     const std::string key = id + "/" + e.name, shown = e.label.empty() ? e.name : e.label;
     const bool unused = e.to.empty(), is_set = have.contains(e.name);
     const json now = is_set ? have[e.name] : e.def;
@@ -910,8 +910,13 @@ void App::draw_workflow_card(const ClipUi &c) {
           if (k.is_generative && k.id != c.id && k.start < c.start && (!before || k.start > before->start))
             before = &k;
         std::string reference, frame, taker; // the Clip Reference node, the Get Frame node after it, the node it feeds
+        std::set<std::string> carries_on; // Clip Reference nodes that feed "continue_from": the Continues row's, not this one's
+        for (auto l = links.begin(); l != links.end(); ++l)
+          if (l->contains("from") && l->contains("to") && end_of((*l)["from"], from_node, from_port) && end_of((*l)["to"], to_node, to_port) &&
+              to_port == "continue_from")
+            carries_on.insert(from_node);
         for (auto n = nodes.begin(); n != nodes.end(); ++n)
-          if (n->value("kind", std::string()) == "attome.clip_reference")
+          if (n->value("kind", std::string()) == "attome.clip_reference" && !carries_on.contains(n.key()))
             reference = n.key();
         for (auto l = links.begin(); !reference.empty() && l != links.end(); ++l)
           if (l->contains("from") && l->contains("to") && end_of((*l)["from"], from_node, from_port) && end_of((*l)["to"], to_node, to_port) &&
@@ -972,6 +977,143 @@ void App::draw_workflow_card(const ClipUi &c) {
         }
         ui_mark("combo:gen_start");
         ImGui::PopStyleColor();
+      }
+
+      // What it carries on from (MiniMax H3): the end of the clip before, seamlessly. In the workflow it is a Clip Reference node whose
+      // video feeds the node's "continue_from"; the clip then skips its first 22 frames (source_in), which repeat that clip's end.
+      std::string gen_node;
+      for (auto n = nodes.begin(); n != nodes.end(); ++n)
+        if (n->value("kind", std::string()) == "attome.generate_video")
+          gen_node = n.key();
+      if (face.contains("continue_from") && track && !gen_node.empty()) {
+        const ClipUi *before = nullptr;
+        for (const ClipUi &k : track->clips)
+          if (k.is_generative && k.id != c.id && k.start < c.start && (!before || k.start > before->start))
+            before = &k;
+        std::string reference;
+        std::vector<std::string> link_ids;
+        for (auto l = links.begin(); l != links.end(); ++l)
+          if (l->contains("from") && l->contains("to") && end_of((*l)["from"], from_node, from_port) && end_of((*l)["to"], to_node, to_port) &&
+              to_node == gen_node && to_port == "continue_from") {
+            reference = from_node;
+            link_ids.push_back(l.key());
+          }
+        const std::string named = reference.empty() || !nodes.contains(reference) ? std::string()
+                                  : nodes[reference].value("settings", json::object()).value("clip", std::string());
+        const ClipUi *source = named.empty() || named == "previous" || named == "next" ? nullptr : find_clip(named);
+        const std::string shown = reference.empty() ? "Nothing"
+                                  : named == "previous" ? (before ? "The end of " + before->name : "The end of the clip before")
+                                                        : "The end of " + (source ? source->name : named);
+        ImGui::TextColored(hexv(look::fg2), "Continues");
+        ImGui::SameLine(88.0f);
+        ImGui::PushStyleColor(ImGuiCol_FrameBg, hexv(look::raised));
+        ImGui::SetNextItemWidth(-1.0f);
+        if (ImGui::BeginCombo("##gen_continue", shown.c_str())) {
+          if (ImGui::Selectable("Nothing", reference.empty()) && !reference.empty()) {
+            json ops = json::array();
+            for (const std::string &l : link_ids)
+              ops.push_back({{"op", "remove"}, {"path", l}});
+            ops.push_back({{"op", "remove"}, {"path", reference}});
+            ops.push_back({{"op", "replace"}, {"path", id + "/media_ref/workflow/exposed/inputs/continue_from/to"},
+                           {"value", json::array({json::array({gen_node, "continue_from"})})}});
+            ops.push_back({{"op", "replace"}, {"path", id + "/timing/source_in"}, {"value", "0"}});
+            pending_ = [this, ops] { patch(ops, "Do not continue a clip"); };
+          }
+          ui_mark("option:gen_continue_none");
+          if (before) {
+            if (ImGui::Selectable(("The end of " + before->name).c_str(), named == "previous") && named != "previous") {
+              json ops = json::array();
+              const std::string wbase = id + "/media_ref/workflow";
+              if (!reference.empty()) {
+                ops.push_back({{"op", "replace"}, {"path", reference + "/settings/clip"}, {"value", "previous"}});
+              } else {
+                ops.push_back({{"op", "replace"}, {"path", wbase + "/exposed/inputs/continue_from/to"}, {"value", json::array()}});
+                ops.push_back({{"op", "add"}, {"path", wbase + "/nodes/$new:cont"},
+                               {"value", {{"kind", "attome.clip_reference"}, {"settings", {{"clip", "previous"}}}, {"ui", {{"x", -520}, {"y", 340}}}}}});
+                ops.push_back({{"op", "add"}, {"path", wbase + "/links/$new:lc"}, {"value", {{"from", {"$new:cont", "video"}}, {"to", {gen_node, "continue_from"}}}}});
+              }
+              ops.push_back({{"op", "replace"}, {"path", id + "/timing/source_in"}, {"value", "11/12"}});
+              pending_ = [this, ops] { patch(ops, "Continue the clip before"); };
+            }
+            ui_mark("option:gen_continue_previous");
+          }
+          ImGui::EndCombo();
+        }
+        ui_mark("combo:gen_continue");
+        ImGui::PopStyleColor();
+        if (ImGui::IsItemHovered())
+          ImGui::SetTooltip("Carry on from the end of the clip before, as one take: its last 22 frames and sound lead into this clip.");
+      }
+
+      // How good it is made (MiniMax H3): a quick preview to look at, or the final, which enlarges it and refines it.
+      const json settings = !gen_node.empty() && nodes.contains(gen_node) ? object_in(nodes[gen_node], "settings") : json::object();
+      if (!gen_node.empty() && settings.contains("stage")) {
+        const std::string stage = settings.value("stage", std::string("preview"));
+        const auto set = [this, gen_node, settings](const char *name, json value, const char *label) {
+          const std::string path = gen_node + "/settings/" + name;
+          pending_ = [this, path, value, label, had = settings.contains(name)] {
+            patch(json::array({{{"op", had ? "replace" : "add"}, {"path", path}, {"value", value}}}), label);
+          };
+        };
+        ImGui::TextColored(hexv(look::fg2), "Quality");
+        ImGui::SameLine(88.0f);
+        if (ImGui::RadioButton("Preview", stage != "final") && stage == "final")
+          set("stage", "preview", "Preview quality");
+        ui_mark("radio:gen_stage_preview");
+        if (ImGui::IsItemHovered())
+          ImGui::SetTooltip("Fast, at the size the model makes first: to look at, choose a take and decide.");
+        ImGui::SameLine();
+        if (ImGui::RadioButton("Final", stage == "final") && stage != "final")
+          set("stage", "final", "Final quality");
+        ui_mark("radio:gen_stage_final");
+        if (ImGui::IsItemHovered())
+          ImGui::SetTooltip("Enlarges the preview about twice and refines it. Slower; it runs the preview first if it has not been made.");
+        if (settings.contains("low_memory")) {
+          bool low = settings.value("low_memory", std::string("off")) == "on";
+          ImGui::Dummy(ImVec2(0.0f, 0.0f));
+          ImGui::SameLine(88.0f);
+          if (ImGui::Checkbox("Low memory", &low))
+            set("low_memory", low ? "on" : "off", "Low memory");
+          ui_mark("check:gen_low_memory");
+          if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Slower, but long clips fit in less graphics memory. The picture is the same.");
+        }
+        if (settings.contains("sparse_keep_percent")) {
+          int keep = settings.value("sparse_keep_percent", 0);
+          ImGui::TextColored(hexv(look::fg2), "Sparse");
+          ImGui::SameLine(88.0f);
+          ImGui::SetNextItemWidth(-1.0f);
+          if (ImGui::SliderInt("##gen_sparse", &keep, 0, 50, keep == 0 ? "off" : "keeps %d %% of attention") ) {
+          }
+          ui_mark("slider:gen_sparse");
+          if (ImGui::IsItemDeactivatedAfterEdit())
+            set("sparse_keep_percent", keep, "Sparse attention");
+          if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Faster by looking at only part of the clip at each step; softer detail. 0 is off.");
+        }
+      }
+
+      // One click for the usual next step: a new clip right after this one that carries on from it (a minute of video is four of these).
+      if (face.contains("continue_from") && track && !gen_node.empty() && nodes.contains(gen_node)) {
+        const std::string model = nodes[gen_node].value("model", std::string());
+        ImGui::Dummy(ImVec2(0.0f, 2.0f));
+        if (soft_button("gen_continue_new", "Continue with a new clip", ImVec2(0.0f, 26.0f), !model.empty()))
+          pending_ = [this, clip_id = c.id, track_id = track->id, model, end = c.start + c.frames] {
+            json params = {{"project", project_path_}, {"prompt", std::string()}, {"model", model}, {"track", track_id},
+                           {"at", frames_text(end)}, {"continue_from", clip_id},
+                           {"seconds", std::round(gen_seconds_ * 2.0f) / 2.0f}};
+            json made;
+            if (!rpc("gen.create_clip", params, made))
+              return;
+            say(made.contains("note") ? made.value("note", std::string()) : "Continue with a new clip", false, !made.contains("note"));
+            refresh();
+            selected_clip_ = made.value("clip", "");
+            focus_prompt_ = selected_clip_;
+            insp_rev_ = 0;
+          };
+        ui_mark("button:gen_continue_new");
+        if (ImGui::IsItemHovered())
+          ImGui::SetTooltip("Add a clip after this one that carries on from it as one take. Write what happens next, then Generate.");
       }
   };
   // The prompt first, then the clip's length and what it starts from (what people set first), then the rest in the workflow's order.
