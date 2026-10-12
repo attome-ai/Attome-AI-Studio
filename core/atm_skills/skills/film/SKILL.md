@@ -95,6 +95,22 @@ Decide shot by shot, as a film does. Most shots are separate (a cut); a few carr
   is 9.42 s) and says so in `note`: leave it. Telling the model "finish the lines two seconds early" does nothing.
 - `music: 'none'` and add music in the edit: the model's music changes from clip to clip.
 
+## Action (a fight, a chase)
+
+- **One action in a shot, and one person doing it.** "She dashes in, he parries, she spins away" in one shot: the model
+  draws the first part and drops or muddles the rest, and the scene makes no sense (the owner: "the actions are bad and do
+  not make sense"). Written as three shots - she sprints at the camera / his blade snaps up, sparks / she skids back - each
+  shows its action.
+- **The hit is made by the cut, not inside a shot.** The one who strikes, then what is struck, then the reaction: the
+  hammer lifted / the stone floor cracking (no people in the picture) / him in the air above the dust. A shot of only the
+  thing (the arrow flying, the wave of light crossing the courtyard) is said to have "no people in the picture".
+- Shots of 3-4 seconds (3 s is the model's 73 frames). 21 such shots made a fight of 74 s in 13 minutes.
+- Give each shot its own sound (a clash of steel, a stone impact, an arrow's whistle), not one ambience for the scene.
+- A model step takes at most **3 voice samples and 9 reference pictures**: `gen.dialogue_prompt` gives a voice only to who
+  has a line in the shot. Four people can be in one shot; at most three of them can speak in it with their own voices.
+- Keep the cut check on, with its line at **0.7** for action (fast action measures 0.1-0.45; a cut to a reference picture
+  0.9-1.0). A shot of someone being hit tends to open on them posing and then cut to the hit: it failed three takes in a row.
+
 ## The checks every take must pass
 
 Do these after every `gen.run`; do not show a film whose shots were not checked.
