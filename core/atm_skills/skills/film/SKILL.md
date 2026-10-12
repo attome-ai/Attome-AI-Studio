@@ -95,6 +95,7 @@ Do these after every `gen.run`; do not show a film whose shots were not checked.
 |---|---|---|
 | No cut inside the shot | the largest scene-change score between two frames of the take (ffmpeg `select='gte(scene,0)',metadata=print`) | above 0.15. Clean shots measure under 0.07; a cut to a reference picture measures 0.3-0.6 |
 | The line is over before the cut | the level of the sound in the last 0.15 s of the clip | above -34 dB: a voice is still sounding (speech is about -20 dB, a quiet room about -45). Do not use the word times of `asr.transcribe` for this: the last word is always stretched to the end of the file |
+| A shot that should hold its place does | 1 - the correlation of a small grey copy (48 x 27) of the first frame with each later frame; the largest value | above 0.85, for a shot whose camera is told not to move (a close-up started inside a master). Shots that held measure 0.06-0.71; the one that left for another room measured 1.05. **One bad example only: a thin margin.** Not for shots where the camera moves (a push-in measures 0.8, a tracking shot 1.2) |
 | The words are the script | `asr.transcribe` on the clip, compared word by word with the lines | less than 90 % alike, or more words than the script (the model adds "I..." or repeats a name) |
 
 Not caught by these, look at a frame of each take: a shot that starts on the empty room and drifts to the people; a face
