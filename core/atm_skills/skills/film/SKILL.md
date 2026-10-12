@@ -79,10 +79,14 @@ Decide shot by shot, as a film does. Most shots are separate (a cut); a few carr
 - Say **where the camera is and how wide the frame is**: "a medium close-up at eye level, filmed from across the desk on
   a long lens, head and shoulders, the whole head in frame". "A close-up on his face" gives a selfie angle or a frame
   that crops the forehead.
-- **Say where each person looks.** A person alone in a close-up looks into the camera unless told otherwise. Take the
-  eyeline from the master: if she sits on the right of the frame and lower, his close-up says "he lifts his eyes to a
-  woman who sits out of frame to the right, lower than him, and speaks to her; his eyes stay on her; he never looks into
-  the camera". Her close-up looks the other way (up, to the left).
+- **A person who talks to someone keeps that someone at the edge of the frame** (a film calls it a dirty single). Take a
+  wider part of the master, so the head or shoulder of the other person is still at the edge (`start_crop` about 0.6 of
+  the frame, not 0.45), name both as subjects, and write: "a medium shot of <Subject 1> from the chest up, with the head
+  and shoulder of <Subject 2> at the lower right edge of the frame, out of focus ... <Subject 1> looks down at
+  <Subject 2> and speaks to her; his eyes stay on her; <Subject 2> does not speak". He then looks at her.
+  - Alone in a tight close-up he looks into the camera. Telling him to look "at a woman out of frame to the right" made
+    it better but not right (the owner: "better but not perfect", and the face changed).
+  - The wider part is also enlarged less, so more of the real face is in the start picture and the face holds better.
 - Name the people by `<Subject N>` in the action, and say what each one **does** from the first second, so the shot
   starts on them.
 - Lines: short, one or two sentences a speaker; at most three lines in a 9 s shot. Give each a tone.
