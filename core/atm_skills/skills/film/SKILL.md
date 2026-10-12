@@ -104,6 +104,16 @@ Decide shot by shot, as a film does. Most shots are separate (a cut); a few carr
 - **The hit is made by the cut, not inside a shot.** The one who strikes, then what is struck, then the reaction: the
   hammer lifted / the stone floor cracking (no people in the picture) / him in the air above the dust. A shot of only the
   thing (the arrow flying, the wave of light crossing the courtyard) is said to have "no people in the picture".
+- **One place for a fight: two eye-level masters that face each other** (one looks at the one, one at the others, each
+  seen from the knees up; make both with one seed and at 0.9 megapixels). Every shot starts inside the master that
+  faces its fighter (`start_from`, `start_crop` about half the frame around them, or the whole frame). The fight then has
+  two backgrounds, as a filmed fight has. Without this every shot invents its own courtyard (the owner: "the scene is
+  all over the place").
+  - **Not a high wide of everyone.** A part of a view from above is a person on bare floor: the model leaves it within
+    half a second for an eye-level view with a background of its own (0 of 16 shots held).
+- A big change of state (three people going down) does not happen in a shot that starts on them standing. Make the
+  reaction first (they throw their arms up and stagger), then a clip that **carries on** from it (`continue_from`) in
+  which they fall and stay down.
 - Shots of 3-4 seconds (3 s is the model's 73 frames). 21 such shots made a fight of 74 s in 13 minutes.
 - Give each shot its own sound (a clash of steel, a stone impact, an arrow's whistle), not one ambience for the scene.
 - A model step takes at most **3 voice samples and 9 reference pictures**: `gen.dialogue_prompt` gives a voice only to who
