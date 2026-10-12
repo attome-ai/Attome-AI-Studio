@@ -109,6 +109,9 @@ Decide shot by shot, as a film does. Most shots are separate (a cut); a few carr
   action". The impact frames are wanted, so the cut check is off for these shots: look at them.
 - **A duel is a chain of clips that carry on** (`continue_from`), 4-5 s each, one exchange in each: trade blows / the
   blades lock / the counter that ends it. It stays one fight in one place.
+  - **At most four clips in a chain.** A chain of nine went dark from the fifth clip on and the fighters shrank to small
+    dark figures. Start a new chain (a new duel) after three or four.
+  - A new fighter is not brought into a clip that carries on (he is drawn as a dark silhouette): begin a new chain with him.
 - **The hit is made by the cut, not inside a shot.** The one who strikes, then what is struck, then the reaction: the
   hammer lifted / the stone floor cracking (no people in the picture) / him in the air above the dust. A shot of only the
   thing (the arrow flying, the wave of light crossing the courtyard) is said to have "no people in the picture".
