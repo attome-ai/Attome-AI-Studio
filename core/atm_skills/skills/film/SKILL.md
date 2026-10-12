@@ -116,10 +116,15 @@ that is a little off; daylight in a night scene.
   because other words of the prompt changed. Judge a change on at least three shots, better on two seeds each.
 - Write down what was tried and what happened, also when it failed.
 
+## Known to work (measured)
+
+- A whole scene of a minute by these rules, in a place the people had never been in: a four-part master and two dirty
+  singles, every take passed every check on the first try, about 7 minutes to make at 0.45 megapixels. The same two
+  people were recognisable in a second scene with another place and light.
+
 ## Not known yet
 
 - How to keep a room *identical* (not just alike) between shots without a reference picture.
 - Whether two or three face angles help when a face is seen from the side.
 - Faces at full size (0.9 megapixels) and in wide shots where the face is small.
 - More than two people in a shot.
-- Scenes longer than one clip with the same light and positions (try `continue_from`).
