@@ -79,6 +79,10 @@ Decide shot by shot, as a film does. Most shots are separate (a cut); a few carr
 - Say **where the camera is and how wide the frame is**: "a medium close-up at eye level, filmed from across the desk on
   a long lens, head and shoulders, the whole head in frame". "A close-up on his face" gives a selfie angle or a frame
   that crops the forehead.
+- **Say where each person looks.** A person alone in a close-up looks into the camera unless told otherwise. Take the
+  eyeline from the master: if she sits on the right of the frame and lower, his close-up says "he lifts his eyes to a
+  woman who sits out of frame to the right, lower than him, and speaks to her; his eyes stay on her; he never looks into
+  the camera". Her close-up looks the other way (up, to the left).
 - Name the people by `<Subject N>` in the action, and say what each one **does** from the first second, so the shot
   starts on them.
 - Lines: short, one or two sentences a speaker; at most three lines in a 9 s shot. Give each a tone.
