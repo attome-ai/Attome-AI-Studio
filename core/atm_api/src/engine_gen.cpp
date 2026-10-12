@@ -582,6 +582,18 @@ Result<json> Engine::Impl::gen_create_clip(const json &params) {
         seconds = longest;
       }
     }
+    // The model makes only some lengths (MiniMax H3: 5 + 17k frames). The clip is given the length the model makes for what was asked,
+    // so every frame of the take is shown: a clip shorter than its take cuts off the end of the last spoken line.
+    const double overlap = continuing ? gen::kContinueOverlapSeconds : 0.0;
+    const double made = gen::made_seconds(*decl, seconds + overlap) - overlap;
+    if (made > 0.0 && std::abs(made - seconds) > 1e-6) {
+      char was[16], now[16];
+      std::snprintf(was, sizeof was, "%.2f", seconds);
+      std::snprintf(now, sizeof now, "%.2f", made);
+      if (note.empty())
+        note = std::string("The clip is ") + now + " s, not " + was + " s: the model makes whole steps of length, and a clip shorter than its take would cut the end off.";
+      seconds = made;
+    }
   }
   static std::atomic<uint32_t> counter{uint32_t(std::chrono::steady_clock::now().time_since_epoch().count())};
   const int64_t seed = params.value("seed", int64_t((counter.fetch_add(2654435761u) >> 8) % 1000000));

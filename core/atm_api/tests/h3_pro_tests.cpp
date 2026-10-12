@@ -1,9 +1,11 @@
 // MiniMax H3 "pro" features of the engine: the dialogue prompt, a clip that continues another, settings, a voice.
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
 #include <filesystem>
 
 #include "atm/api/engine.hpp"
+#include "atm/gen/models.hpp"
 #include "atm/api/gen_mock.hpp"
 #include "atm/base/id.hpp"
 
@@ -100,13 +102,12 @@ TEST_CASE("gen.create_clip: a continuation starts where the clip before ends, sk
   const json second = ok(engine, "gen.create_clip",
                          {{"project", project}, {"prompt", "It keeps running"}, {"model", kH3}, {"seconds", 15}, {"continue_from", "previous"},
                           {"settings", {{"stage", "final"}, {"sparse_keep_percent", 10}}}, {"voice", (dir / "voice.wav").string()}});
-  // 15 s asked, the model's longest is 15 s and 22 frames of it repeat the clip before.
-  CHECK(second["seconds"].get<double>() < 14.09);
-  CHECK(second["seconds"].get<double>() > 14.08);
+  // 15 s asked: the model's longest take is 362 frames, and 22 of them repeat the clip before: 340 frames are shown.
+  CHECK(second["seconds"].get<double>() == Catch::Approx(340.0 / 24.0).margin(0.001));
   CHECK(second.contains("note"));
 
   const json clip = ok(engine, "project.get", {{"project", project}, {"id", second["clip"]}})["object"];
-  CHECK(clip["timing"]["record_in"] == "5");       // where the first clip ends
+  CHECK(clip["timing"]["record_in"] == "5167/1000"); // where the first clip ends: 5 s asked is 124 frames made
   CHECK(clip["timing"]["source_in"] == "11/12");   // 22 frames at 24 a second: they repeat the end of the first clip
   const json &workflow = clip["media_ref"]["workflow"];
   std::string gen_node, reference;
@@ -150,6 +151,36 @@ TEST_CASE("gen.create_clip: a continuation starts where the clip before ends, sk
   CHECK(err(engine, "gen.create_clip", {{"project", project}, {"prompt", "x"}, {"model", kH3}, {"settings", {{"stage", "huge"}}}}).rule == "G_SETTING");
   CHECK(err(engine, "gen.create_clip", {{"project", project}, {"prompt", "x"}, {"model", kH3}, {"settings", {{"sparse_keep_percent", 250}}}}).rule ==
         "G_SETTING");
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}
+
+TEST_CASE("gen.create_clip gives a clip the length the model makes, so the end of its take (and of the last line) is not cut off", "[gen][h3]") {
+  const atm::gen::ModelDecl *h3 = atm::gen::find_model(kH3);
+  REQUIRE(h3);
+  using atm::gen::made_seconds;
+  CHECK(made_seconds(*h3, 9.0) == Catch::Approx(226.0 / 24.0)); // 216 frames asked: the next of 5 + 17k is 226
+  CHECK(made_seconds(*h3, 226.0 / 24.0) == Catch::Approx(226.0 / 24.0)); // already one of its lengths
+  CHECK(made_seconds(*h3, 5.0) == Catch::Approx(124.0 / 24.0));
+  CHECK(made_seconds(*h3, 15.0) == Catch::Approx(362.0 / 24.0)); // its longest: the step that holds 15 s
+  CHECK(made_seconds(*h3, 40.0) == Catch::Approx(362.0 / 24.0));
+  CHECK(made_seconds(*h3, 0.1) == Catch::Approx(5.0 / 24.0));
+  atm::gen::ModelDecl any;
+  CHECK(made_seconds(any, 7.3) == 7.3); // a model with no grid makes what is asked
+
+  const fs::path dir = fs::temp_directory_path() / atm::new_id("attome-h3-grid");
+  fs::create_directories(dir);
+  const std::string project = (dir / "Grid.attome").string();
+  atm::api::EngineConfig cfg;
+  cfg.models_dir = (dir / "models").string();
+  Engine engine(cfg);
+  ok(engine, "project.create", {{"path", project}, {"rate", "24"}, {"canvas", "480x832"}});
+  const json made = ok(engine, "gen.create_clip", {{"project", project}, {"prompt", "A fox runs"}, {"model", kH3}, {"seconds", 9}});
+  CHECK(made["seconds"].get<double>() == Catch::Approx(226.0 / 24.0).margin(0.001));
+  CHECK(made["note"].get<std::string>().find("9.42 s, not 9.00 s") != std::string::npos);
+  const json exact = ok(engine, "gen.create_clip", {{"project", project}, {"prompt", "It rests"}, {"model", kH3}, {"seconds", 124.0 / 24.0}});
+  CHECK(exact["seconds"].get<double>() == Catch::Approx(124.0 / 24.0).margin(0.001));
+  CHECK_FALSE(exact.contains("note"));
   std::error_code ec;
   fs::remove_all(dir, ec);
 }

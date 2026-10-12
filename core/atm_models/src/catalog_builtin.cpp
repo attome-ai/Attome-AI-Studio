@@ -35,6 +35,7 @@ constexpr const char *kCatalog = R"json({
         "kinds": ["generate_video", "encode_prompt", "sample", "decode"],
         "accepts": ["start_image", "end_image", "voice", "continue_from"],
         "seconds": {"min": 1, "max": 15},
+        "frames": {"rate": 24, "step": 17, "offset": 5},
         "sizes": {"multiple": 32, "max_pixels": 2088960},
         "settings": {
           "steps": {"type": "integer", "min": 1, "max": 50, "default": 8},
@@ -78,6 +79,7 @@ constexpr const char *kCatalog = R"json({
         "kinds": ["generate_video", "encode_prompt", "sample", "decode"],
         "accepts": ["start_image", "end_image", "voice", "continue_from"],
         "seconds": {"min": 1, "max": 15},
+        "frames": {"rate": 24, "step": 17, "offset": 5},
         "sizes": {"multiple": 32, "max_pixels": 2088960},
         "settings": {
           "steps": {"type": "integer", "min": 1, "max": 50, "default": 8},
@@ -115,6 +117,7 @@ constexpr const char *kCatalog = R"json({
         "kinds": ["generate_video", "encode_prompt", "sample", "decode"],
         "accepts": ["start_image", "end_image", "references", "voice", "continue_from"],
         "seconds": {"min": 1, "max": 15},
+        "frames": {"rate": 24, "step": 17, "offset": 5},
         "sizes": {"multiple": 32, "max_pixels": 2088960},
         "settings": {
           "steps": {"type": "integer", "min": 1, "max": 50, "default": 8},

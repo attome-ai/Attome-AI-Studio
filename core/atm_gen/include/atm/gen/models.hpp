@@ -39,6 +39,9 @@ struct ModelDecl {
   std::vector<std::string> kinds;   // short kind ids
   std::vector<std::string> accepts; // optional inputs it takes: "start_image", "end_image", "references"
   double seconds_min = 0.0, seconds_max = 0.0; // 0 = no limit
+  // The lengths the model can make, in frames: frames_offset + k * frames_step at frames_rate a second (MiniMax H3: 5 + 17k at 24).
+  // frames_step 0 = any length.
+  int frames_rate = 0, frames_step = 0, frames_offset = 0;
   int size_multiple = 1;                       // width and height are multiples of this
   int64_t max_pixels = 0;                      // width x height; 0 = no limit
   bool needs_files = true;                     // false for a model that is part of the engine (the mock)
@@ -61,6 +64,11 @@ void register_model(ModelDecl declaration);
 const ModelDecl *find_model(std::string_view id); // stays valid until the id is registered again
 void clear_models();                              // for tests
 std::vector<std::string> model_ids();             // every registered model, sorted
+
+// The length a model makes for a length asked for: the shortest of its lengths that is not shorter (the longest when the model has
+// none that long). A clip of exactly this length shows every frame of its take; a shorter clip cuts the end of the take off, and with
+// it the end of a spoken line (the model paces speech to the end of what it makes). The same length for a model with no grid.
+double made_seconds(const ModelDecl &model, double seconds);
 
 // What is wrong with a setting's value, or empty: "must be a whole number", "is 80; the model takes 1 to 50".
 std::string setting_problem(const SettingDecl &setting, const json &value);

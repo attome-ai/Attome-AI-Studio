@@ -107,6 +107,13 @@ Result<ModelDecl> parse_model(const json &d) {
     if (m.seconds_max != 0.0 && m.seconds_min > m.seconds_max)
       return bad(m.id, "seconds", "has a shortest length above its longest.", "Swap \"min\" and \"max\".");
   }
+  if (const auto f = d.find("frames"); f != d.end() && f->is_object()) {
+    m.frames_rate = f->value("rate", 0);
+    m.frames_step = f->value("step", 0);
+    m.frames_offset = f->value("offset", 0);
+    if (m.frames_step < 0 || m.frames_offset < 0 || (m.frames_step > 0 && m.frames_rate <= 0))
+      return bad(m.id, "frames", "has a frame grid that cannot be used.", "Write {\"rate\": 24, \"step\": 17, \"offset\": 5}.");
+  }
   if (const auto s = d.find("sizes"); s != d.end() && s->is_object()) {
     m.size_multiple = std::max(1, s->value("multiple", 1));
     m.max_pixels = s->value("max_pixels", int64_t(0));
@@ -194,6 +201,19 @@ void clear_models() {
   Registry &r = registry();
   std::lock_guard lock(r.mutex);
   r.models.clear();
+}
+
+double made_seconds(const ModelDecl &model, double seconds) {
+  if (model.frames_step <= 0 || model.frames_rate <= 0)
+    return seconds;
+  const double rate = double(model.frames_rate);
+  const int asked = std::max(1, int(std::lround(seconds * rate)));
+  int k = asked <= model.frames_offset ? 0 : (asked - model.frames_offset + model.frames_step - 1) / model.frames_step;
+  if (model.seconds_max > 0.0)
+    // the step that holds the longest length counts as that length (15 s is 360 frames; the model makes 362)
+    while (k > 0 && model.frames_offset + k * model.frames_step > int(std::lround(model.seconds_max * rate)) + model.frames_step - 1)
+      --k;
+  return double(model.frames_offset + k * model.frames_step) / rate;
 }
 
 std::string setting_problem(const SettingDecl &s, const json &v) {
