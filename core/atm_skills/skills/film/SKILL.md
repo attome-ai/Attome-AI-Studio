@@ -97,10 +97,18 @@ Decide shot by shot, as a film does. Most shots are separate (a cut); a few carr
 
 ## Action (a fight, a chase)
 
-- **One action in a shot, and one person doing it.** "She dashes in, he parries, she spins away" in one shot: the model
-  draws the first part and drops or muddles the rest, and the scene makes no sense (the owner: "the actions are bad and do
-  not make sense"). Written as three shots - she sprints at the camera / his blade snaps up, sparks / she skids back - each
-  shows its action.
+- **A fight is two fighters, whole in one frame, seen from the side, in one exchange.** "They trade fast blows, a burst of
+  sparks at every clash, while they circle each other"; "their blades lock, they push face to face"; "she slashes at his
+  head, he ducks under the blade and drives his shoulder into her". The model draws these well.
+  - **Not one person in a shot.** Fighters shown one at a time never touch: they pose, and it is not a fight (the owner:
+    "the scenes themselves are bad, the way they fight").
+  - **Not several different actions, and not three attackers at once**, in a shot: the second half is dropped and the
+    fighters scatter.
+- **Write the look as fight animation:** "hand-drawn 2D anime fight animation of the highest quality (sakuga): fast fluid
+  motion, smear frames, impact frames that flash white and black, speed lines, sparks, a dynamic camera that follows the
+  action". The impact frames are wanted, so the cut check is off for these shots: look at them.
+- **A duel is a chain of clips that carry on** (`continue_from`), 4-5 s each, one exchange in each: trade blows / the
+  blades lock / the counter that ends it. It stays one fight in one place.
 - **The hit is made by the cut, not inside a shot.** The one who strikes, then what is struck, then the reaction: the
   hammer lifted / the stone floor cracking (no people in the picture) / him in the air above the dust. A shot of only the
   thing (the arrow flying, the wave of light crossing the courtyard) is said to have "no people in the picture".
