@@ -26,6 +26,7 @@ constexpr CollectionInfo kCollections[] = {
     {"groups", "grp", false}, {"notes", "nte", false}, // frames and text notes on a workflow's canvas
     {"skills", "skl", false}, // how-to guides for agents kept by the project (atm_skills holds the built-in ones)
     {"transcripts", "trs", false}, // what a media file says, word by word, in the file's own time (asr.transcribe keeps one for each file)
+    {"cast", "chr", false}, // the people, places and things that must look and sound the same in every clip (atm_gen cast.hpp)
 };
 
 const CollectionInfo *collection_info(std::string_view name) {
@@ -259,6 +260,7 @@ json new_project(std::string_view name, FrameRate rate, int width, int height) {
             {"audio", {{"sample_rate", 48000}, {"master_layout", "stereo"}}},
             {"tempo_map", nullptr}}},
           {"variables", json::object()},
+          {"cast", json::object()},
           {"bindings", json::object()},
           {"sequences", {{seq, std::move(sequence)}}},
           {"sequence_order", json::array({seq})},

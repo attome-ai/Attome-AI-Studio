@@ -13,6 +13,7 @@
 #include "atm/base/time.hpp"
 #include "atm/eval/effects.hpp"
 #include "atm/eval/keyframes.hpp"
+#include "atm/gen/cast.hpp"
 #include "atm/gen/graph.hpp"
 
 namespace atm::patch {
@@ -645,9 +646,13 @@ void check_generative(const doc::Document &doc, const std::set<std::string> *tra
   const json &workflows = wit != root.end() && wit->is_object() ? *wit : none;
   const auto vit = root.find("variables");
   const json &variables = vit != root.end() && vit->is_object() ? *vit : none;
+  const auto cit = root.find("cast");
+  const json &cast = cit != root.end() && cit->is_object() ? *cit : none;
   std::vector<gen::Problem> found;
-  if (variables_too) // the project's Variables, read by Variable nodes
+  if (variables_too) { // the project's Variables, read by Variable nodes, and its cast, read by Character nodes
     gen::check_variables(variables, found);
+    gen::check_cast(cast, found);
+  }
   if (workflows_too) // the project's library of Clip Workflows (a clip's own Instance is checked with the clip)
     for (auto it = workflows.begin(); it != workflows.end(); ++it)
       gen::check_workflow(workflows, it.key(), found);
@@ -660,7 +665,7 @@ void check_generative(const doc::Document &doc, const std::set<std::string> *tra
     if (clips == track.end() || !clips->is_object())
       return;
     for (auto c = clips->begin(); c != clips->end(); ++c)
-      gen::check_clip(workflows, variables, c.key(), *c, lookup, found);
+      gen::check_clip(workflows, variables, cast, c.key(), *c, lookup, found);
   };
   if (tracks) {
     for (const std::string &id : *tracks)
@@ -763,7 +768,7 @@ public:
       const string_view prefix = id_prefix(id);
       if (prefix == "cwf") {
         library = true;
-      } else if (prefix == "var") { // a Variable added, changed or removed: any clip with a Variable node may be affected
+      } else if (prefix == "var" || prefix == "chr") { // a Variable or a cast entry added, changed or removed: any clip with a node that reads one may be affected
         variables = everywhere = true;
       } else if (prefix == "nod" || prefix == "lnk") {
         const NodeRef *ref = gone ? nullptr : doc_.find(id);

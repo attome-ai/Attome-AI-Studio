@@ -23,6 +23,8 @@
 //     attome.clip            duration, start (seconds): the clip the Instance is on
 //     attome.clip_reference  settings {"clip": "previous" | "next" | "clp_…"}: outputs video, audio, the other clip's
 //                            outputs of those names; the clip becomes one this clip depends on
+//     attome.character       {"character": "chr_…"}: an entry of the project's cast (cast.hpp): its description, pictures,
+//                            voice and attributes
 //   The Clip Inputs node (the Exposed Inputs) and the Output node (the Outputs) are not stored as nodes: they are the two
 //   faces of "exposed" on the canvas.
 //   attome.get_frame       a node that runs here, with no model: video (and optionally "at", seconds) -> image;
@@ -171,6 +173,9 @@ using ClipLookup = std::function<const json *(std::string_view clip_id)>;
 // G_REFERENCE (a Clip Reference node names no clip, or one that is not generative), G_CLIP_CYCLE (the clip takes from
 // itself through Clip Reference nodes), G_TAKE (the selected Take is not one of its Takes).
 void check_clip(const json &library, const json &variables, const std::string &clip_id, const json &clip, const ClipLookup &lookup,
+                std::vector<Problem> &out);
+// The same, with the project's cast (cast.hpp) for the Character nodes: G_CAST when one names an entry the cast does not have.
+void check_clip(const json &library, const json &variables, const json &cast, const std::string &clip_id, const json &clip, const ClipLookup &lookup,
                 std::vector<Problem> &out);
 
 } // namespace atm::gen

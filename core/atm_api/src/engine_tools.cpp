@@ -451,6 +451,8 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
        "continue_from":{"type":"string","description":"\"previous\" or a generative clip's ID (MiniMax H3): carry on from that clip seamlessly. The last 22 frames and the sound under them lead into this clip; it starts where that one ends and skips its first 22 frames, so playback is one take. At most 14.08 s."},
        "settings":{"type":"object","description":"Settings of the model, by name (gen.nodes lists them): for MiniMax H3 stage (preview | final: the latent upscaler and a refine pass), final_megapixels, sparse_keep_percent (0 = off), low_memory (on | off), steps, sampler, attention."},
        "voice":{"type":"string","description":"The path of a sound file (MiniMax H3): the speaker takes its timbre; cite it in the prompt as <Audio 1> (gen.dialogue_prompt writes that)."},
+       "characters":{"type":"array","items":{"type":"string"},"description":"Names or IDs of entries of the project's cast (character.list) the shot shows: each becomes a Character node in the clip's workflow, its pictures feed the model's references and one of them gives the voice. Changing an entry later marks the clip to be made again. gen.dialogue_prompt returns this list for the subjects that name a character."},
+       "voice_of":{"type":"string","description":"With characters: the one whose voice sample the speaker takes (default: the first that has one)."},
        "references":{"type":"array","items":{"type":"string"},"description":"Paths of picture files the model must reproduce as they are (for a model that lists references in its inputs: MiniMax H3 Singularity), cited in the prompt as <Image 1>, <Image 2> in this order (gen.dialogue_prompt writes that for subjects with image: true). Use it for a product, a face or a place that has to look like the picture."},
        "track":{"type":"string"},"sequence":{"type":"string"},
        "with_audio":{"type":"boolean","description":"Default false: a video model's own guessed ambience (not every model has one) is left out of the mix, the same as with_audio on add_clip. true keeps it. The default is true for a scene with spoken lines of its own (a <d>...</d> tag in the prompt, or a voice): the model's sound is then the dialogue."}},"required":["project","prompt"]})",
@@ -460,14 +462,51 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
      "(<Subject N>, each with an optional voice), shots with their camera, action and lines {subject, text, tone, language}, the look, "
      "the setting, the soundscape and the music. Returns {prompt}, to give to gen.create_clip. Nothing is generated.",
      R"({"type":"object","properties":{
+       "project":{"type":"string","description":"Needed only when a subject names a character of the project's cast"},
        "style":{"type":"string","description":"The look of the whole scene, e.g. \"2d anime style, clean linework, soft cel shading\""},
        "setting":{"type":"string","description":"The place and the light"},
-       "subjects":{"type":"array","items":{"oneOf":[{"type":"string"},{"type":"object","properties":{"description":{"type":"string"},"voice":{"type":"boolean","description":"true: this subject takes the timbre of the clip's voice sound, cited as <Audio N>"},"image":{"type":"boolean","description":"true: a picture of this subject is given as a reference image (gen.create_clip references, in the order of the subjects that say true), cited as <Image N>"}},"required":["description"]}]}},
+       "subjects":{"type":"array","items":{"oneOf":[{"type":"string"},{"type":"object","properties":{"description":{"type":"string"},"character":{"type":"string","description":"An entry of the project's cast, by name or ID (needs project): its description, its pictures (cited as <Image N>) and its voice are used; the answer then lists characters and voice_of for gen.create_clip"},"voice":{"type":"boolean","description":"true: this subject takes the timbre of the clip's voice sound, cited as <Audio N>"},"image":{"type":"boolean","description":"true: a picture of this subject is given as a reference image (gen.create_clip references, in the order of the subjects that say true), cited as <Image N>"}},"required":["description"]}]}},
        "shots":{"type":"array","items":{"type":"object","properties":{"camera":{"type":"string"},"action":{"type":"string"},
          "lines":{"type":"array","items":{"type":"object","properties":{"subject":{"type":"integer","description":"1 = <Subject 1>"},"text":{"type":"string"},"tone":{"type":"string"},"language":{"type":"string"}},"required":["subject","text"]}}}}},
        "continuous":{"type":"boolean","description":"Default true: one shot from beginning to end, no cuts"},
        "soundscape":{"type":"string"},"music":{"type":"string"}},"required":["shots"]})",
      &Impl::gen_dialogue_prompt},
+    {"character.list", "cast", false,
+     "The project's cast: the people, places and things that must look and sound the same in every clip that shows them. Each entry has a kind "
+     "(character, location or prop), a name, a description (how it looks: words for the picture prompt), a personality (how it speaks and behaves: for "
+     "whoever writes its lines), reference pictures, a voice sample and free attributes. START HERE before writing scenes for a film: use the cast "
+     "that is there, and add who is missing with character.create.",
+     R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},
+       "kind":{"type":"string","enum":["character","location","prop"]}},"required":["project"]})",
+     &Impl::character_list},
+    {"character.get", "cast", false, "One entry of the cast, by its name or its ID.",
+     R"({"type":"object","properties":{"project":{"type":"string"},"character":{"type":"string","description":"Its name or its chr_ ID"}},"required":["project","character"]})",
+     &Impl::character_get},
+    {"character.create", "cast", true,
+     "Add an entry to the cast. Its pictures and its voice sample are copied into the project's cast folder. Use it in a shot with gen.create_clip "
+     "characters: [name], and in a prompt with gen.dialogue_prompt subjects: [{character: name}]; on the canvas it is a Character node. A reference "
+     "picture can be a frame of a take you like (take the frame with ffmpeg or video.analyze, then pass the file).",
+     R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},
+       "name":{"type":"string"},"kind":{"type":"string","enum":["character","location","prop"],"description":"Default character"},
+       "description":{"type":"string","description":"How it looks, as words for the picture prompt"},
+       "personality":{"type":"string","description":"How it speaks and behaves; not used for the picture"},
+       "references":{"type":"array","items":{"oneOf":[{"type":"string"},{"type":"object","properties":{"path":{"type":"string"},"label":{"type":"string"}},"required":["path"]}]},"description":"Picture files the model must reproduce, each with an optional label such as face, full body or outfit"},
+       "voice":{"type":"string","description":"A sound file: a few seconds of this voice alone"},
+       "attributes":{"type":"object","description":"Anything else worth keeping, by name: text, number or yes/no, such as alive: false or age: 34"}},
+       "required":["project","name"]})",
+     &Impl::character_create},
+    {"character.update", "cast", true,
+     "Change an entry of the cast. attributes are merged (null takes one away); references replaces the pictures, add_references adds to them, "
+     "remove_references takes out by path, label or number (from 1); voice: null takes the voice away. Every clip whose workflow reads the entry "
+     "is then out of date and gen.run makes it again.",
+     R"({"type":"object","properties":{"project":{"type":"string"},"character":{"type":"string","description":"Its name or its chr_ ID"},
+       "name":{"type":"string"},"kind":{"type":"string","enum":["character","location","prop"]},"description":{"type":"string"},"personality":{"type":"string"},
+       "references":{"type":"array"},"add_references":{"type":"array"},"remove_references":{"type":"array"},
+       "voice":{"type":["string","null"]},"attributes":{"type":"object"}},"required":["project","character"]})",
+     &Impl::character_update},
+    {"character.delete", "cast", true, "Take an entry out of the cast. Refused while a clip's workflow reads it (a Character node).",
+     R"({"type":"object","properties":{"project":{"type":"string"},"character":{"type":"string","description":"Its name or its chr_ ID"}},"required":["project","character"]})",
+     &Impl::character_delete},
     {"gen.save_to_library", "gen", true,
      "Publish a generative clip's own workflow to the project's library as a new Clip Workflow (a card in the Generate panel). "
      "The clip keeps its own; its input values are not part of the copy. name: the library's name for it (default: the workflow's).",

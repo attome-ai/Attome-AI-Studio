@@ -1,5 +1,7 @@
 #include "atm/gen/keys.hpp"
 
+#include "atm/gen/cast.hpp"
+
 #include <algorithm>
 #include <cctype>
 #include <set>
@@ -114,6 +116,9 @@ public:
       const json &variable = object_at(context_.variables, string_at(node, "variable").c_str());
       if (const auto value = variable.find("value"); value != variable.end())
         out.value = *value;
+    } else if (kind == "character") {
+      out.value = cast_port_value(object_at(context_.cast, string_at(node, "character").c_str()), port,
+                                  object_at(node, "settings").value("attribute", std::string()));
     } else if (kind == "clip_reference") {
       if (!context_.reference)
         return out;
@@ -194,7 +199,10 @@ private:
       for (const End &from : links->second) {
         const Made m = made(from.first, from.second);
         if (m.inlined) { // an Input node: its value, if it has one
-          if (!m.value.is_null())
+          if (m.value.is_array() && port.list) { // several values for a list (the pictures of a cast entry): each is one of the list
+            for (const json &one : m.value)
+              sources.push_back(one);
+          } else if (!m.value.is_null())
             sources.push_back(m.value.is_number() && port.type == PortType::number ? json(m.value.get<double>())
                               : m.value.is_string() && port.type == PortType::text ? json(expand_variables(m.value.get_ref<const std::string &>(), context_.variables))
                                                                                     : m.value);

@@ -1,6 +1,7 @@
 // Generation Tools: gen.* (plan, run, status, takes, presets, workflows), engines and readiness checks.
 #include "engine_impl.hpp"
 
+#include "atm/gen/cast.hpp"
 #include "atm/gen/dialogue.hpp"
 
 namespace atm::api {
@@ -28,6 +29,7 @@ const json &Engine::Impl::instance_of(const Project &pr, const std::string &clip
 gen::KeyContext Engine::Impl::key_context(const Project &pr) const {
   gen::KeyContext context;
   context.variables = pr.doc.root().value("variables", json::object()); // what Variable nodes read
+  context.cast = cast_for_keys(pr);                                     // what Character nodes read
   context.model_identity = [this](std::string_view model) {
     std::string identity;
     for (const auto &p : providers)
@@ -162,7 +164,8 @@ json Engine::Impl::ready_problems(const Project &pr, const std::string &clip_id)
     return other ? other->node : nullptr;
   };
   std::vector<gen::Problem> found;
-  gen::check_clip(library_of(pr), pr.doc.root().value("variables", json::object()), clip_id, *ref->node, lookup, found);
+  gen::check_clip(library_of(pr), pr.doc.root().value("variables", json::object()), pr.doc.root().value("cast", json::object()), clip_id, *ref->node, lookup,
+                  found);
   for (gen::Problem &p : found)
     if (gen::is_readiness_rule(p.rule))
       problems.push_back({{"rule", p.rule}, {"path", p.path}, {"target", p.target}, {"message", p.message}, {"hint", p.hint}});
@@ -748,6 +751,40 @@ Result<json> Engine::Impl::gen_create_clip(const json &params) {
         return fail(ErrorCode::InvalidArgument, "G_SETTING", "Every reference must be the path of a picture file.", {}, "Pass paths of PNG or JPEG files.");
     inputs["references"] = refs;
   }
+  // Entries of the cast the shot shows: each becomes a Character node whose pictures feed the model's references. One of them
+  // gives the voice (voice_of, else the first that has a sample), unless the clip was given a voice file of its own.
+  if (params.contains("characters")) {
+    if (!params["characters"].is_array() || params["characters"].empty())
+      return bad_param("characters", "must be a list of names or IDs of the project's cast (character.list)");
+    if (!face.contains("references"))
+      return fail(ErrorCode::InvalidArgument, "G_SETTING", "This model does not take reference pictures, so it cannot use the cast.", {},
+                  "Pick a model that lists references in its inputs (MiniMax H3 Singularity).");
+    if (params.contains("references"))
+      return fail(ErrorCode::InvalidArgument, "G_SETTING", "Give characters or references, not both: the pictures come from one place.", {},
+                  "Make the extra picture a cast entry of its own (a prop) and name it in characters.");
+    const json cast = pr->doc.root().value("cast", json::object());
+    std::string voice_of;
+    if (params.contains("voice_of") && params["voice_of"].is_string() && !params["voice_of"].get<std::string>().empty()) {
+      voice_of = gen::cast_id(cast, params["voice_of"].get<std::string>());
+      if (voice_of.empty())
+        return fail(ErrorCode::UnknownId, "G_CAST", "\"" + params["voice_of"].get<std::string>() + "\" is not in the project's cast.", {}, "See who is with character.list.");
+    }
+    bool voiced = params.contains("voice");
+    std::set<std::string> seen;
+    for (const json &c : params["characters"]) {
+      const std::string who = c.is_string() ? c.get<std::string>() : std::string();
+      const std::string id = gen::cast_id(cast, who);
+      if (id.empty())
+        return fail(ErrorCode::UnknownId, "G_CAST", "\"" + who + "\" is not in the project's cast.", {}, "See who is with character.list, or add it with character.create.");
+      if (!seen.insert(id).second)
+        continue;
+      const bool give_voice = !voiced && face.contains("voice") && !gen::cast_voice(cast[id]).empty() && (voice_of.empty() || voice_of == id);
+      if (!gen::use_character(instance, id, give_voice))
+        return fail(ErrorCode::InvalidArgument, "G_SETTING", "This workflow has no generate video node that takes references.", {},
+                    "Use a model's own Shot workflow, or a workflow with a generate video node.");
+      voiced = voiced || give_voice;
+    }
+  }
   std::string name = params.value("name", std::string());
   if (name.empty()) { // "Shot N": the next number no generative clip of the project has. A prompt makes a poor name: it
     int next = 1;     // often starts with the style, and any cut of it reads as broken.
@@ -827,12 +864,63 @@ Result<json> Engine::Impl::gen_create_clip(const json &params) {
 
   // The structured prompt MiniMax H3 reads for scenes with speaking people, written from a plain description (gen/dialogue.hpp).
 Result<json> Engine::Impl::gen_dialogue_prompt(const json &params) {
+  // A subject can be an entry of the project's cast ({"character": "Mio"}): its description is the entry's, its pictures are
+  // cited by the numbers the clip's node will get them in, and the first one with a voice sample speaks with it.
+  json spec = params;
+  json used = json::array();
+  std::string voice_of;
+  const auto casts = [](const json &s) { return s.is_object() && s.contains("character") && s["character"].is_string(); };
+  if (spec.contains("subjects") && spec["subjects"].is_array() && std::any_of(spec["subjects"].begin(), spec["subjects"].end(), casts)) {
+    if (!params.contains("project"))
+      return bad_param("project", "is required when a subject names a character of the cast");
+    ATM_TRY(Project *pr, project(params));
+    const json cast = cast_for_keys(*pr);
+    std::vector<std::string> pictures;
+    for (const json &s : spec["subjects"])
+      if (casts(s)) {
+        const std::string id = gen::cast_id(cast, s["character"].get<std::string>());
+        if (id.empty())
+          return fail(ErrorCode::UnknownId, "G_CAST", "\"" + s["character"].get<std::string>() + "\" is not in the project's cast.", {},
+                      "See who is with character.list, or add it with character.create.");
+        for (const std::string &p : gen::cast_references(cast[id]))
+          pictures.push_back(p);
+      }
+    const std::vector<std::string> order = gen::reference_order(pictures);
+    for (json &s : spec["subjects"]) {
+      if (!casts(s))
+        continue;
+      const std::string id = gen::cast_id(cast, s["character"].get<std::string>());
+      const json &entry = cast[id];
+      if (!s.contains("description") || !s["description"].is_string() || s["description"].get<std::string>().empty()) {
+        const std::string look = entry.value("description", std::string());
+        s["description"] = look.empty() ? entry.value("name", id) : entry.value("name", id) + ", " + look;
+      }
+      json numbers = json::array();
+      for (const std::string &p : gen::cast_references(entry))
+        numbers.push_back(int(std::find(order.begin(), order.end(), p) - order.begin()) + 1);
+      s.erase("image");
+      if (!numbers.empty())
+        s["images"] = std::move(numbers);
+      const bool speaks = voice_of.empty() && !gen::cast_voice(entry).empty() && s.value("voice", true);
+      s["voice"] = speaks;
+      if (speaks)
+        voice_of = id;
+      if (std::find(used.begin(), used.end(), json(id)) == used.end())
+        used.push_back(id);
+    }
+  }
   std::string problem;
-  std::string prompt = gen::dialogue_prompt(params, problem);
+  std::string prompt = gen::dialogue_prompt(spec, problem);
   if (prompt.empty())
     return fail(ErrorCode::InvalidArgument, "G_DIALOGUE", problem, {},
                 "Give subjects (a description each) and shots (camera, action, and lines {subject, text, tone, language}).");
-  return json{{"prompt", std::move(prompt)}};
+  json out = {{"prompt", std::move(prompt)}};
+  if (!used.empty()) { // what gen.create_clip needs to give the model the same pictures and voice
+    out["characters"] = std::move(used);
+    if (!voice_of.empty())
+      out["voice_of"] = voice_of;
+  }
+  return out;
 }
 
   // Publishes a clip's own workflow to the project's library: a new Clip Workflow, a copy with IDs of its own, that the Generate

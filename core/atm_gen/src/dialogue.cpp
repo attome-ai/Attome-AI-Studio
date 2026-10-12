@@ -1,5 +1,8 @@
 #include "atm/gen/dialogue.hpp"
 
+#include <algorithm>
+#include <vector>
+
 namespace atm::gen {
 namespace {
 
@@ -49,6 +52,7 @@ std::string dialogue_prompt(const json &spec, std::string &problem) {
   std::string out = "subject_definitions:\n";
   int audios = 0, images = 0;
   std::vector<int> audio_of(count, 0), image_of(count, 0);
+  std::vector<std::vector<int>> numbered(count); // a subject's pictures when it names them by number
   for (size_t i = 0; i < count; ++i) {
     const json &s = subjects[i];
     const std::string who = s.is_string() ? s.get<std::string>() : text_of(s, "description");
@@ -65,7 +69,18 @@ std::string dialogue_prompt(const json &spec, std::string &problem) {
       audio_of[i] = ++audios;
       line += " and uses <Audio " + std::to_string(audio_of[i]) + "> as their speaking voice timbre reference";
     }
-    if (s.is_object() && s.value("image", false)) { // a picture of it is given as a reference image (the Nth, in subject order)
+    if (s.is_object() && s.contains("images") && s["images"].is_array() && !s["images"].empty()) {
+      // its pictures by their numbers among the clip's reference images (a cast entry can have several)
+      std::string cited;
+      for (const json &n : s["images"])
+        if (n.is_number_integer() && n.get<int>() > 0) {
+          cited += (cited.empty() ? "" : " and ") + ("<Image " + std::to_string(n.get<int>()) + ">");
+          numbered[i].push_back(n.get<int>());
+          images = std::max(images, n.get<int>());
+        }
+      if (!cited.empty())
+        line += " and appears exactly as in " + cited;
+    } else if (s.is_object() && s.value("image", false)) { // a picture of it is given as a reference image (the Nth, in subject order)
       image_of[i] = ++images;
       line += " and appears exactly as in <Image " + std::to_string(image_of[i]) + ">";
     }
@@ -88,6 +103,9 @@ std::string dialogue_prompt(const json &spec, std::string &problem) {
     for (size_t i = 0; i < count; ++i) {
       if (image_of[i] > 0)
         out += "<Image " + std::to_string(image_of[i]) + ">: reference - the exact shape, colours, markings and proportions of <Subject " +
+               std::to_string(i + 1) + ">, kept without change wherever it appears.\n";
+      for (const int n : numbered[i])
+        out += "<Image " + std::to_string(n) + ">: reference - the exact shape, colours, markings and proportions of <Subject " +
                std::to_string(i + 1) + ">, kept without change wherever it appears.\n";
       if (voiced[i])
         out += "<Audio " + std::to_string(audio_of[i]) + ">: reference - its vocal timbre guides the vocal delivery of <Subject " +

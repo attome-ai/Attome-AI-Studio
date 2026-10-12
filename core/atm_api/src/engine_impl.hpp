@@ -421,6 +421,13 @@ struct Engine::Impl {
   Result<json> gen_models(const json &);
   Result<json> gen_create_clip(const json &params);
   Result<json> gen_dialogue_prompt(const json &params);
+  json cast_for_keys(const Project &pr) const;
+  Result<std::string> cast_keep_file(Project &pr, const std::string &given);
+  Result<json> character_list(const json &params);
+  Result<json> character_get(const json &params);
+  Result<json> character_create(const json &params);
+  Result<json> character_update(const json &params);
+  Result<json> character_delete(const json &params);
   Result<json> gen_save_to_library(const json &params);
   Result<json> gen_reset_clip(const json &params);
   Result<json> gen_save_preset(const json &params);

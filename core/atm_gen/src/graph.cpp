@@ -43,6 +43,9 @@ constexpr PortDef kProjectOutputs[] = {{"width", T::integer}, {"height", T::inte
 constexpr PortDef kVariableOutputs[] = {{"value", T::text}};
 constexpr PortDef kClipOutputs[] = {{"duration", T::number}, {"start", T::number}};
 constexpr PortDef kReferenceOutputs[] = {{"video", T::video}, {"audio", T::audio}};
+// What a Character node gives of its cast entry (cast.hpp). "references" is a list of pictures; one value may feed a list.
+constexpr PortDef kCharacterOutputs[] = {{"description", T::text}, {"personality", T::text}, {"references", T::image},
+                                         {"voice", T::audio},      {"attributes", T::text},  {"attribute", T::text}};
 
 constexpr KindDef kKinds[] = {
     {"generate_video", "Generate video", kShotInputs, kShotOutputs, true},
@@ -56,6 +59,7 @@ constexpr KindDef kKinds[] = {
     {"variable", "Variable", {}, kVariableOutputs, false, true},
     {"clip", "Clip", {}, kClipOutputs, false, true},
     {"clip_reference", "Clip reference", {}, kReferenceOutputs, false, true},
+    {"character", "Character", {}, kCharacterOutputs, false, true},
 };
 
 constexpr std::string_view kNamespace = "attome.";
@@ -656,6 +660,8 @@ void check_workflow(const json &library, const json &workflow, const std::string
     else if (kind == "clip_reference" && reference_of(*it).empty())
       add("G_MISSING", it.key() + "/settings/clip", "Clip Reference node " + it.key() + " names no clip.",
           "Set settings.clip to \"previous\", \"next\" or the ID of a clip.");
+    else if (kind == "character" && string_at(*it, "character").empty())
+      add("G_MISSING", it.key() + "/character", "Character node " + it.key() + " names no one.", "Set \"character\" to the ID of an entry of the project's cast.");
   }
 
   // Every required input gets its value from somewhere.
@@ -705,6 +711,11 @@ void check_variables(const json &variables, std::vector<Problem> &out) {
 }
 
 void check_clip(const json &library, const json &variables, const std::string &clip_id, const json &clip, const ClipLookup &lookup,
+                std::vector<Problem> &out) {
+  check_clip(library, variables, json(nullptr), clip_id, clip, lookup, out);
+}
+
+void check_clip(const json &library, const json &variables, const json &cast, const std::string &clip_id, const json &clip, const ClipLookup &lookup,
                 std::vector<Problem> &out) {
   if (!is_workflow_clip(clip))
     return;
@@ -807,6 +818,12 @@ void check_clip(const json &library, const json &variables, const std::string &c
         add_at("G_VARIABLE", it.key() + "/type",
                "Variable node " + it.key() + " is " + string_at(*it, "type") + " and the Variable " + var + " is " + port_type_name(found->type) + ".",
                "Give the node the type of its Variable.");
+    } else if (kind == "character") {
+      // `cast` null: the caller has no project to look in (a workflow checked on its own), so who the node names is not checked.
+      const std::string who = string_at(*it, "character");
+      if (!who.empty() && cast.is_object() && (!cast.contains(who) || !cast[who].is_object()))
+        add_at("G_CAST", it.key() + "/character", "Character node " + it.key() + " reads \"" + who + "\", which is not in the project's cast.",
+               "Add it with character.create, or pick another entry (character.list).");
     } else if (kind == "clip_reference") {
       const std::string named = reference_of(*it);
       if (named.empty() || named == "previous" || named == "next")

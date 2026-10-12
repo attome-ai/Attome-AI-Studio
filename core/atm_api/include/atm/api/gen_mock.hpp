@@ -4,6 +4,7 @@
 // whole path (plan, steps, cache, Takes, the renderer) runs in tests and on any machine. Its model is "attome-mock".
 
 #include <atomic>
+#include <mutex>
 #include <string>
 
 #include "atm/gen/provider.hpp"
@@ -31,6 +32,12 @@ public:
   std::string fail_kind;  // a step of this kind fails with E_INTERNAL
   bool closed = false;    // true: it offers generate_video only, like a cloud service or a ComfyUI graph
   std::string version = "mock-1";
+  // What the last generate_video step was given (its inputs as the provider got them), for tests of what reaches a model.
+  gen::json last_generate() const;
+
+private:
+  mutable std::mutex seen_mutex_;
+  gen::json last_generate_;
 };
 
 } // namespace atm::api

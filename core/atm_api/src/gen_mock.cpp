@@ -145,6 +145,11 @@ bool MockProvider::offers(std::string_view model, std::string_view kind) const {
 
 std::string MockProvider::fingerprint(std::string_view model) const { return model == kMockModel || model == kMockVoice || model == kMockChoir ? version : std::string(); }
 
+gen::json MockProvider::last_generate() const {
+  std::lock_guard<std::mutex> lock(seen_mutex_);
+  return last_generate_;
+}
+
 Result<gen::StepResult> MockProvider::run(const gen::StepRequest &r) {
   ATM_PROFILE_SCOPE("gen.mock.step");
   const auto started = std::chrono::steady_clock::now();
@@ -248,6 +253,10 @@ Result<gen::StepResult> MockProvider::run(const gen::StepRequest &r) {
     ATM_CHECK(decode(r, latent));
   } else { // generate_video: the three in one
     ++generates;
+    {
+      std::lock_guard<std::mutex> lock(seen_mutex_);
+      last_generate_ = r.inputs;
+    }
     ATM_CHECK(sampling());
     if (r.progress)
       r.progress("decoding", 1, 1);

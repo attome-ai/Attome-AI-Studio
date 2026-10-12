@@ -172,16 +172,26 @@ std::vector<GenOutcome> run_generation(const GenRun &run, const GenProgress &pro
       request.cancel = progress.cancel;
       request.inputs = json::object();
       const json inputs = step.what.value("inputs", json::object());
+      // A file the project keeps for its cast is written relative to the project ("cast/mio.png"): the model gets its full path.
+      const auto kept = [&](const json &value) -> json {
+        if (value.is_string() && value.get_ref<const std::string &>().rfind("cast/", 0) == 0) {
+          std::error_code ec;
+          const std::string &text = value.get_ref<const std::string &>();
+          if (const fs::path file = run.project / fs::path(std::u8string(text.begin(), text.end())); fs::is_regular_file(file, ec))
+            return to_utf8(file);
+        }
+        return value;
+      };
       for (auto it = inputs.begin(); it != inputs.end(); ++it) { // results of other steps become their files
         if (is_made(*it)) {
           request.inputs[it.key()] = to_utf8(made_file(run.dir, *it));
         } else if (it->is_array()) {
           json list = json::array();
           for (const json &e : *it)
-            list.push_back(is_made(e) ? json(to_utf8(made_file(run.dir, e))) : e);
+            list.push_back(is_made(e) ? json(to_utf8(made_file(run.dir, e))) : kept(e));
           request.inputs[it.key()] = std::move(list);
         } else {
-          request.inputs[it.key()] = *it;
+          request.inputs[it.key()] = kept(*it);
         }
       }
       // A size is brought onto the model's grid and under its pixel limit, in the shape that was asked for.

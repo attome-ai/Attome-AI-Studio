@@ -6,7 +6,7 @@
 // hashes of its files and the engine's fingerprint), its settings, the value of every input, and for a linked input the
 // key of the node that feeds it and the port. Left out on purpose: IDs, names and positions.
 //
-// An Input node (Project, Variable, Clip, Clip Reference) has no key of its own: what it gives goes into the key of the
+// An Input node (Project, Variable, Clip, Clip Reference, Character) has no key of its own: what it gives goes into the key of the
 // node it feeds, as a plain value, or, for a Clip Reference, as what the other clip's output is made by. So a changed
 // Variable, canvas size, Duration or referenced clip moves exactly the keys of the nodes that read it, and the clips
 // that hold them. Renaming a node, moving it
@@ -43,6 +43,7 @@ struct KeyContext {
   // that is not installed; the key then holds the model's name only.
   std::function<std::string(std::string_view model)> model_identity;
   json variables;  // the project's Variables, {"var_…": {"name", "type", "value"}} (Variable node)
+  json cast;       // the project's cast, {"chr_…": {…}} (Character node), its file paths as the steps should get them
   ClipFacts clip;  // the clip the workflow is on (Project node, Clip node)
   // What an output of another clip is made by, for a Clip Reference node: `reference` is "previous", "next" or a clip ID,
   // `port` "video" or "audio". An inlined null Made when there is no such clip (the first clip has no previous); an
