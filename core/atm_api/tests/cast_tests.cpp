@@ -11,6 +11,7 @@
 #include "atm/api/gen_mock.hpp"
 #include "atm/base/id.hpp"
 #include "atm/gen/cast.hpp"
+#include "atm/gen/keys.hpp"
 
 using atm::api::Engine;
 using atm::api::json;
@@ -249,15 +250,41 @@ TEST_CASE("cast: gen.dialogue_prompt takes a character as a subject and cites it
   const json out = s.call("gen.dialogue_prompt", spec);
   const std::string prompt = out["prompt"];
   INFO(prompt);
-  // The pictures in the order the model gets them: cast/mio_body.png, cast/mio_face.png, cast/ren.png. Ren is the first with a voice.
-  CHECK(prompt.find("<Subject 1> is Ren, a tall man in a grey hoodie and uses <Audio 1> as their speaking voice timbre reference and appears exactly as in <Image 3>.") !=
+  // The pictures in the order the model gets them: cast/mio_body.png, cast/mio_face.png, cast/ren.png; the voices: cast/mio.wav, cast/ren.wav.
+  // A description is {Name}: the clip reads the entry when it is made.
+  CHECK(prompt.find("<Subject 1> is {Ren} and uses <Audio 2> as their speaking voice timbre reference and appears exactly as in <Image 3>.") != std::string::npos);
+  CHECK(prompt.find("<Subject 2> is {Mio} and uses <Audio 1> as their speaking voice timbre reference and appears exactly as in <Image 2> and <Image 1>.") !=
         std::string::npos);
-  CHECK(prompt.find("<Subject 2> is Mio, a young woman with a silver bob and appears exactly as in <Image 2> and <Image 1>.") != std::string::npos);
   CHECK(prompt.find("<Subject 3> is a white cat.") != std::string::npos);
   CHECK(prompt.find("<Image 3>: reference - the exact shape, colours, markings and proportions of <Subject 1>") != std::string::npos);
-  CHECK(prompt.find("<Audio 2>") == std::string::npos); // one voice sample: the model has one slot for it
+  CHECK(prompt.find("<Audio 1>: reference - its vocal timbre guides the vocal delivery of <Subject 2>") != std::string::npos);
   CHECK(out["characters"] == json::array({ren, mio}));
-  CHECK(out["voice_of"] == ren);
+  CHECK(out["voices"] == json::array({ren, mio}));
+
+  // A subject can be told not to speak with its sample, and to show some of its attributes.
+  s.call("character.update", {{"character", "Mio"}, {"attributes", {{"injured", "left arm in a sling"}, {"age", 24}}}});
+  json quiet = spec;
+  quiet["subjects"] = json::array({{{"character", "Ren"}, {"voice", false}}, {{"character", "Mio"}, {"attributes", json::array({"injured", "nothing"})}}});
+  const json one = s.call("gen.dialogue_prompt", quiet);
+  CHECK(one["voices"] == json::array({mio}));
+  CHECK(one["prompt"].get<std::string>().find("<Subject 1> is {Ren} and appears exactly as in <Image 3>.") != std::string::npos);
+  CHECK(one["prompt"].get<std::string>().find("<Subject 2> is {Mio}; injured: {Mio.injured} and uses <Audio 1>") != std::string::npos);
+
+  // The clip made from it: the model gets the words of the entries, and follows a change to them.
+  const json made = s.call("gen.create_clip", {{"prompt", one["prompt"]}, {"model", atm::api::kMockModel}, {"seconds", 1}, {"characters", one["characters"]}});
+  REQUIRE(s.wait(s.call("gen.run", json::object()))["state"] == "done");
+  const std::string sent = s.mock->last_generate().value("prompt", std::string());
+  CHECK(sent.find("<Subject 1> is Ren, a tall man in a grey hoodie and appears") != std::string::npos);
+  CHECK(sent.find("<Subject 2> is Mio, a young woman with a silver bob; injured: left arm in a sling and uses") != std::string::npos);
+  CHECK(s.state_of(made["clip"]) == "clean");
+  s.call("character.update", {{"character", "Mio"}, {"attributes", {{"age", 25}}}}); // not in the prompt: nothing to make again
+  CHECK(s.state_of(made["clip"]) == "clean");
+  s.call("character.update", {{"character", "Mio"}, {"attributes", {{"injured", "healed"}}}});
+  CHECK(s.state_of(made["clip"]) == "dirty");
+  ok(*s.engine, "project.undo", {{"project", s.project}});
+  CHECK(s.state_of(made["clip"]) == "clean");
+  s.call("character.update", {{"character", "Ren"}, {"description", "a tall man in a red coat"}});
+  CHECK(s.state_of(made["clip"]) == "dirty");
   CHECK(err(*s.engine, "gen.dialogue_prompt", {{"project", s.project}, {"subjects", json::array({{{"character", "Nobody"}}})}, {"shots", spec["shots"]}}).rule == "G_CAST");
 }
 
@@ -288,5 +315,15 @@ TEST_CASE("cast: what a Character node gives, and the rules of an entry", "[cast
   }
   CHECK(paths == "chr_b/name chr_b/kind chr_b/references/0 chr_b/attributes/x chr_c/name ");
   CHECK(atm::gen::cast_id(cast, "MIO") == "chr_a");
+  // A text names the cast in braces.
+  std::string text;
+  CHECK((atm::gen::cast_text(cast, "mio", text) && text == "Mio, silver bob"));
+  CHECK((atm::gen::cast_text(cast, "Mio.mood", text) && text == "tired"));
+  CHECK((atm::gen::cast_text(cast, "Mio.attributes", text) && text == "age: 24, alive: no, height: 1.5, mood: tired"));
+  CHECK_FALSE(atm::gen::cast_text(cast, "Mio.nothing", text));
+  CHECK_FALSE(atm::gen::cast_text(cast, "Nobody", text));
+  CHECK(atm::gen::expand_variables("{Mio} is {Mio.mood}; {style}; {nobody}", {{"var_s", {{"name", "style"}, {"type", "text"}, {"value", "anime"}}}}, cast) ==
+        "Mio, silver bob is tired; anime; {nobody}");
+  CHECK(atm::gen::unknown_variables("{Mio} {Mio.mood} {nobody} {Mio.nothing}", json::object(), cast) == std::vector<std::string>{"nobody", "Mio.nothing"});
   CHECK(atm::gen::find_cast(cast, "nobody") == nullptr);
 }

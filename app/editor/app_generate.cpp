@@ -368,7 +368,8 @@ void App::draw_variables_card() {
 // Under a text: the project's Variables as chips that add {name} to it, and a note for each {name} in it that no Variable has.
 void App::draw_variable_hints(const std::string &text, const std::function<void(const std::string &)> &insert) {
   const json &variables = doc_.contains("variables") && doc_["variables"].is_object() ? doc_["variables"] : json::object();
-  for (const std::string &name : gen::unknown_variables(text, variables)) {
+  const json &cast = doc_.contains("cast") && doc_["cast"].is_object() ? doc_["cast"] : json::object();
+  for (const std::string &name : gen::unknown_variables(text, variables, cast)) { // {Sam} names the cast: not an unknown Variable
     ImGui::TextColored(kError, "No variable called {%s}.", name.c_str());
     ui_mark("unknown_variable:" + name);
   }

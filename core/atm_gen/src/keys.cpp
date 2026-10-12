@@ -204,7 +204,7 @@ private:
               sources.push_back(one);
           } else if (!m.value.is_null())
             sources.push_back(m.value.is_number() && port.type == PortType::number ? json(m.value.get<double>())
-                              : m.value.is_string() && port.type == PortType::text ? json(expand_variables(m.value.get_ref<const std::string &>(), context_.variables))
+                              : m.value.is_string() && port.type == PortType::text ? json(expand_variables(m.value.get_ref<const std::string &>(), context_.variables, context_.cast))
                                                                                     : m.value);
           continue;
         }
@@ -236,7 +236,7 @@ private:
     if (port.type == PortType::number && value->is_number()) // 5 and 5.0 are one number
       return value->get<double>();
     if (port.type == PortType::text && value->is_string()) // {name}: the Variable of that name
-      return expand_variables(value->get_ref<const std::string &>(), context_.variables);
+      return expand_variables(value->get_ref<const std::string &>(), context_.variables, context_.cast);
     return *value;
   }
 
@@ -302,12 +302,17 @@ private:
 
 } // namespace
 
-std::string expand_variables(std::string_view text, const json &variables) {
+std::string expand_variables(std::string_view text, const json &variables) { return expand_variables(text, variables, json(nullptr)); }
+
+std::vector<std::string> unknown_variables(std::string_view text, const json &variables) { return unknown_variables(text, variables, json(nullptr)); }
+
+std::string expand_variables(std::string_view text, const json &variables, const json &cast) {
   std::string out;
   for (size_t i = 0; i < text.size();) {
     const size_t close = text[i] == '{' ? text.find('}', i + 1) : std::string_view::npos;
     std::string value;
-    if (close != std::string_view::npos && close > i + 1 && variable_text(variables, std::string(text.substr(i + 1, close - i - 1)), value)) {
+    if (close != std::string_view::npos && close > i + 1 &&
+        (variable_text(variables, std::string(text.substr(i + 1, close - i - 1)), value) || cast_text(cast, text.substr(i + 1, close - i - 1), value))) {
       out += value;
       i = close + 1;
     } else {
@@ -317,7 +322,7 @@ std::string expand_variables(std::string_view text, const json &variables) {
   return out;
 }
 
-std::vector<std::string> unknown_variables(std::string_view text, const json &variables) {
+std::vector<std::string> unknown_variables(std::string_view text, const json &variables, const json &cast) {
   std::vector<std::string> out;
   for (size_t i = 0; i < text.size(); ++i) {
     if (text[i] != '{')
@@ -328,8 +333,8 @@ std::vector<std::string> unknown_variables(std::string_view text, const json &va
     const std::string name(text.substr(i + 1, close - i - 1));
     std::string ignored;
     // Only a name that reads as one: words and spaces, not a brace of some other kind of text.
-    const bool plain = std::all_of(name.begin(), name.end(), [](unsigned char c) { return std::isalnum(c) || c == '_' || c == ' ' || c == '-'; });
-    if (plain && !variable_text(variables, name, ignored) && std::find(out.begin(), out.end(), name) == out.end())
+    const bool plain = std::all_of(name.begin(), name.end(), [](unsigned char c) { return std::isalnum(c) || c == '_' || c == ' ' || c == '-' || c == '.'; });
+    if (plain && !variable_text(variables, name, ignored) && !cast_text(cast, name, ignored) && std::find(out.begin(), out.end(), name) == out.end())
       out.push_back(name);
     i = close;
   }

@@ -64,7 +64,12 @@ std::string dialogue_prompt(const json &spec, std::string &problem) {
     std::string line = tag + " is " + trimmed(who);
     if (!line.empty() && line.back() == '.')
       line.pop_back();
-    if (s.is_object() && s.value("voice", false)) {
+    if (s.is_object() && s.contains("audio") && s["audio"].is_number_integer() && s["audio"].get<int>() > 0) {
+      voiced[i] = true; // its sample by its number among the clip's voices
+      audio_of[i] = s["audio"].get<int>();
+      audios = std::max(audios, audio_of[i]);
+      line += " and uses <Audio " + std::to_string(audio_of[i]) + "> as their speaking voice timbre reference";
+    } else if (s.is_object() && s.value("voice", false)) {
       voiced[i] = true;
       audio_of[i] = ++audios;
       line += " and uses <Audio " + std::to_string(audio_of[i]) + "> as their speaking voice timbre reference";

@@ -43,6 +43,11 @@ std::string cast_attributes_text(const json &entry);
 // `attribute` is the node's settings.attribute, for the port "attribute".
 json cast_port_value(const json &entry, std::string_view port, std::string_view attribute);
 
+// What a text means by {token} when it names the cast: "{Sam}" is the entry's name and its description ("Sam, a tall man
+// in a grey hoodie"), "{Sam.description}", "{Sam.personality}" and "{Sam.attributes}" one part of it, "{Sam.injured}" the
+// attribute of that name. False when the token names nothing of the cast (or the part is empty).
+bool cast_text(const json &cast, std::string_view token, std::string &out);
+
 // Rule G_CAST for each entry that is not written as above: no name, an unknown kind, a reference without a path,
 // an attribute that is a list or an object, two entries with one name.
 void check_cast(const json &cast, std::vector<Problem> &out);

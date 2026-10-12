@@ -133,6 +133,29 @@ json cast_port_value(const json &entry, std::string_view port, std::string_view 
   return nullptr;
 }
 
+bool cast_text(const json &cast, std::string_view token, std::string &out) {
+  if (!cast.is_object() || token.empty())
+    return false;
+  if (const json *whole = find_cast(cast, token)) { // the whole token is a name (a name may hold a dot)
+    const std::string name = text_at(*whole, "name"), look = text_at(*whole, "description");
+    out = look.empty() ? name : name + ", " + look;
+    return !out.empty();
+  }
+  const size_t dot = token.rfind('.');
+  if (dot == std::string_view::npos || dot == 0 || dot + 1 >= token.size())
+    return false;
+  const json *entry = find_cast(cast, token.substr(0, dot));
+  if (!entry)
+    return false;
+  const std::string_view part = token.substr(dot + 1);
+  const json value = part == "description" || part == "personality" || part == "attributes" ? cast_port_value(*entry, part, "")
+                                                                                             : cast_port_value(*entry, "attribute", part);
+  if (!value.is_string())
+    return false;
+  out = value.get<std::string>();
+  return true;
+}
+
 void check_cast(const json &cast, std::vector<Problem> &out) {
   if (!cast.is_object())
     return;
@@ -199,7 +222,7 @@ bool use_character(json &workflow, std::string_view character_id, bool voice) {
   inputs["references"].erase("to"); // an input is either exposed or linked: the pictures now come from the cast
   if (voice && inputs.contains("voice")) {
     links[placeholders ? "$new:l_character_voice" + n : new_id("lnk")] = {{"from", json::array({node, "voice"})}, {"to", json::array({gen, "voice"})}};
-    inputs["voice"].erase("to");
+    inputs["voice"].erase("to"); // an input is either exposed or linked: the voices now come from the cast
   }
   return true;
 }

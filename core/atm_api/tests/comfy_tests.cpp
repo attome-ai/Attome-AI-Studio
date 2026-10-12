@@ -243,6 +243,15 @@ TEST_CASE("comfyui: continuation, voice, the final stage and the memory options 
   CHECK(server->graph["cond"]["inputs"]["ref_images.ref_image_1"] == json::array({"ref1", 0}));
   CHECK_FALSE(server->graph["cond"]["inputs"].contains("ref_audios.ref_audio_0"));
 
+  // Two speakers: a voice sample for each, in the order they are given.
+  json duet = base;
+  duet["voice"] = json::array({(dir / "voice.wav").string(), (dir / "voice.wav").string()});
+  server->history_calls = 0;
+  REQUIRE(comfy.run(request({{"steps", 8}}, duet)));
+  CHECK(server->graph["cond"]["inputs"]["ref_audios.ref_audio_0"] == json::array({"voice", 0}));
+  CHECK(server->graph["cond"]["inputs"]["ref_audios.ref_audio_1"] == json::array({"voice1", 0}));
+  CHECK(server->graph["voice1"]["class_type"] == "LoadAudio");
+
   // Sparse attention and the memory savers sit in the model chain, in front of both samplers.
   server->history_calls = 0;
   REQUIRE(comfy.run(request({{"steps", 8}, {"sparse_keep_percent", 10}, {"low_memory", "on"}, {"stage", "final"}}, base)));

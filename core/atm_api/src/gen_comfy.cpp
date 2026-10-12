@@ -183,7 +183,8 @@ constexpr int kOverlapFrames = 22;
 
 // What the graph needs besides the step's request: the names ComfyUI gave the uploaded files, and the clip continued from.
 struct H3Media {
-  std::string start_image, end_image, voice, continue_from;
+  std::string start_image, end_image, continue_from;
+  std::vector<std::string> voices; // one sample for each speaker, in the order the prompt's <Audio N> count (uploaded names)
   std::vector<std::string> references; // pictures the model must reproduce as they are (uploaded names)
   int continue_frames = 0;       // frames in the clip continued from
   double continue_seconds = 0.0; // its length
@@ -231,12 +232,13 @@ json h3_graph(const gen::StepRequest &r, const H3Media &media, const std::string
     seconds = std::min(seconds + double(kOverlapFrames) / 24.0, 15.0);
   const int length = frames_for(seconds);
   json start_guide; // the start picture of a voiced step, anchored at frame 0 (set below)
-  if (!media.voice.empty() || !media.references.empty()) { // reference to video: the voice to follow and the pictures to reproduce; the start picture is the clip's real first frame
+  if (!media.voices.empty() || !media.references.empty()) { // reference to video: the voice to follow and the pictures to reproduce; the start picture is the clip's real first frame
     json cond = {{"clip", {"clip", 0}}, {"vae", {"vae", 0}}, {"audio_vae", {"avae", 0}}, {"prompt", r.inputs.value("prompt", std::string())},
                  {"width", width}, {"height", height}, {"length", length}, {"ref_image_size", "max"}};
-    if (!media.voice.empty()) {
-      g["voice"] = node("LoadAudio", {{"audio", media.voice}});
-      cond["ref_audios.ref_audio_0"] = {"voice", 0};
+    for (size_t n = 0; n < media.voices.size(); ++n) {
+      const std::string key = n == 0 ? std::string("voice") : "voice" + std::to_string(n);
+      g[key] = node("LoadAudio", {{"audio", media.voices[n]}});
+      cond["ref_audios.ref_audio_" + std::to_string(n)] = {key, 0};
     }
     for (size_t n = 0; n < media.references.size(); ++n) {
       const std::string key = "ref" + std::to_string(n);
@@ -355,14 +357,11 @@ Result<gen::StepResult> ComfyProvider::run(const gen::StepRequest &r) {
   };
   const auto cancelled = [&] { return r.cancel && r.cancel->load(); };
 
-  // Pictures go to ComfyUI's input folder first.
-  const auto upload = [&](const char *port) -> Result<std::string> {
-    const auto it = r.inputs.find(port);
-    if (it == r.inputs.end() || !it->is_string())
-      return std::string();
-    const fs::path file = to_path(it->get<std::string>());
+  // Pictures and sounds go to ComfyUI's input folder first. `tag` names the file there: the port, or the port and a number.
+  const auto upload_file = [&](const std::string &path, const std::string &tag) -> Result<std::string> {
+    const fs::path file = to_path(path);
     ATM_TRY(std::string bytes, storage::read_file(file));
-    const std::string boundary = "----attome" + r.run_id, name = "attome_" + r.run_id + "_" + port + file.extension().string();
+    const std::string boundary = "----attome" + r.run_id, name = "attome_" + r.run_id + "_" + tag + file.extension().string();
     std::string body = "--" + boundary + "\r\nContent-Disposition: form-data; name=\"image\"; filename=\"" + name +
                        "\"\r\nContent-Type: application/octet-stream\r\n\r\n" + bytes + "\r\n--" + boundary +
                        "\r\nContent-Disposition: form-data; name=\"overwrite\"\r\n\r\ntrue\r\n--" + boundary + "--\r\n";
@@ -371,37 +370,42 @@ Result<gen::StepResult> ComfyProvider::run(const gen::StepRequest &r) {
       return unreachable(reply.error());
     const json answer = json::parse(reply->body, nullptr, false);
     if (reply->status != 200 || !answer.is_object() || !answer.contains("name"))
-      return engine_error("E_INTERNAL", "ComfyUI did not take the picture for \"" + std::string(port) + "\" (status " + std::to_string(reply->status) + ").");
+      return engine_error("E_INTERNAL", "ComfyUI did not take the file for \"" + tag + "\" (status " + std::to_string(reply->status) + ").");
     const std::string sub = answer.value("subfolder", std::string());
     return (sub.empty() ? "" : sub + "/") + answer["name"].get<std::string>();
   };
+  const auto upload = [&](const char *port) -> Result<std::string> {
+    const auto it = r.inputs.find(port);
+    if (it == r.inputs.end() || !it->is_string())
+      return std::string();
+    return upload_file(it->get<std::string>(), port);
+  };
   const bool speech = r.kind == "generate_speech";
   H3Media media;
-  if (!speech && r.inputs.contains("references") && r.inputs["references"].is_array()) {
+  if (!speech && r.inputs.contains("references")) { // one picture, or a list of them
+    const json &refs = r.inputs["references"];
     int n = 0;
-    for (const json &one : r.inputs["references"]) {
-      if (!one.is_string())
-        continue;
-      const fs::path file = to_path(one.get<std::string>());
-      ATM_TRY(std::string bytes, storage::read_file(file));
-      const std::string boundary = "----attome" + r.run_id, name = "attome_" + r.run_id + "_ref" + std::to_string(n++) + file.extension().string();
-      std::string body = "--" + boundary + "\r\nContent-Disposition: form-data; name=\"image\"; filename=\"" + name +
-                         "\"\r\nContent-Type: application/octet-stream\r\n\r\n" + bytes + "\r\n--" + boundary +
-                         "\r\nContent-Disposition: form-data; name=\"overwrite\"\r\n\r\ntrue\r\n--" + boundary + "--\r\n";
-      const auto reply = net::fetch(*transport_, address_ + "/upload/image", body, "multipart/form-data; boundary=" + boundary);
-      if (!reply)
-        return unreachable(reply.error());
-      const json answer = json::parse(reply->body, nullptr, false);
-      if (reply->status != 200 || !answer.is_object() || !answer.contains("name"))
-        return engine_error("E_INTERNAL", "ComfyUI did not take the reference picture " + std::to_string(n) + " (status " + std::to_string(reply->status) + ").");
-      const std::string sub = answer.value("subfolder", std::string());
-      media.references.push_back((sub.empty() ? "" : sub + "/") + answer["name"].get<std::string>());
-    }
+    for (const json &one : refs.is_array() ? refs : json::array({refs}))
+      if (one.is_string()) {
+        ATM_TRY(std::string name, upload_file(one.get<std::string>(), "ref" + std::to_string(n++)));
+        media.references.push_back(std::move(name));
+      }
   }
   if (!speech) {
     ATM_TRY(media.start_image, upload("start_image"));
     ATM_TRY(media.end_image, upload("end_image"));
-    ATM_TRY(media.voice, upload("voice"));
+    if (const auto v = r.inputs.find("voice"); v != r.inputs.end() && v->is_array()) { // several speakers
+      int n = 0;
+      for (const json &one : *v)
+        if (one.is_string()) {
+          ATM_TRY(std::string name, upload_file(one.get<std::string>(), "voice" + std::to_string(n++)));
+          media.voices.push_back(std::move(name));
+        }
+    } else {
+      ATM_TRY(std::string one, upload("voice"));
+      if (!one.empty())
+        media.voices.push_back(std::move(one));
+    }
     ATM_TRY(media.continue_from, upload("continue_from"));
     if (!media.continue_from.empty()) { // the clip continued from: its length picks the last 22 frames and the sound under them
       const auto info = media::probe(r.inputs.value("continue_from", std::string()));

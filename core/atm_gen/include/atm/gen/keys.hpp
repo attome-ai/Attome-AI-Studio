@@ -55,6 +55,10 @@ struct KeyContext {
 // that name (text, number or yes/no, written as text); a name that is no Variable's is left as it is. The key of the node that reads the
 // text holds the expanded text, so changing a Variable moves the keys of exactly the nodes whose texts use it.
 std::string expand_variables(std::string_view text, const json &variables);
+// The same, and a {name} no Variable has may name the project's cast (cast.hpp cast_text): "{Sam}", "{Sam.injured}". A prompt that
+// names an entry this way follows every change to its description or attributes.
+std::string expand_variables(std::string_view text, const json &variables, const json &cast);
+std::vector<std::string> unknown_variables(std::string_view text, const json &variables, const json &cast);
 // The names in braces that no Variable of the project has, in the order they appear.
 std::vector<std::string> unknown_variables(std::string_view text, const json &variables);
 

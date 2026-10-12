@@ -752,7 +752,7 @@ Result<json> Engine::Impl::gen_create_clip(const json &params) {
     inputs["references"] = refs;
   }
   // Entries of the cast the shot shows: each becomes a Character node whose pictures feed the model's references. One of them
-  // gives the voice (voice_of, else the first that has a sample), unless the clip was given a voice file of its own.
+  // Each that has a voice sample gives it (or only those in voices), unless the clip was given a voice file of its own.
   if (params.contains("characters")) {
     if (!params["characters"].is_array() || params["characters"].empty())
       return bad_param("characters", "must be a list of names or IDs of the project's cast (character.list)");
@@ -763,13 +763,26 @@ Result<json> Engine::Impl::gen_create_clip(const json &params) {
       return fail(ErrorCode::InvalidArgument, "G_SETTING", "Give characters or references, not both: the pictures come from one place.", {},
                   "Make the extra picture a cast entry of its own (a prop) and name it in characters.");
     const json cast = pr->doc.root().value("cast", json::object());
+    // voices: the entries whose samples the speakers take (default: every one named that has a sample). The model takes several.
+    std::set<std::string> speakers;
+    const bool chosen = params.contains("voices");
+    if (chosen) {
+      if (!params["voices"].is_array())
+        return bad_param("voices", "must be a list of names or IDs of the cast");
+      for (const json &v : params["voices"]) {
+        const std::string id = gen::cast_id(cast, v.is_string() ? v.get<std::string>() : std::string());
+        if (id.empty())
+          return fail(ErrorCode::UnknownId, "G_CAST", "The voice " + v.dump() + " is not in the project's cast.", {}, "See who is with character.list.");
+        speakers.insert(id);
+      }
+    }
     std::string voice_of;
     if (params.contains("voice_of") && params["voice_of"].is_string() && !params["voice_of"].get<std::string>().empty()) {
       voice_of = gen::cast_id(cast, params["voice_of"].get<std::string>());
       if (voice_of.empty())
         return fail(ErrorCode::UnknownId, "G_CAST", "\"" + params["voice_of"].get<std::string>() + "\" is not in the project's cast.", {}, "See who is with character.list.");
     }
-    bool voiced = params.contains("voice");
+    const bool own_voice = params.contains("voice"); // a voice file of the clip's own: the cast gives none
     std::set<std::string> seen;
     for (const json &c : params["characters"]) {
       const std::string who = c.is_string() ? c.get<std::string>() : std::string();
@@ -778,11 +791,11 @@ Result<json> Engine::Impl::gen_create_clip(const json &params) {
         return fail(ErrorCode::UnknownId, "G_CAST", "\"" + who + "\" is not in the project's cast.", {}, "See who is with character.list, or add it with character.create.");
       if (!seen.insert(id).second)
         continue;
-      const bool give_voice = !voiced && face.contains("voice") && !gen::cast_voice(cast[id]).empty() && (voice_of.empty() || voice_of == id);
+      const bool give_voice = !own_voice && face.contains("voice") && !gen::cast_voice(cast[id]).empty() &&
+                              (chosen ? speakers.count(id) > 0 : voice_of.empty() || voice_of == id);
       if (!gen::use_character(instance, id, give_voice))
         return fail(ErrorCode::InvalidArgument, "G_SETTING", "This workflow has no generate video node that takes references.", {},
                     "Use a model's own Shot workflow, or a workflow with a generate video node.");
-      voiced = voiced || give_voice;
     }
   }
   std::string name = params.value("name", std::string());
@@ -865,17 +878,17 @@ Result<json> Engine::Impl::gen_create_clip(const json &params) {
   // The structured prompt MiniMax H3 reads for scenes with speaking people, written from a plain description (gen/dialogue.hpp).
 Result<json> Engine::Impl::gen_dialogue_prompt(const json &params) {
   // A subject can be an entry of the project's cast ({"character": "Mio"}): its description is the entry's, its pictures are
-  // cited by the numbers the clip's node will get them in, and the first one with a voice sample speaks with it.
+  // cited by the numbers the clip's node will get them in, and each one with a voice sample speaks with its own. The description is
+  // written as {Name}, which the clip expands when it is made: the prompt follows every later change to the entry.
   json spec = params;
-  json used = json::array();
-  std::string voice_of;
+  json used = json::array(), speakers = json::array();
   const auto casts = [](const json &s) { return s.is_object() && s.contains("character") && s["character"].is_string(); };
   if (spec.contains("subjects") && spec["subjects"].is_array() && std::any_of(spec["subjects"].begin(), spec["subjects"].end(), casts)) {
     if (!params.contains("project"))
       return bad_param("project", "is required when a subject names a character of the cast");
     ATM_TRY(Project *pr, project(params));
     const json cast = cast_for_keys(*pr);
-    std::vector<std::string> pictures;
+    std::vector<std::string> pictures, samples;
     for (const json &s : spec["subjects"])
       if (casts(s)) {
         const std::string id = gen::cast_id(cast, s["character"].get<std::string>());
@@ -884,16 +897,24 @@ Result<json> Engine::Impl::gen_dialogue_prompt(const json &params) {
                       "See who is with character.list, or add it with character.create.");
         for (const std::string &p : gen::cast_references(cast[id]))
           pictures.push_back(p);
+        if (const std::string voice = gen::cast_voice(cast[id]); !voice.empty() && s.value("voice", true))
+          samples.push_back(voice);
       }
-    const std::vector<std::string> order = gen::reference_order(pictures);
+    const std::vector<std::string> order = gen::reference_order(pictures), voices = gen::reference_order(samples);
     for (json &s : spec["subjects"]) {
       if (!casts(s))
         continue;
       const std::string id = gen::cast_id(cast, s["character"].get<std::string>());
       const json &entry = cast[id];
+      const std::string name = entry.value("name", id);
       if (!s.contains("description") || !s["description"].is_string() || s["description"].get<std::string>().empty()) {
-        const std::string look = entry.value("description", std::string());
-        s["description"] = look.empty() ? entry.value("name", id) : entry.value("name", id) + ", " + look;
+        std::string look = "{" + name + "}";
+        // attributes: the ones this shot should show ("injured"), each read from the entry when the clip is made
+        if (s.contains("attributes") && s["attributes"].is_array())
+          for (const json &a : s["attributes"])
+            if (a.is_string() && entry.value("attributes", json::object()).contains(a.get<std::string>()))
+              look += "; " + a.get<std::string>() + ": {" + name + "." + a.get<std::string>() + "}";
+        s["description"] = std::move(look);
       }
       json numbers = json::array();
       for (const std::string &p : gen::cast_references(entry))
@@ -901,10 +922,15 @@ Result<json> Engine::Impl::gen_dialogue_prompt(const json &params) {
       s.erase("image");
       if (!numbers.empty())
         s["images"] = std::move(numbers);
-      const bool speaks = voice_of.empty() && !gen::cast_voice(entry).empty() && s.value("voice", true);
-      s["voice"] = speaks;
-      if (speaks)
-        voice_of = id;
+      const std::string voice = gen::cast_voice(entry);
+      const bool speaks = !voice.empty() && s.value("voice", true);
+      s.erase("voice");
+      s.erase("audio");
+      if (speaks) {
+        s["audio"] = int(std::find(voices.begin(), voices.end(), voice) - voices.begin()) + 1;
+        if (std::find(speakers.begin(), speakers.end(), json(id)) == speakers.end())
+          speakers.push_back(id);
+      }
       if (std::find(used.begin(), used.end(), json(id)) == used.end())
         used.push_back(id);
     }
@@ -917,8 +943,7 @@ Result<json> Engine::Impl::gen_dialogue_prompt(const json &params) {
   json out = {{"prompt", std::move(prompt)}};
   if (!used.empty()) { // what gen.create_clip needs to give the model the same pictures and voice
     out["characters"] = std::move(used);
-    if (!voice_of.empty())
-      out["voice_of"] = voice_of;
+    out["voices"] = std::move(speakers);
   }
   return out;
 }
