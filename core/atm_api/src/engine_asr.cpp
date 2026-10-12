@@ -19,9 +19,26 @@ Result<json> Engine::Impl::asr_transcribe(const json &params) {
     if (!ref || !ref->node || clip_id.rfind("clp_", 0) != 0)
       return fail(ErrorCode::NotFound, "E_UNKNOWN_CLIP", "\"clip\" must be the ID of a clip of the project, not \"" + clip_id + "\".");
     const json media = ref->node->value("media_ref", json::object());
-    if (media.value("type", std::string()) != "file" || !media.contains("path"))
+    fs::path file;
+    if (media.value("type", std::string()) == "workflow") {
+      // A generative clip: it listens to the file of the clip's selected Take (a video model such as MiniMax H3 speaks lines of its own).
+      const std::string selected = media.value("selected", std::string());
+      const json outputs = media.contains("takes") && media["takes"].is_object() && media["takes"].contains(selected)
+                               ? media["takes"][selected].value("outputs", json::object())
+                               : json::object();
+      std::string relative;
+      for (const char *key : {"video", "audio"})
+        if (relative.empty() && outputs.contains(key) && outputs[key].is_object() && outputs[key].contains("path") && outputs[key]["path"].is_string())
+          relative = outputs[key]["path"].get<std::string>();
+      if (relative.empty())
+        return fail(ErrorCode::InvalidArgument, "G_NOT_MADE", "This generative clip has no Take with a picture or sound yet, so there is nothing to listen to.", {},
+                    "Make it first with gen.run.");
+      file = to_path(relative);
+    } else if (media.value("type", std::string()) != "file" || !media.contains("path")) {
       return fail(ErrorCode::InvalidArgument, "E_PARAM", "The clip is not made from a sound or video file, so there is nothing to listen to.");
-    fs::path file = to_path(media.value("path", std::string()));
+    } else {
+      file = to_path(media.value("path", std::string()));
+    }
     if (file.is_relative())
       file = pr->dir / file;
     path = to_utf8(file);

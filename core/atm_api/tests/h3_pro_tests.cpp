@@ -65,6 +65,14 @@ TEST_CASE("gen.dialogue_prompt writes the structured H3 prompt from a plain desc
   CHECK(no_voice.find("[reference generation] ") != std::string::npos);
   CHECK(no_voice.find("retention_analysis:\nN/A") != std::string::npos);
 
+  // A subject with a picture is cited as <Image N>, in the order of the subjects that have one, and kept in retention_analysis.
+  json pictured = spec;
+  pictured["subjects"] = json::array({"a man", {{"description", "a gold watch with a green dial"}, {"image", true}}});
+  const std::string with_image = ok(engine, "gen.dialogue_prompt", pictured)["prompt"].get<std::string>();
+  CHECK(with_image.find("<Subject 2> is a gold watch with a green dial and appears exactly as in <Image 1>.") != std::string::npos);
+  CHECK(with_image.find("<Image 1>: reference - the exact shape, colours, markings and proportions of <Subject 2>") != std::string::npos);
+  CHECK(with_image.find("<Audio") == std::string::npos);
+
   // A line spoken by a subject that does not exist is named, not written.
   json bad = spec;
   bad["shots"][0]["lines"][0]["subject"] = 3;
@@ -119,6 +127,17 @@ TEST_CASE("gen.create_clip: a continuation starts where the clip before ends, sk
   CHECK(workflow["nodes"][gen_node]["settings"]["sparse_keep_percent"] == 10);
   CHECK(clip["media_ref"]["inputs"]["voice"] == (dir / "voice.wav").string());
 
+  // Pictures the model must reproduce: kept on the clip in their order; anything but a list of paths is refused.
+  const char *kRef = "minimax-h3.singularity-ref2va.int8"; // the reference-trained fine-tune: the one model that takes them
+  const json pictured = ok(engine, "gen.create_clip", {{"project", project}, {"prompt", "A watch on a wrist"}, {"model", kRef}, {"seconds", 5},
+                                                       {"references", json::array({(dir / "watch.jpg").string(), (dir / "face.png").string()})}});
+  const json refs = ok(engine, "project.get", {{"project", project}, {"id", pictured["clip"]}})["object"]["media_ref"]["inputs"]["references"];
+  CHECK(refs == json::array({(dir / "watch.jpg").string(), (dir / "face.png").string()}));
+  CHECK(err(engine, "gen.create_clip", {{"project", project}, {"prompt", "x"}, {"model", kRef}, {"references", "watch.jpg"}}).rule == "G_SETTING");
+  CHECK(err(engine, "gen.create_clip", {{"project", project}, {"prompt", "x"}, {"model", kRef}, {"references", json::array({7})}}).rule == "G_SETTING");
+
+  // A model that was not trained on references does not take them.
+  CHECK(err(engine, "gen.create_clip", {{"project", project}, {"prompt", "x"}, {"model", kH3}, {"references", json::array({"a.png"})}}).rule == "G_SETTING");
   // The first clip is unchanged: no reference, no settings but the defaults.
   const json plain = ok(engine, "project.get", {{"project", project}, {"id", first["clip"]}})["object"];
   CHECK(plain["timing"]["source_in"] == "0");

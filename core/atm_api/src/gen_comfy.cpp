@@ -184,6 +184,7 @@ constexpr int kOverlapFrames = 22;
 // What the graph needs besides the step's request: the names ComfyUI gave the uploaded files, and the clip continued from.
 struct H3Media {
   std::string start_image, end_image, voice, continue_from;
+  std::vector<std::string> references; // pictures the model must reproduce as they are (uploaded names)
   int continue_frames = 0;       // frames in the clip continued from
   double continue_seconds = 0.0; // its length
 };
@@ -229,16 +230,26 @@ json h3_graph(const gen::StepRequest &r, const H3Media &media, const std::string
   if (!media.continue_from.empty())
     seconds = std::min(seconds + double(kOverlapFrames) / 24.0, 15.0);
   const int length = frames_for(seconds);
-  if (!media.voice.empty()) { // reference to video: the voice, and the start picture as the first reference
+  json start_guide; // the start picture of a voiced step, anchored at frame 0 (set below)
+  if (!media.voice.empty() || !media.references.empty()) { // reference to video: the voice to follow and the pictures to reproduce; the start picture is the clip's real first frame
     json cond = {{"clip", {"clip", 0}}, {"vae", {"vae", 0}}, {"audio_vae", {"avae", 0}}, {"prompt", r.inputs.value("prompt", std::string())},
                  {"width", width}, {"height", height}, {"length", length}, {"ref_image_size", "max"}};
-    g["voice"] = node("LoadAudio", {{"audio", media.voice}});
-    cond["ref_audios.ref_audio_0"] = {"voice", 0};
-    if (!media.start_image.empty()) {
-      g["first"] = node("LoadImage", {{"image", media.start_image}});
-      cond["ref_images.ref_image_0"] = {"first", 0};
+    if (!media.voice.empty()) {
+      g["voice"] = node("LoadAudio", {{"audio", media.voice}});
+      cond["ref_audios.ref_audio_0"] = {"voice", 0};
+    }
+    for (size_t n = 0; n < media.references.size(); ++n) {
+      const std::string key = "ref" + std::to_string(n);
+      g[key] = node("LoadImage", {{"image", media.references[n]}});
+      cond["ref_images.ref_image_" + std::to_string(n)] = {key, 0};
     }
     g["cond"] = node("MiniMaxH3ReferenceToVideo", std::move(cond));
+    if (!media.start_image.empty()) {
+      g["first"] = node("LoadImage", {{"image", media.start_image}});
+      g["start_guide"] = node("MiniMaxH3AddGuide", {{"positive", {"cond", 0}}, {"latent", {"cond", 1}}, {"frame_idx", 0},
+                                                    {"vae", {"vae", 0}}, {"image", {"first", 0}}});
+      start_guide = {"start_guide", 0};
+    }
   } else {
     json cond = {{"clip", {"clip", 0}}, {"vae", {"vae", 0}}, {"prompt", r.inputs.value("prompt", std::string())},
                  {"width", width}, {"height", height}, {"length", length}};
@@ -252,7 +263,7 @@ json h3_graph(const gen::StepRequest &r, const H3Media &media, const std::string
     }
     g["cond"] = node("MiniMaxH3ImageToVideo", std::move(cond));
   }
-  json conditioning = {"cond", 0};
+  json conditioning = start_guide.is_null() ? json{"cond", 0} : start_guide;
   if (!media.continue_from.empty()) {
     const int frames = std::max(media.continue_frames, kOverlapFrames);
     const double tail = double(kOverlapFrames) / 24.0;
@@ -262,7 +273,7 @@ json h3_graph(const gen::StepRequest &r, const H3Media &media, const std::string
     g["ca"] = node("TrimAudioDuration", {{"audio", {"cc", 1}},
                                          {"start_index", std::max(0.0, std::round((media.continue_seconds - tail) * 1e4) / 1e4)},
                                          {"duration", std::round(tail * 1e4) / 1e4}});
-    g["guide"] = node("MiniMaxH3AddGuide", {{"positive", {"cond", 0}}, {"latent", {"cond", 1}}, {"frame_idx", 0},
+    g["guide"] = node("MiniMaxH3AddGuide", {{"positive", conditioning}, {"latent", {"cond", 1}}, {"frame_idx", 0},
                                             {"vae", {"vae", 0}}, {"audio_vae", {"avae", 0}}, {"image", {"ci", 0}}, {"audio", {"ca", 0}}});
     conditioning = {"guide", 0};
   }
@@ -366,6 +377,27 @@ Result<gen::StepResult> ComfyProvider::run(const gen::StepRequest &r) {
   };
   const bool speech = r.kind == "generate_speech";
   H3Media media;
+  if (!speech && r.inputs.contains("references") && r.inputs["references"].is_array()) {
+    int n = 0;
+    for (const json &one : r.inputs["references"]) {
+      if (!one.is_string())
+        continue;
+      const fs::path file = to_path(one.get<std::string>());
+      ATM_TRY(std::string bytes, storage::read_file(file));
+      const std::string boundary = "----attome" + r.run_id, name = "attome_" + r.run_id + "_ref" + std::to_string(n++) + file.extension().string();
+      std::string body = "--" + boundary + "\r\nContent-Disposition: form-data; name=\"image\"; filename=\"" + name +
+                         "\"\r\nContent-Type: application/octet-stream\r\n\r\n" + bytes + "\r\n--" + boundary +
+                         "\r\nContent-Disposition: form-data; name=\"overwrite\"\r\n\r\ntrue\r\n--" + boundary + "--\r\n";
+      const auto reply = net::fetch(*transport_, address_ + "/upload/image", body, "multipart/form-data; boundary=" + boundary);
+      if (!reply)
+        return unreachable(reply.error());
+      const json answer = json::parse(reply->body, nullptr, false);
+      if (reply->status != 200 || !answer.is_object() || !answer.contains("name"))
+        return engine_error("E_INTERNAL", "ComfyUI did not take the reference picture " + std::to_string(n) + " (status " + std::to_string(reply->status) + ").");
+      const std::string sub = answer.value("subfolder", std::string());
+      media.references.push_back((sub.empty() ? "" : sub + "/") + answer["name"].get<std::string>());
+    }
+  }
   if (!speech) {
     ATM_TRY(media.start_image, upload("start_image"));
     ATM_TRY(media.end_image, upload("end_image"));

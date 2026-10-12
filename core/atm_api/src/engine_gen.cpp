@@ -738,6 +738,16 @@ Result<json> Engine::Impl::gen_create_clip(const json &params) {
                   "Pass the path of a sound file, for a model that lists voice in its inputs (MiniMax H3).");
     inputs["voice"] = params["voice"];
   }
+  if (params.contains("references")) {
+    const json &refs = params["references"];
+    if (!refs.is_array() || refs.empty() || !face.contains("references"))
+      return fail(ErrorCode::InvalidArgument, "G_SETTING", "This model does not take reference pictures, or references is not a list of file paths.", {},
+                  "Pass a list of picture file paths, for a model that lists references in its inputs (MiniMax H3).");
+    for (const json &one : refs)
+      if (!one.is_string() || one.get<std::string>().empty())
+        return fail(ErrorCode::InvalidArgument, "G_SETTING", "Every reference must be the path of a picture file.", {}, "Pass paths of PNG or JPEG files.");
+    inputs["references"] = refs;
+  }
   std::string name = params.value("name", std::string());
   if (name.empty()) { // "Shot N": the next number no generative clip of the project has. A prompt makes a poor name: it
     int next = 1;     // often starts with the style, and any cut of it reads as broken.

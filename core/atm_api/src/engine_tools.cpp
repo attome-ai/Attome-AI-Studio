@@ -451,6 +451,7 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
        "continue_from":{"type":"string","description":"\"previous\" or a generative clip's ID (MiniMax H3): carry on from that clip seamlessly. The last 22 frames and the sound under them lead into this clip; it starts where that one ends and skips its first 22 frames, so playback is one take. At most 14.08 s."},
        "settings":{"type":"object","description":"Settings of the model, by name (gen.nodes lists them): for MiniMax H3 stage (preview | final: the latent upscaler and a refine pass), final_megapixels, sparse_keep_percent (0 = off), low_memory (on | off), steps, sampler, attention."},
        "voice":{"type":"string","description":"The path of a sound file (MiniMax H3): the speaker takes its timbre; cite it in the prompt as <Audio 1> (gen.dialogue_prompt writes that)."},
+       "references":{"type":"array","items":{"type":"string"},"description":"Paths of picture files the model must reproduce as they are (for a model that lists references in its inputs: MiniMax H3 Singularity), cited in the prompt as <Image 1>, <Image 2> in this order (gen.dialogue_prompt writes that for subjects with image: true). Use it for a product, a face or a place that has to look like the picture."},
        "track":{"type":"string"},"sequence":{"type":"string"},
        "with_audio":{"type":"boolean","description":"Default false: a video model's own guessed ambience (not every model has one) is left out of the mix, the same as with_audio on add_clip. true keeps it. The default is true for a scene with spoken lines of its own (a <d>...</d> tag in the prompt, or a voice): the model's sound is then the dialogue."}},"required":["project","prompt"]})",
      &Impl::gen_create_clip},
@@ -461,7 +462,7 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
      R"({"type":"object","properties":{
        "style":{"type":"string","description":"The look of the whole scene, e.g. \"2d anime style, clean linework, soft cel shading\""},
        "setting":{"type":"string","description":"The place and the light"},
-       "subjects":{"type":"array","items":{"oneOf":[{"type":"string"},{"type":"object","properties":{"description":{"type":"string"},"voice":{"type":"boolean","description":"true: this subject takes the timbre of the clip's voice sound, cited as <Audio N>"}},"required":["description"]}]}},
+       "subjects":{"type":"array","items":{"oneOf":[{"type":"string"},{"type":"object","properties":{"description":{"type":"string"},"voice":{"type":"boolean","description":"true: this subject takes the timbre of the clip's voice sound, cited as <Audio N>"},"image":{"type":"boolean","description":"true: a picture of this subject is given as a reference image (gen.create_clip references, in the order of the subjects that say true), cited as <Image N>"}},"required":["description"]}]}},
        "shots":{"type":"array","items":{"type":"object","properties":{"camera":{"type":"string"},"action":{"type":"string"},
          "lines":{"type":"array","items":{"type":"object","properties":{"subject":{"type":"integer","description":"1 = <Subject 1>"},"text":{"type":"string"},"tone":{"type":"string"},"language":{"type":"string"}},"required":["subject","text"]}}}}},
        "continuous":{"type":"boolean","description":"Default true: one shot from beginning to end, no cuts"},

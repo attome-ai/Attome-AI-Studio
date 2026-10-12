@@ -225,7 +225,23 @@ TEST_CASE("comfyui: continuation, voice, the final stage and the memory options 
   REQUIRE(comfy.run(request({{"steps", 8}}, voiced)));
   CHECK(server->graph["cond"]["class_type"] == "MiniMaxH3ReferenceToVideo");
   CHECK(server->graph["cond"]["inputs"]["ref_audios.ref_audio_0"] == json::array({"voice", 0}));
-  CHECK(server->graph["cond"]["inputs"]["ref_images.ref_image_0"] == json::array({"first", 0}));
+  // the start picture is the clip's real first frame (anchored at frame 0), not a loose reference; the sampler follows that guide
+  CHECK_FALSE(server->graph["cond"]["inputs"].contains("ref_images.ref_image_0"));
+  CHECK(server->graph["start_guide"]["class_type"] == "MiniMaxH3AddGuide");
+  CHECK(server->graph["start_guide"]["inputs"]["image"] == json::array({"first", 0}));
+  CHECK(server->graph["start_guide"]["inputs"]["frame_idx"] == 0);
+  CHECK(server->graph["guider"]["inputs"]["conditioning"] == json::array({"start_guide", 0}));
+
+  // Pictures to reproduce as they are (a product, a face): reference images of the same node, with or without a voice.
+  json pictured = base;
+  pictured["references"] = json::array({(dir / "start.jpg").string(), (dir / "start.jpg").string()});
+  server->history_calls = 0;
+  REQUIRE(comfy.run(request({{"steps", 8}}, pictured)));
+  CHECK(server->graph["cond"]["class_type"] == "MiniMaxH3ReferenceToVideo");
+  CHECK(server->graph["ref0"]["class_type"] == "LoadImage");
+  CHECK(server->graph["cond"]["inputs"]["ref_images.ref_image_0"] == json::array({"ref0", 0}));
+  CHECK(server->graph["cond"]["inputs"]["ref_images.ref_image_1"] == json::array({"ref1", 0}));
+  CHECK_FALSE(server->graph["cond"]["inputs"].contains("ref_audios.ref_audio_0"));
 
   // Sparse attention and the memory savers sit in the model chain, in front of both samplers.
   server->history_calls = 0;

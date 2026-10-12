@@ -113,7 +113,7 @@ constexpr const char *kCatalog = R"json({
       "notes": "A community fine-tune of MiniMax H3 for scenes with people and references, with a cleaner look than the base model. Run with Kijai's DMAD add-on at 8 steps. Shares its text encoder and VAEs with MiniMax H3. Needs a 24 GB GPU or larger.",
       "declares": {
         "kinds": ["generate_video", "encode_prompt", "sample", "decode"],
-        "accepts": ["start_image", "end_image", "voice", "continue_from"],
+        "accepts": ["start_image", "end_image", "references", "voice", "continue_from"],
         "seconds": {"min": 1, "max": 15},
         "sizes": {"multiple": 32, "max_pixels": 2088960},
         "settings": {
