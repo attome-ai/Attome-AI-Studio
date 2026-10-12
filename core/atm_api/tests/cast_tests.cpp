@@ -12,6 +12,7 @@
 #include "atm/base/id.hpp"
 #include "atm/gen/cast.hpp"
 #include "atm/gen/keys.hpp"
+#include "atm/media/media.hpp"
 
 using atm::api::Engine;
 using atm::api::json;
@@ -262,11 +263,23 @@ TEST_CASE("cast: gen.dialogue_prompt takes a character as a subject and cites it
   INFO(prompt);
   // The pictures in the order the model gets them: cast/mio_body.png, cast/mio_face.png, cast/ren.png; the voices: cast/mio.wav, cast/ren.wav.
   // A description is {Name}: the clip reads the entry when it is made.
-  CHECK(prompt.find("<Subject 1> is {Ren} and uses <Audio 2> as their speaking voice timbre reference and appears exactly as in <Image 3>.") != std::string::npos);
-  CHECK(prompt.find("<Subject 2> is {Mio} and uses <Audio 1> as their speaking voice timbre reference and appears exactly as in <Image 2> and <Image 1>.") !=
+  // A person's pictures say who they are, not where: the wording keeps the picture's background and framing out of the shot.
+  CHECK(prompt.find("<Subject 1> is {Ren} and uses <Audio 2> as their speaking voice timbre reference and has the face, hair and build shown in <Image 3>.") !=
+        std::string::npos);
+  CHECK(prompt.find("<Subject 2> is {Mio} and uses <Audio 1> as their speaking voice timbre reference and has the face, hair and build shown in <Image 2> and <Image 1>.") !=
         std::string::npos);
   CHECK(prompt.find("<Subject 3> is a white cat.") != std::string::npos);
-  CHECK(prompt.find("<Image 3>: reference - the exact shape, colours, markings and proportions of <Subject 1>") != std::string::npos);
+  CHECK(prompt.find("<Image 3>: reference - identity only: the face, hair and build of <Subject 1>. Its background, lighting, framing and pose are not used") !=
+        std::string::npos);
+  // A prop is the opposite: it must look exactly like its picture.
+  s.call("character.create", {{"name", "Lamp"}, {"kind", "prop"}, {"description", "a brass desk lamp"}, {"references", json::array({s.file("mio_face.png")})}});
+  json with_prop = spec;
+  with_prop["subjects"] = json::array({{{"character", "Lamp"}}});
+  with_prop["shots"][0]["lines"] = json::array();
+  const std::string prop = s.call("gen.dialogue_prompt", with_prop)["prompt"];
+  CHECK(prop.find("<Subject 1> is {Lamp} and appears exactly as in <Image 1>.") != std::string::npos);
+  CHECK(prop.find("<Image 1>: reference - the exact shape, colours, markings and proportions of <Subject 1>") != std::string::npos);
+  s.call("character.delete", {{"character", "Lamp"}});
   CHECK(prompt.find("<Audio 1>: reference - its vocal timbre guides the vocal delivery of <Subject 2>") != std::string::npos);
   CHECK(out["characters"] == json::array({ren, mio}));
   CHECK(out["voices"] == json::array({ren, mio}));
@@ -277,14 +290,14 @@ TEST_CASE("cast: gen.dialogue_prompt takes a character as a subject and cites it
   quiet["subjects"] = json::array({{{"character", "Ren"}, {"voice", false}}, {{"character", "Mio"}, {"attributes", json::array({"injured", "nothing"})}}});
   const json one = s.call("gen.dialogue_prompt", quiet);
   CHECK(one["voices"] == json::array({mio}));
-  CHECK(one["prompt"].get<std::string>().find("<Subject 1> is {Ren} and appears exactly as in <Image 3>.") != std::string::npos);
+  CHECK(one["prompt"].get<std::string>().find("<Subject 1> is {Ren} and has the face, hair and build shown in <Image 3>.") != std::string::npos);
   CHECK(one["prompt"].get<std::string>().find("<Subject 2> is {Mio}; injured: {Mio.injured} and uses <Audio 1>") != std::string::npos);
 
   // The clip made from it: the model gets the words of the entries, and follows a change to them.
   const json made = s.call("gen.create_clip", {{"prompt", one["prompt"]}, {"model", atm::api::kMockModel}, {"seconds", 1}, {"characters", one["characters"]}});
   REQUIRE(s.wait(s.call("gen.run", json::object()))["state"] == "done");
   const std::string sent = s.mock->last_generate().value("prompt", std::string());
-  CHECK(sent.find("<Subject 1> is Ren, a tall man in a grey hoodie and appears") != std::string::npos);
+  CHECK(sent.find("<Subject 1> is Ren, a tall man in a grey hoodie and has the face") != std::string::npos);
   CHECK(sent.find("<Subject 2> is Mio, a young woman with a silver bob; injured: left arm in a sling and uses") != std::string::npos);
   CHECK(s.state_of(made["clip"]) == "clean");
   s.call("character.update", {{"character", "Mio"}, {"attributes", {{"age", 25}}}}); // not in the prompt: nothing to make again
@@ -296,6 +309,36 @@ TEST_CASE("cast: gen.dialogue_prompt takes a character as a subject and cites it
   s.call("character.update", {{"character", "Ren"}, {"description", "a tall man in a red coat"}});
   CHECK(s.state_of(made["clip"]) == "dirty");
   CHECK(err(*s.engine, "gen.dialogue_prompt", {{"project", s.project}, {"subjects", json::array({{{"character", "Nobody"}}})}, {"shots", spec["shots"]}}).rule == "G_CAST");
+}
+
+TEST_CASE("cast: a reference can be a part of a picture, so a face comes without the room behind it", "[cast]") {
+  Stage s;
+  // a 64 x 48 picture: the left half red, the right half blue
+  std::vector<uint8_t> bgrx(64 * 48 * 4, 255);
+  for (int y = 0; y < 48; ++y)
+    for (int x = 0; x < 64; ++x) {
+      uint8_t *px = bgrx.data() + (size_t(y) * 64 + size_t(x)) * 4;
+      px[0] = x < 32 ? 0 : 255, px[1] = 0, px[2] = x < 32 ? 255 : 0;
+    }
+  const std::string whole = s.file("whole.png");
+  REQUIRE(atm::media::write_png(whole, bgrx.data(), 64, 48));
+  const json made = s.call("character.create", {{"name", "Mio"}, {"references", json::array({{{"path", whole}, {"label", "face"}, {"crop", json::array({0.5, 0.25, 0.25, 0.5})}}})}});
+  const json refs = s.call("character.get", {{"character", "Mio"}})["references"];
+  REQUIRE(refs.size() == 1);
+  CHECK(refs[0]["path"] == "cast/whole-part.png");
+  CHECK(refs[0]["label"] == "face");
+  const auto info = atm::media::probe((fs::path(s.project) / "cast" / "whole-part.png").string());
+  REQUIRE(info);
+  CHECK(info->width == 16);
+  CHECK(info->height == 24);
+  // the whole picture is kept as it is; a second part gets a name of its own; a crop outside the picture is refused
+  s.call("character.update", {{"character", "Mio"}, {"add_references", json::array({whole, {{"path", whole}, {"crop", json::array({0.0, 0.0, 0.5, 1.0})}}})}});
+  const json more = s.call("character.get", {{"character", "Mio"}})["references"];
+  REQUIRE(more.size() == 3);
+  CHECK(more[1]["path"] == "cast/whole.png");
+  CHECK(more[2]["path"] == "cast/whole-part-2.png");
+  CHECK(s.fails("character.update", {{"character", "Mio"}, {"add_references", json::array({{{"path", whole}, {"crop", json::array({0.8, 0.0, 0.5, 1.0})}}})}}).rule == "E_PARAM");
+  CHECK(s.fails("character.update", {{"character", "Mio"}, {"add_references", json::array({{{"path", whole}, {"crop", "face"}}})}}).rule == "E_PARAM");
 }
 
 TEST_CASE("cast: what a Character node gives, and the rules of an entry", "[cast][gen]") {

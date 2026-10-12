@@ -346,7 +346,7 @@ void App::draw_cast_panel() {
       };
     }
     if (refs.empty())
-      ImGui::TextColored(hexv(look::fg3), "%s", cast_kind_ == 0 ? "A clear face from the front works best; add more angles for more shots." : "A clear picture of it works best; add more angles for more shots.");
+      ImGui::TextColored(hexv(look::fg3), "%s", cast_kind_ == 0 ? "Use a tight crop of the face, with no background: the model copies whatever else is in the picture." : "A clear picture of it works best; add more angles for more shots.");
     ImGui::Spacing();
 
     if (cast_kind_ == 0) {

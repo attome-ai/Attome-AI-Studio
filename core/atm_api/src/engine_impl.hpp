@@ -423,6 +423,7 @@ struct Engine::Impl {
   Result<json> gen_dialogue_prompt(const json &params);
   json cast_for_keys(const Project &pr) const;
   Result<std::string> cast_keep_file(Project &pr, const std::string &given);
+  Result<json> cast_keep_reference(Project &pr, const json &reference);
   Result<json> character_list(const json &params);
   Result<json> character_get(const json &params);
   Result<json> character_create(const json &params);

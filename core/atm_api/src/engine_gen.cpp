@@ -922,6 +922,7 @@ Result<json> Engine::Impl::gen_dialogue_prompt(const json &params) {
       s.erase("image");
       if (!numbers.empty())
         s["images"] = std::move(numbers);
+      s["identity"] = entry.value("kind", std::string("character")) == "character"; // a person's pictures say who, not where
       const std::string voice = gen::cast_voice(entry);
       const bool speaks = !voice.empty() && s.value("voice", true);
       s.erase("voice");

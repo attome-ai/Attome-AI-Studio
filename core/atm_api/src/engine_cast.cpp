@@ -6,6 +6,7 @@
 
 #include "atm/gen/cast.hpp"
 #include "engine_impl.hpp"
+#include "frames.hpp"
 
 namespace atm::api {
 namespace {
@@ -71,6 +72,53 @@ Result<std::string> Engine::Impl::cast_keep_file(Project &pr, const std::string 
   return fail(ErrorCode::IoError, "G_CAST", "The file \"" + given + "\" could not be kept in the project.", {}, "Rename it and try again.");
 }
 
+  // One reference picture as given: a path, or {path, label?, crop?: [x, y, w, h] (fractions of the picture), at?: seconds (a video's frame)}.
+  // A crop, or a frame of a video, is written as a new PNG in the project's cast folder; any other picture is copied there.
+Result<json> Engine::Impl::cast_keep_reference(Project &pr, const json &r) {
+  const std::string path = r.is_string() ? r.get<std::string>() : r.is_object() ? r.value("path", std::string()) : std::string();
+  json one = json::object();
+  if (r.is_object() && r.contains("label") && r["label"].is_string() && !r["label"].get<std::string>().empty())
+    one["label"] = r["label"];
+  const bool cropped = r.is_object() && r.contains("crop");
+  std::string ext = to_utf8(to_path(path).extension());
+  std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+  const bool video = ext == ".mp4" || ext == ".mov" || ext == ".m4v" || ext == ".mkv" || ext == ".webm" || ext == ".avi";
+  if (!cropped && !video && !(r.is_object() && r.contains("at"))) {
+    ATM_TRY(std::string kept, cast_keep_file(pr, path));
+    one["path"] = std::move(kept);
+    return one;
+  }
+  double box[4] = {0.0, 0.0, 1.0, 1.0};
+  if (cropped) {
+    const json &c = r["crop"];
+    if (!c.is_array() || c.size() != 4 || !std::all_of(c.begin(), c.end(), [](const json &v) { return v.is_number(); }))
+      return bad_param("crop", "must be [x, y, w, h], each a fraction of the picture from 0 to 1");
+    for (int i = 0; i < 4; ++i)
+      box[i] = c[size_t(i)].get<double>();
+    if (box[0] < 0.0 || box[1] < 0.0 || box[2] <= 0.0 || box[3] <= 0.0 || box[0] + box[2] > 1.0001 || box[1] + box[3] > 1.0001)
+      return bad_param("crop", "must lie inside the picture: x + w and y + h at most 1");
+  }
+  std::error_code ec;
+  const fs::path raw = to_path(path);
+  const fs::path source = raw.is_absolute() ? raw : pr.dir / raw;
+  if (path.empty() || !fs::is_regular_file(source, ec))
+    return fail(ErrorCode::InvalidArgument, "G_CAST", "The file \"" + path + "\" was not found.", {}, "Give the path of a picture or video file that exists.");
+  const fs::path folder = pr.dir / "cast";
+  fs::create_directories(folder, ec);
+  fs::path target;
+  std::string name;
+  for (int n = 1; n < 10000; ++n) {
+    name = to_utf8(source.stem()) + "-part" + (n > 1 ? "-" + std::to_string(n) : std::string()) + ".png";
+    target = folder / to_path(name);
+    if (!fs::exists(target, ec))
+      break;
+  }
+  if (!write_crop(to_utf8(source), to_utf8(target), r.is_object() ? r.value("at", 0.0) : 0.0, box[0], box[1], box[2], box[3]))
+    return fail(ErrorCode::MediaDecodeFailed, "G_CAST", "The picture \"" + path + "\" could not be read.", {}, "Give a PNG or JPEG picture, or a video file.");
+  one["path"] = "cast/" + name;
+  return one;
+}
+
   // character.list {project, kind?}: every entry of the cast, or those of one kind.
 Result<json> Engine::Impl::character_list(const json &params) {
   ATM_TRY(Project *pr, project(params));
@@ -122,11 +170,7 @@ Result<json> Engine::Impl::character_create(const json &params) {
       return bad_param("references", "must be a list of picture paths, or of {path, label}");
     json refs = json::array();
     for (const json &r : params["references"]) {
-      const std::string path = r.is_string() ? r.get<std::string>() : r.is_object() ? r.value("path", std::string()) : std::string();
-      ATM_TRY(std::string kept, cast_keep_file(*pr, path));
-      json one = {{"path", std::move(kept)}};
-      if (r.is_object() && r.contains("label") && r["label"].is_string() && !r["label"].get<std::string>().empty())
-        one["label"] = r["label"];
+      ATM_TRY(json one, cast_keep_reference(*pr, r));
       refs.push_back(std::move(one));
     }
     entry["references"] = std::move(refs);
@@ -189,11 +233,7 @@ Result<json> Engine::Impl::character_update(const json &params) {
       if (!given.is_array())
         return bad_param("references", "must be a list of picture paths, or of {path, label}");
       for (const json &r : given) {
-        const std::string path = r.is_string() ? r.get<std::string>() : r.is_object() ? r.value("path", std::string()) : std::string();
-        ATM_TRY(std::string kept, cast_keep_file(*pr, path));
-        json one = {{"path", std::move(kept)}};
-        if (r.is_object() && r.contains("label") && r["label"].is_string() && !r["label"].get<std::string>().empty())
-          one["label"] = r["label"];
+        ATM_TRY(json one, cast_keep_reference(*pr, r));
         const bool there = std::any_of(refs.begin(), refs.end(), [&](const json &have) { return have.value("path", std::string()) == one.value("path", std::string()); });
         if (!there)
           refs.push_back(std::move(one));
