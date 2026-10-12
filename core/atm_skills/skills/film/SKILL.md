@@ -45,11 +45,12 @@ Model: `minimax-h3.singularity-ref2va.int8` (the only one that takes reference p
   write `{Name.description}` as the setting): what kind of room, the few things that are always visible, the light.
 - **Say the time of day in the description itself, and say what the windows look like** ("tall black windows, it is
   dark outside"). "Three in the morning" alone gave daylight.
-- A long, very detailed description keeps the room more alike between shots, but shots then **open on the empty room**
-  before the people appear. Two sentences is the measure: the kind of room, where the windows are, two or three things
-  that are always there, the light ("the ceiling lights are off, the only light is the lamp and the monitors").
-  With that the room is the same long room in every shot; single shots still show daylight in a window or the ceiling
-  lights on: look at a frame of each.
+- **Keep the description short: one sentence** ("a large open newsroom in the middle of the night, rows of dark desks, a
+  few glowing monitors, rain on tall black windows, one warm desk lamp; it is dark outside"). This is the version the
+  owner judged best.
+- A longer description (where the windows are, the carpet, "the ceiling lights are off") makes the room more alike from
+  shot to shot, but the film looked **worse**: brighter and flatter, daylight in a window, ceiling lights on, and shots
+  that open on the empty room before the people appear. Likeness of the room is not worth the look.
 
 ## The shot
 
