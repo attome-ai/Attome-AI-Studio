@@ -57,6 +57,10 @@ json voice_workflow(const ModelDecl &model);
 // leaves the "start_image" Exposed Input unlinked (its value is kept). Node IDs are "$new:" placeholders when the
 // workflow's own are, else fresh ones. False when the workflow has no generate video node with a start_image input.
 bool start_from(json &workflow, std::string_view reference);
+// The same, starting on the frame of that clip at `at` seconds (below 0: its last frame) and, with a crop ([x, y, w, h], fractions of
+// the frame; null for the whole frame), on that part of it enlarged: a close-up that begins inside a wider shot of the same scene,
+// so the room, the light and where people are do not change at the cut.
+bool start_from(json &workflow, std::string_view reference, double at, const json &crop);
 
 // Makes a workflow carry on from another clip: adds a Clip Reference node (`reference`, as in start_from) and links its video to
 // the "continue_from" of the generate video node, so the clip's last 22 frames and the sound under them lead into this one. The

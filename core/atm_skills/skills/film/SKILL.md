@@ -60,12 +60,13 @@ Decide shot by shot, as a film does. Most shots are separate (a cut); a few carr
   again: he is in the middle of the room, then she sits in the dark, then they are together somewhere else. Words do
   not fix this (a longer description of the place made the film look worse).
 - **So give a scene a master first:** one wide or two-shot take of the scene's set-up (who sits where, the camera in
-  one place). Then every closer shot of that scene **starts on a part of a frame of the master**: crop the frame to
-  the person (the same shape as the canvas), and give it as the clip's `start_image`
-  (`project.patch` add `<clip>/media_ref/inputs/start_image`). Camera: "the shot begins exactly on the first frame given
-  and carries on from it". The close-up then has the master's windows, lamp and light behind the face.
-  Measured once (two close-ups, both passed the checks, both in the master's room): promising, not yet proven on a
-  whole film.
+  one place). Then every closer shot of that scene **starts on a part of a frame of the master**:
+  `gen.create_clip {start_from: <the master's clip>, start_at: <seconds into it>, start_crop: [x, y, w, h]}` (fractions of
+  the frame, the part the same shape as the canvas, around the person). Camera: "a medium close-up, the camera does not
+  move; the shot begins exactly on the first frame given and carries on from it". The close-up then has the master's
+  windows, lamp and light behind the face.
+  Measured on four close-ups in two films: three stayed in the master's room; **one left it after a second** (the
+  camera pulled back into another room) and no check caught that: look at a late frame of every close-up, and retake.
 - **Carry on (`continue_from`) only where one action runs through the cut** with the camera in one place: someone
   walks in and sits down, a long exchange in one two-shot. It works with the cast (four clips in a row kept the
   room, the seats and both faces), but a film made only of this has no cuts and no close-ups.

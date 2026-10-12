@@ -78,7 +78,9 @@ json shot_workflow(const ModelDecl &model) {
             {"primary", "video"}}}};
 }
 
-bool start_from(json &workflow, std::string_view reference) {
+bool start_from(json &workflow, std::string_view reference) { return start_from(workflow, reference, -1.0, json(nullptr)); }
+
+bool start_from(json &workflow, std::string_view reference, double at, const json &crop) {
   if (!workflow.is_object() || !workflow.contains("nodes") || !workflow["nodes"].is_object() || !workflow.contains("exposed"))
     return false;
   json &nodes = workflow["nodes"];
@@ -93,6 +95,10 @@ bool start_from(json &workflow, std::string_view reference) {
   const std::string ref = placeholders ? "$new:reference" : new_id("nod"), frame = placeholders ? "$new:frame" : new_id("nod");
   nodes[ref] = {{"kind", "attome.clip_reference"}, {"settings", {{"clip", std::string(reference)}}}, {"ui", {{"x", -520}, {"y", 20}}}};
   nodes[frame] = {{"kind", "attome.get_frame"}, {"settings", {{"frame", "last"}}}, {"ui", {{"x", -260}, {"y", 20}}}};
+  if (at >= 0.0)
+    nodes[frame]["inputs"] = {{"at", at}};
+  if (crop.is_array())
+    nodes[frame]["settings"]["crop"] = crop;
   json &links = workflow["links"];
   links[placeholders ? "$new:l_ref" : new_id("lnk")] = {{"from", json::array({ref, "video"})}, {"to", json::array({frame, "video"})}};
   links[placeholders ? "$new:l_frame" : new_id("lnk")] = {{"from", json::array({frame, "image"})}, {"to", json::array({gen, "start_image"})}};

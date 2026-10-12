@@ -705,7 +705,28 @@ Result<json> Engine::Impl::gen_create_clip(const json &params) {
   }
 
   // Starting on the last frame of another clip is two more nodes in the clip's own workflow, a Clip Reference and a Get Frame node.
-  if (!start_reference.empty() && !gen::start_from(instance, start_reference))
+  // start_at / start_crop: not the last frame of that clip but the one at a time, and a part of it: a closer shot of the same moment.
+  double start_at = -1.0;
+  json start_crop;
+  if (params.contains("start_at") || params.contains("start_crop")) {
+    if (start_reference.empty())
+      return bad_param("start_from", "is required with start_at and start_crop: the clip whose frame the shot starts on");
+    if (params.contains("start_at")) {
+      if (!params["start_at"].is_number() || params["start_at"].get<double>() < 0.0)
+        return bad_param("start_at", "must be seconds into that clip, 0 or more");
+      start_at = params["start_at"].get<double>();
+    }
+    if (params.contains("start_crop")) {
+      const json &c = params["start_crop"];
+      bool fine = c.is_array() && c.size() == 4;
+      for (size_t n = 0; fine && n < 4; ++n)
+        fine = c[n].is_number() && c[n].get<double>() >= 0.0 && c[n].get<double>() <= 1.0;
+      if (!fine || c[2].get<double>() <= 0.0 || c[3].get<double>() <= 0.0 || c[0].get<double>() + c[2].get<double>() > 1.0001 || c[1].get<double>() + c[3].get<double>() > 1.0001)
+        return bad_param("start_crop", "must be [x, y, w, h], each a fraction of the frame from 0 to 1, inside it");
+      start_crop = c;
+    }
+  }
+  if (!start_reference.empty() && !gen::start_from(instance, start_reference, start_at, start_crop))
     return fail(ErrorCode::InvalidArgument, "G_SETTING", "This workflow has no start picture to start on a clip's last frame.", {},
                 "Use a workflow with a node that takes a start_image, exposed as \"start_image\".");
 

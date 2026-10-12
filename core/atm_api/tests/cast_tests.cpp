@@ -341,6 +341,46 @@ TEST_CASE("cast: a reference can be a part of a picture, so a face comes without
   CHECK(s.fails("character.update", {{"character", "Mio"}, {"add_references", json::array({{{"path", whole}, {"crop", "face"}}})}}).rule == "E_PARAM");
 }
 
+TEST_CASE("gen.create_clip: a closer shot starts on a part of a frame of another clip", "[gen][cast]") {
+  Stage s;
+  const json master = s.call("gen.create_clip", {{"prompt", "Two people at a desk"}, {"model", atm::api::kMockModel}, {"seconds", 1}});
+  REQUIRE(s.wait(s.call("gen.run", json::object()))["state"] == "done");
+  const json close = s.call("gen.create_clip", {{"prompt", "Her face"}, {"model", atm::api::kMockModel}, {"seconds", 1}, {"start_from", master["clip"]},
+                                                {"start_at", 0.25}, {"start_crop", json::array({0.5, 0.25, 0.4, 0.4})}});
+  const json workflow = s.call("project.get", {{"id", close["clip"]}})["object"]["media_ref"]["workflow"];
+  json frame, reference;
+  for (const json &n : workflow["nodes"]) {
+    if (n["kind"] == "attome.get_frame" && n.value("settings", json::object()).contains("crop"))
+      frame = n;
+    else if (n["kind"] == "attome.clip_reference")
+      reference = n;
+  }
+  REQUIRE(frame.is_object());
+  CHECK(frame["settings"]["crop"] == json::array({0.5, 0.25, 0.4, 0.4}));
+  CHECK(frame["inputs"]["at"] == 0.25);
+  CHECK(reference["settings"]["clip"] == master["clip"]);
+  // made: the model was given a start picture, the size of a whole frame
+  REQUIRE(s.wait(s.call("gen.run", json::object()))["state"] == "done");
+  const std::string start = s.mock->last_generate().value("start_image", std::string());
+  REQUIRE(!start.empty());
+  const auto info = atm::media::probe(start);
+  REQUIRE(info);
+  const json taken = s.call("project.get", {{"id", master["clip"]}})["object"]["media_ref"];
+  const auto whole = atm::media::probe((fs::path(s.project) / taken["takes"][taken["selected"].get<std::string>()]["outputs"]["video"]["path"].get<std::string>()).string());
+  REQUIRE(whole);
+  CHECK(info->width == whole->width); // the part is enlarged to the size of the frame it was taken from
+  CHECK(info->height == whole->height);
+  // refused: a part outside the frame; a time or a part with no clip to take it from
+  const auto bad = [&](json extra) {
+    json p = {{"prompt", "x"}, {"model", atm::api::kMockModel}};
+    p.update(extra);
+    return s.fails("gen.create_clip", p).rule;
+  };
+  CHECK(bad({{"start_from", master["clip"]}, {"start_crop", json::array({0.8, 0.0, 0.5, 0.5})}}) == "E_PARAM");
+  CHECK(bad({{"start_from", master["clip"]}, {"start_at", -1}}) == "E_PARAM");
+  CHECK(bad({{"start_crop", json::array({0.0, 0.0, 0.5, 0.5})}}) == "E_PARAM");
+}
+
 TEST_CASE("cast: what a Character node gives, and the rules of an entry", "[cast][gen]") {
   const json entry = {{"kind", "character"}, {"name", "Mio"}, {"description", "silver bob"},
                       {"references", json::array({{{"path", "cast/a.png"}, {"label", "face"}}, "cast/b.png"})},

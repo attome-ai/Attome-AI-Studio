@@ -28,7 +28,8 @@
 //   The Clip Inputs node (the Exposed Inputs) and the Output node (the Outputs) are not stored as nodes: they are the two
 //   faces of "exposed" on the canvas.
 //   attome.get_frame       a node that runs here, with no model: video (and optionally "at", seconds) -> image;
-//                          settings {"frame": "first" | "last"} when "at" is not given
+//                          settings {"frame": "first" | "last"} when "at" is not given; {"crop": [x, y, w, h]} takes that part of
+//                          the frame (fractions of it) and enlarges it to the whole: a closer view of the same moment
 //   attome.generate_speech runs a model (a text-to-speech one): text, instruct (how to speak: the voice), seed -> audio
 //   attome.get_duration    a node that runs here, with no model: media (a video) or audio (a sound) -> seconds, its length. Exposed as an
 //                          Output and named by the clip's "length_from", it is how a workflow decides how long its clip is.

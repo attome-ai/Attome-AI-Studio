@@ -225,7 +225,11 @@ std::vector<GenOutcome> run_generation(const GenRun &run, const GenProgress &pro
         const double at = request.inputs.contains("at") && request.inputs["at"].is_number()
                               ? request.inputs["at"].get<double>()
                               : request.settings.value("frame", std::string("last")) == "first" ? 0.0 : -1.0;
-        if (!write_frame(video, request.outputs["image"], at))
+        // settings.crop [x, y, w, h]: a part of the frame, enlarged to the whole (a closer shot that starts inside another shot)
+        const json crop = request.settings.value("crop", json());
+        const bool closer = crop.is_array() && crop.size() == 4;
+        if (closer ? !write_frame_part(video, request.outputs["image"], at, crop[0].get<double>(), crop[1].get<double>(), crop[2].get<double>(), crop[3].get<double>())
+                 : !write_frame(video, request.outputs["image"], at))
           result = tl::unexpected(engine_error("E_INTERNAL", "A frame of " + video + " could not be read.",
                                                "The clip it comes from may have no video in its Take."));
       } else {

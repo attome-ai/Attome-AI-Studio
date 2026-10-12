@@ -448,6 +448,8 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
        "workflow":{"type":"string","description":"Instead of a model: the ID of a Clip Workflow of the project's library, a key of its workflows"},"seconds":{"type":"number"},
        "seed":{"type":"integer"},"name":{"type":"string"},
        "start_from":{"type":"string","description":"\"previous\" or a generative clip's ID"},"at":{"type":"string"},
+       "start_at":{"type":"number","description":"With start_from: start on that clip's frame at this many seconds, not on its last frame"},
+       "start_crop":{"type":"array","items":{"type":"number"},"description":"With start_from: [x, y, w, h], fractions of that frame: start on this part of it, enlarged. A CLOSE-UP THAT STARTS INSIDE A WIDER SHOT of the same scene keeps its room, light and where people are (skill film). Give the part the shape of the canvas (w equal to h as fractions)."},
        "continue_from":{"type":"string","description":"\"previous\" or a generative clip's ID (MiniMax H3): carry on from that clip seamlessly. The last 22 frames and the sound under them lead into this clip; it starts where that one ends and skips its first 22 frames, so playback is one take. At most 14.08 s."},
        "settings":{"type":"object","description":"Settings of the model, by name (gen.nodes lists them): for MiniMax H3 stage (preview | final: the latent upscaler and a refine pass), final_megapixels, sparse_keep_percent (0 = off), low_memory (on | off), steps, sampler, attention."},
        "voice":{"type":"string","description":"The path of a sound file (MiniMax H3): the speaker takes its timbre; cite it in the prompt as <Audio 1> (gen.dialogue_prompt writes that)."},

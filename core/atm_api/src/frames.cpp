@@ -32,6 +32,45 @@ bool write_frame(const std::string &video, const std::string &jpeg, double at_se
   return bool(media::write_jpeg(jpeg, bgrx.data(), w, h));
 }
 
+bool write_frame_part(const std::string &video, const std::string &jpeg, double at_seconds, double x, double y, double w, double h) {
+  const auto info = media::probe(video);
+  auto reader = media::VideoReader::open(video, 0, 0);
+  if (!info || !reader || info->rate_num <= 0)
+    return false;
+  const int64_t frame = info->rate_den * media::kHnsPerSecond / info->rate_num;
+  const int64_t last = std::max<int64_t>(0, info->duration_hns - frame / 2);
+  const int64_t at = at_seconds < 0.0 ? last : std::min<int64_t>(last, int64_t(at_seconds * double(media::kHnsPerSecond)));
+  const auto view = (*reader)->frame_at(at);
+  if (!view)
+    return false;
+  const int fw = view->width, fh = view->height;
+  std::vector<uint8_t> nv12(media::nv12_size(fw, fh)), bgrx(size_t(fw) * size_t(fh) * 4), out(size_t(fw) * size_t(fh) * 4);
+  for (int row = 0; row < fh; ++row)
+    std::copy_n(view->y + size_t(row) * size_t(view->y_pitch), fw, nv12.data() + size_t(row) * size_t(fw));
+  for (int row = 0; row < fh / 2; ++row)
+    std::copy_n(view->uv + size_t(row) * size_t(view->uv_pitch), fw, nv12.data() + size_t(fw) * size_t(fh) + size_t(row) * size_t(fw));
+  media::nv12_to_bgrx(nv12.data(), fw, fh, bgrx.data());
+  // the part, enlarged to the whole frame (bilinear): the model starts on a picture of its own size
+  const double x0 = std::clamp(x, 0.0, 1.0) * fw, y0 = std::clamp(y, 0.0, 1.0) * fh;
+  const double pw = std::clamp(w, 0.01, 1.0) * fw, ph = std::clamp(h, 0.01, 1.0) * fh;
+  for (int row = 0; row < fh; ++row) {
+    const double sy = std::clamp(y0 + (row + 0.5) * ph / fh - 0.5, 0.0, double(fh - 1));
+    const int ya = int(sy), yb = std::min(fh - 1, ya + 1);
+    const double fy = sy - ya;
+    for (int col = 0; col < fw; ++col) {
+      const double sx = std::clamp(x0 + (col + 0.5) * pw / fw - 0.5, 0.0, double(fw - 1));
+      const int xa = int(sx), xb = std::min(fw - 1, xa + 1);
+      const double fx = sx - xa;
+      for (int c = 0; c < 4; ++c) {
+        const double top = bgrx[(size_t(ya) * fw + xa) * 4 + c] * (1.0 - fx) + bgrx[(size_t(ya) * fw + xb) * 4 + c] * fx;
+        const double bottom = bgrx[(size_t(yb) * fw + xa) * 4 + c] * (1.0 - fx) + bgrx[(size_t(yb) * fw + xb) * 4 + c] * fx;
+        out[(size_t(row) * fw + col) * 4 + c] = uint8_t(std::clamp(top * (1.0 - fy) + bottom * fy + 0.5, 0.0, 255.0));
+      }
+    }
+  }
+  return bool(media::write_jpeg(jpeg, out.data(), fw, fh, 0.95f));
+}
+
 bool write_crop(const std::string &source, const std::string &png, double at_seconds, double x, double y, double w, double h) {
   int fw = 0, fh = 0;
   std::vector<uint8_t> bgrx;

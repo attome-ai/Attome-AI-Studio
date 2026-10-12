@@ -417,6 +417,16 @@ void check_workflow(const json &library, const json &workflow, const std::string
         add("G_VARIABLE", id + "/type", "Variable node " + id + " has the type \"" + type + "\".",
             "Use the Data Type of its Variable: text, number, integer, boolean, image, video, audio or mask.");
     } else if (def && short_name(kind) == "get_frame") {
+      if (const auto crop = node_settings.find("crop"); crop != node_settings.end()) {
+        bool fine = crop->is_array() && crop->size() == 4;
+        for (size_t n = 0; fine && n < 4; ++n)
+          fine = (*crop)[n].is_number() && (*crop)[n].get<double>() >= 0.0 && (*crop)[n].get<double>() <= 1.0;
+        fine = fine && (*crop)[2].get<double>() > 0.0 && (*crop)[3].get<double>() > 0.0 && (*crop)[0].get<double>() + (*crop)[2].get<double>() <= 1.0001 &&
+               (*crop)[1].get<double>() + (*crop)[3].get<double>() <= 1.0001;
+        if (!fine)
+          add("G_SETTING", id + "/settings/crop", "Get Frame node " + id + " takes a crop of [x, y, w, h], each a fraction of the picture, inside it.",
+              "Example: [0.5, 0.25, 0.4, 0.4] is a part in the right half.");
+      }
       if (const auto frame = node_settings.find("frame"); frame != node_settings.end() && (!frame->is_string() || (*frame != "first" && *frame != "last")))
         add("G_SETTING", id + "/settings/frame", "Get Frame node " + id + " takes \"first\" or \"last\" as its frame.",
             "Or give the input \"at\" a time in seconds.");
