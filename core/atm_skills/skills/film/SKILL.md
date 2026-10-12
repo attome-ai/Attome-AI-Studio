@@ -52,6 +52,26 @@ Model: `minimax-h3.singularity-ref2va.int8` (the only one that takes reference p
   shot to shot, but the film looked **worse**: brighter and flatter, daylight in a window, ceiling lights on, and shots
   that open on the empty room before the people appear. Likeness of the room is not worth the look.
 
+## A scene: which shots are separate, which carry on
+
+Decide shot by shot, as a film does. Most shots are separate (a cut); a few carry on.
+
+- **Separate shots made on their own do not share a room.** Each one invents the room, the light and where people sit
+  again: he is in the middle of the room, then she sits in the dark, then they are together somewhere else. Words do
+  not fix this (a longer description of the place made the film look worse).
+- **So give a scene a master first:** one wide or two-shot take of the scene's set-up (who sits where, the camera in
+  one place). Then every closer shot of that scene **starts on a part of a frame of the master**: crop the frame to
+  the person (the same shape as the canvas), and give it as the clip's `start_image`
+  (`project.patch` add `<clip>/media_ref/inputs/start_image`). Camera: "the shot begins exactly on the first frame given
+  and carries on from it". The close-up then has the master's windows, lamp and light behind the face.
+  Measured once (two close-ups, both passed the checks, both in the master's room): promising, not yet proven on a
+  whole film.
+- **Carry on (`continue_from`) only where one action runs through the cut** with the camera in one place: someone
+  walks in and sits down, a long exchange in one two-shot. It works with the cast (four clips in a row kept the
+  room, the seats and both faces), but a film made only of this has no cuts and no close-ups.
+- When checking a clip that carries on, leave out its first 22 frames (0.92 s): they repeat the end of the clip
+  before, and the listener hears that clip's last word again.
+
 ## The shot
 
 - One shot = one `gen.create_clip`, `continuous: true`. Do not ask for cuts inside a clip.
