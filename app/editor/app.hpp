@@ -615,7 +615,20 @@ private:
   int media_kind_ = 0; // the Media panel's filter: 0 all, 1 video, 2 audio, 3 pictures
   int text_tab_ = 0, fx_tab_ = 0, gen_tab_ = 0; // the tab chosen in the Text, Effects and Generate panels; 0 is All
   int inspector_tab_ = 0;
-  int rail_tab_ = 0; // 0 Media, 2 Text, 3 Effects, 4 Generate, 6 Models, 7 Library, 8 Niches
+  int rail_tab_ = 0; // 0 Media, 2 Text, 3 Effects, 4 Generate, 6 Models, 7 Library, 8 Niches, 9 Cast
+  // The Cast panel (rail tab 9): the characters, places and props of the project (atm_gen cast.hpp).
+  std::string cast_sel_, cast_look_, cast_manner_, dialog_cast_picture_, dialog_cast_voice_;
+  char cast_name_[128] = {}, cast_attr_name_[64] = {}, cast_attr_value_[160] = {};
+  int cast_kind_ = 0; // 0 character, 1 place, 2 prop
+  bool cast_editing_ = false, cast_dirty_ = false;
+  std::vector<std::pair<std::string, std::string>> cast_attrs_; // the attributes of the open entry, as typed
+  void draw_cast_panel();
+  void cast_open(const std::string &id);
+  void cast_new(int kind);
+  void cast_save();
+  void cast_delete();
+  void cast_add_file(const std::string &path, bool voice);
+  void ask_cast_file(bool voice);
   // The user's clip library (library.*), the same in every project.
   json library_items_ = json::array();
   bool library_stale_ = true;

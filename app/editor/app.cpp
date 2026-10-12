@@ -2406,7 +2406,7 @@ namespace {
 
 void App::take_dialog_results() {
   std::vector<std::string> import;
-  std::string out, project, lut, models_folder, input, wf_import, wf_export, niche_video, niche_cookies;
+  std::string out, project, lut, models_folder, input, wf_import, wf_export, niche_video, niche_cookies, cast_picture, cast_voice;
   {
     std::lock_guard lock(dialog_mutex_);
     import.swap(dialog_import_);
@@ -2419,7 +2419,13 @@ void App::take_dialog_results() {
     wf_export.swap(dialog_wf_export_);
     niche_video.swap(dialog_niche_video_);
     niche_cookies.swap(dialog_niche_cookies_);
+    cast_picture.swap(dialog_cast_picture_);
+    cast_voice.swap(dialog_cast_voice_);
   }
+  if (!cast_picture.empty())
+    cast_add_file(cast_picture, false);
+  if (!cast_voice.empty())
+    cast_add_file(cast_voice, true);
   if (!niche_cookies.empty())
     niche_cookies_ = niche_cookies;
   if (!niche_video.empty())

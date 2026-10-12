@@ -218,6 +218,16 @@ TEST_CASE("cast: a shot that uses characters gets their pictures and one voice, 
   ok(*s.engine, "project.undo", {{"project", s.project}});
   CHECK(s.state_of(clip) == "clean");
 
+  // A clip that is already there takes one more entry: a node, a link, and the name to write in its prompt.
+  s.call("character.create", {{"name", "Kit"}, {"kind", "prop"}, {"references", json::array({s.file("mio.wav")})}});
+  const json used = s.call("character.use", {{"clip", clip}, {"character", "Kit"}});
+  CHECK(used["prompt_name"] == "{Kit}");
+  CHECK(used["node"].get<std::string>().rfind("nod_", 0) == 0);
+  CHECK(s.state_of(clip) == "dirty");
+  CHECK(s.fails("character.use", {{"clip", clip}, {"character", "Kit"}}).rule == "G_CAST");
+  ok(*s.engine, "project.undo", {{"project", s.project}});
+  CHECK(s.state_of(clip) == "clean");
+
   // Someone a clip reads cannot be taken out of the cast.
   CHECK(s.fails("character.delete", {{"character", "Ren"}}).rule == "G_CAST");
 

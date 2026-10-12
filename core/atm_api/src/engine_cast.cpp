@@ -278,4 +278,57 @@ Result<json> Engine::Impl::character_delete(const json &params) {
   return json{{"removed", id}, {"name", name}, {"revision", applied["revision"]}};
 }
 
+  // character.use {project, clip, character, voice?}: make a generative clip show an entry of the cast: a Character node in the clip's
+  // own workflow, its pictures linked to the model's references and (voice, default true, when it has a sample) its voice to the
+  // model's voice. One edit. The clip's prompt is not changed: name the entry in it as {Name}.
+Result<json> Engine::Impl::character_use(const json &params) {
+  ATM_TRY(Project *pr, project(params));
+  ATM_TRY(const std::string *clip, string_param(params, "clip"));
+  ATM_TRY(const std::string *who, string_param(params, "character"));
+  const json cast = pr->doc.root().value("cast", json::object());
+  const std::string id = gen::cast_id(cast, *who);
+  if (id.empty())
+    return no_such(*who);
+  const doc::NodeRef *ref = pr->doc.find(*clip);
+  const json media = ref ? ref->node->value("media_ref", json::object()) : json::object();
+  const json workflow = media.value("workflow", json::object());
+  if (media.value("type", std::string()) != "workflow" || !workflow.contains("nodes"))
+    return fail(ErrorCode::UnknownId, "G_WORKFLOW", "\"" + *clip + "\" is not a generative clip.", {}, "Pass the ID of a clip made by gen.create_clip.");
+  std::string gen_node;
+  for (auto it = workflow["nodes"].begin(); it != workflow["nodes"].end(); ++it) {
+    const std::string kind = it->value("kind", std::string());
+    if (kind == "attome.generate_video")
+      gen_node = it.key();
+    else if (kind == "attome.character" && it->value("character", std::string()) == id)
+      return fail(ErrorCode::InvalidArgument, "G_CAST", "The clip already uses " + cast[id].value("name", id) + ".", {}, "Nothing to do.");
+  }
+  const json inputs = workflow.value("exposed", json::object()).value("inputs", json::object());
+  const gen::ModelDecl *decl = gen::main_model(workflow);
+  if (gen_node.empty() || !decl || !decl->takes("references"))
+    return fail(ErrorCode::InvalidArgument, "G_SETTING", "The model of this clip does not take reference pictures, so it cannot use the cast.", {},
+                "Use a model that lists references in its inputs (MiniMax H3 Singularity).");
+  const std::string base = *clip + "/media_ref/workflow";
+  int have = 0;
+  for (const json &n : workflow["nodes"])
+    have += n.value("kind", std::string()) == "attome.character";
+  json ops = json::array();
+  ops.push_back({{"op", "add"}, {"path", base + "/nodes/$new:chr"},
+                 {"value", {{"kind", "attome.character"}, {"character", id}, {"ui", {{"x", -520}, {"y", 560 + 140 * have}}}}}});
+  ops.push_back({{"op", "add"}, {"path", base + "/links/$new:l_ref"},
+                 {"value", {{"from", json::array({"$new:chr", "references"})}, {"to", json::array({gen_node, "references"})}}}});
+  if (inputs.contains("references") && inputs["references"].contains("to"))
+    ops.push_back({{"op", "remove"}, {"path", base + "/exposed/inputs/references/to"}});
+  const bool voice = params.value("voice", true) && decl->takes("voice") && !gen::cast_voice(cast[id]).empty();
+  if (voice) {
+    ops.push_back({{"op", "add"}, {"path", base + "/links/$new:l_voice"},
+                   {"value", {{"from", json::array({"$new:chr", "voice"})}, {"to", json::array({gen_node, "voice"})}}}});
+    if (inputs.contains("voice") && inputs["voice"].contains("to"))
+      ops.push_back({{"op", "remove"}, {"path", base + "/exposed/inputs/voice/to"}});
+  }
+  const std::string name = cast[id].value("name", id);
+  ATM_TRY(json applied, project_patch({{"project", to_utf8(pr->dir)}, {"patch", {{"ops", std::move(ops)}, {"label", "Use " + name + " in the clip"}}}}));
+  return json{{"clip", *clip}, {"character", id}, {"node", applied["id_map"].value("$new:chr", std::string())}, {"voice", voice},
+              {"prompt_name", "{" + name + "}"}, {"revision", applied["revision"]}};
+}
+
 } // namespace atm::api

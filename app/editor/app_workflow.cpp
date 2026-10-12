@@ -1506,6 +1506,11 @@ void App::draw_workflow_canvas(const json &library) {
       const json &vars = object_in(doc_, "variables");
       sub = var.empty() ? "No variable chosen" : vars.contains(var) ? "\"" + vars[var].value("name", var) + "\"" : "Not in the project";
       sub_bad = var.empty() || !vars.contains(var);
+    } else if (def && std::string_view(def->id) == "character") {
+      const std::string who = b.node->value("character", std::string());
+      const json &cast = object_in(doc_, "cast");
+      sub = who.empty() ? "No one chosen" : cast.contains(who) ? cast[who].value("name", who) : "Not in the cast";
+      sub_bad = who.empty() || !cast.contains(who);
     } else if (def && std::string_view(def->id) == "clip_reference") {
       const std::string named = object_in(*b.node, "settings").value("clip", std::string());
       const ClipUi *other = named.empty() || named == "previous" || named == "next" ? nullptr : find_clip(named);
@@ -2603,6 +2608,51 @@ void App::draw_workflow_side(const json &library) {
       ImGui::PopStyleColor();
       if (vars.empty())
         ImGui::TextColored(hexv(look::fg3), "The project has no variables yet.");
+    } else if (short_kind == "character") {
+      // The entry of the cast it reads, by name; and, for its "attribute" output, which attribute.
+      const json &cast = object_in(doc_, "cast");
+      const std::string chosen = node.value("character", std::string());
+      ImGui::TextColored(hexv(look::fg2), "Who");
+      ImGui::SameLine(label_w);
+      ImGui::PushStyleColor(ImGuiCol_FrameBg, hexv(look::raised));
+      ImGui::SetNextItemWidth(-1.0f);
+      if (ImGui::BeginCombo("##wf_character", cast.contains(chosen) ? cast[chosen].value("name", chosen).c_str() : "Choose from the cast")) {
+        for (auto c = cast.begin(); c != cast.end(); ++c) {
+          const std::string cid = c.key();
+          if (ImGui::Selectable((c->value("name", cid) + "##" + cid).c_str(), cid == chosen) && cid != chosen) {
+            const bool had = node.contains("character");
+            pending_ = [this, id, cid, had] { patch(json::array({{{"op", had ? "replace" : "add"}, {"path", id + "/character"}, {"value", cid}}}), "Choose from the cast"); };
+          }
+          ui_mark("wfcharacter:" + c->value("name", cid));
+        }
+        ImGui::EndCombo();
+      }
+      ui_mark("combo:wf_character");
+      if (cast.contains(chosen)) {
+        const json &attributes = object_in(cast[chosen], "attributes");
+        const std::string attribute = object_in(node, "settings").value("attribute", std::string());
+        ImGui::TextColored(hexv(look::fg2), "Attribute");
+        ImGui::SameLine(label_w);
+        ImGui::SetNextItemWidth(-1.0f);
+        if (ImGui::BeginCombo("##wf_character_attribute", attribute.empty() ? "None" : attribute.c_str())) {
+          for (auto a = attributes.begin(); a != attributes.end(); ++a)
+            if (ImGui::Selectable(a.key().c_str(), a.key() == attribute) && a.key() != attribute) {
+              const bool had_settings = node.contains("settings"), had = object_in(node, "settings").contains("attribute");
+              const std::string name = a.key();
+              pending_ = [this, id, name, had_settings, had] {
+                if (!had_settings)
+                  patch(json::array({{{"op", "add"}, {"path", id + "/settings"}, {"value", json{{"attribute", name}}}}}), "Choose attribute");
+                else
+                  patch(json::array({{{"op", had ? "replace" : "add"}, {"path", id + "/settings/attribute"}, {"value", name}}}), "Choose attribute");
+              };
+            }
+          ImGui::EndCombo();
+        }
+      }
+      ImGui::PopStyleColor();
+      ImGui::PushTextWrapPos(0.0f);
+      ImGui::TextColored(hexv(look::fg3), cast.empty() ? "The project has no cast yet: add someone in the Cast panel." : "Gives their pictures, voice, look and attributes. The clip follows every change to them.");
+      ImGui::PopTextWrapPos();
     } else if (short_kind == "clip_reference") {
       // The clip it reads: the one before or after this clip on the timeline, or a named clip.
       const std::string named = object_in(node, "settings").value("clip", std::string());
