@@ -255,10 +255,12 @@ TEST_CASE("cast: gen.dialogue_prompt takes a character as a subject and cites it
                      {"subjects", json::array({{{"character", "Ren"}}, {{"character", "Mio"}}, "a white cat"})},
                      {"shots", json::array({{{"camera", "a wide shot"}, {"action", "They look at the city"},
                                              {"lines", json::array({{{"subject", 1}, {"text", "It is late."}, {"tone", "quiet"}}})}}})}};
+  json both = spec; // both speak
+  both["shots"][0]["lines"].push_back({{"subject", 2}, {"text", "Then go home."}, {"tone", "dry"}});
   // A character needs the project it is in.
   CHECK(err(*s.engine, "gen.dialogue_prompt", spec).rule == "E_PARAM");
 
-  const json out = s.call("gen.dialogue_prompt", spec);
+  const json out = s.call("gen.dialogue_prompt", both);
   const std::string prompt = out["prompt"];
   INFO(prompt);
   // The pictures in the order the model gets them: cast/mio_body.png, cast/mio_face.png, cast/ren.png; the voices: cast/mio.wav, cast/ren.wav.
@@ -284,9 +286,16 @@ TEST_CASE("cast: gen.dialogue_prompt takes a character as a subject and cites it
   CHECK(out["characters"] == json::array({ren, mio}));
   CHECK(out["voices"] == json::array({ren, mio}));
 
+  // Only who has a line gets a voice: with no line for Mio, hers is not one of the samples (the model takes three at most).
+  json one_speaker = spec;
+  one_speaker["subjects"] = json::array({{{"character", "Ren"}}, {{"character", "Mio"}}});
+  const json lone = s.call("gen.dialogue_prompt", one_speaker);
+  CHECK(lone["voices"] == json::array({ren}));
+  CHECK(lone["prompt"].get<std::string>().find("<Audio 2>") == std::string::npos);
+
   // A subject can be told not to speak with its sample, and to show some of its attributes.
   s.call("character.update", {{"character", "Mio"}, {"attributes", {{"injured", "left arm in a sling"}, {"age", 24}}}});
-  json quiet = spec;
+  json quiet = both;
   quiet["subjects"] = json::array({{{"character", "Ren"}, {"voice", false}}, {{"character", "Mio"}, {"attributes", json::array({"injured", "nothing"})}}});
   const json one = s.call("gen.dialogue_prompt", quiet);
   CHECK(one["voices"] == json::array({mio}));

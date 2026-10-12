@@ -816,6 +816,7 @@ Result<json> Engine::Impl::gen_create_clip(const json &params) {
         return fail(ErrorCode::UnknownId, "G_CAST", "\"" + params["voice_of"].get<std::string>() + "\" is not in the project's cast.", {}, "See who is with character.list.");
     }
     const bool own_voice = params.contains("voice"); // a voice file of the clip's own: the cast gives none
+    int voices_linked = 0;
     std::set<std::string> seen;
     for (const json &c : params["characters"]) {
       const std::string who = c.is_string() ? c.get<std::string>() : std::string();
@@ -826,6 +827,9 @@ Result<json> Engine::Impl::gen_create_clip(const json &params) {
         continue;
       const bool give_voice = !own_voice && face.contains("voice") && !gen::cast_voice(cast[id]).empty() &&
                               (chosen ? speakers.count(id) > 0 : voice_of.empty() || voice_of == id);
+      if (give_voice && ++voices_linked > gen::kMaxVoices)
+        return fail(ErrorCode::InvalidArgument, "G_SETTING", "The model takes at most " + std::to_string(gen::kMaxVoices) + " voice samples in one shot.", {},
+                    "Give voices: the ones who speak in this shot (gen.dialogue_prompt returns that list).");
       if (!gen::use_character(instance, id, give_voice))
         return fail(ErrorCode::InvalidArgument, "G_SETTING", "This workflow has no generate video node that takes references.", {},
                     "Use a model's own Shot workflow, or a workflow with a generate video node.");
@@ -921,8 +925,20 @@ Result<json> Engine::Impl::gen_dialogue_prompt(const json &params) {
       return bad_param("project", "is required when a subject names a character of the cast");
     ATM_TRY(Project *pr, project(params));
     const json cast = cast_for_keys(*pr);
+    // Who has a line in these shots: only they need a voice sample (the model takes at most three, and a sample nobody speaks with
+    // is a slot wasted).
+    std::set<int> speaking;
+    if (spec.contains("shots") && spec["shots"].is_array())
+      for (const json &shot : spec["shots"])
+        if (shot.is_object() && shot.contains("lines") && shot["lines"].is_array())
+          for (const json &line : shot["lines"])
+            if (line.is_object())
+              speaking.insert(line.value("subject", 0));
     std::vector<std::string> pictures, samples;
-    for (const json &s : spec["subjects"])
+    int subject_number = 0, voices_given = 0;
+    std::set<int> voiced_subjects;
+    for (const json &s : spec["subjects"]) {
+      ++subject_number;
       if (casts(s)) {
         const std::string id = gen::cast_id(cast, s["character"].get<std::string>());
         if (id.empty())
@@ -930,11 +946,22 @@ Result<json> Engine::Impl::gen_dialogue_prompt(const json &params) {
                       "See who is with character.list, or add it with character.create.");
         for (const std::string &p : gen::cast_references(cast[id]))
           pictures.push_back(p);
-        if (const std::string voice = gen::cast_voice(cast[id]); !voice.empty() && s.value("voice", true))
+        if (const std::string voice = gen::cast_voice(cast[id]);
+            !voice.empty() && s.value("voice", true) && speaking.count(subject_number) && voices_given < gen::kMaxVoices) {
           samples.push_back(voice);
+          voiced_subjects.insert(subject_number);
+          ++voices_given;
+        }
       }
+    }
+    if (int(gen::reference_order(pictures).size()) > gen::kMaxReferencePictures)
+      return fail(ErrorCode::InvalidArgument, "G_CAST", "These subjects have more reference pictures together than the model takes (" +
+                                                              std::to_string(gen::kMaxReferencePictures) + ").",
+                  {}, "Keep one or two pictures for each, or show fewer of the cast in this shot.");
+    subject_number = 0;
     const std::vector<std::string> order = gen::reference_order(pictures), voices = gen::reference_order(samples);
     for (json &s : spec["subjects"]) {
+      ++subject_number;
       if (!casts(s))
         continue;
       const std::string id = gen::cast_id(cast, s["character"].get<std::string>());
@@ -957,7 +984,7 @@ Result<json> Engine::Impl::gen_dialogue_prompt(const json &params) {
         s["images"] = std::move(numbers);
       s["identity"] = entry.value("kind", std::string("character")) == "character"; // a person's pictures say who, not where
       const std::string voice = gen::cast_voice(entry);
-      const bool speaks = !voice.empty() && s.value("voice", true);
+      const bool speaks = voiced_subjects.count(subject_number) > 0;
       s.erase("voice");
       s.erase("audio");
       if (speaks) {

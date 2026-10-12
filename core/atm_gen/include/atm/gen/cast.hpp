@@ -27,6 +27,10 @@
 
 namespace atm::gen {
 
+// What one generate video step of MiniMax H3 takes at most (its reference-to-video node): voice samples and reference pictures.
+constexpr int kMaxVoices = 3;
+constexpr int kMaxReferencePictures = 9;
+
 // The entry with this ID, or else with this name (letter case does not matter); null when there is none.
 const json *find_cast(const json &cast, std::string_view id_or_name);
 // Its ID; empty when there is none.
