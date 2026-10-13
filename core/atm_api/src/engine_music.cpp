@@ -9,10 +9,10 @@ namespace {
 
   // The four files ACE-Step 1.5 needs in ComfyUI's models folder, as ComfyUI names them.
 constexpr const char *kMusicUnet = "acestep_v1.5_xl_turbo_bf16.safetensors";
+constexpr const char *kMusicModel = "ace-step.1.5-xl-turbo";
 constexpr const char *kMusicFilesHint =
-    "ACE-Step 1.5 needs four files in ComfyUI's models folder: diffusion_models/acestep_v1.5_xl_turbo_bf16.safetensors, "
-    "text_encoders/qwen_0.6b_ace15.safetensors, text_encoders/qwen_4b_ace15.safetensors and vae/ace_1.5_vae.safetensors "
-    "(about 20 GB; ask the user before downloading). Restart ComfyUI after adding them.";
+    "Download the model with models.fetch {id: \"ace-step.1.5-xl-turbo\"} (four files, 19.9 GB: ask the user first) into the models folder "
+    "ComfyUI reads (models.set_folder chooses it), then restart ComfyUI.";
 
 std::string url_part(const std::string &s) {
   std::string out;
@@ -55,6 +55,9 @@ Result<json> Engine::Impl::music_make(const json &params) {
     pr = found;
     output = to_utf8(pr->dir / ".attome" / "music" / ("music_" + std::to_string(seed) + "_" + std::to_string(int(seconds)) + "s_" + new_id("m").substr(2, 8) + ".wav"));
   }
+  // Not on this computer at all: say so before ComfyUI is asked (it would only name the first file it misses).
+  if (const models::CatalogEntry *entry = models::find_entry(models::builtin_catalog(), kMusicModel); entry && !model_installed(kMusicModel))
+    return fail(ErrorCode::ModelMissing, "E_MODEL_FILE", "The music model (ACE-Step 1.5 XL turbo) is not on this computer.", {}, kMusicFilesHint);
   if (comfyui_address.empty())
     return fail(ErrorCode::WorkerUnavailable, "G_ENGINE", "Music is made by ComfyUI, and no ComfyUI address is set.", {},
                 "Set it with gen.set_comfyui {address: \"http://127.0.0.1:8188\"} (the address is remembered).");

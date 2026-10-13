@@ -393,11 +393,13 @@ TEST_CASE("music.make asks for what it needs before it calls an engine", "[gen][
   CHECK(err(*f.engine, "music.make", {{"tags", "piano"}, {"project", f.project}, {"seconds", 2}}).rule == "E_PARAM"); // too short
   CHECK(err(*f.engine, "music.make", {{"tags", "piano"}, {"project", f.project}, {"bpm", 400}}).rule == "E_PARAM");
   CHECK(err(*f.engine, "music.make", {{"tags", "piano"}}).rule == "E_PARAM");                                         // nowhere to write it
-  if (ok(*f.engine, "gen.engines", json::object()).value("comfyui", std::string()).empty()) {
-    const atm::Error none = err(*f.engine, "music.make", {{"tags", "piano"}, {"project", f.project}});
-    CHECK(none.rule == "G_ENGINE");
-    CHECK(none.hint.find("gen.set_comfyui") != std::string::npos);
-  }
+  // The music model is in the catalog, so the engine can download it, and a computer without it is told how.
+  const std::string catalog = ok(*f.engine, "models.list", json::object()).dump();
+  INFO(catalog.substr(0, 600));
+  CHECK(catalog.find("ace-step.1.5-xl-turbo") != std::string::npos);
+  const atm::Error none = err(*f.engine, "music.make", {{"tags", "piano"}, {"project", f.project}});
+  CHECK(none.rule == "E_MODEL_FILE");
+  CHECK(none.hint.find("models.fetch") != std::string::npos);
 }
 
 TEST_CASE("audio.match levels the clips it is given and reads a generative clip's Take", "[gen][audio][match]") {

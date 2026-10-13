@@ -20,6 +20,12 @@ namespace {
 // ggerganov/whisper.cpp at revision 5359861c739e955e79d9a303bcbc70fb988958b1 (read 2026-10-09: the revision, size and hash are what the
 // repository's own headers report for ggml-small.bin, and the hash matches the file as downloaded).
 #define ATM_WHISPER "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/"
+// Comfy-Org/ace_step_1.5_ComfyUI_files at revision 6707deb277e9e0907fd9c14ce6b6f1d695c6a3fc (read 2026-10-13: sizes and hashes are what the
+// repository reports; the sizes match the files as downloaded).
+// hexgrad/Kokoro-82M at revision f3ff3571791e39611d31c381e3a41a3af07b4987 (read 2026-10-13: sizes and hashes are what the repository reports, and
+// every file listed here matched the copy on disk).
+#define ATM_KOKORO "https://huggingface.co/hexgrad/Kokoro-82M/resolve/f3ff3571791e39611d31c381e3a41a3af07b4987/"
+#define ATM_ACESTEP "https://huggingface.co/Comfy-Org/ace_step_1.5_ComfyUI_files/resolve/6707deb277e9e0907fd9c14ce6b6f1d695c6a3fc/split_files/"
 
 constexpr const char *kCatalog = R"json({
   "version": 1,
@@ -158,6 +164,95 @@ constexpr const char *kCatalog = R"json({
         {"path": "latent_upscale_models/minimax_h3_latent_upscaler_3d_conv_v1_fp16.safetensors", "size": 690592672,
          "sha256": "043e5a48e161610ef6c3ea974645220354d06fa618abca15f76d084812eb55c2",
          "url": ")json" ATM_H3UPSCALER R"json(minimax_h3_latent_upscaler_3d_conv_v1/minimax_h3_latent_upscaler_3d_conv_v1_fp16.safetensors"}
+      ]
+    },
+    {
+      "id": "ace-step.1.5-xl-turbo",
+      "title": "ACE-Step 1.5 XL turbo: music from words",
+      "kind": "model",
+      "licence": "Apache 2.0: free to use, also commercially.",
+      "licence_url": "https://huggingface.co/ACE-Step/Ace-Step1.5",
+      "notes": "Makes a piece of music from a description (genre, instruments, mood), a tempo and a key: music.make. Run by ComfyUI, about 10 s for a minute of music on a 24 GB GPU. The files must be in the models folder ComfyUI reads.",
+      "files": [
+        {"path": "vae/ace_1.5_vae.safetensors", "size": 337431732,
+         "sha256": "6de92e3a862acd287e08b024ac90f0783a8635451b728721a33ff03565bcb2bb",
+         "url": ")json" ATM_ACESTEP R"json(vae/ace_1.5_vae.safetensors"},
+        {"path": "text_encoders/qwen_0.6b_ace15.safetensors", "size": 1191588248,
+         "sha256": "fd4590c82153b8ddb67e15a2e7aaa8afa8b83a858c8a9b82a4831063156aa7a7",
+         "url": ")json" ATM_ACESTEP R"json(text_encoders/qwen_0.6b_ace15.safetensors"},
+        {"path": "text_encoders/qwen_4b_ace15.safetensors", "size": 8379154232,
+         "sha256": "ffe5ffb855086c2ab55e467e9859fb01894781020a0376484dd19de166b79873",
+         "url": ")json" ATM_ACESTEP R"json(text_encoders/qwen_4b_ace15.safetensors"},
+        {"path": "diffusion_models/acestep_v1.5_xl_turbo_bf16.safetensors", "size": 9974719892,
+         "sha256": "86a1afb0a1f711f0e3304ff65d874df3ae6783db683dcf982513fb9b6d14ae71",
+         "url": ")json" ATM_ACESTEP R"json(diffusion_models/acestep_v1.5_xl_turbo_bf16.safetensors"}
+      ]
+    },
+    {
+      "id": "kokoro.82m",
+      "title": "Kokoro: speech from text, with a ready-made voice",
+      "kind": "model",
+      "licence": "Apache 2.0: free to use, also commercially.",
+      "licence_url": "https://huggingface.co/hexgrad/Kokoro-82M",
+      "notes": "Clean English voices to choose from, fast: voice.make and Voice clips. Run by ComfyUI with the attome_kokoro node; the files must be in the models folder ComfyUI reads.",
+      "files": [
+        {"path": "Kokorotts/Kokoro-82M/config.json", "size": 2351,
+         "sha256": "5abb01e2403b072bf03d04fde160443e209d7a0dad49a423be15196b9b43c17f",
+         "url": ")json" ATM_KOKORO R"json(config.json"},
+        {"path": "Kokorotts/Kokoro-82M/kokoro-v1_0.pth", "size": 327212226,
+         "sha256": "496dba118d1a58f5f3db2efc88dbdc216e0483fc89fe6e47ee1f2c53f18ad1e4",
+         "url": ")json" ATM_KOKORO R"json(kokoro-v1_0.pth"},
+        {"path": "Kokorotts/Kokoro-82M/voices/af_bella.pt", "size": 523425,
+         "sha256": "8cb64e02fcc8de0327a8e13817e49c76c945ecf0052ceac97d3081480e8e48d6",
+         "url": ")json" ATM_KOKORO R"json(voices/af_bella.pt"},
+        {"path": "Kokorotts/Kokoro-82M/voices/af_heart.pt", "size": 523425,
+         "sha256": "0ab5709b8ffab19bfd849cd11d98f75b60af7733253ad0d67b12382a102cb4ff",
+         "url": ")json" ATM_KOKORO R"json(voices/af_heart.pt"},
+        {"path": "Kokorotts/Kokoro-82M/voices/af_nicole.pt", "size": 523430,
+         "sha256": "c5561808bcf5250fe8c5f5de32caf2d94f27e57e95befdb098c5c85991d4c5da",
+         "url": ")json" ATM_KOKORO R"json(voices/af_nicole.pt"},
+        {"path": "Kokorotts/Kokoro-82M/voices/af_sarah.pt", "size": 523425,
+         "sha256": "49bd364ea3be9eb3e9685e8f9a15448c4883112a7c0ff7ab139fa4088b08cef9",
+         "url": ")json" ATM_KOKORO R"json(voices/af_sarah.pt"},
+        {"path": "Kokorotts/Kokoro-82M/voices/af_sky.pt", "size": 523351,
+         "sha256": "c799548aed06e0cb0d655a85a01b48e7f10484d71663f9a3045a5b9362e8512c",
+         "url": ")json" ATM_KOKORO R"json(voices/af_sky.pt"},
+        {"path": "Kokorotts/Kokoro-82M/voices/am_adam.pt", "size": 523420,
+         "sha256": "ced7e284aba12472891be1da3ab34db84cc05cc02b5889535796dbf2d8b0cb34",
+         "url": ")json" ATM_KOKORO R"json(voices/am_adam.pt"},
+        {"path": "Kokorotts/Kokoro-82M/voices/am_eric.pt", "size": 523420,
+         "sha256": "ada66f0eefff34ec921b1d7474d7ac8bec00cd863c170f1c534916e9b8212aae",
+         "url": ")json" ATM_KOKORO R"json(voices/am_eric.pt"},
+        {"path": "Kokorotts/Kokoro-82M/voices/am_fenrir.pt", "size": 523430,
+         "sha256": "98e507eca1db08230ae3b6232d59c10aec9630022d19accac4f5d12fcec3c37a",
+         "url": ")json" ATM_KOKORO R"json(voices/am_fenrir.pt"},
+        {"path": "Kokorotts/Kokoro-82M/voices/am_liam.pt", "size": 523420,
+         "sha256": "c82550757ddb31308b97f30040dda8c2d609a9e2de6135848d0a948368138518",
+         "url": ")json" ATM_KOKORO R"json(voices/am_liam.pt"},
+        {"path": "Kokorotts/Kokoro-82M/voices/am_michael.pt", "size": 523435,
+         "sha256": "9a443b79a4b22489a5b0ab7c651a0bcd1a30bef675c28333f06971abbd47bd37",
+         "url": ")json" ATM_KOKORO R"json(voices/am_michael.pt"},
+        {"path": "Kokorotts/Kokoro-82M/voices/am_onyx.pt", "size": 523420,
+         "sha256": "e8452be16cd0f6da7b4579eaf7b1e4506e92524882053d86d72b96b9a7fed584",
+         "url": ")json" ATM_KOKORO R"json(voices/am_onyx.pt"},
+        {"path": "Kokorotts/Kokoro-82M/voices/am_puck.pt", "size": 523420,
+         "sha256": "dd1d8973f4ce4b7d8ae407c77a435f485dabc052081b80ea75c4f30b84f36223",
+         "url": ")json" ATM_KOKORO R"json(voices/am_puck.pt"},
+        {"path": "Kokorotts/Kokoro-82M/voices/bf_emma.pt", "size": 523420,
+         "sha256": "d0a423deabf4a52b4f49318c51742c54e21bb89bbbe9a12141e7758ddb5da701",
+         "url": ")json" ATM_KOKORO R"json(voices/bf_emma.pt"},
+        {"path": "Kokorotts/Kokoro-82M/voices/bm_daniel.pt", "size": 523430,
+         "sha256": "fc3fce4e9c12ed4dbc8fa9680cfe51ee190a96444ce7c3ad647549a30823fc5d",
+         "url": ")json" ATM_KOKORO R"json(voices/bm_daniel.pt"},
+        {"path": "Kokorotts/Kokoro-82M/voices/bm_fable.pt", "size": 523425,
+         "sha256": "d44935f3135257a9064df99f007fc1342ff1aa767552b4a4fa4c3b2e6e59079c",
+         "url": ")json" ATM_KOKORO R"json(voices/bm_fable.pt"},
+        {"path": "Kokorotts/Kokoro-82M/voices/bm_george.pt", "size": 523430,
+         "sha256": "f1bc812213dc59774769e5c80004b13eeb79bd78130b11b2d7f934542dab811b",
+         "url": ")json" ATM_KOKORO R"json(voices/bm_george.pt"},
+        {"path": "Kokorotts/Kokoro-82M/voices/bm_lewis.pt", "size": 523425,
+         "sha256": "b5204750dcba01029d2ac9cec17aec3b20a6d64073c579d694a23cb40effbd0e",
+         "url": ")json" ATM_KOKORO R"json(voices/bm_lewis.pt"}
       ]
     },
     {
