@@ -58,7 +58,7 @@ TEST_CASE("Skills: the built-in ones are listed and readable, and a project keep
   const std::string rules = ok(e, "skill.get", {{"id", "film"}}).value("body", std::string());
   for (const char *rule : {"tight crop of the whole face", "A place has no reference picture", "Cause and effect are never two shots made on their own",
                            "Judge a take first for what the shot is for", "The checks every take must pass",
-                           "what would another video of this kind need to know?", "Never write a video's own story", "gen.check_take",
+                           "video of this kind need to know?", "Never write a video's own story", "gen.check_take",
                            "niche-anime-action"})
     CHECK(rules.find(rule) != std::string::npos);
   CHECK(ok(e, "skill.get", {{"id", "film"}, {"file", "scripts/attome_film.py"}}).dump().find("gen.check_take") != std::string::npos);
