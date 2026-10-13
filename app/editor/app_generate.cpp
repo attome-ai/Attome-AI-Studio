@@ -1353,6 +1353,113 @@ void App::draw_generate_card(const ClipUi &c) {
   end_card();
 }
 
+// "Auto captions" with no speech model on the computer: a sheet that says what the download is and starts it, shows how far it is, and
+// makes the captions when the model is there. The download is the Models panel's own (models.fetch), so the two always agree.
+void App::draw_asr_offer() {
+  if (asr_offer_clip_.empty())
+    return;
+  poll_models();
+  const auto entry_of = [&](const std::string &id) {
+    for (const json &e : models_.value("entries", json::array()))
+      if (e.value("id", "") == id)
+        return e;
+    return json();
+  };
+  static const char *kModels[] = {"whisper.large-v3-turbo-q5", "whisper.small"};
+  if (asr_offer_model_.empty()) // a download that the Models panel already started counts
+    for (const char *id : kModels)
+      if (entry_of(id).value("state", "") == "downloading")
+        asr_offer_model_ = id;
+  if (!asr_offer_model_.empty() && entry_of(asr_offer_model_).value("state", "") == "installed") {
+    pending_ = [this, clip = std::exchange(asr_offer_clip_, std::string())] { auto_captions(clip); };
+    asr_offer_model_.clear();
+    return;
+  }
+  const auto gb = [](int64_t bytes) {
+    char text[32];
+    std::snprintf(text, sizeof text, "%.0f MB", double(bytes) / 1e6);
+    return std::string(text);
+  };
+  ImGuiViewport *vp = ImGui::GetMainViewport();
+  ImGui::OpenPopup("Speech model");
+  ImGui::SetNextWindowPos(vp->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+  ImGui::SetNextWindowSize(ImVec2(520.0f * s_, 0.0f));
+  ImGui::PushStyleColor(ImGuiCol_PopupBg, hexv(look::panel));
+  ImGui::PushStyleColor(ImGuiCol_Border, hexv(look::line2));
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 16.0f);
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(22.0f, 18.0f));
+  const bool open = ImGui::BeginPopupModal("Speech model", nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoTitleBar);
+  ImGui::PopStyleVar(2);
+  ImGui::PopStyleColor(2);
+  if (!open)
+    return;
+  bool close = false;
+  ImGui::PushFont(g_fonts.bold, 18.0f);
+  ImGui::TextUnformatted("Auto captions need a speech model");
+  ImGui::PopFont();
+  ImGui::Spacing();
+  ImGui::PushTextWrapPos(0.0f);
+  if (asr_offer_model_.empty()) {
+    ImGui::TextColored(hexv(look::fg2), "It is downloaded once, kept on this computer, and works without the internet after that. The captions are made from the clip as soon as it is there.");
+    ImGui::Spacing();
+    const char *notes[] = {"Better in Arabic and about as good in English.", "Smaller and faster to download."};
+    const char *labels[] = {"Whisper large-v3 turbo", "Whisper small"};
+    for (int i = 0; i < 2; ++i) {
+      const json e = entry_of(kModels[i]);
+      const int64_t size = e.value("size", int64_t(0)), have = e.value("bytes", int64_t(0));
+      ImGui::PushID(i);
+      ImGui::TextUnformatted(labels[i]);
+      ImGui::TextColored(hexv(look::fg3), "%s", notes[i]);
+      const std::string label = (have > 0 ? "Continue download, " : "Download, ") + gb(size - have);
+      if (soft_button("asr_download", label.c_str(), ImVec2(0.0f, 30.0f), size > 0, i == 0)) {
+        json started;
+        model_jobs_.erase(kModels[i]);
+        if (rpc("models.fetch", {{"id", kModels[i]}}, started)) {
+          model_jobs_[kModels[i]] = {{"job", started.value("job_id", "")}, {"state", "running"}};
+          asr_offer_model_ = kModels[i];
+        }
+        next_models_poll_ = 0.0;
+      }
+      ImGui::PopID();
+      ImGui::Spacing();
+    }
+    if (soft_button("asr_offer_cancel", "Not now", ImVec2(96.0f, 30.0f)))
+      close = true;
+  } else {
+    const json e = entry_of(asr_offer_model_);
+    const int64_t size = e.value("size", int64_t(0)), bytes = e.value("bytes", int64_t(0));
+    if (job_failed(model_jobs_, asr_offer_model_)) {
+      ImGui::TextColored(kError, "%s", model_jobs_[asr_offer_model_].value("error", json::object()).value("message", "The download failed.").c_str());
+      if (soft_button("asr_back", "Back", ImVec2(96.0f, 30.0f)))
+        asr_offer_model_.clear();
+    } else {
+      const auto job = model_jobs_.find(asr_offer_model_);
+      const double rate = job != model_jobs_.end() ? job->second.value("bytes_per_second", 0.0) : 0.0;
+      ImGui::TextColored(hexv(look::fg2), "Downloading. The captions follow when it is done; you can keep editing.");
+      ImGui::PushStyleColor(ImGuiCol_PlotHistogram, hexv(look::accent));
+      ImGui::ProgressBar(size > 0 ? float(double(bytes) / double(size)) : 0.0f, ImVec2(-1.0f, 6.0f), "");
+      ImGui::PopStyleColor();
+      ImGui::TextColored(hexv(look::fg2), "%s of %s, %.1f MB/s", gb(bytes).c_str(), gb(size).c_str(), rate / 1e6);
+      if (soft_button("asr_stop", "Stop", ImVec2(96.0f, 30.0f))) {
+        json unused;
+        rpc("jobs.cancel", {{"job_id", e.value("job_id", "")}}, unused);
+        asr_offer_model_.clear();
+        next_models_poll_ = 0.0;
+      }
+      ImGui::SameLine();
+      if (soft_button("asr_hide", "Hide", ImVec2(96.0f, 30.0f))) // the download goes on; the Models panel shows it
+        close = true;
+    }
+  }
+  ImGui::PopTextWrapPos();
+  if (close) {
+    asr_offer_clip_.clear();
+    asr_offer_model_.clear();
+    ImGui::CloseCurrentPopup();
+  }
+  ImGui::EndPopup();
+}
+
 // The model store: what can be downloaded, what is on disk, and the download itself. The download runs in the daemon,
 // so it goes on when this panel is closed; a stopped one continues from where it stopped.
 void App::poll_models() {

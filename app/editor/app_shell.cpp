@@ -193,6 +193,7 @@ void App::frame(double dt) {
     ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport(), ImGuiDockNodeFlags_KeepAliveOnly);
     draw_workflows();
     draw_export();
+    draw_asr_offer();
     draw_toasts();
     run_pending();
     frame_ms_ = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - frame_start).count();
@@ -222,6 +223,7 @@ void App::frame(double dt) {
   if (show_profiler_)
     draw_profiler();
   draw_export();
+  draw_asr_offer();
   draw_shortcuts_sheet();
   draw_settings();
   draw_monitor_full();
