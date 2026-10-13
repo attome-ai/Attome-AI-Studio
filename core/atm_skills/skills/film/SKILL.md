@@ -42,6 +42,12 @@ Model: `minimax-h3.singularity-ref2va.int8` (the only one that takes reference p
   a reverse grip, the blades pointing down along her forearms". Without this the weapon changes from shot to shot (the
   owner: "the sword keeps changing, she holds it in the wrong direction"). Five shots of a swordsman made again with only
   these words all showed the same slim blade.
+  - **Say where the thing is in every shot, and where it is not.** In a close-up the model moves a weapon to the
+    person's back if nothing says otherwise (the owner: "she holds the weapon in the first shot; when she talks it is on
+    her back"). In the description: "she wears nothing on her back: no sheaths, no blades behind her shoulders". In the
+    shot: "she holds one dagger up beside her cheek in her right hand"; "her two daggers lie on the stone in front of her,
+    out of her hands". Six takes with these words: none had a weapon on her back.
+  - Ask the owner how a thing is held before fixing it in words: a reverse grip written in by guess was the wrong one.
   - **A picture of the weapon as a prop helps a small, distinct object and harms a long thin one.** A pair of crescent
     daggers named as a second subject ("<Subject 2> held up beside her face") matched their picture in every shot. A
     katana as a prop was drawn as a huge broad blade in most shots (the pictured object is enlarged): use words for it.
