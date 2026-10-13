@@ -126,6 +126,14 @@ Decide shot by shot, as a film does. Most shots are separate (a cut); a few carr
   one who was hit sliding or kneeling after.
   The side-view exchange below is one of these shots, not the whole fight. Not drawn well: a held pose with a delayed
   fall (two people just stand).
+- **Cause and effect are never two shots made apart.** A kick in one shot and her slide in another, a leap in one and
+  a landing beside the enemy in another: the poses and the places do not join, and the viewer sees it (the owner: "the way
+  he kicks her does not make sense, she transitions into the pose"; "he jumps so high, but later appears behind the big
+  man"). Either one shot holds the action and its result (jump, kick, fall: one side-view shot), or the result **carries
+  on** from the action (`continue_from`: the kick lands, the next clip is her skidding away from it).
+  Shots made apart are for what does not have to join: eyes, a weapon at the lens, the floor breaking, a reaction.
+- **Judge every take for what the shot is for, first.** A take made again to fix the sword had the right sword and no
+  action at all; it went into the film and made it worse.
 - **A fight is two fighters, whole in one frame, seen from the side, in one exchange.** "They trade fast blows, a burst of
   sparks at every clash, while they circle each other"; "their blades lock, they push face to face"; "she slashes at his
   head, he ducks under the blade and drives his shoulder into her". The model draws these well.
