@@ -40,7 +40,8 @@ PICTURES OF THE THING
 - No written text, labels or diagrams in the picture: they come out as nonsense letters. Titles belong in the edit.
 
 SOUND
-- All speech at one level; one quiet score under the whole film, pulled down under the voices; no effects needed.
+- All speech at one level (`audio.match`); one quiet score under the whole film (`music.make`: "gentle warm piano, soft
+  strings, wonder, slow", 72 bpm), pulled down under the voices (`audio.duck`); no effects needed.
 
 CHECKS (besides those of `film`)
 - Hear the whole finished film (`asr.transcribe`, in parts of a minute: a longer piece made the listener repeat a

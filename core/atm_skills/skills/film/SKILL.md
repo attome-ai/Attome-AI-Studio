@@ -26,28 +26,29 @@ read `niche-anime-action` after this; for a film that explains something, `niche
 5. Notes with a time in the film ("at 0:23 the kick does not lead to her pose") are the best evidence: find the shot, find
    the cause, fix that shot, and write the cause as a rule.
 
-Files of this skill: `LAB.md` (the evidence) and `scripts/` (the recipes the experiments ran with: `film.py` drives the
-engine, `newsroom.py` holds the checks, `words.py` hears a clip, `drift.py` measures whether a shot holds its place,
-`music.py` makes a score). They hold paths of the machine they were written on: adapt the top of each.
+Files of this skill: `LAB.md` (the evidence) and `scripts/`. **`scripts/attome_film.py` is the one to use**: a driver of a
+hundred lines over the Tools (a shot made and checked, the cut, the score, the export), with no path of any machine in it.
+The others are the records of the experiments, with the paths of the machine they ran on: read them for their prompts.
 
 ## Setting up (once for a film)
 
-- The engine: `attome` (the command line; `attome tools` lists the Tools). Call a Tool with
-  `attome --daemon never --json call <tool> params.json`; every Tool takes `project` (the path of the `.attome` folder).
-- It needs to know where the models are and where the generator runs: the environment variables `ATTOME_MODELS_DIR`
-  and `ATTOME_COMFYUI` (ask the owner or look in the machine's notes if they are not set).
+Everything is a Tool of the engine; nothing here needs a program of your own beyond calling them.
+
+- The engine: `attome` (`attome tools` lists the Tools with their parameters). Call one with
+  `attome --daemon never --json call <tool> -` and the parameters as JSON on standard input; every Tool takes `project`
+  (the path of the `.attome` folder).
+- Where the models are and where the generator runs: `gen.engines` shows what is set. If nothing is, set the environment
+  variables `ATTOME_MODELS_DIR` and `ATTOME_COMFYUI`, or once `models.set_folder` and `gen.set_comfyui` (remembered).
+  Ask the owner where they are; never download a model without listing the files and sizes and a clear yes.
 - A project: `attome new <folder>/<Name>.attome --name <Name> --rate 24 --canvas 1920x1080`.
-- A shot: `gen.dialogue_prompt` -> `gen.create_clip` (returns `clip`) -> `attome gen run <project> --clip <clip>`
-  (`--new-take` for another take). The take's file: `project.get {id: <clip>}`, `object.media_ref.takes[selected]
-  .outputs.video.path`, relative to the project folder.
-- **Draft size**: after `gen.create_clip`, in the clip's workflow (`object.media_ref.workflow.nodes`) find the node of
-  kind `attome.project` and set its `settings/pixels` to 450000 with `project.patch`
-  (`{op: replace, path: "<clip>/media_ref/workflow/nodes/<node>/settings/pixels", value: 450000}`).
-- `scripts/film.py` does all of this in forty lines (class `Film`: `call`, `shot`, `run`, `take`): adapt its three
-  paths and use it, rather than writing it again.
-- The cut: the films so far were joined with ffmpeg (trim, one level for speech, the score pulled down under the
-  voices: see `scripts/anime_cut5.py`). The engine's own edit (`timeline.edit`, `render.sequence`) has not been used
-  for a film yet: if you use it, look at the result and write down what happened.
+- A shot: `gen.dialogue_prompt` -> `gen.create_clip` (**`megapixels: 0.45`** for a draft; returns `clip`) ->
+  `attome gen run <project> --clip <clip>` (`--new-take` for another take) -> **`gen.check_take {clip}`**.
+- A take's file, to look at its frames: `project.get {id: <clip>}`, `object.media_ref.takes[selected].outputs.video.path`,
+  relative to the project folder. Look at 5-8 frames of every take (ffmpeg, or `see.frames` once it is on the timeline).
+- The film: `timeline.edit` (`move` the clips in order onto a new track, `delete_track` the old one), `audio.match`,
+  `music.make`, `audio.duck`, `attome render <project> -o film.mp4`. See "The cut" below.
+- `scripts/attome_film.py` does all of this (`Film.shot`, `Film.make`, `Film.cut`): get it with
+  `skill.get {id: "film", file: "scripts/attome_film.py"}`, save it beside your work and import it.
 
 ## The order of work
 
@@ -55,11 +56,12 @@ engine, `newsroom.py` holds the checks, `words.py` hears a clip, `drift.py` meas
 2. Write each scene as shots, with the lines spoken in each. Decide for each shot how it joins its neighbours (below).
 3. For each shot: `gen.dialogue_prompt` (subjects `{character: name}`) -> `gen.create_clip` (pass its `characters` and
    `voices`) -> `gen.run`.
-4. **Check every take** (below). A take that fails is made again: `gen.run --clip <id> --new-take`. Keep the best.
-5. Sound and music in the edit; `render.sequence`.
+4. **Check every take**: `gen.check_take`, and your own eyes on its frames (below). A take that fails is made again
+   (`--new-take`); keep the best (`gen.select_take`).
+5. The cut, the sound and the music (below); the export.
 
 Model: `minimax-h3.singularity-ref2va.int8` (the only one that takes reference pictures), `steps: 8`. Work at draft size
-(0.45 megapixels) until the content is right: full size makes the picture sharper and changes nothing in what happens.
+(`megapixels: 0.45`) until the content is right: full size makes the picture sharper and changes nothing in what happens.
 
 ## What the model does by itself (why the rules exist)
 
@@ -178,29 +180,41 @@ Shots made on their own share nothing. Decide for each shot which of these it is
   reaction, then a clip that carries on in which it happens.
 - `music: 'none'` in every shot: the model's music changes from clip to clip.
 
-## Sound and music
+## The cut, the sound and the music
 
-- One level for all speech; the model's other sound a few dB under it; short fades at the cuts.
-- **One bed of the place's air under a whole scene**: a 12 s take of the empty place, played forward then backward (no
-  loop is heard).
-- **Music** (no Tool yet: ACE-Step 1.5 XL turbo through ComfyUI, `scripts/music.py`): about 10 s to make a minute. Tags
-  (genre, instruments, mood), a BPM, a key, lyrics "[instrumental]". A track stays at one level from start to end: make
-  one track for each part of a scene (tension, action, after) and cut between them on the picture. Pull the music down
-  under speech (side-chain).
+- **The cut**: one `timeline.edit` with `add_track {id: "$new:film", kind: video, position: top}`, then for each clip of
+  the film in order `move {clip, to: "<seconds>s", track: "$new:film"}` (the time is the sum of the lengths before it:
+  `project.get` -> `timing.duration`), then `delete_track` of the track the clips were made on (the takes not used go
+  with it). A clip that carries on already skips the 22 frames it repeats: do not trim it.
+- **One level for all speech**: `audio.match {clips: [the spoken clips], lufs: -17}`; the shots with only the place's
+  air: `lufs: -30`. Generated takes come out at different levels.
+- **Music**: `music.make {project, tags, seconds, bpm, key}` (genre, instruments and mood in words; about 10 s for a
+  minute; it needs ACE-Step 1.5 in the owner's ComfyUI and says so when it is missing). Put it on the timeline with
+  `add_clip {asset, at: "0s", duration, gain_db: -25 - its lufs, fade_in, fade_out}`, then `audio.duck {clip: <music>,
+  over: [<film track>], db: 8}`. A piece stays at one level from start to end: for a scene that changes make one piece
+  for each part (tension, action, after) and cut between them on the picture.
+- A shot that should be silent but murmurs: retake it, or set its `audio.gain_db` to -60 and let the music carry it.
+- **The export**: `attome render <project> -o film.mp4` (a 3-minute film: seconds). Then check the film itself:
+  `audio.analyze {path}` (peak under -1 dB), frames (`see.contact_sheet`), and hear it in parts of a minute
+  (`asr.transcribe {path, from, duration: 60}`): every line there, in order, nothing extra.
+- Under a fight: an impact (`sfx.make`) on every flash (see `niche-anime-action`).
 
 ## The checks every take must pass
 
-Do these after every `gen.run`. **Judge a take first for what the shot is for** (is the action there?), then for the
+**`gen.check_take {project, clip}`** measures the rows marked (T) and answers `{ok, problems: [{check, message, hint}]}`:
+call it after every `gen.run`, with `hold: true` for a shot told to keep its place and `cut_limit: 0.7` for fast action.
+It was calibrated on 22 takes of two films. The other rows are yours: the Tool cannot see what a shot is *for*.
+**Judge a take first for what the shot is for** (is the action there?), then for the
 thing you made it again to fix: a take with the right detail and no action made a film worse.
 
 | Check | How | Fails when |
 |---|---|---|
 | The shot shows what it is for | look at 5-8 frames spread over the take | the action is missing, half done, or done by the wrong person |
-| No cut inside the shot | the largest scene-change score between two frames (ffmpeg `select='gte(scene,0)',metadata=print`) | above 0.15 for a calm shot (clean: under 0.07; a cut to a reference picture: 0.3-1.0). Niches with flashes set their own line |
-| The line is over before the cut | the level of the sound in the last 0.15 s of the clip | above -34 dB (speech about -20, a quiet place about -45). Not the word times of `asr.transcribe`: the last word is stretched to the end of the file |
-| A shot told to hold its place does | 1 - the correlation of a 48 x 27 grey copy of the first frame with each later frame; the largest | above 0.85 (held: 0.06-0.71; left: 1.05; one bad example, a thin margin). Not for a moving camera |
-| The words are the script | `asr.transcribe`, word by word against the lines | less than 90 % alike, or extra words (a sigh, a name said twice) |
-| A shot without lines is silent | `asr.transcribe` on it too | words are heard: people who are told nothing murmur (1 of 3). Retake with "their mouths are closed, nobody speaks, no voice is heard", or give the shot the sound of an empty shot of the place |
+| (T) No cut inside the shot | the largest scene-change score between two frames (ffmpeg `select='gte(scene,0)',metadata=print`) | above 0.15 for a calm shot (clean: under 0.07; a cut to a reference picture: 0.3-1.0). Niches with flashes set their own line |
+| (T) The line is over before the cut | the level of the sound in the last 0.15 s of the clip | above -34 dB (speech about -20, a quiet place about -45). Not the word times of `asr.transcribe`: the last word is stretched to the end of the file |
+| (T) A shot told to hold its place does | 1 - the correlation of a 48 x 27 grey copy of the first frame with each later frame; the largest | above 0.85 (held: 0.06-0.71; left: 1.05; one bad example, a thin margin). Not for a moving camera |
+| (T) The words are the script | `asr.transcribe`, word by word against the lines | less than 90 % alike, or extra words (a sigh, a name said twice) |
+| (T) A shot without lines is silent | `asr.transcribe` on it too | words are heard: people who are told nothing murmur (1 of 3). Retake with "their mouths are closed, nobody speaks, no voice is heard", or give the shot the sound of an empty shot of the place |
 | Nothing foreign in the picture | look at the corners of the frames | a broadcaster's mark, a caption, letters (1 of 10 cutaways): retake with "no logo, no watermark and no letters anywhere in the picture" (clean 2 of 2) |
 | Continuity | compare with the shot before and after | a thing held differently, on the back, a different length; a person somewhere they could not have got to |
 

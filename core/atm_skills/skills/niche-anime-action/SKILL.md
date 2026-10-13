@@ -73,7 +73,7 @@ SOUND
   under the last shots. One track for the whole scene stays at one level and reads as flat.
 
 CHECKS (besides those of `film`)
-- The cut check's line is 0.7 here (fast action measures 0.1-0.45; a cut to a reference picture 0.9-1.0). In the
+- `gen.check_take` with `cut_limit: 0.7`: the cut check's line is 0.7 here (fast action measures 0.1-0.45; a cut to a reference picture 0.9-1.0). In the
   side-view chains the flashes are wanted: look at those by eye.
 - Every action shot: is the action there, done by the right one, with the weapon in the hand?
 - Across the cut: the weapon the same length and held the same way; the struck one where the blow would send them.
