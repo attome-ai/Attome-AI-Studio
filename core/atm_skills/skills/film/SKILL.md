@@ -10,7 +10,7 @@ about how the model behaves, not about one video. They were found by experiment 
 model does otherwise), and the words that work. The films they were found on are only evidence (`LAB.md`).
 
 A kind of video with rules of its own is a **niche** (a skill named `niche-...`, see `niche-rules`): for action and fights
-read `niche-anime-action` after this.
+read `niche-anime-action` after this; for a film that explains something, `niche-explainer-film`.
 
 ## Keeping what is learned (part of the work, every time)
 
@@ -60,6 +60,8 @@ Model: `minimax-h3.singularity-ref2va.int8` (the only one that takes reference p
   - A whole frame as the reference: shots cut to a copy of that frame, wall and all.
   - A crop that cuts off part of the face, or keeps background at its edges: the shot lands in a place like that background.
   - Anything else in the crop comes along in every shot (a strap, a hilt behind the shoulder, a collar): crop it out.
+  - **Film the portrait with room around the head** (from the waist up, empty wall above and beside). A face that fills
+    the portrait cannot be cropped tight: the crop is the whole frame, and shots cut to a copy of it (2 of 3).
 - **One face picture per person.** A second angle made no visible difference. A "reference sheet" made by generating
   the person on a plain background does not work (the old background is copied into it).
 - **A voice sample** is 3-5 s of that person speaking alone. Each speaker of a shot gets their own (`voices`); at most
@@ -86,6 +88,9 @@ Model: `minimax-h3.singularity-ref2va.int8` (the only one that takes reference p
   - A prop's picture: a 2 s shot of the object alone, "a locked-off product shot, the whole object in the centre of the
     frame, seen from the side, on a plain pale grey surface; no people, no hands"; the frame at 1 s.
   - Three subjects in a shot at most (two people and one object): with four, one of the people is lost.
+- **A voice from off screen is a cast entry with a voice sample and no picture** ("the warm slow voice of an old man,
+  heard from off screen, never seen"). In the shot: "nobody is in the picture; the voice of <Subject 1> is heard from off
+  screen". The speaker was never drawn (10 of 10 cutaways). Someone else may be in the picture and stays silent if told so.
 - **A place has no reference picture.** Named as a subject with a picture, shots open on that exact picture, empty, and
   then cut to the action. A place is words (next section) and a master (the section after).
 - In a prompt a cast entry is `{Name}` (its name and look) or `{Name.attribute}`: the clip follows every change to it.
@@ -111,14 +116,20 @@ Shots made on their own share nothing. Decide for each shot which of these it is
   - **The master must be filmed from the angle the closer shots have.** A part of a view from above is left within half
     a second (0 of 16 held). Eye-level masters held (7 of 8).
   - About one closer shot in four leaves its place after a second: measure it (drift, below) and retake.
+  - **The part a closer shot starts on holds one person and at most a sliver of the other** (a shoulder at the edge).
+    With half of the other's head in it the shot left its place (4 of 4); with a sliver it held (4 of 4).
 - **A clip that carries on (`continue_from`)** where one motion runs through the join: someone walks in and sits, a long
   exchange in one framing, **an action and its result**. The place, the positions and the faces hold.
   - **At most four in a chain**; then start a new one.
   - A person who was not in the chain cannot enter it (drawn as a dark figure). A person CAN enter a shot that starts on
     a still frame ("<Subject 2> comes in from the right edge of the frame").
-  - When checking such a clip leave out its first 22 frames (0.92 s): they repeat the clip before.
+  - When checking such a clip leave out its first 22 frames (0.92 s): they repeat the clip before, its last word too
+    (heard as an "extra word").
   - **Who leaves the frame is gone**: the next clip of the chain does not bring them back. Write the end of each clip so
     that everyone needed next is still in the picture ("drops to one knee in front of her", not "falls").
+- **The next scene in the same place starts on the last frame of the scene before** (`start_from` that clip,
+  `start_at` its last second, `start_crop: [0, 0, 1, 1]`): the place is the same one, and a new object can be brought
+  into it ("he lifts ... from under the table and lays it on the table").
 - **Several sequences in one exact place: a stage.** One shot with the constant person at one side and the rest of the
   frame empty; the first clip of every sequence starts on the same frame of it (`start_crop: [0, 0, 1, 1]`) and the
   other person comes in from the empty side.
@@ -170,6 +181,8 @@ thing you made it again to fix: a take with the right detail and no action made 
 | The line is over before the cut | the level of the sound in the last 0.15 s of the clip | above -34 dB (speech about -20, a quiet place about -45). Not the word times of `asr.transcribe`: the last word is stretched to the end of the file |
 | A shot told to hold its place does | 1 - the correlation of a 48 x 27 grey copy of the first frame with each later frame; the largest | above 0.85 (held: 0.06-0.71; left: 1.05; one bad example, a thin margin). Not for a moving camera |
 | The words are the script | `asr.transcribe`, word by word against the lines | less than 90 % alike, or extra words (a sigh, a name said twice) |
+| A shot without lines is silent | `asr.transcribe` on it too | words are heard: people who are told nothing murmur (1 of 3). Give the shot the sound of an empty shot of the place |
+| Nothing foreign in the picture | look at the corners of the frames | a broadcaster's mark, a caption, letters (1 of 10 cutaways): crop it out or retake |
 | Continuity | compare with the shot before and after | a thing held differently, on the back, a different length; a person somewhere they could not have got to |
 
 ## How to experiment (so a lesson is a lesson)
@@ -187,6 +200,8 @@ thing you made it again to fix: a take with the right detail and no action made 
 - A scene of a minute with two people in a place they had never been in: a four-part master and two dirty singles, every
   take passed on the first try, about 7 minutes at draft size. The same people were recognisable in a second scene.
 - Four drawn characters, each recognisable in every shot, also four in one frame.
+- A film of three minutes (two people at a table, 23 shots, 10 of them with a voice from off screen): 19 of 23 first
+  takes passed, about 35 minutes at draft size (LAB 53).
 - **The rules carry to a new video**: a second drawn fight with other people, place and weapons, made from this skill
   and `niche-anime-action` alone: 17 of 24 first takes usable, the rest fixed in one round of retakes (LAB 51-52).
 
