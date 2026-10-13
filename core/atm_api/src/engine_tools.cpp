@@ -447,6 +447,7 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
        "prompt":{"type":"string"},"model":{"type":"string","description":"An id from gen.models"},
        "workflow":{"type":"string","description":"Instead of a model: the ID of a Clip Workflow of the project's library, a key of its workflows"},"seconds":{"type":"number"},
        "seed":{"type":"integer"},"name":{"type":"string"},
+       "megapixels":{"type":"number","description":"The size it is made at, in the canvas's shape: 0.9 by default. 0.45 is a DRAFT: the same shot, less sharp, about three times faster. Work at draft size until what happens in the shots is right (skill film)."},
        "start_from":{"type":"string","description":"\"previous\" or a generative clip's ID"},"at":{"type":"string"},
        "start_at":{"type":"number","description":"With start_from: start on that clip's frame at this many seconds, not on its last frame"},
        "start_crop":{"type":"array","items":{"type":"number"},"description":"With start_from: [x, y, w, h], fractions of that frame: start on this part of it, enlarged. A CLOSE-UP THAT STARTS INSIDE A WIDER SHOT of the same scene keeps its room, light and where people are (skill film). Give the part the shape of the canvas (w equal to h as fractions)."},
@@ -565,6 +566,21 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
      R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},
        "clip":{"type":"string"},"take":{"type":"string"}},"required":["project","clip","take"]})",
      &Impl::gen_select_take},
+    {"gen.check_take", "gen", false,
+     "Check the selected Take of a generative clip, as the skill film asks after every gen.run: is there a cut inside the shot (cut.score above cut_limit; "
+     "a cut to a copy of a reference picture measures 0.3 to 1), is what is said the script (the lines of the clip's prompt, or `lines`; heard by the speech "
+     "model: match under 0.9, or added words), is someone still speaking when the clip ends (end_db above -34), does a shot told to hold its place leave it "
+     "(hold: true; drift above 0.85), and does a shot without lines have speech. Returns {ok, problems: [{check, message, hint}], cut, drift, end_db, heard, "
+     "match}. A clip that carries on from another is checked from the first frame it shows. The numbers say where to look: also look at the frames yourself "
+     "(is the action there, are the people and things right). A Take with problems is made again with gen.run {scope: \"selected\", clips: [id], new_take: true}.",
+     R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},
+       "clip":{"type":"string","description":"A generative clip that has a Take"},
+       "lines":{"type":"array","items":{"type":"string"},"description":"The lines spoken in the shot, in order. Default: the ones in the clip's prompt. An empty list: nobody speaks."},
+       "hold":{"type":"boolean","description":"true for a shot told not to move its camera (a closer shot started inside a master): it must stay on the picture it starts on"},
+       "cut_limit":{"type":"number","description":"Default 0.15, for a calm shot. 0.7 for fast action with flashes (they measure 0.1 to 0.45)."},
+       "language":{"type":"string","description":"The language spoken, as a code (en, ar): default from the prompt, else auto"},
+       "listen":{"type":"boolean","description":"Default true. false leaves the words out (faster)."}},"required":["project","clip"]})",
+     &Impl::gen_check_take},
     {"models.list", "models", false,
      "The models this version can download, with their size, licence and what is already on disk (installed, partial, downloading, missing); "
      "the folder downloads go to with its free space, and the other folders that are looked in.",

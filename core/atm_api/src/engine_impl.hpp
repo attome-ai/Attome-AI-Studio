@@ -318,6 +318,7 @@ struct Engine::Impl {
   Result<json> ytdlp_install(const json &params);
   Result<json> video_fetch(const json &params);
   Result<json> asr_transcribe(const json &params);
+  Result<asr::Options> asr_options(const std::string &wanted_model, const std::string &language, const std::string &device, std::string &model_id);
   Result<json> music_fit(const json &params);
   Result<json> clip_motion(const json &params);
   Result<json> text_pop(const json &params);
@@ -438,6 +439,7 @@ struct Engine::Impl {
   Result<json> gen_export_workflow(const json &params);
   Result<json> gen_import_workflow(const json &params);
   Result<json> gen_select_take(const json &params);
+  Result<json> gen_check_take(const json &params);
   static bool models_dir_fixed();
   fs::path models_dir() const;
   static bool same_folder(const fs::path &a, const fs::path &b);

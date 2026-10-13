@@ -368,6 +368,14 @@ TEST_CASE("workflow: a clip made by gen.create_clip has its own copy of the buil
   CHECK(made["width"].get<int>() % 16 == 0);
   CHECK(ok(e, "project.get", {{"project", project}, {"id", made["clip"]}})["object"]["timing"]["duration"] == "2");
 
+  // megapixels: a draft is made smaller, in the same shape; the clip's Project node holds the size, so the run makes it at that.
+  const json draft = ok(e, "gen.create_clip", {{"project", project}, {"prompt", "A draft"}, {"model", atm::api::kMockModel}, {"seconds", 2}, {"megapixels", 0.45}});
+  CHECK(draft["width"].get<int>() * draft["height"].get<int>() <= 450000 * 102 / 100);
+  CHECK(draft["width"].get<int>() * draft["height"].get<int>() < made["width"].get<int>() * made["height"].get<int>());
+  const json draft_wf = instance(draft);
+  CHECK(draft_wf["nodes"][node_of(draft_wf, "attome.project")]["settings"]["pixels"] == 450000);
+  CHECK(err(e, "gen.create_clip", {{"project", project}, {"prompt", "Too big"}, {"model", atm::api::kMockModel}, {"megapixels", 9}}).rule == "E_PARAM");
+
   // A clip made to start from the clip before has the two nodes that say so, and no value for a start picture.
   const json third = ok(e, "gen.create_clip", {{"project", project}, {"prompt", "Then"}, {"model", atm::api::kMockModel}, {"seconds", 2}, {"start_from", "previous"}});
   const json chained = instance(third);

@@ -387,6 +387,32 @@ TEST_CASE("generate: a project that is moved keeps its Takes", "[gen][generate]"
   CHECK(f.mock->samples == 2);
 }
 
+TEST_CASE("gen.check_take measures the selected Take of a generative clip and says what is wrong with it", "[gen][generate][check]") {
+  Film f;
+  // Nothing to check before the clip is made, and only a generative clip can be checked.
+  CHECK(err(*f.engine, "gen.check_take", {{"project", f.project}, {"clip", f.a}}).rule == "G_NOT_MADE");
+  CHECK(err(*f.engine, "gen.check_take", {{"project", f.project}, {"clip", f.root}}).rule == "G_CLIP");
+  REQUIRE(f.wait(f.run())["state"] == "done");
+  const json checked = ok(*f.engine, "gen.check_take", {{"project", f.project}, {"clip", f.a}, {"listen", false}, {"hold", true}});
+  CHECK(checked["clip"] == f.a);
+  CHECK(checked["take"] == f.get(f.a)["media_ref"]["selected"]);
+  CHECK(checked["seconds"].get<double>() > 0.0);
+  REQUIRE(checked.contains("cut"));
+  CHECK(checked["cut"]["limit"] == 0.15);
+  CHECK(checked["cut"]["score"].get<double>() >= 0.0);
+  CHECK(checked["cut"]["score"].get<double>() <= 1.0);
+  CHECK(checked["drift"].get<double>() >= 0.0);
+  CHECK(checked["problems"].is_array());
+  CHECK(checked["ok"] == checked["problems"].empty());
+  // Every problem says which check it is, what was found and what to do.
+  const json strict = ok(*f.engine, "gen.check_take", {{"project", f.project}, {"clip", f.a}, {"listen", false}, {"cut_limit", -1.0}});
+  REQUIRE(strict["problems"].size() == 1);
+  CHECK(strict["ok"] == false);
+  CHECK(strict["problems"][0]["check"] == "cut");
+  CHECK_FALSE(strict["problems"][0]["hint"].get<std::string>().empty());
+  CHECK(err(*f.engine, "gen.check_take", {{"project", f.project}, {"clip", f.a}, {"lines", "one line"}}).rule == "E_PARAM");
+}
+
 TEST_CASE("generate: a failed clip stops the clips that start from it; a stopped run leaves nothing half-made", "[gen][generate]") {
   Film f;
   f.mock->fail_kind = "sample";

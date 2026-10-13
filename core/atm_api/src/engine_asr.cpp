@@ -3,6 +3,52 @@
 
 namespace atm::api {
 
+  // The speech program, the model that listens (the best one installed unless one is asked for) and where it runs. Shared by
+  // asr.transcribe and gen.check_take.
+Result<asr::Options> Engine::Impl::asr_options(const std::string &wanted_model, const std::string &language, const std::string &device, std::string &model_id) {
+  asr::Options options;
+  options.exe = asr::find_runtime();
+  if (options.exe.empty())
+    return fail(ErrorCode::WorkerUnavailable, "E_ASR_NOT_INSTALLED", "The speech program (attome-whisper) is not installed.", {},
+                "It is built with Attome when whisper.cpp is in .deps/whisper.cpp; ATTOME_WHISPER_EXE can point at one.");
+  if (const char *own = std::getenv("ATTOME_WHISPER_MODEL"); own && *own) { // a ggml Whisper file of the user's own (or a test's)
+    std::error_code ec;
+    if (fs::exists(to_path(own), ec)) {
+      options.model = to_path(own);
+      model_id = "custom";
+    }
+  }
+  if (options.model.empty()) {
+    // The best one that is installed, unless one is asked for: the more exact large-v3 turbo first, then small.
+    std::vector<std::string> order;
+    if (wanted_model != "small")
+      order.push_back("whisper.large-v3-turbo-q5");
+    if (wanted_model != "turbo")
+      order.push_back("whisper.small");
+    for (const std::string &id : order) {
+      const models::CatalogEntry *entry = models::find_entry(models::builtin_catalog(), id);
+      if (!entry || entry->files.empty())
+        return fail(ErrorCode::Internal, "E_ASR_MODEL", "The speech model " + id + " is not in the catalog of this version.");
+      if (const fs::path found = models::find_file(entry->files.front(), models_dir(), model_folders); !found.empty()) {
+        options.model = found;
+        model_id = id;
+        break;
+      }
+    }
+  }
+  if (options.model.empty())
+    return fail(ErrorCode::ModelMissing, "E_ASR_MODEL",
+                wanted_model == "turbo" ? "The speech model whisper.large-v3-turbo-q5 is not on this computer."
+                                         : "No speech model is on this computer.",
+                {}, wanted_model == "turbo" ? "Download it with models.fetch {id: \"whisper.large-v3-turbo-q5\"} (574 MB)."
+                                            : "Download one with models.fetch: whisper.small (488 MB) or the more exact whisper.large-v3-turbo-q5 (574 MB, better in Arabic), or point ATTOME_WHISPER_MODEL at a ggml Whisper file.");
+  options.language = language;
+  // The graphics card, about 25 times as fast as the processor on a long clip; but a generation that is running keeps it (as for the renderer).
+  const bool generating = std::any_of(jobs.begin(), jobs.end(), [](const auto &j) { return j.second->kind == "gen.run" && j.second->state.load() == Job::running; });
+  options.gpu = device == "gpu" || (device == "auto" && !generating);
+  return options;
+}
+
   // asr.transcribe {project + clip | path, from?, duration?, language?, again?}: starts a job that hears the sound and times its words (jobs.get has the
   // result: {words: [{text, start, end}], language, cached}). For a clip, the part of its file that it plays, with times counted from the clip's start in
   // film time (a clip at another speed gives its words earlier or later accordingly); for a path, `from` and `duration` in seconds of the file.
@@ -62,47 +108,8 @@ Result<json> Engine::Impl::asr_transcribe(const json &params) {
   if (language != "auto" && !code)
     return bad_param("language", "must be auto or a language code such as en, ar or fr");
 
-  asr::Options options;
-  options.exe = asr::find_runtime();
-  if (options.exe.empty())
-    return fail(ErrorCode::WorkerUnavailable, "E_ASR_NOT_INSTALLED", "The speech program (attome-whisper) is not installed.", {},
-                "It is built with Attome when whisper.cpp is in .deps/whisper.cpp; ATTOME_WHISPER_EXE can point at one.");
   std::string model_id; // which one listens: a model of the catalog, or the user's own file
-  if (const char *own = std::getenv("ATTOME_WHISPER_MODEL"); own && *own) { // a ggml Whisper file of the user's own (or a test's)
-    std::error_code ec;
-    if (fs::exists(to_path(own), ec)) {
-      options.model = to_path(own);
-      model_id = "custom";
-    }
-  }
-  if (options.model.empty()) {
-    // The best one that is installed, unless one is asked for: the more exact large-v3 turbo first, then small.
-    std::vector<std::string> order;
-    if (wanted_model != "small")
-      order.push_back("whisper.large-v3-turbo-q5");
-    if (wanted_model != "turbo")
-      order.push_back("whisper.small");
-    for (const std::string &id : order) {
-      const models::CatalogEntry *entry = models::find_entry(models::builtin_catalog(), id);
-      if (!entry || entry->files.empty())
-        return fail(ErrorCode::Internal, "E_ASR_MODEL", "The speech model " + id + " is not in the catalog of this version.");
-      if (const fs::path found = models::find_file(entry->files.front(), models_dir(), model_folders); !found.empty()) {
-        options.model = found;
-        model_id = id;
-        break;
-      }
-    }
-  }
-  if (options.model.empty())
-    return fail(ErrorCode::ModelMissing, "E_ASR_MODEL",
-                wanted_model == "turbo" ? "The speech model whisper.large-v3-turbo-q5 is not on this computer."
-                                         : "No speech model is on this computer.",
-                {}, wanted_model == "turbo" ? "Download it with models.fetch {id: \"whisper.large-v3-turbo-q5\"} (574 MB)."
-                                            : "Download one with models.fetch: whisper.small (488 MB) or the more exact whisper.large-v3-turbo-q5 (574 MB, better in Arabic), or point ATTOME_WHISPER_MODEL at a ggml Whisper file.");
-  options.language = language;
-  // The graphics card, about 25 times as fast as the processor on a long clip; but a generation that is running keeps it (as for the renderer).
-  const bool generating = std::any_of(jobs.begin(), jobs.end(), [](const auto &j) { return j.second->kind == "gen.run" && j.second->state.load() == Job::running; });
-  options.gpu = device == "gpu" || (device == "auto" && !generating);
+  ATM_TRY(asr::Options options, asr_options(wanted_model, language, device, model_id));
 
   ATM_TRY(json info, media_probe({{"path", path}}));
   if (!info.value("has_audio", false))

@@ -550,7 +550,24 @@ Result<json> Engine::Impl::gen_create_clip(const json &params) {
   // node and the run give the model). It is kept on the clip so the editor can scale the picture to cover the canvas.
   const json canvas = sequence.value("canvas", json::object());
   const double cw = canvas.value("width", 1920), ch = canvas.value("height", 1080);
-  const auto scaled = gen::scaled_size(int64_t(cw), int64_t(ch), gen::kGenerationPixels);
+  // megapixels: a draft is made smaller (what happens in the shot is the same; it is only less sharp, and several times faster).
+  int64_t pixels = gen::kGenerationPixels;
+  if (params.contains("megapixels")) {
+    if (!params["megapixels"].is_number() || params["megapixels"].get<double>() < 0.1 || params["megapixels"].get<double>() > 2.1)
+      return bad_param("megapixels", "must be a number between 0.1 and 2.1 (0.45 is a draft, 0.9 the default)");
+    pixels = int64_t(std::llround(params["megapixels"].get<double>() * 1000000.0));
+    bool set = false;
+    if (instance.contains("nodes") && instance["nodes"].is_object())
+      for (auto it = instance["nodes"].begin(); it != instance["nodes"].end(); ++it)
+        if (it->value("kind", std::string()) == "attome.project") {
+          (*it)["settings"]["pixels"] = pixels;
+          set = true;
+        }
+    if (!set)
+      return fail(ErrorCode::InvalidArgument, "G_SETTING", "This workflow has no Project node that decides the size.", {},
+                  "Leave megapixels out, or use a model's own Shot.");
+  }
+  const auto scaled = gen::scaled_size(int64_t(cw), int64_t(ch), pixels);
   const auto [made_w, made_h] = decl ? gen::fit_size(*decl, scaled.first, scaled.second) : scaled;
   const int width = int(made_w), height = int(made_h);
   double seconds = std::max(params.value("seconds", 5.0), 0.1);
