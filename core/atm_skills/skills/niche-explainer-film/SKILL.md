@@ -49,5 +49,14 @@ CHECKS (besides those of `film`)
   every fact right, is nothing said twice?
 - The length: the lines add up before generating (the words / 2 = seconds of speech; add a quarter for pauses).
 
+
+SECOND FILM (3 minutes, 20 shots; every shot passed `gen.check_take`, one still needed a retake for what it showed; first versions of rules)
+- **A scene of the two people is a chain of at most three clips; the next scene in the same place starts on the last frame of the one before** (`start_from`, `start_crop: [0, 0, 1, 1]`), and may itself be continued. The same two faces, clothes and room held in all eight of them.
+- **A cut to a shot of the thing, then back to the room, works**: the clip that carries on after a cutaway skips its first 22 frames, which is what the cut needs. Put the cutaways between scenes, not inside a chain.
+- **Show one change in a shot of the thing, in a camera that does not move**: two objects that snap together or push apart, a heap of small objects lifted, particles that bend round a body, a pointer that turns. The change is drawn when it is one and when it is written as what ends up different ("turns through a quarter of a circle and settles"). A pointer or dial written as "swings" alone was not drawn (1 of 2): the thing was drawn as a gauge and did not move.
+- **Look at the thing you ask for before the film is cut**: the Take checks pass a shot in which nothing happens. Read 5 frames of every shot of the thing.
+- **Name the people so that the transcript spells them the same way** (a name with two usual spellings fails the words check while the shot is right).
+- **Draft size (0.45 MP) was enough to judge the whole film.**
+
 LIMITS (say them to the owner)
 - The pictures show the idea; they are not a simulation, and numbers cannot be shown.
