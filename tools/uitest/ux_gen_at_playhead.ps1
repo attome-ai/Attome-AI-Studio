@@ -34,9 +34,9 @@ try {
     'wait 1200'
     'key Home', 'key Right shift', 'key Right shift', 'wait 300'   # the playhead at 2 s, inside the video
     'click @rail:Generate', 'wait 500'
-    'click @model:attome-mock', 'wait 900'                         # over the video, at 2 s
+    'dblclick @model:attome-mock', 'wait 900'                         # over the video, at 2 s
     'click @rail:Generate', 'wait 300'                             # out of the prompt field
-    'click @model:attome-mock', 'wait 900'                         # where the first one ends
+    'dblclick @model:attome-mock', 'wait 900'                         # where the first one ends
     "shot $work\two_clips.jpg"
   )
   $failed = $run.Errors

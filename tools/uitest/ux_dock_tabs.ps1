@@ -34,7 +34,7 @@ try {
     'click @dock:History', 'wait 500', "shot $work\history.jpg"
     'click @dock:Profiler', 'wait 800', "shot $work\profiler.jpg"
     'click @dock:Timeline', 'wait 500', 'expect @clip:v'
-    'click @rail:Generate', 'wait 500', 'click @model:attome-mock', 'wait 1000'
+    'click @rail:Generate', 'wait 500', 'dblclick @model:attome-mock', 'wait 1000'
     'dblclick @clip:Shot_1', 'wait 1500'
     "shot $work\workflow.jpg"
     'inside @node:generate_video'

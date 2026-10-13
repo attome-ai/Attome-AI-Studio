@@ -33,7 +33,7 @@ $failed = $null
 try {
   $run = Invoke-EditorScript -Project $proj -TimeoutSeconds 300 -Script @(
     'wait 1500'
-    'click @rail:Generate', 'wait 500', 'click @model:attome-mock-voice', 'wait 900'
+    'click @rail:Generate', 'wait 500', 'dblclick @model:attome-mock-voice', 'wait 900'
     'expect @field:input_text'
     'type Hello there my friend. Free popcorn today!', 'wait 300'
     'click @button:gen_run', 'wait 4000'       # straight after typing: the words must be kept

@@ -218,6 +218,9 @@ void App::frame(double dt) {
   draw_media();
   draw_viewer();
   draw_timeline();
+  if (!pick_.kind.empty() && pick_.clip != selected_clip_)
+    clear_pick(); // another clip was picked: the Inspector is that clip's
+  sync_pick_preview();
   draw_inspector();
   draw_history();
   if (show_profiler_)
@@ -771,10 +774,10 @@ void App::draw_media() {
     const bool card_hovered = ImGui::IsItemHovered();
     const bool media_clicked = card_source("media:" + path, name.c_str());
     if (media_clicked)
-      selected_media_ = path; // a click only selects: adding is a double click, the plus, or a drag onto the timeline
+      set_pick("media", path); // a click only picks it (the Inspector shows the file): adding is a double click, the plus, or a drag onto the timeline
     bool add_by_menu = false;
     if (ImGui::BeginPopupContextItem("##mediactx")) {
-      selected_media_ = path;
+      set_pick("media", path);
       std::vector<std::string> used; // the clips made from this file
       for (const TrackUi &t : tracks_)
         for (const ClipUi &c : t.clips)
@@ -794,21 +797,7 @@ void App::draw_media() {
       else
         std::snprintf(label, sizeof label, "Remove, and delete its %d %s", int(used.size()), used.size() == 1 ? "clip" : "clips");
       if (menu_item(label))
-        pending_ = [this, path, used] { // the file on the disk is not touched
-          if (!used.empty()) {
-            select_clips(used, false);
-            delete_selected();
-            for (const TrackUi &t : tracks_) // a locked track kept its clip: the file stays in the project
-              for (const ClipUi &c : t.clips)
-                if (c.path == path) {
-                  say("A clip made from it is on a locked track. Unlock the track first.", true);
-                  return;
-                }
-          }
-          std::erase(media_paths_, path);
-          if (selected_media_ == path)
-            selected_media_.clear();
-        };
+        pending_ = [this, path] { remove_media(path); };
       ImGui::EndPopup();
     }
     const bool add_by_double_click = (card_hovered && ImGui::IsMouseDoubleClicked(0)) || (card_pressed && !ImGui::IsMouseReleased(0)); // or Enter on the card
@@ -857,7 +846,7 @@ void App::draw_media() {
     if (add_by_double_click || add_by_plus || add_by_menu)
       pending_ = [this, path] { import_files({path}); };
     if (hovered && !ImGui::IsMouseDown(0) && !add_by_plus)
-      ImGui::SetTooltip("Click to select. Double click, or the plus, adds it at the end. Drag it onto the timeline to choose where.");
+      ImGui::SetTooltip("Click to see it in the Inspector. Double click, or the plus, adds it at the end. Drag it onto the timeline to choose where.");
     ImGui::PopID();
     ImGui::EndGroup();
     column = (column + 1) % columns;
@@ -866,6 +855,7 @@ void App::draw_media() {
     ImGui::Spacing();
     ImGui::TextColored(hexv(look::fg3), "None of this kind in the project.");
   }
+  panel_hint("Click a file to see it in the Inspector. Double-click it, or drag it onto the timeline, to add it.");
   ImGui::EndChild();
   if (ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows) && ImGui::IsMouseClicked(0) && !ImGui::IsAnyItemHovered())
     select_nothing(); // a click on the panel's empty space

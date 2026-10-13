@@ -22,7 +22,7 @@ try {
 
   $run = Invoke-EditorScript -Project $proj -TimeoutSeconds 240 -Script @(
     'click @rail:Generate'
-    'click @model:attome-mock'               # the first clip, from the built-in Shot
+    'dblclick @model:attome-mock'               # the first clip, from the built-in Shot
     'wait 600'
     'click @field:prompt'
     'type A robot walks'

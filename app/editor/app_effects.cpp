@@ -28,7 +28,8 @@ namespace atm::editor {
 // Adds a 3-second effect at the playhead on the "Effects" track, made when missing just under the titles, so it changes
 // the video but not the text.
 // Puts an effect on one clip (dragged from the Effects panel). A clip keeps one effect of each kind.
-void App::add_clip_effect(const std::string &clip_id, const eval::EffectDef &def) {
+void App::add_clip_effect(const std::string &clip_id, const eval::EffectDef &def, const std::map<std::string, float> *values) {
+  pick_preview_ = false;
   const ClipUi *c = find_clip(clip_id);
   if (!c)
     return;
@@ -42,11 +43,30 @@ void App::add_clip_effect(const std::string &clip_id, const eval::EffectDef &def
     ask_lut(clip_id); // the effect is added when the file is chosen
     return;
   }
-  patch(json::array({{{"op", "add"}, {"path", clip_id + "/effects/$new:fx"}, {"value", default_effect(def)}}}),
+  patch(json::array({{{"op", "add"}, {"path", clip_id + "/effects/$new:fx"}, {"value", default_effect(def, {}, values)}}}),
         (std::string("Add ") + def.title).c_str());
 }
 
-void App::add_adjustment(const eval::EffectDef &def, const std::string &file, const std::string &on_track, int64_t on_at) {
+void App::add_picked_effect(const eval::EffectDef &def) {
+  pick_preview_ = false; // it is on the timeline now: the preview would show it twice
+  const ClipUi *c = selected();
+  const bool picture = c && !c->is_text && !c->is_adjustment && c->stream != "audio";
+  if (def.clip_only) { // only a picture clip has one
+    if (!picture)
+      say("Select a clip, or drag " + std::string(def.title) + " onto one.", true);
+    else
+      add_clip_effect(c->id, def, &pick_values_);
+  } else if (def.file_param[0] != '\0') {
+    ask_lut(picture ? c->id : std::string()); // the effect is added when the file is chosen
+  } else if (picture) {
+    add_clip_effect(c->id, def, &pick_values_);
+  } else {
+    add_adjustment(def, {}, {}, -1, &pick_values_);
+  }
+}
+
+void App::add_adjustment(const eval::EffectDef &def, const std::string &file, const std::string &on_track, int64_t on_at, const std::map<std::string, float> *values) {
+  pick_preview_ = false;
   const TrackUi *effects = nullptr, *titles = nullptr; // the track it goes on: the one it was dropped on, else "Effects"
   for (const TrackUi &t : tracks_) {
     if (on_track.empty() ? t.name == "Effects" : t.id == on_track)
@@ -72,7 +92,7 @@ void App::add_adjustment(const eval::EffectDef &def, const std::string &file, co
                   {{"name", def.title},
                    {"timing", {{"record_in", frames_text(at)}, {"duration", frames_text(frames)}, {"source_in", "0"}}},
                    {"media_ref", {{"type", "adjustment"}}},
-                   {"effects", {{"$new:fx", default_effect(def, file)}}},
+                   {"effects", {{"$new:fx", default_effect(def, file, values)}}},
                    {"transform", {{"opacity", 1.0}}}}}});
   json ids;
   std::string label = std::string("Add ") + def.title;

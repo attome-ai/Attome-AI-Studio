@@ -22,13 +22,13 @@ try {
   $run = Invoke-EditorScript -Project $proj -Script @(
     'click @rail:Generate'
     'wait 400'
-    'click @model:attome-mock'
+    'dblclick @model:attome-mock'
     'wait 500'
     'click @field:prompt'
     'type A robot walks'
     'click @rail:Generate'               # leaving the field saves the prompt
     'wait 400'
-    'click @model:attome-mock'
+    'dblclick @model:attome-mock'
     'wait 500'
     'click @field:prompt'
     'type It starts to rain'

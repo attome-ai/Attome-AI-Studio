@@ -31,7 +31,7 @@ try {
 
 $run = Invoke-EditorScript -Project $proj -Script @(
   'click @rail:Effects'
-  'click @effect:blur'               # adds the blur at the playhead and selects it
+  'dblclick @effect:blur'               # adds the blur at the playhead and selects it
   'slide @slider:blur_radius 0.5'    # 0 .. 0.1: 0.05
   "shot $work\effects_blur.jpg"
 )

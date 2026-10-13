@@ -37,7 +37,7 @@ function Get-Keys($run, $clipId) {
 $failed = $null
 $run = Invoke-EditorScript -Project $proj -Script @(
   'click @rail:Effects'
-  'click @effect:vignette'                  # a vignette layer from 0 to 3 s, selected, the playhead in its middle (1.5 s)
+  'dblclick @effect:vignette'                  # a vignette layer from 0 to 3 s, selected, the playhead in its middle (1.5 s)
   'click @key:vignette_strength'            # animate: a key at 1.5 s with the plain value
   'slide @slider:vignette_strength 1'       # the slider now edits that key: strength 1 at 1.5 s
   'key Home'                                # the playhead to 0

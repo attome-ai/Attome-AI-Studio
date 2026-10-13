@@ -22,8 +22,8 @@ try {
     'click @rail:Generate', 'wait 500'
     "shot $work\models_generate.jpg"
     'click @rail:Models', 'wait 900'
-    'expect @engine_model:kokoro.82m'                # found by scrolling the panel
-    'expect @engine_model:omnivoice.bf16'
+    'expect @appmodel:kokoro.82m'                    # a model of the store, found by scrolling the panel
+    'expect @engine_model:attome-mock'               # a model that lives in the engine
     "shot $work\models_engine.jpg"
   )
   $failed = $run.Errors

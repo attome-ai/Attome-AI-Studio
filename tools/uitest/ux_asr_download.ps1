@@ -32,7 +32,7 @@ try {
 
   $run = Invoke-EditorScript -Project $proj -TimeoutSeconds 200 -Script @(
     'wait 1200'
-    'click @rail:Text', 'wait 400', 'click @tab:Captions', 'wait 400'
+    'click @rail:Text', 'wait 400', 'click @tab:Captions', 'wait 400', 'click @captions:auto', 'wait 400'
     'key Right shift', 'key Right shift', 'wait 400'   # 2 s: on the clip
     'click @button:auto_captions', 'wait 800'
     'expect @button:asr_download'

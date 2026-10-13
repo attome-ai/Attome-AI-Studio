@@ -31,7 +31,7 @@ try {
 
   $run = Invoke-EditorScript -Project $proj -TimeoutSeconds 200 -Script @(
     'wait 1200'
-    'click @rail:Text', 'wait 400', 'click @tab:Captions', 'wait 400'
+    'click @rail:Text', 'wait 400', 'click @tab:Captions', 'wait 400', 'click @captions:auto', 'wait 400'
     'key Home', 'wait 300'                       # 0 s: before the clip, nothing to hear
     'expect @button:auto_captions'
     "shot $work\nothing_to_hear.jpg"
@@ -40,7 +40,7 @@ try {
     'key Right shift', 'key Right shift', 'wait 400'   # 2 s: on the clip
     "shot $work\clip_to_hear.jpg"
     'click @button:auto_captions', 'wait 1500'
-    "expect @$toast"
+    $(if (Test-Path (Join-Path $bin 'attome-whisper.exe')) { 'expect @button:asr_download' } else { "expect @$toast" }) # with the program but no model: the sheet that offers the download
     "shot $work\answer.jpg"
   )
   $failed = $run.Errors

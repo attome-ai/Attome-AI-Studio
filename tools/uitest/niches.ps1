@@ -51,7 +51,7 @@ if (-not $failed) {
 if (-not $failed) {
   $env:ATTOME_EDITOR_PICK_NICHE_VIDEO = $video
   try {
-    $steps = @('wait 1200', 'click @rail:Niches', 'wait 400', 'click @button:niche_learn', 'wait 1500', "shot $work\draft.jpg",
+    $steps = @('wait 1200', 'click @rail:Niches', 'wait 400', 'click @button:niche_learn', 'wait 400', 'click @button:niche_learn_pick', 'wait 1500', "shot $work\draft.jpg",
                'click @button:niche_save', 'wait 600')
     $run2 = Invoke-EditorScript -Project $proj -Endpoint $ep -TimeoutSeconds 240 -Script $steps
   } finally { Remove-Item Env:\ATTOME_EDITOR_PICK_NICHE_VIDEO -ErrorAction SilentlyContinue }
@@ -105,7 +105,7 @@ public static class FakeYtDlp {
   $env:ATTOME_YTDLP = "$fakeDir\yt-dlp.exe"; $env:FAKE_YTDLP_SAMPLE = $video; $env:ATTOME_MODELS_DIR = "$work\appdata\models"
   $ep4 = "\\.\pipe\attome-uitest-niches4-$PID"
   try {
-    $steps = @('wait 1200', 'click @rail:Niches', 'wait 400', 'click @field:niche_link', 'type https://example.com/watch?v=abc', 'wait 200',
+    $steps = @('wait 1200', 'click @rail:Niches', 'wait 400', 'click @button:niche_link', 'wait 400', 'click @field:niche_link', 'type https://example.com/watch?v=abc', 'wait 200',
                "shot $work\link.jpg", 'click @button:niche_get_link', 'wait 5000', "shot $work\link_done.jpg", 'click @button:niche_save', 'wait 600')
     $run4 = Invoke-EditorScript -Project $proj -Endpoint $ep4 -TimeoutSeconds 240 -Script $steps
   } finally { foreach ($k in $saved.Keys) { if ($saved[$k]) { Set-Item "Env:\$k" $saved[$k] } else { Remove-Item "Env:\$k" -ErrorAction SilentlyContinue } } }
@@ -121,7 +121,7 @@ public static class FakeYtDlp {
 
 # 5. "Also keep this video's sound": checked, a local "Learn from a video" also imports the sound as the project's own media asset
 if (-not $failed) {
-  $steps = @('wait 1200', 'click @rail:Niches', 'wait 400', 'click @check:niche_keep_sound', 'wait 200', 'click @button:niche_learn', 'wait 1500',
+  $steps = @('wait 1200', 'click @rail:Niches', 'wait 400', 'click @button:niche_learn', 'wait 400', 'click @check:niche_keep_sound', 'wait 200', 'click @button:niche_learn_pick', 'wait 1500',
              "shot $work\with_sound.jpg", 'wait 600')
   $env:ATTOME_EDITOR_PICK_NICHE_VIDEO = $video
   try { $run5 = Invoke-EditorScript -Project $proj -Endpoint $ep -TimeoutSeconds 240 -Script $steps }

@@ -556,7 +556,11 @@ struct Tile {
   bool download = false;                                  // a badge: it has to be downloaded before it can be used
   std::function<void(ImDrawList *, ImVec2, ImVec2)> art;  // draws the preview inside the tile's rectangle
   std::string payload;                                    // "<kind>:<id>": what the tile carries when it is dragged
+  bool selected = false;                                  // the card that is picked: the Inspector shows it
 };
+
+// What a card of a left panel answers to: one click picks it (the Inspector shows its properties), a double click or a drag adds it.
+enum class TileHit { none, pick, open };
 
 // Makes the item just drawn a card that can be dragged onto the timeline, carrying "<kind>:<id>" (see App::DropPlan).
 // True when it was clicked instead: pressed and let go without a drag.
@@ -573,8 +577,9 @@ inline bool card_source(const std::string &payload, const char *label) {
   return ImGui::IsItemDeactivated() && ImGui::IsItemHovered() && !dragged;
 }
 
-// Draws one tile in the next free cell of the grid. True when it was clicked (a press that became a drag is not a click).
-inline bool gallery_tile(TileGrid &g, const Tile &t) {
+// Draws one tile in the next free cell of the grid and says what was done to it: picked (a click), opened (a double click). A press that
+// became a drag is neither: the drag carries the tile's payload.
+inline TileHit tile_hit(TileGrid &g, const Tile &t) {
   if (g.n % g.cols != 0)
     ImGui::SameLine(0.0f, g.gap);
   ++g.n;
@@ -583,7 +588,15 @@ inline bool gallery_tile(TileGrid &g, const Tile &t) {
   if (!t.mark.empty())
     ui_mark(t.mark);
   const bool hovered = ImGui::IsItemHovered();
-  const bool clicked = card_source(t.payload, t.label.c_str()) || (tile_pressed && !ImGui::IsMouseReleased(0)); // a click, or Enter
+  const bool by_key = tile_pressed && !ImGui::IsMouseReleased(0); // Enter or Space on the focused card opens it, as a double click does
+  const bool clicked = card_source(t.payload, t.label.c_str());
+  // A double click opens; the release that ends it is not a second pick.
+  static bool swallow = false;
+  if (ImGui::IsMouseClicked(0) && !ImGui::IsMouseDoubleClicked(0))
+    swallow = false;
+  const bool opened = (hovered && ImGui::IsMouseDoubleClicked(0)) || by_key;
+  if (opened && !by_key)
+    swallow = true;
   ImDrawList *dl = ImGui::GetWindowDrawList();
   constexpr float kRound = 10.0f;
   dl->AddRectFilled(p, q, hex(t.base), kRound);
@@ -610,9 +623,9 @@ inline bool gallery_tile(TileGrid &g, const Tile &t) {
     dl->AddLine(ImVec2(c.x - 4.0f, c.y), ImVec2(c.x, c.y + 4.5f), hex(look::fg), 1.6f);
     dl->AddLine(ImVec2(c.x + 4.0f, c.y), ImVec2(c.x, c.y + 4.5f), hex(look::fg), 1.6f);
   }
-  if (hovered)
-    dl->AddRectFilled(p, q, IM_COL32(255, 255, 255, 14), kRound);
-  dl->AddRect(p, q, hex(hovered ? look::accent : look::line), kRound, 0, hovered ? 2.0f : 1.0f);
+  if (hovered || t.selected)
+    dl->AddRectFilled(p, q, IM_COL32(255, 255, 255, t.selected ? 22 : 14), kRound);
+  dl->AddRect(p, q, hex(hovered || t.selected ? look::accent : look::line), kRound, 0, hovered || t.selected ? 2.0f : 1.0f);
   if (hovered && !ImGui::IsMouseDown(0) && !t.tip.empty()) {
     ImGui::BeginTooltip();
     ImGui::PushFont(g_fonts.bold, 13.0f);
@@ -623,7 +636,41 @@ inline bool gallery_tile(TileGrid &g, const Tile &t) {
     ImGui::PopTextWrapPos();
     ImGui::EndTooltip();
   }
-  return clicked;
+  if (opened)
+    return TileHit::open;
+  if (clicked && swallow) {
+    swallow = false;
+    return TileHit::none;
+  }
+  return clicked ? TileHit::pick : TileHit::none;
+}
+
+// The older one-answer form: true when the tile was clicked or opened.
+inline bool gallery_tile(TileGrid &g, const Tile &t) { return tile_hit(g, t) != TileHit::none; }
+
+// A checkbox in the mockup's style: a rounded box, orange with a tick when on, and its label. Returns true when it was changed. Marked
+// "check:<id>" for UI tests.
+inline bool soft_check(const char *id, const char *label, bool *value) {
+  ImGui::PushID(id);
+  const ImVec2 p = ImGui::GetCursorScreenPos();
+  const float w = ImGui::GetContentRegionAvail().x;
+  const bool pressed = ImGui::InvisibleButton("##c", ImVec2(w, 26.0f), ImGuiButtonFlags_EnableNav);
+  ui_mark(std::string("check:") + id);
+  const bool changed = item_hit(pressed);
+  if (changed)
+    *value = !*value;
+  const bool hovered = ImGui::IsItemHovered();
+  ImDrawList *dl = ImGui::GetWindowDrawList();
+  const ImVec2 b0(p.x, p.y + 4.0f), b1(p.x + 18.0f, p.y + 22.0f);
+  dl->AddRectFilled(b0, b1, *value ? hex(look::accent) : hex(look::raised), 5.0f);
+  dl->AddRect(b0, b1, hex(*value ? look::accent : hovered ? look::fg3 : look::line2), 5.0f, 0, 1.5f);
+  if (*value) {
+    dl->AddLine(ImVec2(b0.x + 4.5f, b0.y + 9.5f), ImVec2(b0.x + 7.8f, b0.y + 12.8f), hex(look::accent_ink), 2.2f);
+    dl->AddLine(ImVec2(b0.x + 7.8f, b0.y + 12.8f), ImVec2(b0.x + 13.5f, b0.y + 5.5f), hex(look::accent_ink), 2.2f);
+  }
+  dl->AddText(ImVec2(p.x + 28.0f, p.y + 5.0f), hex(hovered ? look::fg : look::fg2), label);
+  ImGui::PopID();
+  return changed;
 }
 
 // The keyframe diamond of a parameter row. state: 0 not animated, 1 animated, 2 there is a key at the playhead.
@@ -791,14 +838,116 @@ inline void draw_wave_bars(ImDrawList *dl, const std::vector<float> *peaks, ImVe
 }
 
 // The effect object of a table entry with every parameter at its default.
-inline json default_effect(const eval::EffectDef &def, const std::string &file = {}) {
+inline json default_effect(const eval::EffectDef &def, const std::string &file = {}, const std::map<std::string, float> *values = nullptr) {
   json params = json::object();
-  for (const eval::EffectParam &p : def.params)
+  for (const eval::EffectParam &p : def.params) {
     params[p.key] = p.def;
+    if (values)
+      if (const auto it = values->find(p.key); it != values->end())
+        params[p.key] = it->second;
+  }
   if (def.file_param[0] != '\0')
     params[def.file_param] = file;
   return {{"effect", eval::effect_name(def)}, {"enabled", true}, {"params", std::move(params)}};
 }
 
-} // namespace atm::editor
+// ---- the pictures on the cards of effects and transitions (the panel shows them small, the Inspector large) ----------------------
+inline void draw_effect_art(const std::string &name, ImDrawList *dl, ImVec2 p, ImVec2 q, float k = 1.0f) {
+  const ImVec2 c((p.x + q.x) * 0.5f, p.y + (q.y - p.y) * 0.42f);
+  if (name == "blur") { // soft rings
+    for (int i = 0; i < 5; ++i)
+      dl->AddCircle(c, (5.0f + float(i) * 4.0f) * k, hex(look::adj, 200 - i * 40), 0, 2.0f);
+  } else if (name == "grade") { // three overlapping colour discs
+    dl->AddCircleFilled(ImVec2(c.x - 9.0f * k, c.y + 5.0f * k), 15.0f * k, IM_COL32(230, 70, 70, 130));
+    dl->AddCircleFilled(ImVec2(c.x + 9.0f * k, c.y + 5.0f * k), 15.0f * k, IM_COL32(70, 200, 110, 130));
+    dl->AddCircleFilled(ImVec2(c.x, c.y - 10.0f * k), 15.0f * k, IM_COL32(80, 130, 240, 130));
+  } else if (name == "sharpen") { // an edge that overshoots on both sides: the profile of a sharpened step
+    const ImVec2 edge[6] = {ImVec2(c.x - 30.0f * k, c.y + 10.0f * k), ImVec2(c.x - 8.0f * k, c.y + 10.0f * k), ImVec2(c.x - 6.0f * k, c.y + 16.0f * k),
+                            ImVec2(c.x - 4.0f * k, c.y - 16.0f * k), ImVec2(c.x - 2.0f * k, c.y - 10.0f * k), ImVec2(c.x + 30.0f * k, c.y - 10.0f * k)};
+    dl->AddPolyline(edge, 6, hex(look::adj), 0, 2.2f);
+  } else if (name == "lut") { // a strip of graded colour: the table's cube, flattened
+    for (int i = 0; i < 6; ++i)
+      dl->AddRectFilled(ImVec2(c.x - (33.0f - float(i) * 11.0f) * k, c.y - 14.0f * k), ImVec2(c.x - (23.0f - float(i) * 11.0f) * k, c.y + 14.0f * k),
+                        IM_COL32(60 + i * 30, 170 - i * 20, 220 - i * 32, 200), 3.0f);
+  } else if (name == "grain") { // scattered specks
+    for (int i = 0; i < 70; ++i)
+      dl->AddRectFilled(ImVec2(c.x + (-30.0f + std::fmod(float(i) * 37.3f, 60.0f)) * k, c.y + (-22.0f + std::fmod(float(i) * 53.7f, 44.0f)) * k),
+                        ImVec2(c.x + (-29.0f + std::fmod(float(i) * 37.3f, 60.0f)) * k, c.y + (-21.0f + std::fmod(float(i) * 53.7f, 44.0f)) * k),
+                        hex(look::adj, 90 + (i * 53) % 150));
+  } else if (name == "key") { // a green screen with a person-shaped hole cut out of it
+    dl->AddRectFilled(ImVec2(c.x - 30.0f * k, c.y - 20.0f * k), ImVec2(c.x + 30.0f * k, c.y + 20.0f * k), IM_COL32(40, 180, 90, 200), 6.0f);
+    dl->AddCircleFilled(ImVec2(c.x, c.y - 6.0f * k), 7.0f * k, IM_COL32(20, 24, 36, 255));
+    dl->AddRectFilled(ImVec2(c.x - 11.0f * k, c.y + 3.0f * k), ImVec2(c.x + 11.0f * k, c.y + 20.0f * k), IM_COL32(20, 24, 36, 255), 5.0f, ImDrawFlags_RoundCornersTop);
+  } else if (name == "luma") { // brightness steps, the dark ones cut away
+    for (int i = 0; i < 6; ++i)
+      dl->AddRectFilled(ImVec2(c.x - (33.0f - float(i) * 11.0f) * k, c.y - 18.0f * k), ImVec2(c.x - (23.0f - float(i) * 11.0f) * k, c.y + 18.0f * k),
+                        i < 2 ? IM_COL32(255, 255, 255, 25) : IM_COL32(60 + i * 36, 60 + i * 36, 60 + i * 36, 255), 3.0f);
+  } else { // vignette: a frame whose edges fade to dark
+    for (int i = 0; i < 5; ++i)
+      dl->AddRect(ImVec2(c.x - (28.0f - float(i) * 3.0f) * k, c.y - (20.0f - float(i) * 2.0f) * k),
+                  ImVec2(c.x + (28.0f - float(i) * 3.0f) * k, c.y + (20.0f - float(i) * 2.0f) * k), hex(look::adj, 60 + i * 40), 8.0f, 0, 2.0f);
+  }
+}
 
+// A big icon in the middle of a card, for what has no picture of its own.
+inline void draw_icon_art(ImDrawList *dl, ImVec2 p, ImVec2 q, Icon icon, uint32_t colour, float size = 34.0f) {
+  const std::string g = glyph(icon);
+  ImGui::PushFont(g_fonts.ui, size);
+  const ImVec2 gs = text_size(g.c_str());
+  dl->AddText(ImVec2((p.x + q.x - gs.x) * 0.5f, p.y + (q.y - p.y) * 0.42f - gs.y * 0.5f), hex(colour), g.c_str());
+  ImGui::PopFont();
+}
+
+// Auto captions: a picture with a line of words under it, the word being said lit.
+inline void draw_captions_art(ImDrawList *dl, ImVec2 p, ImVec2 q, float k = 1.0f) {
+  const float h = q.y - p.y;
+  dl->AddRectFilled(p, ImVec2(q.x, p.y + h * 0.55f), IM_COL32(64, 98, 150, 255), 10.0f, ImDrawFlags_RoundCornersTop);
+  dl->AddRectFilled(ImVec2(p.x, p.y + h * 0.55f), q, IM_COL32(22, 30, 48, 255), 10.0f, ImDrawFlags_RoundCornersBottom);
+  const float w = q.x - p.x, y = p.y + h * 0.40f;
+  const float lit = std::fmod(float(ImGui::GetTime()) * 1.6f, 4.0f);
+  float x = p.x + w * 0.18f;
+  const float widths[4] = {0.17f, 0.12f, 0.20f, 0.15f};
+  for (int i = 0; i < 4; ++i) {
+    const float ww = w * widths[i];
+    const bool on = int(lit) == i;
+    dl->AddRectFilled(ImVec2(x, y), ImVec2(x + ww, y + 9.0f * k), on ? hex(look::accent) : IM_COL32(236, 239, 246, 230), 4.0f * k);
+    x += ww + w * 0.04f;
+  }
+  dl->AddRectFilled(ImVec2(p.x + w * 0.30f, y + 18.0f * k), ImVec2(p.x + w * 0.70f, y + 26.0f * k), IM_COL32(236, 239, 246, 110), 4.0f * k);
+}
+
+// The transition, played over and over: picture A turns into picture B.
+inline void draw_transition_art(const std::string &id, ImDrawList *dl, ImVec2 p, ImVec2 q, float k = 1.0f) {
+  const ImVec2 c((p.x + q.x) * 0.5f, p.y + (q.y - p.y) * 0.42f);
+  const float w = 62.0f * k, h = 40.0f * k;
+  const ImVec2 a0(c.x - w * 0.5f, c.y - h * 0.5f), a1(c.x + w * 0.5f, c.y + h * 0.5f);
+  const float t = std::fmod(float(ImGui::GetTime()) * 0.7f, 1.4f), u = std::clamp(t / 1.0f, 0.0f, 1.0f); // a pause at the end
+  const ImU32 first = IM_COL32(70, 130, 220, 255), second = IM_COL32(240, 150, 70, 255);
+  dl->PushClipRect(a0, a1, true);
+  dl->AddRectFilled(a0, a1, first);
+  if (id == "dissolve") {
+    dl->AddRectFilled(a0, a1, IM_COL32(240, 150, 70, int(u * 255)));
+  } else if (id == "wipe") {
+    dl->AddRectFilled(a0, ImVec2(a0.x + w * u, a1.y), second);
+  } else if (id == "push") {
+    dl->AddRectFilled(ImVec2(a0.x - w * u, a0.y), ImVec2(a1.x - w * u, a1.y), first);
+    dl->AddRectFilled(ImVec2(a1.x - w * u, a0.y), ImVec2(a1.x + w - w * u, a1.y), second);
+  } else if (id == "slide") {
+    dl->AddRectFilled(ImVec2(a1.x - w * u, a0.y), a1, second);
+  } else if (id == "iris") {
+    dl->AddCircleFilled(c, std::sqrt(w * w + h * h) * 0.5f * u, second);
+  } else if (id == "zoom_in") {
+    const float z = 1.0f + u * 0.8f;
+    dl->AddRectFilled(ImVec2(c.x - w * 0.5f * z, c.y - h * 0.5f * z), ImVec2(c.x + w * 0.5f * z, c.y + h * 0.5f * z), first);
+    dl->AddRectFilled(ImVec2(c.x - w * 0.5f * (0.4f + 0.6f * u), c.y - h * 0.5f * (0.4f + 0.6f * u)),
+                      ImVec2(c.x + w * 0.5f * (0.4f + 0.6f * u), c.y + h * 0.5f * (0.4f + 0.6f * u)), IM_COL32(240, 150, 70, int(60 + u * 195)));
+  } else {
+    dl->AddRectFilled(a0, a1, second);
+    const float z = 1.0f - u * 0.9f;
+    dl->AddRectFilled(ImVec2(c.x - w * 0.5f * z, c.y - h * 0.5f * z), ImVec2(c.x + w * 0.5f * z, c.y + h * 0.5f * z), first);
+  }
+  dl->PopClipRect();
+  dl->AddRect(a0, a1, IM_COL32(255, 255, 255, 90), 3.0f);
+}
+
+} // namespace atm::editor

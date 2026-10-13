@@ -159,10 +159,13 @@ private:
   void add_title(int preset, const std::string &track = {}, int64_t at = -1); // without a place: the Titles track, at the playhead
   void add_generative_clip(const std::string &model, const std::string &track = {}, int64_t at = -1);
   // Without a place: the Effects track, at the playhead.
-  void add_adjustment(const eval::EffectDef &def, const std::string &file = {}, const std::string &track = {}, int64_t at = -1);
-  void add_clip_effect(const std::string &clip_id, const eval::EffectDef &def); // an effect on one clip alone
+  // `values`: parameters other than the defaults (what the Inspector's draft of an effect was set to).
+  void add_adjustment(const eval::EffectDef &def, const std::string &file = {}, const std::string &track = {}, int64_t at = -1,
+                      const std::map<std::string, float> *values = nullptr);
+  void add_clip_effect(const std::string &clip_id, const eval::EffectDef &def, const std::map<std::string, float> *values = nullptr); // an effect on one clip alone
+  void add_picked_effect(const eval::EffectDef &def); // a double click on a card: on the selected picture clip, else a layer over everything
   void draw_effects_panel();
-  void add_transition_at(const std::string &from, const std::string &to, const std::string &kind); // a transition on a cut: "dissolve", "wipe", "push", "slide", "iris", "zoom_in", "zoom_out"
+  void add_transition_at(const std::string &from, const std::string &to, const std::string &kind, double seconds = 0.0, const std::string &direction = {}); // a transition on a cut: "dissolve", "wipe", "push", "slide", "iris", "zoom_in", "zoom_out"
   void draw_effect_card(const ClipUi &clip, const eval::EffectDef &def, bool show_amount);
   void draw_effect_cards(const ClipUi &clip);
   // Keyframes of effect parameters: the value at the playhead, and the edits that write a key there.
@@ -381,6 +384,8 @@ private:
     const char *in = "", *out = "";                       // animations (fade | pop | slide | typewriter), "" none
   };
   static const std::vector<TextStyle> &text_styles();
+  static void draw_text_style_art(const TextStyle &st, ImDrawList *dl, ImVec2 p, ImVec2 q); // the sample of a style, in the rectangle
+  void remove_media(const std::string &path); // takes a file out of the project, with the clips made from it
   void freeze_frame(int seconds = 2); // the selected video (or the picture of the selected sound) holds the frame at the playhead
   void select_nothing(); // a click on empty space: no clip, no media card
   // While a value is dragged: the edit it would make, shown in the Monitor at once (the project is not changed until the value is let go).
@@ -614,13 +619,36 @@ private:
   char media_filter_[128] = {};
   char library_filter_[128] = {}; // the Library's search
   int media_kind_ = 0; // the Media panel's filter: 0 all, 1 video, 2 audio, 3 pictures
+  int library_kind_ = 0; // the Library panel's filter: 0 all, 1 video, 2 audio
   int text_tab_ = 0, fx_tab_ = 0, gen_tab_ = 0; // the tab chosen in the Text, Effects and Generate panels; 0 is All
   int inspector_tab_ = 0;
   int rail_tab_ = 0; // 0 Media, 2 Text, 3 Effects, 4 Generate, 6 Models, 7 Library, 8 Niches, 9 Cast
+  // What is picked in a left panel (one click on a card): the Inspector shows its properties, as for a selected clip; a double click or a
+  // drag adds it to the timeline. `clip` is the clip that was selected when it was picked: the one an effect would go on.
+  struct Pick {
+    std::string kind, id, clip;
+  };
+  Pick pick_;
+  bool pick_preview_ = false;               // "Preview": the Monitor shows the picked effect on the film without adding it (kept from card to card)
+  bool pick_shown_ = false;                 // the Monitor shows a preview now
+  std::string pick_sig_;                    // what the preview shows, to draw it again only when that changes
+  std::map<std::string, float> pick_values_; // the draft's values: an effect's parameters, a transition's seconds
+  std::string pick_text_;                   // a draft's choice that is a word (a transition's direction)
+  bool picked(const char *kind, const std::string &id) const { return pick_.kind == kind && pick_.id == id; }
+  void set_pick(const std::string &kind, const std::string &id);
+  void clear_pick();
+  void draw_pick_inspector();    // the Inspector for the picked card (app_pick.cpp)
+  void sync_pick_preview();      // every frame: the Monitor shows the preview, or goes back to the film
+  void restore_preview();        // the Monitor shows the film itself again
   // The Cast panel (rail tab 9): the characters, places and props of the project (atm_gen cast.hpp).
   std::string cast_sel_, cast_look_, cast_manner_, dialog_cast_picture_, dialog_cast_voice_;
   char cast_name_[128] = {}, cast_attr_name_[64] = {}, cast_attr_value_[160] = {};
   int cast_kind_ = 0; // 0 character, 1 place, 2 prop
+  int cast_tab_ = 0, niche_tab_ = 0, models_tab_ = 0; // the chip chosen in the Cast, Niches and Models panels; 0 is All
+  void draw_cast_inspector();   // the form of the picked cast entry (app_cast.cpp)
+  void draw_appmodel_inspector(); // a picked model: what it is, the download (app_generate.cpp)
+  void draw_settings_models();    // the folder the models go to, and ComfyUI, in the Settings window
+  void draw_niche_inspector();  // the editor of the picked niche, and the ways to start one (app_niches.cpp)
   bool cast_editing_ = false, cast_dirty_ = false;
   std::vector<std::pair<std::string, std::string>> cast_attrs_; // the attributes of the open entry, as typed
   void draw_cast_panel();

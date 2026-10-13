@@ -185,63 +185,104 @@ void App::ask_cast_file(bool voice) {
         this, window_, pictures, 2, user_folder(SDL_FOLDER_PICTURES).c_str(), false);
 }
 
+// The picture an entry shows on its card: its first reference picture, resolved against the project.
+static std::string cast_picture_of(const json &entry, const std::string &project) {
+  const json refs = entry.value("references", json::array());
+  if (!refs.is_array() || refs.empty())
+    return {};
+  const std::string rel = refs[0].is_string() ? refs[0].get<std::string>() : refs[0].value("path", std::string());
+  if (rel.empty())
+    return {};
+  const std::filesystem::path raw(std::u8string(rel.begin(), rel.end()));
+  return (raw.is_absolute() ? raw : std::filesystem::path(std::u8string(project.begin(), project.end())) / raw).string();
+}
+
+// The Cast panel: a card for each character, place and prop. A click picks it (the Inspector has its form); the plus cards start a new one.
 void App::draw_cast_panel() {
   ATM_PROFILE_SCOPE("ui.cast");
   const json &cast = object_in(doc_, "cast");
   if (!cast_sel_.empty() && !cast.contains(cast_sel_)) { // gone (an Undo, another session)
     cast_sel_.clear();
     cast_editing_ = false;
+    if (pick_.kind == "cast")
+      clear_pick();
   }
-  ImGui::BeginChild("##cast_scroll", ImVec2(0.0f, 0.0f), ImGuiChildFlags_NavFlattened, ImGuiWindowFlags_NoBackground);
-  section_label("CAST");
-  ImGui::PushTextWrapPos(0.0f);
-  ImGui::TextColored(hexv(look::fg3), "The people, places and things that must look and sound the same in every clip. Give each a few pictures "
-                                      "and a voice; a clip that uses one follows every change to it.");
-  ImGui::PopTextWrapPos();
+  static const std::string tabs[] = {"All", "Characters", "Places", "Props"};
+  panel_tabs("tab", tabs, cast_tab_);
+  ImGui::NewLine();
   ImGui::Spacing();
-
-  ImGui::PushStyleColor(ImGuiCol_ChildBg, hexv(look::bg));
-  ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 10.0f);
-  const float list_h = std::min(176.0f, 34.0f * float(std::max<size_t>(1, cast.size())) + 14.0f);
-  ImGui::BeginChild("##cast_list", ImVec2(-1.0f, list_h), ImGuiChildFlags_NavFlattened | ImGuiChildFlags_AlwaysUseWindowPadding);
-  std::string open_id;
+  int count = 0;
+  for (auto it = cast.begin(); it != cast.end(); ++it)
+    count += cast_tab_ == 0 || kind_index(it->value("kind", std::string("character"))) == cast_tab_ - 1 ? 1 : 0;
+  TileGrid grid = tile_grid(count + (cast_tab_ == 0 ? 3 : 1));
   for (auto it = cast.begin(); it != cast.end(); ++it) {
     const std::string id = it.key(), name = it->value("name", id);
-    ImGui::PushID(id.c_str());
-    if (ImGui::Selectable(name.c_str(), cast_sel_ == id, 0, ImVec2(0.0f, 26.0f)))
-      open_id = id;
-    ui_mark("cast:" + name);
-    const char *tag = kKindNames[kind_index(it->value("kind", std::string("character")))];
-    const float tw = text_size(tag).x;
-    ImGui::SameLine(ImGui::GetContentRegionMax().x - tw - 8.0f);
-    ImGui::TextColored(hexv(look::fg3), "%s", tag);
-    ImGui::PopID();
+    const int kind = kind_index(it->value("kind", std::string("character")));
+    if (cast_tab_ != 0 && kind != cast_tab_ - 1)
+      continue;
+    const std::string picture = cast_picture_of(*it, project_path_);
+    if (!picture.empty())
+      thumbs_.request(picture);
+    Tile t;
+    t.id = "cast_" + id;
+    t.mark = "cast:" + name;
+    t.label = name;
+    t.tip = std::string(kKindNames[kind]) + ". Click to see and change it.";
+    t.base = 0x1b2536;
+    t.selected = picked("cast", id);
+    t.art = [this, picture, kind](ImDrawList *dl, ImVec2 p, ImVec2 q) {
+      const auto tex = thumb_tex_.find(picture);
+      if (!picture.empty() && tex != thumb_tex_.end() && tex->second) { // the picture, covering the card
+        float tw = q.x - p.x, th = q.y - p.y;
+        SDL_GetTextureSize(tex->second, &tw, &th);
+        if (tw > 0.0f && th > 0.0f) {
+          const float w = q.x - p.x, h = q.y - p.y, fit = std::max(w / tw, h / th), vw = w / (tw * fit), vh = h / (th * fit);
+          dl->AddImageRounded(ImTextureID(reinterpret_cast<intptr_t>(tex->second)), p, q, ImVec2((1.0f - vw) * 0.5f, (1.0f - vh) * 0.3f),
+                              ImVec2((1.0f + vw) * 0.5f, (1.0f - vh) * 0.3f + vh), IM_COL32_WHITE, 10.0f);
+          return;
+        }
+      }
+      draw_icon_art(dl, p, q, kind == 0 ? icon::eye : kind == 1 ? icon::video : icon::star, look::fg3, 34.0f);
+    };
+    const TileHit hit = tile_hit(grid, t);
+    if (hit != TileHit::none) {
+      cast_open(id);
+      set_pick("cast", id);
+    }
   }
-  if (cast.empty())
-    ImGui::TextColored(hexv(look::fg2), "No one yet.");
-  ImGui::EndChild();
-  ImGui::PopStyleVar();
-  ImGui::PopStyleColor();
-  if (!open_id.empty())
-    cast_open(open_id);
-  ImGui::Spacing();
+  static const char *kNewMarks[] = {"cast_new_character", "cast_new_place", "cast_new_prop"};
+  for (int k = 0; k < 3; ++k) {
+    if (cast_tab_ != 0 && k != cast_tab_ - 1)
+      continue;
+    Tile t;
+    t.id = std::string("cast_plus_") + kKinds[k];
+    t.mark = std::string("button:") + kNewMarks[k];
+    t.label = std::string("New ") + (k == 0 ? "character" : k == 1 ? "place" : "prop");
+    t.tip = "Add a " + std::string(kKindNames[k]) + " to the cast: give it a name, a look, pictures and a voice.";
+    t.base = 0x141824;
+    t.selected = picked("cast", "new") && cast_kind_ == k && cast_sel_.empty();
+    t.art = [](ImDrawList *dl, ImVec2 p, ImVec2 q) { draw_icon_art(dl, p, q, icon::add, look::accent, 34.0f); };
+    if (tile_hit(grid, t) != TileHit::none) {
+      cast_new(k);
+      set_pick("cast", "new");
+    }
+  }
+  panel_hint("The people, places and things that must look and sound the same in every clip. Click one to see and change it; a clip that uses one "
+             "follows every change to it.");
+}
 
-  const float bw = (ImGui::GetContentRegionAvail().x - 16.0f) / 3.0f;
-  if (soft_button("cast_new_character", "New character", ImVec2(bw, 30.0f)))
-    cast_new(0);
-  ImGui::SameLine(0.0f, 8.0f);
-  if (soft_button("cast_new_place", "New place", ImVec2(bw, 30.0f)))
-    cast_new(1);
-  ImGui::SameLine(0.0f, 8.0f);
-  if (soft_button("cast_new_prop", "New prop", ImVec2(bw, 30.0f)))
-    cast_new(2);
-  ImGui::Spacing();
-
+// The Inspector for the picked cast entry: its name, look, pictures, voice and attributes.
+void App::draw_cast_inspector() {
+  ATM_PROFILE_SCOPE("ui.cast_inspector");
+  const json &cast = object_in(doc_, "cast");
   if (!cast_editing_) {
-    ImGui::PushTextWrapPos(0.0f);
-    ImGui::TextColored(hexv(look::fg2), "Pick someone to see or change them, or add a new one.");
-    ImGui::PopTextWrapPos();
-    ImGui::EndChild();
+    clear_pick();
+    return;
+  }
+  if (!cast_sel_.empty() && pick_.id == "new")
+    pick_.id = cast_sel_; // a new entry was saved: it is the picked one now
+  if (!begin_card("##pick", cast_name_[0] ? cast_name_ : "New", kKindNames[cast_kind_])) {
+    end_card();
     return;
   }
   const bool saved = !cast_sel_.empty();
@@ -249,12 +290,14 @@ void App::draw_cast_panel() {
 
   ImGui::PushStyleColor(ImGuiCol_FrameBg, hexv(look::raised));
   section_label("NAME");
-  const float kind_w = 110.0f;
-  ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - kind_w - 8.0f);
+  const bool narrow = ImGui::GetContentRegionAvail().x < 340.0f; // the Inspector is narrow: what does not fit in a row goes under it
+  const float kind_w = narrow ? ImGui::GetContentRegionAvail().x : 110.0f;
+  ImGui::SetNextItemWidth(narrow ? -1.0f : ImGui::GetContentRegionAvail().x - kind_w - 8.0f);
   if (ImGui::InputText("##cast_name", cast_name_, sizeof cast_name_))
     cast_dirty_ = true;
   ui_mark("field:cast_name");
-  ImGui::SameLine(0.0f, 8.0f);
+  if (!narrow)
+    ImGui::SameLine(0.0f, 8.0f);
   ImGui::SetNextItemWidth(kind_w);
   if (ImGui::BeginCombo("##cast_kind", kKindNames[cast_kind_])) {
     for (int i = 0; i < 3; ++i)
@@ -267,14 +310,16 @@ void App::draw_cast_panel() {
   ui_mark("combo:cast_kind");
   ImGui::Spacing();
 
-  section_label("HOW IT LOOKS  (goes into the picture)");
+  section_label("HOW IT LOOKS");
+  ImGui::TextColored(hexv(look::fg3), "Goes into the picture.");
   if (ImGui::InputTextMultiline("##cast_look", cast_look_.data(), cast_look_.capacity() + 1, ImVec2(-1.0f, 62.0f),
                                 ImGuiInputTextFlags_WordWrap | ImGuiInputTextFlags_CallbackResize, resize_text, &cast_look_))
     cast_dirty_ = true;
   ui_mark("field:cast_look");
   ImGui::Spacing();
   if (cast_kind_ == 0) {
-    section_label("HOW THEY SPEAK AND BEHAVE  (for whoever writes their lines)");
+    section_label("HOW THEY SPEAK");
+    ImGui::TextColored(hexv(look::fg3), "For whoever writes their lines.");
     if (ImGui::InputTextMultiline("##cast_manner", cast_manner_.data(), cast_manner_.capacity() + 1, ImVec2(-1.0f, 46.0f),
                                   ImGuiInputTextFlags_WordWrap | ImGuiInputTextFlags_CallbackResize, resize_text, &cast_manner_))
       cast_dirty_ = true;
@@ -400,10 +445,9 @@ void App::draw_cast_panel() {
     cast_attrs_.erase(cast_attrs_.begin() + drop);
     cast_dirty_ = true;
   }
-  ImGui::SetNextItemWidth(112.0f);
+  ImGui::SetNextItemWidth(-1.0f);
   ImGui::InputTextWithHint("##cast_attr_name", "name", cast_attr_name_, sizeof cast_attr_name_);
   ui_mark("field:cast_attr_name");
-  ImGui::SameLine(120.0f);
   ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 64.0f);
   ImGui::InputTextWithHint("##cast_attr_value", "value: words, a number, yes or no", cast_attr_value_, sizeof cast_attr_value_);
   ui_mark("field:cast_attr_value");
@@ -430,11 +474,9 @@ void App::draw_cast_panel() {
 
   const ClipUi *clip = selected();
   const bool can_use = saved && clip && clip->is_generative;
-  const float bw2 = (ImGui::GetContentRegionAvail().x - 16.0f) / 3.0f;
-  if (soft_button("cast_save", "Save", ImVec2(bw2, 30.0f), cast_dirty_, true))
+  if (soft_button("cast_save", "Save", ImVec2(-1.0f, 30.0f), cast_dirty_, true))
     cast_save();
-  ImGui::SameLine(0.0f, 8.0f);
-  if (soft_button("cast_use", "Use in the clip", ImVec2(bw2, 30.0f), can_use)) {
+  if (soft_button("cast_use", "Use in the clip", ImVec2(-1.0f, 30.0f), can_use)) {
     const std::string id = cast_sel_, clip_id = clip->id;
     pending_ = [this, id, clip_id] {
       json done;
@@ -447,10 +489,12 @@ void App::draw_cast_panel() {
   if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
     ImGui::SetTooltip(can_use ? "Adds a Character node to the selected clip's workflow: its pictures and voice go to the model."
                               : "Select a generative clip on the timeline first.");
-  ImGui::SameLine(0.0f, 8.0f);
-  if (soft_button("cast_delete", "Delete", ImVec2(bw2, 30.0f), saved))
+  if (soft_button("cast_delete", "Delete", ImVec2(-1.0f, 30.0f), saved))
     cast_delete();
-  ImGui::EndChild();
+  ImGui::Spacing();
+  if (soft_button("pick_close", "Close", ImVec2(-1.0f, 28.0f)))
+    pending_ = [this] { cast_editing_ = false; clear_pick(); };
+  end_card();
 }
 
 } // namespace atm::editor

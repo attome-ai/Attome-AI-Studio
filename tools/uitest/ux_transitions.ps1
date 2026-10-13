@@ -52,7 +52,7 @@ try {
     if ($t.Count -ne 1 -or $t[0].type -ne 'attome.dissolve') { $failed = "the drop did not make one dissolve ($($t.Count) transitions)" }
   }
   if (-not $failed) { # a click: on the cut after the selected clip
-    $r2 = Invoke-EditorScript -Project $proj -Endpoint $run.Endpoint -Script @('click @rail:Effects', 'click @tab:Transitions', 'wait 300', 'click @clip:Second', 'wait 400', 'click @transition:push', 'wait 900', 'expect @button:toast_undo')
+    $r2 = Invoke-EditorScript -Project $proj -Endpoint $run.Endpoint -Script @('click @rail:Effects', 'click @tab:Transitions', 'wait 300', 'click @clip:Second', 'wait 400', 'dblclick @transition:push', 'wait 900', 'expect @button:toast_undo')
     $failed = $r2.Errors
     if (-not $failed) {
       $t = @(Transitions $run)
@@ -61,7 +61,7 @@ try {
     }
   }
   if (-not $failed) { # the same cut again: refused, nothing changes
-    $r3 = Invoke-EditorScript -Project $proj -Endpoint $run.Endpoint -Script @('click @rail:Effects', 'click @tab:Transitions', 'wait 300', 'click @clip:First', 'wait 400', 'click @transition:wipe', 'wait 700', 'expect @toast:There_is_a_transition_on')
+    $r3 = Invoke-EditorScript -Project $proj -Endpoint $run.Endpoint -Script @('click @rail:Effects', 'click @tab:Transitions', 'wait 300', 'click @clip:First', 'wait 400', 'dblclick @transition:wipe', 'wait 700', 'expect @toast:There_is_a_transition_on')
     $failed = $r3.Errors
     if (-not $failed -and @(Transitions $run).Count -ne 2) { $failed = 'a second transition went onto a cut that had one' }
   }

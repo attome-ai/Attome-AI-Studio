@@ -39,7 +39,7 @@ $failed = $null
 # 1. A Titles track made by the editor starts locked; V1 does not.
 $run = Invoke-EditorScript -Project $proj -Script @(
   'click @rail:Text'
-  'click @style:Title'
+  'dblclick @style:Title'
   'wait 500'
   "shot $work\lock_titles.jpg"
 )

@@ -67,7 +67,7 @@ try {
     "shot $work\locate_after.jpg"
     'click @rail:Models'
     'wait 800'
-    'click @button:models_settings', 'wait 300'
+    'click @menu:File', 'wait 300', 'click @menuitem:Settings...', 'wait 800'
     'expect @button:models_forget'          # the folder is listed, and can be dropped
     "shot $work\locate_models.jpg"
   )

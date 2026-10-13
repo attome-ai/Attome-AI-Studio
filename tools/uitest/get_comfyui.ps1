@@ -24,7 +24,7 @@ try {
   $run = Invoke-EditorScript -Project $proj -Script @(
     'click @rail:Models'
     'wait 500'
-    'click @button:models_settings', 'wait 600'
+    'click @menu:File', 'wait 300', 'click @menuitem:Settings...', 'wait 800'
     'expect @button:comfy_get_install'
     "shot $work\get_offer.jpg"
     'click @button:comfy_get_install', 'wait 400'

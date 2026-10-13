@@ -33,7 +33,7 @@ try {
   $longPrompt = 'A cozy bedroom in the early morning. {character} wakes up and reaches out his hand to the empty pillow beside him, pale sunlight on the bed. Slow zoom-in. {style}'
   $run = Invoke-EditorScript -Project $proj -TimeoutSeconds 240 -Script @(
     'click @rail:Generate', 'wait 400'
-    'click @model:attome-mock', 'wait 700'
+    'dblclick @model:attome-mock', 'wait 700'
     'expect @field:prompt'
     'click @field:prompt'
     "type $longPrompt"
@@ -44,7 +44,7 @@ try {
     'inside @button:variable_chip_girl'              # the last chip is the one that used to leave the panel
     "shot $work\inspector_prompt.jpg"
     'click @rail:Generate', 'click @tab:Audio', 'wait 300'
-    'click @model:attome-mock-choir', 'wait 800'
+    'dblclick @model:attome-mock-choir', 'wait 800'
     'expect @combo:input_voice'                      # ready-made voices: a list
     'click @combo:input_voice', 'wait 300'
     "shot $work\inspector_voice_list.jpg"

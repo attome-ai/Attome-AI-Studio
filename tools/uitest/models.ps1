@@ -26,11 +26,13 @@ try {
   $run = Invoke-EditorScript -Project $proj -Script @(
     'click @rail:Models'
     'wait 800'                         # the panel asks the daemon twice a second
-    'click @button:models_settings', 'wait 300'
-    'expect @button:models_folder'
+    'click @appmodel:minimax-h3.fl2va.turbo8-int8', 'wait 500'   # a click picks the card: the Inspector has its details
     'expect @button:model_fetch'       # "Continue, ... left"
     'expect @button:model_licence'
     "shot $work\models.jpg"
+    'click @menu:File', 'wait 300', 'click @menuitem:Settings...', 'wait 800'   # the folder is in Settings
+    'expect @button:models_folder'
+    "shot $work\models_settings.jpg"
   )
   $failed = $run.Errors
   try {

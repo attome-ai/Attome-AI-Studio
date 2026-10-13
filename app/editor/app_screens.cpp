@@ -553,7 +553,7 @@ void App::draw_settings() {
     return;
   ImGuiViewport *vp = ImGui::GetMainViewport();
   ImGui::SetNextWindowPos(vp->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-  ImGui::SetNextWindowSize(ImVec2(620.0f * s_, 0.0f));
+  ImGui::SetNextWindowSizeConstraints(ImVec2(620.0f * s_, 0.0f), ImVec2(620.0f * s_, std::max(300.0f, vp->Size.y * 0.88f))); // grows with its content, then scrolls
   ImGui::PushStyleColor(ImGuiCol_WindowBg, hexv(look::panel));
   ImGui::PushStyleColor(ImGuiCol_Border, hexv(look::line2));
   ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 16.0f);
@@ -609,6 +609,13 @@ void App::draw_settings() {
       if (rpc("render.devices", {{"check", true}}, answer))
         devices_ = std::move(answer);
     }
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+    section_label("MODELS AND COMFYUI");
+    ImGui::Spacing();
+    draw_settings_models();
+    ImGui::Spacing();
     ImGui::SameLine(ImGui::GetContentRegionAvail().x - 110.0f + ImGui::GetCursorPosX());
     if (soft_button("settings_close", "Close", ImVec2(110.0f, 32.0f), true, true) || ImGui::IsKeyPressed(ImGuiKey_Escape, false))
       settings_open_ = false;

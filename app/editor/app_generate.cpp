@@ -153,8 +153,9 @@ void App::draw_generate_panel() {
       tip += !is_installed ? "\nNot installed. Download it in the Models panel."
              : !has_engine ? "\nNothing runs it yet. Set ComfyUI in the Models panel."
                            : "\nReady.";
-      t.tip = tip + "\nDrag it onto the timeline, or click to add it at the playhead.";
+      t.tip = tip + "\nClick to see it; double-click adds a clip at the playhead; drag it onto the timeline to choose where.";
       t.payload = "gen:" + id;
+      t.selected = picked("model", id);
       t.art = [type, is_installed, has_engine](ImDrawList *dl, ImVec2 p, ImVec2 q) {
         dl->AddCircleFilled(ImVec2(q.x - 12.0f, p.y + 12.0f), 4.5f, hex(!is_installed ? 0xef5f5f : !has_engine ? 0xe3a33a : look::ok)); // ready, no engine, not installed
         if (!is_installed || !has_engine) // in words too, at the top left (the dot is at the top right)
@@ -173,7 +174,10 @@ void App::draw_generate_panel() {
           dl->AddTriangleFilled(ImVec2(c.x - 21.0f, c.y + 14.0f), ImVec2(c.x - 7.0f, c.y - 3.0f), ImVec2(c.x + 5.0f, c.y + 14.0f), hex(look::gen));
         }
       };
-      if (gallery_tile(grid, t))
+      const TileHit hit = tile_hit(grid, t);
+      if (hit == TileHit::pick || hit == TileHit::open)
+        set_pick("model", id);
+      if (hit == TileHit::open)
         pending_ = [this, id] { add_generative_clip(id); };
     }
     ImGui::Dummy(ImVec2(0, 4.0f));
@@ -191,8 +195,9 @@ void App::draw_generate_panel() {
       t.mark = "workflow_card:" + name;
       t.label = name;
       t.base = 0x2a2218;
-      t.tip = name + "\nA Clip Workflow saved in this project.\nDrag it onto the timeline, or click to add it at the playhead.";
+      t.tip = name + "\nA Clip Workflow saved in this project.\nClick to see it; double-click adds a clip at the playhead; drag it onto the timeline to choose where.";
       t.payload = "gen:" + id;
+      t.selected = picked("model", id);
       t.art = [](ImDrawList *dl, ImVec2 p, ImVec2 q) {
         const ImVec2 c((p.x + q.x) * 0.5f, p.y + (q.y - p.y) * 0.42f);
         dl->AddRect(ImVec2(c.x - 26.0f, c.y - 18.0f), ImVec2(c.x + 26.0f, c.y + 18.0f), hex(look::accent2), 6.0f, 0, 2.2f);
@@ -200,12 +205,15 @@ void App::draw_generate_panel() {
         dl->AddCircleFilled(ImVec2(c.x + 12.0f, c.y), 4.0f, hex(look::accent2));
         dl->AddLine(ImVec2(c.x - 12.0f, c.y), ImVec2(c.x + 12.0f, c.y), hex(look::accent2), 2.0f);
       };
-      if (gallery_tile(grid, t))
+      const TileHit hit = tile_hit(grid, t);
+      if (hit == TileHit::pick || hit == TileHit::open)
+        set_pick("model", id);
+      if (hit == TileHit::open)
         pending_ = [this, id] { add_generative_clip(id); };
     }
     ImGui::Dummy(ImVec2(0, 4.0f));
   }
-  panel_hint("Click a model to add a clip at the playhead, or drag it onto the timeline. Then write what it should make in the Inspector.");
+  panel_hint("Click a model to see what it makes. Double-click it, or drag it onto the timeline, to add a clip; then write what it should make in the Inspector.");
 }
 
 // The clips whose workflow cannot run on this computer, and why. Asked again when the project changes and while a
@@ -1490,400 +1498,458 @@ void App::poll_models() {
 }
 
 
+// The category of a model, for the chips and the icon of its card.
+static std::string model_group(const std::string &id) {
+  if (id.rfind("minimax-h3.", 0) == 0 || id.rfind("fasth3.", 0) == 0)
+    return "Video";
+  if (id.rfind("ace-step", 0) == 0)
+    return "Music";
+  if (id.rfind("kokoro", 0) == 0)
+    return "Voice";
+  if (id.rfind("whisper", 0) == 0)
+    return "Captions";
+  return "Other";
+}
+
+static std::string model_size_text(int64_t bytes) {
+  char text[32];
+  if (bytes >= 995000000)
+    std::snprintf(text, sizeof text, "%.1f GB", double(bytes) / 1e9);
+  else
+    std::snprintf(text, sizeof text, "%.0f MB", double(bytes) / 1e6);
+  return text;
+}
+
+// The Models panel: a card for each model the engine can use, with whether it is on this computer. A click picks it: the Inspector has its
+// details and the download. The folder and the engine are in Settings.
 void App::draw_models_panel() {
   poll_models();
-  ImGui::BeginChild("##models_scroll", ImVec2(0.0f, 0.0f), ImGuiChildFlags_NavFlattened, ImGuiWindowFlags_NoBackground); // the whole panel scrolls as one
-  const auto gb = [](int64_t bytes) {
-    char text[32];
-    if (bytes >= 995000000)
-      std::snprintf(text, sizeof text, "%.1f GB", double(bytes) / 1e9);
-    else
-      std::snprintf(text, sizeof text, "%.0f MB", double(bytes) / 1e6);
-    return std::string(text);
-  };
-  ImGui::PushTextWrapPos(0.0f);
-  ImGui::TextColored(hexv(look::fg3), "Models run on this computer. A download can be stopped and continued later, and "
-                                      "every file is checked before it is used.");
-  ImGui::PopTextWrapPos();
+  std::vector<std::string> groups = {"All"};
+  for (const json &e : models_.value("entries", json::array()))
+    if (const std::string g = model_group(e.value("id", "")); std::find(groups.begin(), groups.end(), g) == groups.end())
+      groups.push_back(g);
+  panel_tabs("tab", groups, models_tab_);
+  ImGui::NewLine();
   ImGui::Spacing();
-  section_label("AVAILABLE");
-  ImGui::Spacing();
+  const std::string wanted = models_tab_ == 0 ? std::string() : groups[size_t(models_tab_)];
+  int count = 0;
+  for (const json &e : models_.value("entries", json::array()))
+    count += wanted.empty() || model_group(e.value("id", "")) == wanted ? 1 : 0;
+  TileGrid grid = tile_grid(count);
   for (const json &e : models_.value("entries", json::array())) {
-    const std::string id = e.value("id", ""), state = e.value("state", "missing");
+    const std::string id = e.value("id", ""), state = e.value("state", "missing"), title = e.value("title", id);
+    const std::string group = model_group(id);
+    if (!wanted.empty() && group != wanted)
+      continue;
     const int64_t size = e.value("size", int64_t(0)), bytes = e.value("bytes", int64_t(0));
-    const auto found = model_jobs_.find(id);
-    const json job = found != model_jobs_.end() ? found->second : json::object();
-    const bool downloading = state == "downloading";
-    ImGui::PushID(id.c_str());
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, hexv(look::bg));
-    ImGui::PushStyleColor(ImGuiCol_Border, hexv(look::line));
-    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 12.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12.0f, 10.0f));
-    ImGui::BeginChild("##card", ImVec2(0.0f, 0.0f),
-                      ImGuiChildFlags_Borders | ImGuiChildFlags_NavFlattened | ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_AlwaysUseWindowPadding);
-    ImGui::PushTextWrapPos(0.0f);
-    ImGui::PushFont(g_fonts.bold, 14.0f);
-    ImGui::TextUnformatted(e.value("title", id).c_str());
-    ImGui::PopFont();
-    if (state == "installed")
-      ImGui::TextColored(hexv(look::ok), "Installed, %s", gb(size).c_str());
-    else if (bytes > 0)
-      ImGui::TextColored(hexv(look::fg2), "%s of %s", gb(bytes).c_str(), gb(size).c_str());
-    else
-      ImGui::TextColored(hexv(look::fg2), "%s", gb(size).c_str());
-    if (state != "installed" && bytes > 0) {
-      ImGui::PushStyleColor(ImGuiCol_PlotHistogram, hexv(look::accent));
-      ImGui::ProgressBar(size > 0 ? float(double(bytes) / double(size)) : 0.0f, ImVec2(-1.0f, 6.0f), "");
-      ImGui::PopStyleColor();
-    }
-    if (downloading) {
-      const double rate = job.value("bytes_per_second", 0.0);
-      const double left = rate > 0.0 ? double(size - bytes) / rate : 0.0;
-      if (rate > 0.0 && left >= 90.0)
-        ImGui::TextColored(hexv(look::fg2), "%.1f MB/s, about %.0f min left", rate / 1e6, left / 60.0);
-      else if (rate > 0.0)
-        ImGui::TextColored(hexv(look::fg2), "%.1f MB/s, about %.0f s left", rate / 1e6, left);
-      ImGui::TextColored(hexv(look::fg3), "%s", job.value("detail", "Starting").c_str());
-    } else if (job.value("state", "") == "failed" && state != "installed") {
-      const json error = job.value("error", json::object());
-      ImGui::TextColored(kError, "%s", error.value("message", "The download failed.").c_str());
-      if (error.contains("data") && !error["data"].value("hint", "").empty())
-        ImGui::TextColored(hexv(look::fg3), "%s", error["data"].value("hint", "").c_str());
-    }
-    ImGui::Spacing();
-    if (const std::string notes = e.value("notes", ""); !notes.empty()) { // two lines; the rest is in the tip
-      const float room = std::max(40.0f, ImGui::GetContentRegionAvail().x), two = ImGui::GetTextLineHeight() * 2.0f + 1.0f;
-      std::string shown = notes;
-      bool cut = false;
-      while (ImGui::CalcTextSize(shown.c_str(), nullptr, false, room).y > two && shown.size() > 4) {
-        shown.pop_back();
-        while (!shown.empty() && (static_cast<unsigned char>(shown.back()) & 0xC0) == 0x80)
-          shown.pop_back();
-        cut = true;
-        if (const size_t sp = shown.find_last_of(' '); sp != std::string::npos && ImGui::CalcTextSize((shown + "...").c_str(), nullptr, false, room).y > two)
-          shown.resize(sp);
+    Tile t;
+    t.id = "model_" + id;
+    t.mark = "appmodel:" + id;
+    t.label = title.substr(0, title.find(':'));
+    t.tip = title + "\n" + (state == "installed" ? "Installed, " + model_size_text(size) : model_size_text(size)) + ". Click to see it" + (state == "installed" ? "." : " and download it.");
+    t.base = 0x182321;
+    t.download = state != "installed" && state != "downloading";
+    t.selected = picked("appmodel", id);
+    const double fraction = size > 0 ? double(bytes) / double(size) : 0.0;
+    t.art = [group, state, fraction](ImDrawList *dl, ImVec2 p, ImVec2 q) {
+      const Icon g = group == "Video" ? icon::video : group == "Music" ? icon::audio : group == "Voice" ? icon::chat : group == "Captions" ? icon::text : icon::models;
+      draw_icon_art(dl, p, q, g, look::gen, 34.0f);
+      dl->AddCircleFilled(ImVec2(q.x - 12.0f, p.y + 12.0f), 4.5f, hex(state == "installed" ? look::ok : state == "downloading" ? look::accent : 0x8993aa));
+      dl->AddText(ImVec2(p.x + 8.0f, p.y + 5.0f), hex(state == "installed" ? look::ok : state == "downloading" ? look::accent : look::fg3),
+                  state == "installed" ? "Installed" : state == "downloading" ? "Downloading" : state == "partial" ? "Partial" : "");
+      if (state != "installed" && fraction > 0.0) { // how much of it is on disk
+        const float y = q.y - 30.0f;
+        dl->AddRectFilled(ImVec2(p.x + 10.0f, y), ImVec2(q.x - 10.0f, y + 4.0f), hex(look::raised), 2.0f);
+        dl->AddRectFilled(ImVec2(p.x + 10.0f, y), ImVec2(p.x + 10.0f + (q.x - p.x - 20.0f) * float(std::min(1.0, fraction)), y + 4.0f), hex(look::accent), 2.0f);
       }
-      if (cut) {
-        while (!shown.empty() && (shown.back() == ' ' || shown.back() == ',' || shown.back() == ';' || shown.back() == ':'))
-          shown.pop_back();
-        shown += "...";
-      }
-      ImGui::TextColored(hexv(look::fg3), "%s", shown.c_str());
-      if (cut && ImGui::IsItemHovered())
-        ImGui::SetTooltip("%s", notes.c_str());
-    }
-    ImGui::PopTextWrapPos();
-    ImGui::Spacing();
-    if (downloading) {
-      if (soft_button("model_stop", "Stop", ImVec2(96.0f, 30.0f))) {
-        json unused;
-        rpc("jobs.cancel", {{"job_id", e.value("job_id", "")}}, unused);
-        next_models_poll_ = 0.0;
-      }
-    } else if (state != "installed") {
-      const std::string label = bytes > 0 ? "Continue, " + gb(size - bytes) + " left" : "Download " + gb(size);
-      if (soft_button("model_fetch", label.c_str(), ImVec2(0.0f, 30.0f), true, true)) {
-        json started;
-        model_jobs_.erase(id);
-        if (rpc("models.fetch", {{"id", id}}, started))
-          model_jobs_[id] = {{"job", started.value("job_id", "")}, {"state", "running"}};
-        next_models_poll_ = 0.0;
-      }
-    }
-    if (!e.value("licence_url", "").empty() || !e.value("licence", "").empty()) { // the licence's words are in the tip; the button opens its page
-      if (state != "installed")
-        ImGui::SameLine();
-      const bool opened = soft_button("model_licence", "Licence", ImVec2(0.0f, 30.0f));
-      if (ImGui::IsItemHovered() && !e.value("licence", "").empty()) {
-        ImGui::PushTextWrapPos(360.0f);
-        ImGui::SetTooltip("%s", e.value("licence", "").c_str());
-        ImGui::PopTextWrapPos();
-      }
-      if (opened && !e.value("licence_url", "").empty())
-        SDL_OpenURL(e.value("licence_url", "").c_str());
-    }
-    const json files = e.value("files", json::array());
-    if (ImGui::TreeNodeEx("##files", ImGuiTreeNodeFlags_SpanAvailWidth, files.size() == 1 ? "1 file" : "%zu files", files.size())) {
-      for (const json &f : files) {
-        const std::string path = f.value("path", ""), fstate = f.value("state", "missing");
-        const std::string name = path.substr(path.find_last_of('/') + 1);
-        const int64_t fsize = f.value("size", int64_t(0)), fbytes = f.value("bytes", int64_t(0));
-        ImGui::PushTextWrapPos(0.0f);
-        ImGui::TextColored(hexv(fstate == "installed" ? look::fg2 : look::fg3), "%s", name.c_str());
-        ImGui::PopTextWrapPos();
-        if (fstate == "installed")
-          ImGui::TextColored(hexv(look::ok), "  %s, on disk", gb(fsize).c_str());
-        else if (fstate == "partial")
-          ImGui::TextColored(hexv(look::accent), "  %s of %s", gb(fbytes).c_str(), gb(fsize).c_str());
-        else
-          ImGui::TextColored(hexv(look::fg3), "  %s", gb(fsize).c_str());
-      }
-      ImGui::TreePop();
-    }
-    ImGui::EndChild();
-    ImGui::PopStyleVar(2);
-    ImGui::PopStyleColor(2);
-    ImGui::PopID();
-    ImGui::Dummy(ImVec2(0.0f, 4.0f));
+    };
+    if (tile_hit(grid, t) != TileHit::none)
+      set_pick("appmodel", id);
   }
-  // Models that live in the engine (speech in ComfyUI): nothing to download here, but the panel says whether they are usable.
-  std::vector<const json *> brought;
+  // Models that live in the engine (speech in ComfyUI): nothing to download, but the card says whether they are usable.
   for (const json &m : gen_models_) {
     bool in_catalog = false;
     for (const json &e : models_.value("entries", json::array()))
       in_catalog = in_catalog || e.value("id", "") == m.value("id", "x");
-    if (!in_catalog)
-      brought.push_back(&m);
+    if (in_catalog || !wanted.empty())
+      continue;
+    const std::string id = m.value("id", ""), title = m.value("title", id);
+    const bool ready = m.value("ready", false);
+    Tile t;
+    t.id = "engine_" + id;
+    t.mark = "engine_model:" + id;
+    t.label = title.substr(0, title.find(':'));
+    t.tip = title + "\nIn the engine. Click to see it.";
+    t.base = 0x182321;
+    t.selected = picked("appmodel", id);
+    t.art = [ready](ImDrawList *dl, ImVec2 p, ImVec2 q) {
+      draw_icon_art(dl, p, q, icon::models, look::gen, 34.0f);
+      dl->AddCircleFilled(ImVec2(q.x - 12.0f, p.y + 12.0f), 4.5f, hex(ready ? look::ok : 0xef5f5f));
+      dl->AddText(ImVec2(p.x + 8.0f, p.y + 5.0f), hex(ready ? look::ok : 0xef5f5f), ready ? "Ready" : "Not ready");
+    };
+    if (tile_hit(grid, t) != TileHit::none)
+      set_pick("appmodel", id);
   }
-  if (!brought.empty()) {
-    section_label("IN THE ENGINE");
-    ImGui::Spacing();
-    for (const json *m : brought) {
-      const std::string id = m->value("id", "");
-      ImGui::PushID(("engine_" + id).c_str());
-      ImGui::PushStyleColor(ImGuiCol_ChildBg, hexv(look::bg));
-      ImGui::PushStyleColor(ImGuiCol_Border, hexv(look::line));
-      ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 12.0f);
-      ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12.0f, 10.0f));
-      ImGui::BeginChild("##engine_card", ImVec2(0.0f, 0.0f), ImGuiChildFlags_Borders | ImGuiChildFlags_NavFlattened | ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_AlwaysUseWindowPadding);
-      ImGui::PushTextWrapPos(0.0f);
-      ImGui::PushFont(g_fonts.bold, 14.0f);
-      ImGui::TextUnformatted(m->value("title", id).c_str());
-      ImGui::PopFont();
-      if (m->value("ready", false))
-        ImGui::TextColored(hexv(look::ok), "Ready: it runs in ComfyUI");
-      else
-        ImGui::TextColored(kError, "Not ready: ComfyUI does not answer");
-      if (const std::string note = m->value("note", std::string()); !note.empty())
-        ImGui::TextColored(hexv(look::fg3), "%s", note.c_str());
-      ImGui::PopTextWrapPos();
-      ImGui::EndChild();
-      ui_mark("engine_model:" + id); // after the child: it is the item of this panel, and is there even when scrolled out of view
-      ImGui::PopStyleVar(2);
-      ImGui::PopStyleColor(2);
-      ImGui::PopID();
-      ImGui::Dummy(ImVec2(0.0f, 4.0f));
-    }
-  }
-  // The folder and the engine are set once: a part closed until asked for, under the models.
-  ImGui::Spacing();
-  const bool settings_open = ImGui::CollapsingHeader("Folder and ComfyUI");
-  ui_mark("button:models_settings");
-  if (settings_open) {
-    const std::string dir = models_.value("models_dir", "");
-    if (!dir.empty()) {
-      section_label("FOLDER");
-      path_text(dir, hexv(look::fg2));
-      if (const int64_t room = models_.value("free_bytes", int64_t(-1)); room >= 0)
-        ImGui::TextColored(hexv(look::fg3), "%s free", gb(room).c_str());
-      if (soft_button("models_folder", "Open folder", ImVec2(0.0f, 26.0f))) {
-        std::string url = "file:///" + dir;
-        std::replace(url.begin(), url.end(), '\\', '/');
-        SDL_OpenURL(url.c_str());
-      }
-      if (!models_.value("folder_fixed", false)) { // downloads can go to another drive
-        ImGui::SameLine();
-        if (soft_button("models_move", "Change...", ImVec2(0.0f, 26.0f)))
-          ask_models_folder("move");
-      }
-      // Models that are on this computer already are used where they are.
-      if (soft_button("models_locate", "I already have models...", ImVec2(0.0f, 26.0f)))
-        ask_models_folder("locate");
-      if (!models_note_.empty() && models_note_model_.empty()) {
-        ImGui::PushTextWrapPos(0.0f);
-        ImGui::TextColored(models_note_error_ ? kError : hexv(look::fg2), "%s", models_note_.c_str());
-        ImGui::PopTextWrapPos();
-      }
-      const json folders = models_.value("folders", json::array());
-      if (!folders.empty()) {
-        ImGui::Spacing();
-        ImGui::TextColored(hexv(look::fg3), "Also used from:");
-        for (const json &f : folders) {
-          const std::string folder = f.is_string() ? f.get<std::string>() : std::string();
-          ImGui::PushID(folder.c_str());
-          path_text(folder, hexv(look::fg2));
-          if (soft_button("models_forget", "Stop using", ImVec2(0.0f, 24.0f))) { // the files stay where they are
-            json unused;
-            rpc("models.forget_folder", {{"folder", folder}}, unused);
-            next_models_poll_ = 0.0;
-            gen_models_loaded_ = false;
-            pending_ = [this] { refresh_gen_status(); };
-          }
-          ImGui::PopID();
-        }
-      }
-      ImGui::Spacing();
-    }
-    // Engines: what runs the models. For now the user's own ComfyUI, by its address.
-    if (!engines_loaded_) {
-      engines_loaded_ = true;
-      json engines;
-      if (rpc("gen.engines", json::object(), engines)) {
-        copy_to(comfy_buf_, sizeof comfy_buf_, engines.value("comfyui", std::string()));
-        for (const json &e : engines.value("engines", json::array()))
-          if (e.value("name", "") == "comfyui")
-            comfy_status_ = e;
-      }
-    }
-    section_label("COMFYUI");
-    ImGui::PushStyleColor(ImGuiCol_FrameBg, hexv(look::raised));
-    ImGui::SetNextItemWidth(-1.0f);
-    ImGui::InputTextWithHint("##comfyui", "http://127.0.0.1:8188", comfy_buf_, sizeof comfy_buf_);
-    ui_mark("field:comfyui");
-    ImGui::PopStyleColor();
-    if (soft_button("comfy_test", "Use and test", ImVec2(0.0f, 26.0f))) {
-      json set;
-      comfy_status_ = json::object();
-      if (rpc("gen.set_comfyui", {{"address", std::string(comfy_buf_)}}, set)) {
-        copy_to(comfy_buf_, sizeof comfy_buf_, set.value("comfyui", std::string()));
-        comfy_status_ = set.value("status", json{{"off", true}});
-        pending_ = [this] { refresh_gen_status(); }; // clips that waited for an engine can run now
-      }
-    }
-    ImGui::PushTextWrapPos(0.0f);
-    if (comfy_status_.value("off", false))
-      ImGui::TextColored(hexv(look::fg3), "ComfyUI is not used.");
-    else if (comfy_status_.value("reachable", false))
-      ImGui::TextColored(hexv(look::ok), "Connected: ComfyUI %s, %s", comfy_status_.value("version", "?").c_str(),
-                         comfy_status_.value("device", "").c_str());
-    else if (comfy_status_.contains("message"))
-      ImGui::TextColored(kError, "No answer. %s", comfy_status_.value("hint", "").c_str());
-    else
-      ImGui::TextColored(hexv(look::fg3), "Your own ComfyUI can run the models. Give its address.");
-    ImGui::PopTextWrapPos();
-    ImGui::Spacing();
+  panel_hint("Models run on this computer. Click one to see what it is and download it: a download can be stopped and continued later, and every "
+             "file is checked before it is used. The folder they go to, and ComfyUI, are in File > Settings.");
+}
 
-    // Get ComfyUI: one button puts it on this computer with every node pack the engine uses, and starts it.
-    const double now = ImGui::GetTime();
-    if (!comfy_job_.empty() && now >= comfy_poll_at_) {
-      comfy_poll_at_ = now + 0.5;
-      json state;
-      RpcError error;
-      if (client_.call("jobs.get", {{"job_id", comfy_job_}}, state, error)) {
-        comfy_job_state_ = state;
-        const std::string what = state.value("state", std::string());
-        if (what != "running") {
-          comfy_job_.clear();
-          comfy_get_known_ = false;
-          engines_loaded_ = false; // the address is the new ComfyUI's
-          if (what == "done") {
-            const json made = state.value("result", json::object());
-            say(made.value("running", false) ? "ComfyUI is installed and running." : "ComfyUI is installed. " + made.value("problem", std::string()));
-            pending_ = [this] { refresh_gen_status(); };
-          } else if (what == "failed") {
-            const json e = state.value("error", json::object());
-            say(e.value("message", std::string("ComfyUI could not be installed.")) + (e.contains("data") ? "  " + e["data"].value("hint", std::string()) : std::string()), true);
-          } else {
-            say("Stopped. Press Install again to continue from where it was.");
-          }
+// The Inspector for a picked model: what it is, how much of it is on disk, the download (stop, continue), its licence and its files.
+void App::draw_appmodel_inspector() {
+  poll_models();
+  json entry;
+  for (const json &e : models_.value("entries", json::array()))
+    if (e.value("id", "") == pick_.id)
+      entry = e;
+  if (!entry.is_object()) { // a model of the engine, not of the catalog
+    for (const json &m : gen_models_)
+      if (m.value("id", "") == pick_.id) {
+        const std::string title = m.value("title", pick_.id);
+        if (begin_card("##pick", title.substr(0, title.find(':')).c_str(), "In the engine")) {
+          ImGui::PushTextWrapPos(0.0f);
+          if (m.value("ready", false))
+            ImGui::TextColored(hexv(look::ok), "Ready: it runs in ComfyUI");
+          else
+            ImGui::TextColored(kError, "Not ready: ComfyUI does not answer");
+          if (const std::string note = m.value("note", std::string()); !note.empty())
+            ImGui::TextColored(hexv(look::fg3), "%s", note.c_str());
+          ImGui::PopTextWrapPos();
+          ImGui::Spacing();
+          if (soft_button("pick_close", "Close", ImVec2(-1.0f, 28.0f)))
+            pending_ = [this] { clear_pick(); };
         }
-      } else {
+        end_card();
+        return;
+      }
+    clear_pick();
+    return;
+  }
+  const auto gb = [](int64_t bytes) { return model_size_text(bytes); };
+  const json &e = entry;
+  const std::string id = e.value("id", ""), state = e.value("state", "missing");
+  const int64_t size = e.value("size", int64_t(0)), bytes = e.value("bytes", int64_t(0));
+  const auto found = model_jobs_.find(id);
+  const json job = found != model_jobs_.end() ? found->second : json::object();
+  const bool downloading = state == "downloading";
+  const std::string title = e.value("title", id);
+  if (!begin_card("##pick", title.substr(0, title.find(':')).c_str(), model_group(id).c_str())) {
+    end_card();
+    return;
+  }
+  ImGui::PushID(id.c_str());
+  ImGui::PushTextWrapPos(0.0f);
+  if (title.find(':') != std::string::npos) {
+    std::string rest = title.substr(title.find(':') + 1);
+    rest.erase(0, rest.find_first_not_of(' '));
+    ImGui::TextColored(hexv(look::fg2), "%s", rest.c_str());
+  }
+  if (state == "installed")
+    ImGui::TextColored(hexv(look::ok), "Installed, %s", gb(size).c_str());
+  else if (bytes > 0)
+    ImGui::TextColored(hexv(look::fg2), "%s of %s", gb(bytes).c_str(), gb(size).c_str());
+  else
+    ImGui::TextColored(hexv(look::fg2), "%s", gb(size).c_str());
+  if (state != "installed" && bytes > 0) {
+    ImGui::PushStyleColor(ImGuiCol_PlotHistogram, hexv(look::accent));
+    ImGui::ProgressBar(size > 0 ? float(double(bytes) / double(size)) : 0.0f, ImVec2(-1.0f, 6.0f), "");
+    ImGui::PopStyleColor();
+  }
+  if (downloading) {
+    const double rate = job.value("bytes_per_second", 0.0);
+    const double left = rate > 0.0 ? double(size - bytes) / rate : 0.0;
+    if (rate > 0.0 && left >= 90.0)
+      ImGui::TextColored(hexv(look::fg2), "%.1f MB/s, about %.0f min left", rate / 1e6, left / 60.0);
+    else if (rate > 0.0)
+      ImGui::TextColored(hexv(look::fg2), "%.1f MB/s, about %.0f s left", rate / 1e6, left);
+    ImGui::TextColored(hexv(look::fg3), "%s", job.value("detail", "Starting").c_str());
+  } else if (job.value("state", "") == "failed" && state != "installed") {
+    const json error = job.value("error", json::object());
+    ImGui::TextColored(kError, "%s", error.value("message", "The download failed.").c_str());
+    if (error.contains("data") && !error["data"].value("hint", "").empty())
+      ImGui::TextColored(hexv(look::fg3), "%s", error["data"].value("hint", "").c_str());
+  }
+  ImGui::Spacing();
+  if (const std::string notes = e.value("notes", ""); !notes.empty())
+    ImGui::TextColored(hexv(look::fg3), "%s", notes.c_str());
+  ImGui::PopTextWrapPos();
+  ImGui::Spacing();
+  if (downloading) {
+    if (soft_button("model_stop", "Stop", ImVec2(96.0f, 30.0f))) {
+      json unused;
+      rpc("jobs.cancel", {{"job_id", e.value("job_id", "")}}, unused);
+      next_models_poll_ = 0.0;
+    }
+  } else if (state != "installed") {
+    const std::string label = bytes > 0 ? "Continue, " + gb(size - bytes) + " left" : "Download " + gb(size);
+    if (soft_button("model_fetch", label.c_str(), ImVec2(-1.0f, 30.0f), true, true)) {
+      json started;
+      model_jobs_.erase(id);
+      if (rpc("models.fetch", {{"id", id}}, started))
+        model_jobs_[id] = {{"job", started.value("job_id", "")}, {"state", "running"}};
+      next_models_poll_ = 0.0;
+    }
+    if (soft_button("model_locate", "I already have it...", ImVec2(-1.0f, 28.0f)))
+      ask_models_folder("locate", id);
+    if (!models_note_.empty() && models_note_model_ == id) {
+      ImGui::PushTextWrapPos(0.0f);
+      ImGui::TextColored(models_note_error_ ? kError : hexv(look::fg2), "%s", models_note_.c_str());
+      ImGui::PopTextWrapPos();
+    }
+  }
+  if (!e.value("licence_url", "").empty() || !e.value("licence", "").empty()) { // the licence's words are in the tip; the button opens its page
+    const bool opened = soft_button("model_licence", "Licence", ImVec2(-1.0f, 28.0f));
+    if (ImGui::IsItemHovered() && !e.value("licence", "").empty()) {
+      ImGui::PushTextWrapPos(360.0f);
+      ImGui::SetTooltip("%s", e.value("licence", "").c_str());
+      ImGui::PopTextWrapPos();
+    }
+    if (opened && !e.value("licence_url", "").empty())
+      SDL_OpenURL(e.value("licence_url", "").c_str());
+  }
+  const json files = e.value("files", json::array());
+  if (ImGui::TreeNodeEx("##files", ImGuiTreeNodeFlags_SpanAvailWidth, files.size() == 1 ? "1 file" : "%zu files", files.size())) {
+    for (const json &f : files) {
+      const std::string path = f.value("path", ""), fstate = f.value("state", "missing");
+      const std::string name = path.substr(path.find_last_of('/') + 1);
+      const int64_t fsize = f.value("size", int64_t(0)), fbytes = f.value("bytes", int64_t(0));
+      ImGui::PushTextWrapPos(0.0f);
+      ImGui::TextColored(hexv(fstate == "installed" ? look::fg2 : look::fg3), "%s", name.c_str());
+      ImGui::PopTextWrapPos();
+      if (fstate == "installed")
+        ImGui::TextColored(hexv(look::ok), "  %s, on disk", gb(fsize).c_str());
+      else if (fstate == "partial")
+        ImGui::TextColored(hexv(look::accent), "  %s of %s", gb(fbytes).c_str(), gb(fsize).c_str());
+      else
+        ImGui::TextColored(hexv(look::fg3), "  %s", gb(fsize).c_str());
+    }
+    ImGui::TreePop();
+  }
+  ImGui::Spacing();
+  if (soft_button("pick_close", "Close", ImVec2(-1.0f, 28.0f)))
+    pending_ = [this] { clear_pick(); };
+  ImGui::PopID();
+  end_card();
+}
+
+// The folder the models go to and the engine that runs them, in the Settings window.
+void App::draw_settings_models() {
+  poll_models();
+  const auto gb = [](int64_t bytes) { return model_size_text(bytes); };
+  ImGui::PushTextWrapPos(0.0f);
+  const std::string dir = models_.value("models_dir", "");
+  if (!dir.empty()) {
+    section_label("FOLDER");
+    path_text(dir, hexv(look::fg2));
+    if (const int64_t room = models_.value("free_bytes", int64_t(-1)); room >= 0)
+      ImGui::TextColored(hexv(look::fg3), "%s free", gb(room).c_str());
+    if (soft_button("models_folder", "Open folder", ImVec2(0.0f, 26.0f))) {
+      std::string url = "file:///" + dir;
+      std::replace(url.begin(), url.end(), '\\', '/');
+      SDL_OpenURL(url.c_str());
+    }
+    if (!models_.value("folder_fixed", false)) { // downloads can go to another drive
+      ImGui::SameLine();
+      if (soft_button("models_move", "Change...", ImVec2(0.0f, 26.0f)))
+        ask_models_folder("move");
+    }
+    // Models that are on this computer already are used where they are.
+    if (soft_button("models_locate", "I already have models...", ImVec2(0.0f, 26.0f)))
+      ask_models_folder("locate");
+    if (!models_note_.empty() && models_note_model_.empty()) {
+      ImGui::PushTextWrapPos(0.0f);
+      ImGui::TextColored(models_note_error_ ? kError : hexv(look::fg2), "%s", models_note_.c_str());
+      ImGui::PopTextWrapPos();
+    }
+    const json folders = models_.value("folders", json::array());
+    if (!folders.empty()) {
+      ImGui::Spacing();
+      ImGui::TextColored(hexv(look::fg3), "Also used from:");
+      for (const json &f : folders) {
+        const std::string folder = f.is_string() ? f.get<std::string>() : std::string();
+        ImGui::PushID(folder.c_str());
+        path_text(folder, hexv(look::fg2));
+        if (soft_button("models_forget", "Stop using", ImVec2(0.0f, 24.0f))) { // the files stay where they are
+          json unused;
+          rpc("models.forget_folder", {{"folder", folder}}, unused);
+          next_models_poll_ = 0.0;
+          gen_models_loaded_ = false;
+          pending_ = [this] { refresh_gen_status(); };
+        }
+        ImGui::PopID();
+      }
+    }
+    ImGui::Spacing();
+  }
+  // Engines: what runs the models. For now the user's own ComfyUI, by its address.
+  if (!engines_loaded_) {
+    engines_loaded_ = true;
+    json engines;
+    if (rpc("gen.engines", json::object(), engines)) {
+      copy_to(comfy_buf_, sizeof comfy_buf_, engines.value("comfyui", std::string()));
+      for (const json &e : engines.value("engines", json::array()))
+        if (e.value("name", "") == "comfyui")
+          comfy_status_ = e;
+    }
+  }
+  section_label("COMFYUI");
+  ImGui::PushStyleColor(ImGuiCol_FrameBg, hexv(look::raised));
+  ImGui::SetNextItemWidth(-1.0f);
+  ImGui::InputTextWithHint("##comfyui", "http://127.0.0.1:8188", comfy_buf_, sizeof comfy_buf_);
+  ui_mark("field:comfyui");
+  ImGui::PopStyleColor();
+  if (soft_button("comfy_test", "Use and test", ImVec2(0.0f, 26.0f))) {
+    json set;
+    comfy_status_ = json::object();
+    if (rpc("gen.set_comfyui", {{"address", std::string(comfy_buf_)}}, set)) {
+      copy_to(comfy_buf_, sizeof comfy_buf_, set.value("comfyui", std::string()));
+      comfy_status_ = set.value("status", json{{"off", true}});
+      pending_ = [this] { refresh_gen_status(); }; // clips that waited for an engine can run now
+    }
+  }
+  ImGui::PushTextWrapPos(0.0f);
+  if (comfy_status_.value("off", false))
+    ImGui::TextColored(hexv(look::fg3), "ComfyUI is not used.");
+  else if (comfy_status_.value("reachable", false))
+    ImGui::TextColored(hexv(look::ok), "Connected: ComfyUI %s, %s", comfy_status_.value("version", "?").c_str(),
+                       comfy_status_.value("device", "").c_str());
+  else if (comfy_status_.contains("message"))
+    ImGui::TextColored(kError, "No answer. %s", comfy_status_.value("hint", "").c_str());
+  else
+    ImGui::TextColored(hexv(look::fg3), "Your own ComfyUI can run the models. Give its address.");
+  ImGui::PopTextWrapPos();
+  ImGui::Spacing();
+
+  // Get ComfyUI: one button puts it on this computer with every node pack the engine uses, and starts it.
+  const double now = ImGui::GetTime();
+  if (!comfy_job_.empty() && now >= comfy_poll_at_) {
+    comfy_poll_at_ = now + 0.5;
+    json state;
+    RpcError error;
+    if (client_.call("jobs.get", {{"job_id", comfy_job_}}, state, error)) {
+      comfy_job_state_ = state;
+      const std::string what = state.value("state", std::string());
+      if (what != "running") {
         comfy_job_.clear();
-      }
-    }
-    if (comfy_starting_ && now >= comfy_poll_at_) {
-      comfy_poll_at_ = now + 2.0;
-      comfy_get_known_ = false;
-    }
-    if (!comfy_get_known_) {
-      comfy_get_known_ = true;
-      RpcError error;
-      json status;
-      if (client_.call("comfyui.status", json::object(), status, error))
-        comfy_get_ = status;
-      if (comfy_get_.value("job_id", std::string()) != "" && comfy_job_.empty())
-        comfy_job_ = comfy_get_.value("job_id", std::string());
-      if (comfy_starting_ && comfy_get_.value("running", false)) {
-        comfy_starting_ = false;
-        engines_loaded_ = false;
-        say("ComfyUI is running.");
-        pending_ = [this] { refresh_gen_status(); };
-      }
-    }
-    section_label("GET COMFYUI");
-    ImGui::PushTextWrapPos(0.0f);
-    const bool own = comfy_get_.value("installed", false), supported = comfy_get_.value("supported", false);
-    if (!comfy_job_.empty()) {
-      ImGui::PushStyleColor(ImGuiCol_PlotHistogram, hexv(look::accent));
-      ImGui::ProgressBar(float(comfy_job_state_.value("progress", 0.0)), ImVec2(-1.0f, 8.0f), "");
-      ImGui::PopStyleColor();
-      ImGui::TextColored(hexv(look::fg2), "%s", comfy_job_state_.value("detail", std::string("Installing ComfyUI")).c_str());
-      if (soft_button("comfy_get_stop", "Stop", ImVec2(0.0f, 26.0f))) {
-        json stopped;
-        rpc("jobs.cancel", {{"job_id", comfy_job_}}, stopped);
-      }
-    } else if (!supported) {
-      ImGui::TextColored(hexv(look::fg3), "Attome can install ComfyUI itself on Windows with an NVIDIA card. On this computer install it yourself and give its address above.");
-    } else if (!own) {
-      if (!comfy_get_confirm_) {
-        ImGui::TextColored(hexv(look::fg3), "No ComfyUI yet? Attome can put it on this computer with everything it uses, and start it.");
-        if (soft_button("comfy_get_install", "Install ComfyUI  (2 GB)", ImVec2(0.0f, 30.0f), true, true))
-          comfy_get_confirm_ = true;
-      } else {
-        ImGui::TextColored(hexv(look::fg2), "This downloads, from their own publishers:");
-        ImGui::TextColored(hexv(look::fg3), "  ComfyUI %s, 2.0 GB (GPL-3.0), from Comfy-Org on GitHub", comfy_get_.value("version", "").c_str());
-        for (const json &p : comfy_get_.value("packs", json::array()))
-          ImGui::TextColored(hexv(look::fg3), "  %s (%s): %s", p.value("name", "").c_str(), p.value("licence", "").c_str(), p.value("for", "").c_str());
-        ImGui::TextColored(hexv(look::fg3), "They are programs of their own that Attome asks to generate; Attome does not contain them. It goes into %s and "
-                                            "needs about 8 GB there. The models are separate downloads, listed above.",
-                           comfy_get_.value("path", "").c_str());
-        if (soft_button("comfy_get_go", "Download and install", ImVec2(0.0f, 30.0f), true, true)) {
-          json started;
-          if (rpc("comfyui.install", json::object(), started)) {
-            comfy_job_ = started.value("job_id", std::string());
-            comfy_job_state_ = json::object();
-            comfy_get_confirm_ = false;
-          }
+        comfy_get_known_ = false;
+        engines_loaded_ = false; // the address is the new ComfyUI's
+        if (what == "done") {
+          const json made = state.value("result", json::object());
+          say(made.value("running", false) ? "ComfyUI is installed and running." : "ComfyUI is installed. " + made.value("problem", std::string()));
+          pending_ = [this] { refresh_gen_status(); };
+        } else if (what == "failed") {
+          const json e = state.value("error", json::object());
+          say(e.value("message", std::string("ComfyUI could not be installed.")) + (e.contains("data") ? "  " + e["data"].value("hint", std::string()) : std::string()), true);
+        } else {
+          say("Stopped. Press Install again to continue from where it was.");
         }
-        ImGui::SameLine();
-        if (soft_button("comfy_get_cancel", "Not now", ImVec2(0.0f, 30.0f)))
-          comfy_get_confirm_ = false;
       }
     } else {
-      const bool mine = comfy_get_.value("started_by_attome", false);
-      int missing = 0;
-      for (const json &p : comfy_get_.value("nodes", json::object()).value("packs", json::array()))
-        missing += p.value("ready", true) ? 0 : 1;
-      missing += int(comfy_get_.value("nodes", json::object()).value("core_missing", json::array()).size());
-      if (comfy_starting_)
-        ImGui::TextColored(hexv(look::fg2), "Starting ComfyUI (up to a minute the first time)...");
-      else if (mine && comfy_get_.value("running", false) && missing == 0)
-        ImGui::TextColored(hexv(look::ok), "Attome's ComfyUI %s is running, with every node Attome uses.", comfy_get_.value("version", "").c_str());
-      else if (mine && comfy_get_.value("running", false))
-        ImGui::TextColored(kError, "Attome's ComfyUI is running, but %d of the nodes Attome uses are missing. Repair adds them.", missing);
-      else
-        ImGui::TextColored(hexv(look::fg3), "Attome's ComfyUI %s is installed and not running.", comfy_get_.value("version", "").c_str());
-      if (!mine && !comfy_starting_) {
-        if (soft_button("comfy_get_start", "Start ComfyUI", ImVec2(0.0f, 28.0f), true, true)) {
-          json started;
-          if (rpc("comfyui.start", {{"wait", 0}}, started)) {
-            comfy_starting_ = true;
-            comfy_poll_at_ = now + 2.0;
-          }
-        }
-      } else if (mine) {
-        if (soft_button("comfy_get_stop_run", "Stop ComfyUI", ImVec2(0.0f, 28.0f))) {
-          json stopped;
-          rpc("comfyui.stop", json::object(), stopped);
-          comfy_get_known_ = false;
-          comfy_starting_ = false;
-          engines_loaded_ = false;
-        }
-      }
-      ImGui::SameLine();
-      if (soft_button("comfy_get_repair", "Repair", ImVec2(0.0f, 28.0f))) {
+      comfy_job_.clear();
+    }
+  }
+  if (comfy_starting_ && now >= comfy_poll_at_) {
+    comfy_poll_at_ = now + 2.0;
+    comfy_get_known_ = false;
+  }
+  if (!comfy_get_known_) {
+    comfy_get_known_ = true;
+    RpcError error;
+    json status;
+    if (client_.call("comfyui.status", json::object(), status, error))
+      comfy_get_ = status;
+    if (comfy_get_.value("job_id", std::string()) != "" && comfy_job_.empty())
+      comfy_job_ = comfy_get_.value("job_id", std::string());
+    if (comfy_starting_ && comfy_get_.value("running", false)) {
+      comfy_starting_ = false;
+      engines_loaded_ = false;
+      say("ComfyUI is running.");
+      pending_ = [this] { refresh_gen_status(); };
+    }
+  }
+  section_label("GET COMFYUI");
+  ImGui::PushTextWrapPos(0.0f);
+  const bool own = comfy_get_.value("installed", false), supported = comfy_get_.value("supported", false);
+  if (!comfy_job_.empty()) {
+    ImGui::PushStyleColor(ImGuiCol_PlotHistogram, hexv(look::accent));
+    ImGui::ProgressBar(float(comfy_job_state_.value("progress", 0.0)), ImVec2(-1.0f, 8.0f), "");
+    ImGui::PopStyleColor();
+    ImGui::TextColored(hexv(look::fg2), "%s", comfy_job_state_.value("detail", std::string("Installing ComfyUI")).c_str());
+    if (soft_button("comfy_get_stop", "Stop", ImVec2(0.0f, 26.0f))) {
+      json stopped;
+      rpc("jobs.cancel", {{"job_id", comfy_job_}}, stopped);
+    }
+  } else if (!supported) {
+    ImGui::TextColored(hexv(look::fg3), "Attome can install ComfyUI itself on Windows with an NVIDIA card. On this computer install it yourself and give its address above.");
+  } else if (!own) {
+    if (!comfy_get_confirm_) {
+      ImGui::TextColored(hexv(look::fg3), "No ComfyUI yet? Attome can put it on this computer with everything it uses, and start it.");
+      if (soft_button("comfy_get_install", "Install ComfyUI  (2 GB)", ImVec2(0.0f, 30.0f), true, true))
+        comfy_get_confirm_ = true;
+    } else {
+      ImGui::TextColored(hexv(look::fg2), "This downloads, from their own publishers:");
+      ImGui::TextColored(hexv(look::fg3), "  ComfyUI %s, 2.0 GB (GPL-3.0), from Comfy-Org on GitHub", comfy_get_.value("version", "").c_str());
+      for (const json &p : comfy_get_.value("packs", json::array()))
+        ImGui::TextColored(hexv(look::fg3), "  %s (%s): %s", p.value("name", "").c_str(), p.value("licence", "").c_str(), p.value("for", "").c_str());
+      ImGui::TextColored(hexv(look::fg3), "They are programs of their own that Attome asks to generate; Attome does not contain them. It goes into %s and "
+                                          "needs about 8 GB there. The models are separate downloads, listed above.",
+                         comfy_get_.value("path", "").c_str());
+      if (soft_button("comfy_get_go", "Download and install", ImVec2(0.0f, 30.0f), true, true)) {
         json started;
         if (rpc("comfyui.install", json::object(), started)) {
           comfy_job_ = started.value("job_id", std::string());
           comfy_job_state_ = json::object();
+          comfy_get_confirm_ = false;
         }
       }
+      ImGui::SameLine();
+      if (soft_button("comfy_get_cancel", "Not now", ImVec2(0.0f, 30.0f)))
+        comfy_get_confirm_ = false;
     }
-    ui_mark("section:get_comfyui");
-    ImGui::PopTextWrapPos();
-    ImGui::Spacing();
+  } else {
+    const bool mine = comfy_get_.value("started_by_attome", false);
+    int missing = 0;
+    for (const json &p : comfy_get_.value("nodes", json::object()).value("packs", json::array()))
+      missing += p.value("ready", true) ? 0 : 1;
+    missing += int(comfy_get_.value("nodes", json::object()).value("core_missing", json::array()).size());
+    if (comfy_starting_)
+      ImGui::TextColored(hexv(look::fg2), "Starting ComfyUI (up to a minute the first time)...");
+    else if (mine && comfy_get_.value("running", false) && missing == 0)
+      ImGui::TextColored(hexv(look::ok), "Attome's ComfyUI %s is running, with every node Attome uses.", comfy_get_.value("version", "").c_str());
+    else if (mine && comfy_get_.value("running", false))
+      ImGui::TextColored(kError, "Attome's ComfyUI is running, but %d of the nodes Attome uses are missing. Repair adds them.", missing);
+    else
+      ImGui::TextColored(hexv(look::fg3), "Attome's ComfyUI %s is installed and not running.", comfy_get_.value("version", "").c_str());
+    if (!mine && !comfy_starting_) {
+      if (soft_button("comfy_get_start", "Start ComfyUI", ImVec2(0.0f, 28.0f), true, true)) {
+        json started;
+        if (rpc("comfyui.start", {{"wait", 0}}, started)) {
+          comfy_starting_ = true;
+          comfy_poll_at_ = now + 2.0;
+        }
+      }
+    } else if (mine) {
+      if (soft_button("comfy_get_stop_run", "Stop ComfyUI", ImVec2(0.0f, 28.0f))) {
+        json stopped;
+        rpc("comfyui.stop", json::object(), stopped);
+        comfy_get_known_ = false;
+        comfy_starting_ = false;
+        engines_loaded_ = false;
+      }
+    }
+    ImGui::SameLine();
+    if (soft_button("comfy_get_repair", "Repair", ImVec2(0.0f, 28.0f))) {
+      json started;
+      if (rpc("comfyui.install", json::object(), started)) {
+        comfy_job_ = started.value("job_id", std::string());
+        comfy_job_state_ = json::object();
+      }
+    }
   }
-  ImGui::EndChild();
+  ui_mark("section:get_comfyui");
+  ImGui::PopTextWrapPos();
+  ImGui::Spacing();
+  
+  ImGui::PopTextWrapPos();
 }
 
 

@@ -35,7 +35,7 @@ try {
     'click @rail:Generate', 'wait 600'
     "expect @model:$($model.id)"
     "shot $work\card_not_installed.jpg"
-    "click @model:$($model.id)", 'wait 900'
+    "dblclick @model:$($model.id)", 'wait 900'
     "expect @$toast"
     'expect @card:Generate', 'expect @card:Workflow'
     'above @card:Generate @card:Workflow'

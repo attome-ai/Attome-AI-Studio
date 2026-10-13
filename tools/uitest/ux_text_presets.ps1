@@ -27,14 +27,14 @@ $run = Invoke-EditorScript -Project $proj -TimeoutSeconds 240 -Script @(
   'wait 1200'
   'click @rail:Text', 'wait 500'
   "shot $work\text_panel.jpg"
-  'click @style:Bold_pop', 'wait 900'
+  'dblclick @style:Bold_pop', 'wait 900'
   "shot $work\bold_pop.jpg"
-  'click @style:Neon', 'wait 900'
+  'dblclick @style:Neon', 'wait 900'
   "shot $work\neon.jpg"
-  'click @style:Typewriter', 'wait 900'
-  'click @style:Headline', 'wait 900'
+  'dblclick @style:Typewriter', 'wait 900'
+  'dblclick @style:Headline', 'wait 900'
   "shot $work\headline.jpg"
-  'click @tab:Captions', 'wait 300', 'click @style:Subtitle', 'wait 900'
+  'click @tab:Captions', 'wait 300', 'dblclick @style:Subtitle', 'wait 900'
   "shot $work\subtitle.jpg"
 )
 $failed = $run.Errors

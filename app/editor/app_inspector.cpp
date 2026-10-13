@@ -35,6 +35,11 @@ void App::draw_inspector() {
   ImGui::PopStyleColor();
 
   inspector_tab_ = 0;
+  if (!pick_.kind.empty()) { // a card picked in a left panel: its properties, until a clip is picked in the timeline or it is closed
+    draw_pick_inspector();
+    ImGui::End();
+    return;
+  }
   const TrackUi *track = nullptr;
   const ClipUi *c = selected(&track);
   if (c && picked_.size() > 1) { // several clips: what can be done to all of them

@@ -1198,6 +1198,8 @@ void App::select_clips(const std::vector<std::string> &ids, bool extend) {
     now.insert(picked_.begin(), picked_.end());
   }
   now.insert(ids.begin(), ids.end());
+  if (!ids.empty())
+    clear_pick(); // a clip was picked in the timeline: the Inspector shows the clip, not the card that was picked in a panel
   if (now.empty()) {
     selected_clip_.clear();
     picked_.clear();
@@ -1911,7 +1913,7 @@ App::DropPlan App::plan_drop(const std::string &payload, int row, int64_t frame)
 
 // A transition on the cut between `from` and `to` (touching clips of one track): one second, or less for short clips; the engine trims
 // the clips and moves what follows when their media does not reach past the cut (make_room), and says what it did.
-void App::add_transition_at(const std::string &from, const std::string &to, const std::string &kind) {
+void App::add_transition_at(const std::string &from, const std::string &to, const std::string &kind, double seconds, const std::string &direction) {
   const ClipUi *a = find_clip(from), *b = find_clip(to);
   if (!a || !b)
     return;
@@ -1925,19 +1927,20 @@ void App::add_transition_at(const std::string &from, const std::string &to, cons
       say("There is a transition on this cut already. Select the clip to change or remove it.", true);
       return;
     }
-  const int64_t frames = std::max<int64_t>(2, std::min<int64_t>(std::llround(fps()), std::min(a->frames, b->frames)));
+  const int64_t wanted = seconds > 0.0 ? std::llround(seconds * fps()) : std::llround(fps());
+  const int64_t frames = std::max<int64_t>(2, std::min<int64_t>(wanted, std::min(a->frames, b->frames)));
   json op = {{"op", "add_transition"}, {"between", json::array({from, to})}, {"duration", frames_text(frames)}, {"make_room", true}};
   if (kind == "dissolve") {
     op["type"] = "dissolve";
   } else if (kind == "wipe") {
     op["type"] = "wipe";
-    op["direction"] = "left";
+    op["direction"] = direction.empty() ? "left" : direction;
   } else if (kind == "push") {
     op["type"] = "push";
-    op["direction"] = "left";
+    op["direction"] = direction.empty() ? "left" : direction;
   } else if (kind == "slide") {
     op["type"] = "slide";
-    op["direction"] = "left";
+    op["direction"] = direction.empty() ? "left" : direction;
   } else if (kind == "iris") {
     op["type"] = "iris";
   } else {

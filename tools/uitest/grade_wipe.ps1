@@ -35,10 +35,10 @@ function Get-FxOf($run, $clip) { @($clip.effects.PSObject.Properties | ForEach-O
 
 $run = Invoke-EditorScript -Project $proj -Script @(
   'click @rail:Effects'
-  'click @effect:grade'                 # a colour grade adjustment layer at the playhead, selected
+  'dblclick @effect:grade'                 # a colour grade adjustment layer at the playhead, selected
   'slide @slider:grade_saturation 0'    # 0 .. 3: no colour
   "shot $work\grade_card.jpg"
-  'click @effect:vignette'              # a second layer, after the first on the same Effects track
+  'dblclick @effect:vignette'              # a second layer, after the first on the same Effects track
   "shot $work\vignette_card.jpg"
 )
 $failed = $run.Errors

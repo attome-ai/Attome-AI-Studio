@@ -322,13 +322,13 @@ void App::draw_library_panel() {
     if (client_.call("library.list", json::object(), result, error))
       library_items_ = result.value("items", json::array());
   }
-  section_label("LIBRARY");
-  ImGui::PushTextWrapPos(0.0f);
-  ImGui::TextColored(hexv(look::fg3), "Clips kept here can be used in any project. Right-click clips on the timeline and choose Add to the library.");
-  ImGui::PopTextWrapPos();
+  static const std::string kinds[] = {"All", "Video", "Audio"};
+  panel_tabs("tab", kinds, library_kind_);
+  ImGui::NewLine();
   ImGui::Spacing();
   if (library_items_.empty()) {
     ImGui::TextColored(hexv(look::fg2), "Nothing is kept yet.");
+    panel_hint("Clips kept here can be used in any project. Right-click clips on the timeline and choose Add to the library.");
     return;
   }
   ImGui::SetNextItemWidth(-1.0f);
@@ -352,6 +352,10 @@ void App::draw_library_panel() {
     const std::string id = item.value("id", std::string()), name = item.value("name", std::string("Clip"));
     if (!wanted.empty() && lower(name).find(wanted) == std::string::npos)
       continue;
+    if (library_kind_ == 1 && !item.value("picture", false))
+      continue; // Video: it has a picture
+    if (library_kind_ == 2 && item.value("picture", false))
+      continue; // Audio: sound only
     std::string thumb = item.value("picture_path", std::string()); // the clip's own file; the item's frame is canvas-shaped, with bars
     if (thumb.empty())
       thumb = item.value("thumb", std::string());
@@ -366,7 +370,8 @@ void App::draw_library_panel() {
     const bool card_pressed = ImGui::InvisibleButton("##card", ImVec2(cell, thumb_h + 38.0f), ImGuiButtonFlags_EnableNav);
     ui_mark("library:" + name);
     const bool hovered = ImGui::IsItemHovered();
-    card_source("lib:" + id, name.c_str());
+    if (card_source("lib:" + id, name.c_str()))
+      set_pick("library", id); // a click only picks it: the Inspector shows it; a double click, the plus or a drag adds it
     const bool add_by_double_click = (hovered && ImGui::IsMouseDoubleClicked(0)) || (card_pressed && !ImGui::IsMouseReleased(0)); // or Enter on the card
     bool add_now = add_by_double_click;
     if (ImGui::BeginPopupContextItem("##libctx")) {
@@ -405,8 +410,8 @@ void App::draw_library_panel() {
       dl->AddText(ImVec2(p.x + (cell - gs.x) * 0.5f, p.y + (thumb_h - gs.y) * 0.5f), hex(look::fg3), g.c_str());
       ImGui::PopFont();
     }
-    if (hovered)
-      dl->AddRect(p, ImVec2(p.x + cell, p.y + thumb_h), hex(look::accent), 8.0f, 0, 1.5f);
+    if (hovered || picked("library", id))
+      dl->AddRect(p, ImVec2(p.x + cell, p.y + thumb_h), hex(look::accent), 8.0f, 0, picked("library", id) ? 2.5f : 1.5f);
     {
       const ImVec2 here = ImGui::GetCursorScreenPos();
       ImGui::SetCursorScreenPos(ImVec2(p.x + cell - 34.0f, p.y + 6.0f));
@@ -449,7 +454,7 @@ void App::draw_library_panel() {
       dl->AddText(ImVec2(p.x + 2.0f, p.y + thumb_h + 20.0f), hex(look::fg3), info);
     }
     if (hovered && !ImGui::IsMouseDown(0))
-      ImGui::SetTooltip("Double-click or the plus: at the playhead. Drag it onto the timeline to choose where. Right-click for more.");
+      ImGui::SetTooltip("Click to see it in the Inspector. Double-click or the plus: at the playhead. Drag it onto the timeline to choose where. Right-click for more.");
     if (add_now)
       pending_ = [this, id] { insert_library(id, playhead_, {}, true); };
     ImGui::PopID();
@@ -459,16 +464,45 @@ void App::draw_library_panel() {
   if (column == 0 && !wanted.empty() && std::none_of(library_items_.begin(), library_items_.end(), [&](const json &i) { return lower(i.value("name", std::string())).find(wanted) != std::string::npos; }))
     ImGui::TextColored(hexv(look::fg2), "Nothing kept matches.");
   ImGui::EndChild();
+  panel_hint("Clips kept here can be used in any project. Right-click clips on the timeline and choose Add to the library. Click one to see it; "
+             "double-click it, or drag it onto the timeline, to add it.");
   if (!remove_id.empty()) {
     json ignored;
     if (rpc("library.remove", {{"id", remove_id}}, ignored)) {
       library_stale_ = true;
+      if (pick_.kind == "library" && pick_.id == remove_id)
+        clear_pick();
       say("Removed from the library. Projects that use it keep their clips.");
     }
   }
 }
 
+// A file out of the project, with the clips made from it (the file on the disk is not touched).
+void App::remove_media(const std::string &path) {
+  std::vector<std::string> used;
+  for (const TrackUi &t : tracks_)
+    for (const ClipUi &c : t.clips)
+      if (c.path == path)
+        used.push_back(c.id);
+  if (!used.empty()) {
+    select_clips(used, false);
+    delete_selected();
+    for (const TrackUi &t : tracks_) // a locked track kept its clip: the file stays in the project
+      for (const ClipUi &c : t.clips)
+        if (c.path == path) {
+          say("A clip made from it is on a locked track. Unlock the track first.", true);
+          return;
+        }
+  }
+  std::erase(media_paths_, path);
+  if (selected_media_ == path)
+    selected_media_.clear();
+  if (pick_.kind == "media" && pick_.id == path)
+    clear_pick();
+}
+
 void App::select_nothing() {
+  clear_pick();
   selected_clip_.clear();
   picked_.clear();
   selected_media_.clear();
@@ -504,37 +538,59 @@ const ClipUi *App::speech_clip() const {
   return nullptr;
 }
 
+// The sample of a text style as it is drawn on a card and in the Inspector: its colour, outline, shadow or glow, and box over a stand-in picture
+// (the sizes are scaled to the width of the rectangle).
+void App::draw_text_style_art(const TextStyle &st, ImDrawList *dl, ImVec2 p, ImVec2 q) {
+  const float h = q.y - p.y;
+  dl->AddRectFilled(p, ImVec2(q.x, p.y + h * 0.4f), IM_COL32(64, 98, 150, 255), 10.0f, ImDrawFlags_RoundCornersTop);
+  dl->AddRectFilled(ImVec2(p.x, p.y + h * 0.4f), ImVec2(q.x, p.y + h * 0.7f), IM_COL32(40, 62, 100, 255));
+  dl->AddRectFilled(ImVec2(p.x, p.y + h * 0.7f), q, IM_COL32(22, 30, 48, 255), 10.0f, ImDrawFlags_RoundCornersBottom);
+  const float scale = (q.x - p.x) / 133.0f, px = std::min(st.size * 250.0f, 34.0f) * scale;
+  ImGui::PushFont(st.bold ? g_fonts.bold : g_fonts.ui, px);
+  const ImVec2 ss = ImGui::CalcTextSize(st.sample);
+  const ImVec2 at(p.x + (q.x - p.x - ss.x) * 0.5f, st.y > 0.7f ? p.y + h * 0.55f : st.y < 0.4f ? p.y + h * 0.12f : p.y + (h * 0.62f - ss.y) * 0.5f);
+  const auto rgb = [](uint32_t c, float a) { return IM_COL32((c >> 16) & 255, (c >> 8) & 255, c & 255, int(a * 255.0f)); };
+  if (st.box > 0.0f)
+    dl->AddRectFilled(ImVec2(at.x - px * 0.3f, at.y - px * 0.15f), ImVec2(at.x + ss.x + px * 0.3f, at.y + ss.y + px * 0.15f), rgb(st.box_color, st.box), px * 0.3f);
+  if (st.shadow > 0.0f) {
+    const float spread = std::max(1.0f, st.shadow_blur * px * 0.15f), off = st.shadow_off * px;
+    for (const ImVec2 d : {ImVec2(-1, -1), ImVec2(1, -1), ImVec2(-1, 1), ImVec2(1, 1)})
+      dl->AddText(ImVec2(at.x + off + d.x * spread, at.y + off + d.y * spread), rgb(st.shadow_color, st.shadow * 0.3f), st.sample);
+  }
+  if (st.outline > 0.0f) {
+    const float w = std::max(1.0f, st.outline * px * 0.6f);
+    for (const ImVec2 d : {ImVec2(-1, 0), ImVec2(1, 0), ImVec2(0, -1), ImVec2(0, 1), ImVec2(-1, -1), ImVec2(1, 1), ImVec2(-1, 1), ImVec2(1, -1)})
+      dl->AddText(ImVec2(at.x + d.x * w, at.y + d.y * w), IM_COL32(0, 0, 0, 255), st.sample);
+  }
+  dl->AddText(at, rgb(st.color, 1.0f), st.sample);
+  ImGui::PopFont();
+}
+
 void App::draw_text_panel() {
   static const std::string tabs[] = {"All", "Titles", "Captions"};
   panel_tabs("tab", tabs, text_tab_);
   ImGui::NewLine();
   ImGui::Spacing();
-  if (text_tab_ != 1) { // captions from what is said: the clip it will hear, and the button (Stop while it listens)
-    section_label("AUTO CAPTIONS");
-    const ClipUi *source = speech_clip();
-    ImGui::PushTextWrapPos(0.0f);
-    if (!asr_job_.empty())
-      ImGui::TextColored(hexv(look::fg2), "Listening...");
-    else if (source)
-      ImGui::TextColored(hexv(look::fg2), "Captions from what is said in %s.", source->name.c_str());
-    else
-      ImGui::TextColored(hexv(look::fg3), "Select a clip with speech, or put the playhead on one.");
-    ImGui::PopTextWrapPos();
-    if (!asr_job_.empty()) {
-      if (soft_button("auto_captions_stop", "Stop listening", ImVec2(160.0f, 30.0f)))
-        pending_ = [this] {
-          json unused;
-          rpc("jobs.cancel", {{"job_id", asr_job_}}, unused);
-        };
-    } else if (soft_button("auto_captions", "Auto captions", ImVec2(160.0f, 30.0f), source != nullptr, source != nullptr)) {
-      pending_ = [this, id = source->id] { auto_captions(id); };
-    }
-    ImGui::Spacing();
-    section_label("STYLES");
-  }
   const std::vector<TextStyle> &styles = text_styles();
   const auto in_tab = [&](const TextStyle &s) { return text_tab_ == 0 || (text_tab_ == 2) == s.caption; };
-  TileGrid grid = tile_grid(int(std::count_if(styles.begin(), styles.end(), in_tab)));
+  const bool with_auto = text_tab_ != 1; // "Auto captions" is a card of its own among the captions
+  TileGrid grid = tile_grid(int(std::count_if(styles.begin(), styles.end(), in_tab)) + (with_auto ? 1 : 0));
+  if (with_auto) {
+    Tile t;
+    t.id = "captions_auto";
+    t.mark = "captions:auto";
+    t.label = "Auto captions";
+    t.tip = "Captions from what is said in a clip, one word at a time.\nClick to see which clip it would hear; double-click starts it.";
+    t.base = 0x1b2536;
+    t.selected = picked("captions", "auto");
+    t.art = [](ImDrawList *dl, ImVec2 p, ImVec2 q) { draw_captions_art(dl, p, q); };
+    const TileHit hit = tile_hit(grid, t);
+    if (hit == TileHit::pick || hit == TileHit::open)
+      set_pick("captions", "auto");
+    if (hit == TileHit::open && asr_job_.empty())
+      if (const ClipUi *source = speech_clip())
+        pending_ = [this, id = source->id] { auto_captions(id); };
+  }
   for (size_t i = 0; i < styles.size(); ++i) {
     if (!in_tab(styles[i]))
       continue;
@@ -544,41 +600,18 @@ void App::draw_text_panel() {
     t.mark = std::string("style:") + st.name;
     std::replace(t.mark.begin(), t.mark.end(), ' ', '_'); // "style:Bold_pop", as a script writes it
     t.label = st.name;
-    t.tip = std::string(st.hint) + ". Drag it onto the timeline, or click to add it at the playhead.";
+    t.tip = std::string(st.hint) + ". Click to see it; double-click adds it at the playhead; drag it onto the timeline to choose where.";
     t.payload = "title:" + std::to_string(i);
     t.base = 0x1b2536;
-    t.art = [st](ImDrawList *dl, ImVec2 p, ImVec2 q) {
-      // a stand-in picture for the words to sit on: sky over a darker ground
-      const float h = q.y - p.y;
-      dl->AddRectFilled(p, ImVec2(q.x, p.y + h * 0.4f), IM_COL32(64, 98, 150, 255), 10.0f, ImDrawFlags_RoundCornersTop);
-      dl->AddRectFilled(ImVec2(p.x, p.y + h * 0.4f), ImVec2(q.x, p.y + h * 0.7f), IM_COL32(40, 62, 100, 255));
-      dl->AddRectFilled(ImVec2(p.x, p.y + h * 0.7f), q, IM_COL32(22, 30, 48, 255), 10.0f, ImDrawFlags_RoundCornersBottom);
-      // The sample as the style draws it: its colour, outline, shadow or glow, and box (the sizes scaled to the tile: 133 px wide in a
-      // two-column panel, the text 0.12 of a short side is about 30 px there).
-      const float scale = (q.x - p.x) / 133.0f, px = std::min(st.size * 250.0f, 34.0f) * scale;
-      ImGui::PushFont(st.bold ? g_fonts.bold : g_fonts.ui, px);
-      const ImVec2 ss = ImGui::CalcTextSize(st.sample);
-      const ImVec2 at(p.x + (q.x - p.x - ss.x) * 0.5f, st.y > 0.7f ? p.y + h * 0.55f : st.y < 0.4f ? p.y + h * 0.12f : p.y + (h * 0.62f - ss.y) * 0.5f);
-      const auto rgb = [](uint32_t c, float a) { return IM_COL32((c >> 16) & 255, (c >> 8) & 255, c & 255, int(a * 255.0f)); };
-      if (st.box > 0.0f)
-        dl->AddRectFilled(ImVec2(at.x - px * 0.3f, at.y - px * 0.15f), ImVec2(at.x + ss.x + px * 0.3f, at.y + ss.y + px * 0.15f), rgb(st.box_color, st.box), px * 0.3f);
-      if (st.shadow > 0.0f) {
-        const float spread = std::max(1.0f, st.shadow_blur * px * 0.15f), off = st.shadow_off * px;
-        for (const ImVec2 d : {ImVec2(-1, -1), ImVec2(1, -1), ImVec2(-1, 1), ImVec2(1, 1)})
-          dl->AddText(ImVec2(at.x + off + d.x * spread, at.y + off + d.y * spread), rgb(st.shadow_color, st.shadow * 0.3f), st.sample);
-      }
-      if (st.outline > 0.0f) {
-        const float w = std::max(1.0f, st.outline * px * 0.6f);
-        for (const ImVec2 d : {ImVec2(-1, 0), ImVec2(1, 0), ImVec2(0, -1), ImVec2(0, 1), ImVec2(-1, -1), ImVec2(1, 1), ImVec2(-1, 1), ImVec2(1, -1)})
-          dl->AddText(ImVec2(at.x + d.x * w, at.y + d.y * w), IM_COL32(0, 0, 0, 255), st.sample);
-      }
-      dl->AddText(at, rgb(st.color, 1.0f), st.sample);
-      ImGui::PopFont();
-    };
-    if (gallery_tile(grid, t))
+    t.selected = picked("style", std::to_string(i));
+    t.art = [st](ImDrawList *dl, ImVec2 p, ImVec2 q) { draw_text_style_art(st, dl, p, q); };
+    const TileHit hit = tile_hit(grid, t);
+    if (hit == TileHit::pick || hit == TileHit::open)
+      set_pick("style", std::to_string(i));
+    if (hit == TileHit::open)
       add_title(int(i));
   }
-  panel_hint("Drag a style onto the timeline, or click it to add it at the playhead. Edit the words, size and colour in the "
+  panel_hint("Click a style to see it. Double-click it, or drag it onto the timeline, to add it. Edit the words, size and colour in the "
              "Inspector; Arabic and other right-to-left text work.");
 }
 
@@ -728,45 +761,17 @@ void App::draw_effects_panel() {
       t.id = std::string("tr_") + k.id;
       t.mark = std::string("transition:") + k.id;
       t.label = k.title;
-      t.tip = std::string(k.tip) + ".\nDrag it onto the cut between two clips that touch. Click puts it on the cut after the selected clip.";
+      t.tip = std::string(k.tip) + ".\nClick to see it and set it; double-click puts it on the cut after the selected clip; drag it onto the cut between two clips.";
       t.payload = std::string("tr:") + k.id;
       t.base = 0x141824;
+      t.selected = picked("transition", k.id);
       const std::string id = k.id;
-      t.art = [id](ImDrawList *dl, ImVec2 p, ImVec2 q) { // the transition, played over and over: picture A turns into picture B
-        const ImVec2 c((p.x + q.x) * 0.5f, p.y + (q.y - p.y) * 0.42f);
-        const float w = 62.0f, h = 40.0f;
-        const ImVec2 a0(c.x - w * 0.5f, c.y - h * 0.5f), a1(c.x + w * 0.5f, c.y + h * 0.5f);
-        const float t = std::fmod(float(ImGui::GetTime()) * 0.7f, 1.4f), u = std::clamp(t / 1.0f, 0.0f, 1.0f); // a pause at the end
-        const ImU32 first = IM_COL32(70, 130, 220, 255), second = IM_COL32(240, 150, 70, 255);
-        dl->PushClipRect(a0, a1, true);
-        dl->AddRectFilled(a0, a1, first);
-        if (id == "dissolve") {
-          dl->AddRectFilled(a0, a1, IM_COL32(240, 150, 70, int(u * 255)));
-        } else if (id == "wipe") {
-          dl->AddRectFilled(a0, ImVec2(a0.x + w * u, a1.y), second);
-        } else if (id == "push") {
-          dl->AddRectFilled(ImVec2(a0.x - w * u, a0.y), ImVec2(a1.x - w * u, a1.y), first);
-          dl->AddRectFilled(ImVec2(a1.x - w * u, a0.y), ImVec2(a1.x + w - w * u, a1.y), second);
-        } else if (id == "slide") {
-          dl->AddRectFilled(ImVec2(a1.x - w * u, a0.y), a1, second);
-        } else if (id == "iris") {
-          dl->AddCircleFilled(c, std::sqrt(w * w + h * h) * 0.5f * u, second);
-        } else if (id == "zoom_in") {
-          const float k = 1.0f + u * 0.8f;
-          dl->AddRectFilled(ImVec2(c.x - w * 0.5f * k, c.y - h * 0.5f * k), ImVec2(c.x + w * 0.5f * k, c.y + h * 0.5f * k), first);
-          dl->AddRectFilled(ImVec2(c.x - w * 0.5f * (0.4f + 0.6f * u), c.y - h * 0.5f * (0.4f + 0.6f * u)),
-                            ImVec2(c.x + w * 0.5f * (0.4f + 0.6f * u), c.y + h * 0.5f * (0.4f + 0.6f * u)), IM_COL32(240, 150, 70, int(60 + u * 195)));
-        } else {
-          dl->AddRectFilled(a0, a1, second);
-          const float k = 1.0f - u * 0.9f;
-          dl->AddRectFilled(ImVec2(c.x - w * 0.5f * k, c.y - h * 0.5f * k), ImVec2(c.x + w * 0.5f * k, c.y + h * 0.5f * k), first);
-        }
-        dl->PopClipRect();
-        dl->AddRect(a0, a1, IM_COL32(255, 255, 255, 90), 3.0f);
-      };
-      if (gallery_tile(grid, t)) {
-        const std::string kind = id;
-        pending_ = [this, kind] { // click: on the cut after the selected clip
+      t.art = [id](ImDrawList *dl, ImVec2 p, ImVec2 q) { draw_transition_art(id, dl, p, q); };
+      const TileHit hit = tile_hit(grid, t);
+      if (hit == TileHit::pick || hit == TileHit::open)
+        set_pick("transition", id);
+      if (hit == TileHit::open)
+        pending_ = [this, kind = id] { // on the cut after the selected clip, with what the Inspector shows
           const TrackUi *home = nullptr;
           const ClipUi *c = selected(&home);
           if (!c || !home) {
@@ -775,12 +780,11 @@ void App::draw_effects_panel() {
           }
           for (const ClipUi &next : home->clips)
             if (next.id != c->id && next.start == c->start + c->frames)
-              return add_transition_at(c->id, next.id, kind);
+              return add_transition_at(c->id, next.id, kind, pick_values_["seconds"], pick_text_);
           say("No clip starts where this one ends. Drag the card onto a cut instead.", true);
         };
-      }
     }
-    panel_hint("Drag a transition onto the cut between two clips. Short clips get a shorter one; the engine trims and moves clips when their media does not reach past the cut.");
+    panel_hint("Click a transition to see it and set it. Double-click it, or drag it onto the cut between two clips, to add it.");
     return;
   }
   // The tab an effect is under: colour (grade, LUT, vignette), detail (blur, sharpen, grain) or key (chroma, luma).
@@ -805,60 +809,19 @@ void App::draw_effects_panel() {
     t.label = def.title;
     for (const auto &[blurb_name, blurb] : kBlurb)
       if (name == blurb_name)
-        t.tip = std::string(blurb) + (def.clip_only ? ". Drag it onto a clip." : ". Drag it onto a clip, or onto empty track space for an adjustment layer. Click adds one at the playhead.");
+        t.tip = std::string(blurb) + (def.clip_only ? ". Click to set it up; double-click or drag it onto a clip." : ". Click to set it up and preview it; double-click adds it to the selected clip, or drag it onto a clip, or onto empty track space for a layer over everything.");
     t.payload = std::string("fx:") + def.id;
     t.base = 0x141824;
-    t.art = [name](ImDrawList *dl, ImVec2 p, ImVec2 q) {
-      const ImVec2 c((p.x + q.x) * 0.5f, p.y + (q.y - p.y) * 0.42f);
-      if (name == "blur") { // soft rings
-        for (int i = 0; i < 5; ++i)
-          dl->AddCircle(c, 5.0f + float(i) * 4.0f, hex(look::adj, 200 - i * 40), 0, 2.0f);
-      } else if (name == "grade") { // three overlapping colour discs
-        dl->AddCircleFilled(ImVec2(c.x - 9.0f, c.y + 5.0f), 15.0f, IM_COL32(230, 70, 70, 130));
-        dl->AddCircleFilled(ImVec2(c.x + 9.0f, c.y + 5.0f), 15.0f, IM_COL32(70, 200, 110, 130));
-        dl->AddCircleFilled(ImVec2(c.x, c.y - 10.0f), 15.0f, IM_COL32(80, 130, 240, 130));
-      } else if (name == "sharpen") { // an edge that overshoots on both sides: the profile of a sharpened step
-        const ImVec2 edge[6] = {ImVec2(c.x - 30.0f, c.y + 10.0f), ImVec2(c.x - 8.0f, c.y + 10.0f), ImVec2(c.x - 6.0f, c.y + 16.0f),
-                                ImVec2(c.x - 4.0f, c.y - 16.0f), ImVec2(c.x - 2.0f, c.y - 10.0f), ImVec2(c.x + 30.0f, c.y - 10.0f)};
-        dl->AddPolyline(edge, 6, hex(look::adj), 0, 2.2f);
-      } else if (name == "lut") { // a strip of graded colour: the table's cube, flattened
-        for (int i = 0; i < 6; ++i)
-          dl->AddRectFilled(ImVec2(c.x - 33.0f + float(i) * 11.0f, c.y - 14.0f), ImVec2(c.x - 23.0f + float(i) * 11.0f, c.y + 14.0f),
-                            IM_COL32(60 + i * 30, 170 - i * 20, 220 - i * 32, 200), 3.0f);
-      } else if (name == "grain") { // scattered specks
-        for (int i = 0; i < 70; ++i)
-          dl->AddRectFilled(ImVec2(c.x - 30.0f + std::fmod(float(i) * 37.3f, 60.0f), c.y - 22.0f + std::fmod(float(i) * 53.7f, 44.0f)),
-                            ImVec2(c.x - 29.0f + std::fmod(float(i) * 37.3f, 60.0f), c.y - 21.0f + std::fmod(float(i) * 53.7f, 44.0f)),
-                            hex(look::adj, 90 + (i * 53) % 150));
-      } else if (name == "key") { // a green screen with a person-shaped hole cut out of it
-        dl->AddRectFilled(ImVec2(c.x - 30.0f, c.y - 20.0f), ImVec2(c.x + 30.0f, c.y + 20.0f), IM_COL32(40, 180, 90, 200), 6.0f);
-        dl->AddCircleFilled(ImVec2(c.x, c.y - 6.0f), 7.0f, IM_COL32(20, 24, 36, 255));
-        dl->AddRectFilled(ImVec2(c.x - 11.0f, c.y + 3.0f), ImVec2(c.x + 11.0f, c.y + 20.0f), IM_COL32(20, 24, 36, 255), 5.0f, ImDrawFlags_RoundCornersTop);
-      } else if (name == "luma") { // brightness steps, the dark ones cut away
-        for (int i = 0; i < 6; ++i)
-          dl->AddRectFilled(ImVec2(c.x - 33.0f + float(i) * 11.0f, c.y - 18.0f), ImVec2(c.x - 23.0f + float(i) * 11.0f, c.y + 18.0f),
-                            i < 2 ? IM_COL32(255, 255, 255, 25) : IM_COL32(60 + i * 36, 60 + i * 36, 60 + i * 36, 255), 3.0f);
-      } else { // vignette: a frame whose edges fade to dark
-        for (int i = 0; i < 5; ++i)
-          dl->AddRect(ImVec2(c.x - 28.0f + float(i) * 3.0f, c.y - 20.0f + float(i) * 2.0f),
-                      ImVec2(c.x + 28.0f - float(i) * 3.0f, c.y + 20.0f - float(i) * 2.0f), hex(look::adj, 60 + i * 40), 8.0f, 0, 2.0f);
-      }
-    };
-    if (gallery_tile(grid, t)) {
-      if (def.clip_only) { // only a clip has one: the selected clip
-        if (selected_clip_.empty())
-          say("Drag " + std::string(def.title) + " onto a clip.", true);
-        else
-          add_clip_effect(selected_clip_, def);
-      } else if (def.file_param[0] != 0) {
-        ask_lut(""); // the layer is made when the file is chosen
-      } else {
-        add_adjustment(def);
-      }
-    }
+    t.selected = picked("effect", def.id);
+    t.art = [name](ImDrawList *dl, ImVec2 p, ImVec2 q) { draw_effect_art(name, dl, p, q); };
+    const TileHit hit = tile_hit(grid, t);
+    if (hit == TileHit::pick || hit == TileHit::open)
+      set_pick("effect", def.id);
+    if (hit == TileHit::open) // a double click adds it: to the selected picture clip, or as a layer over everything
+      add_picked_effect(def);
   }
-  panel_hint("Drag an effect onto a clip to change that clip alone, or onto empty track space for an adjustment layer: it "
-             "changes every track below it while it plays.");
+  panel_hint("Click an effect to set it up and preview it on the video. Double-click it, or drag it onto a clip, to add it; drag it onto "
+             "empty track space for a layer that changes every track below it.");
 }
 
 

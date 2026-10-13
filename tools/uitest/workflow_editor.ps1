@@ -20,7 +20,7 @@ try {
 
   $run = Invoke-EditorScript -Project $proj -TimeoutSeconds 150 -Script @(
     'click @rail:Generate'
-    'click @model:attome-mock'               # a generative clip, with the built-in Shot workflow of the model
+    'dblclick @model:attome-mock'               # a generative clip, with the built-in Shot workflow of the model
     'wait 600'
     'dblclick @clip:Shot_1'                  # its workflow, as a graph
     'expect @node:generate_video'

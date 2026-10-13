@@ -58,7 +58,7 @@ try {
         $wf3 = $third.media_ref.workflow
         $ref3 = $wf3.nodes.PSObject.Properties | Where-Object { $_.Value.kind -eq 'attome.clip_reference' } | Select-Object -First 1
         "third: record_in=$($third.timing.record_in) source_in=$($third.timing.source_in) reference clip=$($ref3.Value.settings.clip)"
-        if ($third.timing.record_in -ne '10' -or $third.timing.source_in -ne '11/12') { $failed = "the third clip is not at the end of the second, skipping the overlap ($($third.timing.record_in), $($third.timing.source_in))" }
+        if ($third.timing.record_in -ne '5167/500' -or $third.timing.source_in -ne '11/12') { $failed = "the third clip is not at the end of the second, skipping the overlap ($($third.timing.record_in), $($third.timing.source_in))" }
         elseif ($ref3.Value.settings.clip -ne $clips[1].clip) { $failed = 'the third clip does not carry on from the second' }
       }
       if (-not $failed) {

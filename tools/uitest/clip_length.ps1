@@ -27,9 +27,9 @@ try {
   # Two 5-second shots, touching. The mock model makes 0.1 to 15 s: the slider at 0.5 sets the Duration (what the Clip node gives) to 7.5 s.
   $run = Invoke-EditorScript -Project $proj -Script @(
     'click @rail:Generate'
-    'click @model:attome-mock'
+    'dblclick @model:attome-mock'
     'wait 500'
-    'click @model:attome-mock'
+    'dblclick @model:attome-mock'
     'wait 500'
     'click @clip:Shot_1'
     'wait 300'

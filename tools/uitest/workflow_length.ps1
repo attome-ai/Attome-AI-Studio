@@ -28,9 +28,9 @@ try {
   # Two 5-second shots; the first gets its length from its workflow. The slider at 0.5 asks for 7.5 s of the mock model's 0.1 to 15.
   $run = Invoke-EditorScript -Project $proj -TimeoutSeconds 240 -Script @(
     'click @rail:Generate'
-    'click @model:attome-mock'
+    'dblclick @model:attome-mock'
     'wait 500'
-    'click @model:attome-mock'
+    'dblclick @model:attome-mock'
     'wait 500'
     'click @clip:Shot_1'
     'wait 400'

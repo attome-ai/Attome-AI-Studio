@@ -628,8 +628,10 @@ void App::draw_timeline() {
           } else if (mode != 1 || !picked_.count(c.id) || picked_.size() < 2) { // a plain press outside the group: just this clip
             picked_.clear();
             selected_clip_ = c.id;
+            clear_pick(); // a clip picked in the timeline: the Inspector is the clip's, not a card's from a left panel
           } else {
             selected_clip_ = c.id; // inside the group: the group stays, so it can be dragged as one
+            clear_pick();
           }
           if (track.locked)
             say("Track " + track.name + " is locked. Unlock it to move or trim its clips.", true);

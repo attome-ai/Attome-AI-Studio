@@ -23,7 +23,7 @@ try {
     'click @tab:Audio'
     'expect @model:attome-mock-voice'
     "shot $work\voice_panel.jpg"             # the voice card, with the bars of a waveform
-    'click @model:attome-mock-voice'         # a click adds it at the end of an audio track
+    'dblclick @model:attome-mock-voice'         # a click adds it at the end of an audio track
     'wait 600'
     'expect @input:text'
     'click @field:input_text'

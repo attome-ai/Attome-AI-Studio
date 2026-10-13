@@ -32,9 +32,9 @@ function Get-FxOf($run, $clip) { @($clip.effects.PSObject.Properties | ForEach-O
 $run = Invoke-EditorScript -Project $proj -Script @(
   'click @rail:Effects'
   "shot $work\effects_five.jpg"
-  'click @effect:sharpen'              # a Sharpen layer at the playhead, selected
+  'dblclick @effect:sharpen'              # a Sharpen layer at the playhead, selected
   'slide @slider:sharpen_amount 1'     # 0 .. 3 on the slider: 3
-  'click @effect:grain'                # a Film grain layer after it
+  'dblclick @effect:grain'                # a Film grain layer after it
   'slide @slider:grain_size 0.5'       # 1 .. 6 on the slider: 3.5
   'wait 500'
   "shot $work\grain_card.jpg"

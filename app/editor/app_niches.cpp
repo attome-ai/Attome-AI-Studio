@@ -213,6 +213,7 @@ void App::niche_learn(const std::string &file) {
   copy_to(niche_title_, sizeof niche_title_, "Learned from " + stem_of(file));
   niche_dirty_ = true;
   niche_editing_ = true;
+  set_pick("niche", "new");
   say("A draft niche was written from the video. Check it, then save it.");
   if (niche_keep_sound_ && !project_path_.empty()) { // before any deletion of a link-fetched file: niche_learn runs first either way
     json sound;
@@ -411,81 +412,138 @@ void App::ask_niche_video() {
       this, window_, filters, 2, user_folder(SDL_FOLDER_VIDEOS).c_str(), false);
 }
 
+// The Niches panel: a card for each niche (the built-in ones, then the project's own) and the ways to start a new one. A click picks a card:
+// the Inspector shows the niche's text to read and change, or the options of the way to start one.
 void App::draw_niches_panel() {
   ATM_PROFILE_SCOPE("ui.niches");
   if (niches_stale_)
     niches_refresh();
   poll_niche_job();
-  ImGui::BeginChild("##niches_scroll", ImVec2(0.0f, 0.0f), ImGuiChildFlags_NavFlattened, ImGuiWindowFlags_NoBackground);
-  section_label("NICHES");
-  ImGui::PushTextWrapPos(0.0f);
-  ImGui::TextColored(hexv(look::fg3), "A niche is text that tells the agent how a kind of video is made. It follows whatever is written here: "
-                                      "change any line, delete a heading, or start from nothing.");
-  ImGui::PopTextWrapPos();
+  static const std::string tabs[] = {"All", "Built in", "Yours"};
+  panel_tabs("tab", tabs, niche_tab_);
+  ImGui::NewLine();
   ImGui::Spacing();
-
-  // the list: the built-in ones first, then the project's own
-  ImGui::PushStyleColor(ImGuiCol_ChildBg, hexv(look::bg));
-  ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 10.0f);
-  const float list_h = std::min(176.0f, 34.0f * float(std::max<size_t>(1, niches_.size())) + 14.0f);
-  ImGui::BeginChild("##niche_list", ImVec2(-1.0f, list_h), ImGuiChildFlags_NavFlattened | ImGuiChildFlags_AlwaysUseWindowPadding);
-  std::string open_id;
+  int count = 0;
+  for (const json &n : niches_)
+    count += niche_tab_ == 0 || (niche_tab_ == 1) == n.value("builtin", false) ? 1 : 0;
+  const bool with_new = niche_tab_ != 1; // starting one is for the niches that are yours
+  TileGrid grid = tile_grid(count + (with_new ? 3 : 0));
   for (const json &n : niches_) {
     const std::string id = n.value("id", std::string()), title = n.value("title", id);
     const bool builtin = n.value("builtin", false);
-    ImGui::PushID(id.c_str());
-    if (ImGui::Selectable(title.c_str(), niche_sel_ == id, 0, ImVec2(0.0f, 26.0f)))
-      open_id = id;
-    ui_mark("niche:" + id);
-    const char *tag = builtin ? "built in" : "yours";
-    const float tw = text_size(tag).x;
-    ImGui::SameLine(ImGui::GetContentRegionMax().x - tw - 8.0f);
-    ImGui::TextColored(hexv(look::fg3), "%s", tag);
-    ImGui::PopID();
+    if (niche_tab_ != 0 && (niche_tab_ == 1) != builtin)
+      continue;
+    Tile t;
+    t.id = "niche_" + id;
+    t.mark = "niche:" + id;
+    t.label = title.substr(0, title.find(" ("));
+    t.tip = title + (builtin ? "\nBuilt in. Click to read it; save a change as your own copy." : "\nYours, kept in this project. Click to read and change it.");
+    t.base = builtin ? 0x1b2536 : 0x2a2218;
+    t.selected = picked("niche", id);
+    t.art = [builtin](ImDrawList *dl, ImVec2 p, ImVec2 q) {
+      draw_icon_art(dl, p, q, icon::chat, builtin ? look::vid : look::accent2, 34.0f);
+      dl->AddText(ImVec2(p.x + 8.0f, p.y + 6.0f), hex(look::fg3), builtin ? "built in" : "yours");
+    };
+    if (tile_hit(grid, t) != TileHit::none) {
+      niche_open(id);
+      niche_editing_ = true;
+      set_pick("niche", id);
+    }
   }
-  if (niches_.empty())
-    ImGui::TextColored(hexv(look::fg2), "No niches yet.");
-  ImGui::EndChild();
-  ImGui::PopStyleVar();
-  ImGui::PopStyleColor();
-  if (!open_id.empty()) {
-    niche_open(open_id);
-    niche_editing_ = true;
+  if (with_new) {
+    struct Way {
+      const char *kind, *mark, *label, *tip;
+      Icon glyph;
+    };
+    static const Way ways[] = {{"niche", "button:niche_new", "New niche", "Start a niche of your own: from the default one, or empty.", icon::add},
+                               {"niche_learn", "button:niche_learn", "Learn from a video", "Pick a video: its cuts, pace, look and sound are measured and written as a draft niche.", icon::video},
+                               {"niche_link", "button:niche_link", "Learn from a link", "Learn a style from a video on the web: it is measured, then deleted.", icon::share}};
+    for (const Way &w : ways) {
+      Tile t;
+      t.id = std::string("niche_way_") + w.kind;
+      t.mark = w.mark;
+      t.label = w.label;
+      t.tip = w.tip;
+      t.base = 0x141824;
+      const bool is_new = std::string(w.kind) == "niche";
+      t.selected = is_new ? (picked("niche", "new") && !niche_editing_) : picked(w.kind, "");
+      const Icon g = w.glyph;
+      t.art = [g](ImDrawList *dl, ImVec2 p, ImVec2 q) { draw_icon_art(dl, p, q, g, look::accent, 34.0f); };
+      if (tile_hit(grid, t) != TileHit::none) {
+        if (is_new) {
+          niche_sel_.clear();
+          niche_editing_ = false;
+        }
+        set_pick(w.kind, is_new ? "new" : "");
+      }
+    }
   }
-  ImGui::Spacing();
+  panel_hint("A niche is text that tells the agent how a kind of video is made. Click one to read or change it; it follows whatever is written "
+             "there. Start your own, or learn one from a video.");
+}
 
-  const float bw = (ImGui::GetContentRegionAvail().x - 16.0f) / 3.0f;
-  if (soft_button("niche_new_default", "New from default", ImVec2(bw, 30.0f)))
-    niche_new(true);
-  ImGui::SameLine(0.0f, 8.0f);
-  if (soft_button("niche_new_empty", "New empty", ImVec2(bw, 30.0f)))
-    niche_new(false);
-  ImGui::SameLine(0.0f, 8.0f);
-  if (soft_button("niche_learn", "Learn from a video", ImVec2(bw, 30.0f)))
-    ask_niche_video();
-  if (ImGui::IsItemHovered())
-    ImGui::SetTooltip("Pick a video: its cuts, pace, look and sound are measured and written as a draft niche.");
-  if (!project_path_.empty()) {
-    ImGui::Checkbox("##niche_keep_sound", &niche_keep_sound_);
-    ui_mark("check:niche_keep_sound");
-    ImGui::SameLine();
-    ImGui::TextColored(hexv(look::fg3), "Also keep this video's sound (a niche sometimes fits one piece of music or one voice, not just its pace)");
-    if (ImGui::IsItemHovered())
-      ImGui::SetTooltip("Added to this project's media as its own file, ready to drag onto the timeline. Off by default: the video's "
-                        "picture is never kept, only measured.");
-  }
-  ImGui::Spacing();
-  draw_niche_link();
-
-  if (!niche_editing_) {
+// The Inspector for a picked niche card: the text to read and change, or the options of the way to start a new one.
+void App::draw_niche_inspector() {
+  ATM_PROFILE_SCOPE("ui.niche_inspector");
+  poll_niche_job();
+  const auto wrapped_text = [](const char *text, uint32_t colour = look::fg2) {
     ImGui::PushTextWrapPos(0.0f);
-    ImGui::TextColored(hexv(look::fg2), "Pick a niche to read or change it, or start a new one.");
+    ImGui::TextColored(hexv(colour), "%s", text);
     ImGui::PopTextWrapPos();
-    ImGui::EndChild();
+  };
+  const auto close = [&] {
+    ImGui::Spacing();
+    if (soft_button("pick_close", "Close", ImVec2(-1.0f, 28.0f)))
+      pending_ = [this] { niche_editing_ = false; clear_pick(); };
+  };
+
+  if (pick_.kind == "niche_learn") {
+    if (begin_card("##pick", "Learn from a video", "Niche")) {
+      wrapped_text("Pick a video file: its cuts, pace, look and sound are measured and written as a draft niche for you to check. The picture is never kept.");
+      ImGui::Spacing();
+      if (soft_button("niche_learn_pick", "Choose a video...", ImVec2(-1.0f, 30.0f), true, true))
+        ask_niche_video();
+      if (!project_path_.empty()) {
+        ImGui::Spacing();
+        soft_check("niche_keep_sound", "Also keep this video's sound", &niche_keep_sound_);
+        wrapped_text("A niche sometimes fits one piece of music or one voice, not just its pace. The sound is added to this project's media as its own file.", look::fg3);
+      }
+      close();
+    }
+    end_card();
     return;
   }
 
-  {
+  if (pick_.kind == "niche_link") {
+    if (begin_card("##pick", "Learn from a link", "Niche")) {
+      draw_niche_link();
+      close();
+    }
+    end_card();
+    return;
+  }
+
+  // a niche, or a new one
+  if (pick_.id == "new" && !niche_sel_.empty())
+    pick_.id = niche_sel_; // a new niche was saved: it is the picked one now
+  if (pick_.id == "new" && !niche_editing_) {
+    if (begin_card("##pick", "New niche", "Niche")) {
+      wrapped_text("Start from the default niche and change what you want, or from nothing.");
+      ImGui::Spacing();
+      if (soft_button("niche_new_default", "From the default niche", ImVec2(-1.0f, 30.0f), true, true))
+        niche_new(true);
+      if (soft_button("niche_new_empty", "Empty", ImVec2(-1.0f, 30.0f)))
+        niche_new(false);
+      close();
+    }
+    end_card();
+    return;
+  }
+  if (!niche_editing_) {
+    clear_pick();
+    return;
+  }
+  if (begin_card("##pick", niche_builtin_ ? "Built-in niche" : niche_sel_.empty() ? "New niche" : niche_title_, "Niche")) {
     section_label(niche_builtin_ ? "NAME OF YOUR COPY" : "NAME");
     ImGui::SetNextItemWidth(-1.0f);
     ImGui::PushStyleColor(ImGuiCol_FrameBg, hexv(look::raised));
@@ -494,36 +552,33 @@ void App::draw_niches_panel() {
     ui_mark("field:niche_name");
     ImGui::PopStyleColor();
     ImGui::Spacing();
-  }
-  section_label(niche_builtin_ ? "TEXT  (Save keeps your changes as your own niche)" : "TEXT");
-  const float below = 44.0f;
-  const float box_h = std::max(160.0f, ImGui::GetContentRegionAvail().y - below);
-  ImGui::PushStyleColor(ImGuiCol_FrameBg, hexv(look::raised));
-  if (ImGui::InputTextMultiline("##niche_text", niche_text_.data(), niche_text_.capacity() + 1, ImVec2(-1.0f, box_h),
-                                ImGuiInputTextFlags_WordWrap | ImGuiInputTextFlags_CallbackResize, resize_text, &niche_text_))
-    niche_dirty_ = true;
-  ui_mark("field:niche_text");
-  ImGui::PopStyleColor();
-  ImGui::Spacing();
-
-  const bool can_delete = !niche_sel_.empty() && !niche_builtin_;
-  const bool can_reset = !niche_sel_.empty();
-  const float bw2 = (ImGui::GetContentRegionAvail().x - 16.0f) / 3.0f;
-  if (soft_button("niche_save", niche_builtin_ ? "Save as mine" : "Save", ImVec2(bw2, 30.0f), niche_dirty_ || niche_builtin_, true))
-    niche_save();
-  ImGui::SameLine(0.0f, 8.0f);
-  if (soft_button("niche_reset", can_reset ? "Undo changes" : "Clear", ImVec2(bw2, 30.0f), can_reset || !niche_text_.empty())) {
-    if (can_reset)
-      niche_open(niche_sel_);
-    else {
-      niche_text_.clear();
+    section_label("TEXT");
+    if (niche_builtin_)
+      ImGui::TextColored(hexv(look::fg3), "Save keeps your changes as your own.");
+    ImGui::PushStyleColor(ImGuiCol_FrameBg, hexv(look::raised));
+    if (ImGui::InputTextMultiline("##niche_text", niche_text_.data(), niche_text_.capacity() + 1, ImVec2(-1.0f, 320.0f),
+                                  ImGuiInputTextFlags_WordWrap | ImGuiInputTextFlags_CallbackResize, resize_text, &niche_text_))
       niche_dirty_ = true;
+    ui_mark("field:niche_text");
+    ImGui::PopStyleColor();
+    ImGui::Spacing();
+    const bool can_delete = !niche_sel_.empty() && !niche_builtin_;
+    const bool can_reset = !niche_sel_.empty();
+    if (soft_button("niche_save", niche_builtin_ ? "Save as mine" : "Save", ImVec2(-1.0f, 30.0f), niche_dirty_ || niche_builtin_, true))
+      niche_save();
+    if (soft_button("niche_reset", can_reset ? "Undo changes" : "Clear", ImVec2(-1.0f, 28.0f), can_reset || !niche_text_.empty())) {
+      if (can_reset) {
+        niche_open(niche_sel_);
+      } else {
+        niche_text_.clear();
+        niche_dirty_ = true;
+      }
     }
+    if (soft_button("niche_delete", "Delete", ImVec2(-1.0f, 28.0f), can_delete))
+      niche_delete();
+    close();
   }
-  ImGui::SameLine(0.0f, 8.0f);
-  if (soft_button("niche_delete", "Delete", ImVec2(bw2, 30.0f), can_delete))
-    niche_delete();
-  ImGui::EndChild();
+  end_card();
 }
 
 } // namespace atm::editor

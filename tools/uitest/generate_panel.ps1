@@ -23,7 +23,7 @@ try {
     'wait 400'
     'expect @model:minimax-h3.fl2va.turbo8-int8' # two cards: the mock (ready) and the catalog's (not installed: a badge)
     "shot $work\panel_models.jpg"
-    'click @model:attome-mock'            # a click adds the clip at the playhead and selects it; its prompt is in the Inspector
+    'dblclick @model:attome-mock'            # a click adds the clip at the playhead and selects it; its prompt is in the Inspector
     'wait 500'
     'click @field:prompt'
     'type A robot walks through the snow'
@@ -31,7 +31,7 @@ try {
     "shot $work\panel_typed.jpg"
     'click @rail:Generate'                # leaving the field saves the prompt
     'wait 400'
-    'click @model:attome-mock'
+    'dblclick @model:attome-mock'
     'wait 500'
     'click @field:prompt'
     'type It finds a lantern, and lifts it'

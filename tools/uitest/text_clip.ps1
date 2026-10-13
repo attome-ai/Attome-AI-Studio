@@ -29,7 +29,7 @@ try {
 $run = Invoke-EditorScript -Project $proj -Script @(
   'click @rail:Text'
   "shot $work\text_panel.jpg"
-  'click @style:Title'
+  'dblclick @style:Title'
   "shot $work\text_added.jpg"
 )
 $failed = $run.Errors
