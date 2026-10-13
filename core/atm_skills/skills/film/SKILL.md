@@ -30,6 +30,25 @@ Files of this skill: `LAB.md` (the evidence) and `scripts/` (the recipes the exp
 engine, `newsroom.py` holds the checks, `words.py` hears a clip, `drift.py` measures whether a shot holds its place,
 `music.py` makes a score). They hold paths of the machine they were written on: adapt the top of each.
 
+## Setting up (once for a film)
+
+- The engine: `attome` (the command line; `attome tools` lists the Tools). Call a Tool with
+  `attome --daemon never --json call <tool> params.json`; every Tool takes `project` (the path of the `.attome` folder).
+- It needs to know where the models are and where the generator runs: the environment variables `ATTOME_MODELS_DIR`
+  and `ATTOME_COMFYUI` (ask the owner or look in the machine's notes if they are not set).
+- A project: `attome new <folder>/<Name>.attome --name <Name> --rate 24 --canvas 1920x1080`.
+- A shot: `gen.dialogue_prompt` -> `gen.create_clip` (returns `clip`) -> `attome gen run <project> --clip <clip>`
+  (`--new-take` for another take). The take's file: `project.get {id: <clip>}`, `object.media_ref.takes[selected]
+  .outputs.video.path`, relative to the project folder.
+- **Draft size**: after `gen.create_clip`, in the clip's workflow (`object.media_ref.workflow.nodes`) find the node of
+  kind `attome.project` and set its `settings/pixels` to 450000 with `project.patch`
+  (`{op: replace, path: "<clip>/media_ref/workflow/nodes/<node>/settings/pixels", value: 450000}`).
+- `scripts/film.py` does all of this in forty lines (class `Film`: `call`, `shot`, `run`, `take`): adapt its three
+  paths and use it, rather than writing it again.
+- The cut: the films so far were joined with ffmpeg (trim, one level for speech, the score pulled down under the
+  voices: see `scripts/anime_cut5.py`). The engine's own edit (`timeline.edit`, `render.sequence`) has not been used
+  for a film yet: if you use it, look at the result and write down what happened.
+
 ## The order of work
 
 1. `character.list` - use the cast that is there. Add who and what is missing with `character.create`.
