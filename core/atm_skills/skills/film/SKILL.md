@@ -116,6 +116,15 @@ Decide shot by shot, as a film does. Most shots are separate (a cut); a few carr
   - Use the plain anime look, not the fight wording, for the quiet shots after the fight: the fight wording puts an impact
     frame into them.
   - A new fighter is not brought into a clip that carries on (he is drawn as a dark silhouette): begin a new chain with him.
+- **One exact place for several duels: a stage.** Make one stage shot first (plain look, 3 s): the hero alone, seen from
+  the side at eye level, whole, in the left third of the frame, "the right half of the frame is empty courtyard". The
+  first clip of EVERY duel starts on the same frame of it (`start_from` the stage, `start_crop: [0, 0, 1, 1]`) and says
+  "<the opponent> comes in from the right edge of the frame and ..."; the duel then carries on for two or three clips.
+  Three duels made this way have the same pillars, sky and torches (measured on two films).
+- **Sound of a fight:** an impact frame is a flash, so find them in the picture (a scene-change score above 0.5 between two
+  frames, at most one every 0.6 s) and put an impact (`sfx.make`) on each, with a whoosh ending on it; keep the model's own
+  fight sound about 5 dB under the voices; one bed of the place's air under everything (a 12 s take of the empty place,
+  played forward then backward so no loop is heard).
 - **The hit is made by the cut, not inside a shot.** The one who strikes, then what is struck, then the reaction: the
   hammer lifted / the stone floor cracking (no people in the picture) / him in the air above the dust. A shot of only the
   thing (the arrow flying, the wave of light crossing the courtyard) is said to have "no people in the picture".
