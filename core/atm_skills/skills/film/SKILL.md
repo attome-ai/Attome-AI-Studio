@@ -107,6 +107,10 @@ Decide shot by shot, as a film does. Most shots are separate (a cut); a few carr
   - two silhouettes crossing in one slash against the sky.
   For the close action shots give no place at all: "the background is abstract anime speed lines in red and black, not a
   place". Anime does this, and it removes the problem of the place changing between shots.
+  **The moment one fighter strikes the other is taken from a side-view exchange** (below), cut to the second it lands:
+  written as a close two-person shot ("he kicks him across the jaw", "his blade cuts her bow") the two just stand.
+  The close shots carry everything around the hit: the eyes before, the weapon at the lens, the floor breaking, the
+  one who was hit sliding or kneeling after.
   The side-view exchange below is one of these shots, not the whole fight. Not drawn well: a held pose with a delayed
   fall (two people just stand).
 - **A fight is two fighters, whole in one frame, seen from the side, in one exchange.** "They trade fast blows, a burst of
