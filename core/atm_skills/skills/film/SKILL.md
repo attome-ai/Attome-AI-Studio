@@ -97,6 +97,18 @@ Decide shot by shot, as a film does. Most shots are separate (a cut); a few carr
 
 ## Action (a fight, a chase)
 
+- **An anime fight is its shot language, cut fast.** A fight told only in side-view two-shots is clear but reads as a stage
+  play (the owner: "still kind of bad, not like real anime"). Mix these, 1.3-2.5 s each on the timeline (ask for 2-3 s and
+  cut the first 0.45 s off: a shot made on its own opens on a few frames of a posed portrait):
+  - eyes only, in an extreme close-up, one fighter then the other;
+  - feet digging in and launching; a dash straight at the camera; a blade swung down at the lens;
+  - blades only, a flurry with afterimages; a clash seen from a low angle between them;
+  - both faces either side of crossed blades; a kick with a black-and-white impact frame; a skid backward in dust;
+  - two silhouettes crossing in one slash against the sky.
+  For the close action shots give no place at all: "the background is abstract anime speed lines in red and black, not a
+  place". Anime does this, and it removes the problem of the place changing between shots.
+  The side-view exchange below is one of these shots, not the whole fight. Not drawn well: a held pose with a delayed
+  fall (two people just stand).
 - **A fight is two fighters, whole in one frame, seen from the side, in one exchange.** "They trade fast blows, a burst of
   sparks at every clash, while they circle each other"; "their blades lock, they push face to face"; "she slashes at his
   head, he ducks under the blade and drives his shoulder into her". The model draws these well.
@@ -121,6 +133,10 @@ Decide shot by shot, as a film does. Most shots are separate (a cut); a few carr
   first clip of EVERY duel starts on the same frame of it (`start_from` the stage, `start_crop: [0, 0, 1, 1]`) and says
   "<the opponent> comes in from the right edge of the frame and ..."; the duel then carries on for two or three clips.
   Three duels made this way have the same pillars, sky and torches (measured on two films).
+- **Music** (`gen` has no Tool for it yet: ACE-Step 1.5 XL turbo through ComfyUI, attome-bench `scripts/music.py`): about
+  10 s to make a minute. Give tags (genre, instruments, mood), a BPM and a key, lyrics "[instrumental]". The owner called an
+  orchestral battle score "meh"; a track comes out at one level from start to end, it does not build by itself: make a
+  track for each part of a scene and cut between them.
 - **Sound of a fight:** an impact frame is a flash, so find them in the picture (a scene-change score above 0.5 between two
   frames, at most one every 0.6 s) and put an impact (`sfx.make`) on each, with a whoosh ending on it; keep the model's own
   fight sound about 5 dB under the voices; one bed of the place's air under everything (a 12 s take of the empty place,
