@@ -16,9 +16,22 @@ Result<json> Engine::Impl::audio_analyze(const json &params) {
     if (!ref || !ref->node || id.rfind("clp_", 0) != 0)
       return fail(ErrorCode::NotFound, "E_UNKNOWN_CLIP", "\"clip\" must be the ID of a clip of the project, not \"" + id + "\".");
     const json media = ref->node->value("media_ref", json::object());
-    if (media.value("type", std::string()) != "file" || !media.contains("path"))
+    std::string relative = media.value("path", std::string());
+    if (media.value("type", std::string()) == "workflow") { // a generative clip: the file of its selected Take
+      const std::string selected = media.value("selected", std::string());
+      const json outputs = media.contains("takes") && media["takes"].is_object() && media["takes"].contains(selected)
+                               ? media["takes"][selected].value("outputs", json::object())
+                               : json::object();
+      relative.clear();
+      for (const char *key : {"video", "audio"})
+        if (relative.empty() && outputs.contains(key) && outputs[key].is_object() && outputs[key].contains("path") && outputs[key]["path"].is_string())
+          relative = outputs[key]["path"].get<std::string>();
+      if (relative.empty())
+        return fail(ErrorCode::InvalidArgument, "G_NOT_MADE", "This generative clip has no Take yet, so there is nothing to analyse.", {}, "Make it first with gen.run.");
+    } else if (media.value("type", std::string()) != "file" || !media.contains("path")) {
       return fail(ErrorCode::InvalidArgument, "E_PARAM", "The clip is not made from a sound or video file, so there is nothing to analyse.");
-    fs::path file = to_path(media.value("path", std::string()));
+    }
+    fs::path file = to_path(relative);
     if (file.is_relative())
       file = pr->dir / file;
     path = to_utf8(file);
@@ -165,6 +178,55 @@ Result<json> Engine::Impl::music_cuts(const json &params) {
     at.push_back(std::round(t * 1000.0) / 1000.0);
   done["cuts"] = std::move(at);
   return done;
+}
+
+  // audio.match {project, clips | track, lufs?}: every clip gets the gain that brings its own sound to the same loudness (the part of the
+  // file it plays, measured as audio.analyze does). A film's speech then sits at one level whatever each take came out at. One edit.
+Result<json> Engine::Impl::audio_match(const json &params) {
+  ATM_PROFILE_SCOPE("api.audio_match");
+  ATM_TRY(Project *pr, project(params));
+  const double target = params.value("lufs", -17.0);
+  if (target < -50.0 || target > -6.0)
+    return bad_param("lufs", "must be between -50 and -6 (speech in a film: -17; a quiet place: -30)");
+  std::vector<std::string> wanted;
+  if (params.contains("clips") && params["clips"].is_array())
+    for (const json &c : params["clips"])
+      if (c.is_string())
+        wanted.push_back(c.get<std::string>());
+  const std::string track = params.value("track", std::string());
+  if (wanted.empty() && track.empty())
+    return bad_param("clips", "is required: the clip IDs to level (or track: every clip of that track)");
+  std::vector<std::string> ids;
+  for_each_clip(pr->doc.root(), [&](const std::string &clip_id, const json &, const std::string &track_id, const json &) {
+    if (std::find(wanted.begin(), wanted.end(), clip_id) != wanted.end() || (!track.empty() && track_id == track))
+      ids.push_back(clip_id);
+  });
+  if (ids.empty())
+    return fail(ErrorCode::NotFound, "E_UNKNOWN_CLIP", "None of the clips asked for is in the project.");
+  json ops = json::array(), list = json::array();
+  for (const std::string &id : ids) {
+    auto measured = audio_analyze({{"project", params["project"]}, {"clip", id}});
+    if (!measured) { // a clip without sound (a picture, a silent take) is left as it is
+      list.push_back({{"clip", id}, {"skipped", measured.error().message}});
+      continue;
+    }
+    const double lufs = (*measured).value("lufs", -70.0);
+    if (lufs < -60.0) {
+      list.push_back({{"clip", id}, {"lufs", lufs}, {"skipped", "silent"}});
+      continue;
+    }
+    // Never louder than its own peak allows: 1.5 dB are left under full level, so the mix does not clip.
+    const double room = -1.5 - (*measured).value("peak_db", 0.0);
+    const double gain = std::round(std::clamp(std::min(target - lufs, room), -24.0, 24.0) * 10.0) / 10.0;
+    ops.push_back({{"op", "set_property"}, {"target", id}, {"path", "audio.gain_db"}, {"value", gain}});
+    list.push_back({{"clip", id}, {"lufs", std::round(lufs * 10.0) / 10.0}, {"gain_db", gain}});
+  }
+  json out = {{"lufs", target}, {"clips", std::move(list)}};
+  if (!ops.empty()) {
+    ATM_TRY(json applied, timeline_edit({{"project", params["project"]}, {"ops", std::move(ops)}, {"label", "Match loudness"}}));
+    out["revision"] = applied.value("revision", json());
+  }
+  return out;
 }
 
   // audio.duck {project, clip, over, db?, ramp?}: the clip's level goes down by `db` (default 12) under the clips in `over` (clip IDs, or a track ID for all its clips) and

@@ -387,6 +387,38 @@ TEST_CASE("generate: a project that is moved keeps its Takes", "[gen][generate]"
   CHECK(f.mock->samples == 2);
 }
 
+TEST_CASE("music.make asks for what it needs before it calls an engine", "[gen][music]") {
+  Film f;
+  CHECK(err(*f.engine, "music.make", {{"project", f.project}}).rule == "E_PARAM");                                   // no tags
+  CHECK(err(*f.engine, "music.make", {{"tags", "piano"}, {"project", f.project}, {"seconds", 2}}).rule == "E_PARAM"); // too short
+  CHECK(err(*f.engine, "music.make", {{"tags", "piano"}, {"project", f.project}, {"bpm", 400}}).rule == "E_PARAM");
+  CHECK(err(*f.engine, "music.make", {{"tags", "piano"}}).rule == "E_PARAM");                                         // nowhere to write it
+  if (ok(*f.engine, "gen.engines", json::object()).value("comfyui", std::string()).empty()) {
+    const atm::Error none = err(*f.engine, "music.make", {{"tags", "piano"}, {"project", f.project}});
+    CHECK(none.rule == "G_ENGINE");
+    CHECK(none.hint.find("gen.set_comfyui") != std::string::npos);
+  }
+}
+
+TEST_CASE("audio.match levels the clips it is given and reads a generative clip's Take", "[gen][audio][match]") {
+  Film f;
+  CHECK(err(*f.engine, "audio.match", {{"project", f.project}}).rule == "E_PARAM");                                  // no clips and no track
+  CHECK(err(*f.engine, "audio.match", {{"project", f.project}, {"clips", json::array({f.a})}, {"lufs", 3}}).rule == "E_PARAM");
+  CHECK(err(*f.engine, "audio.match", {{"project", f.project}, {"clips", json::array({"clp_nothing"})}}).rule == "E_UNKNOWN_CLIP");
+  // Before it is made a generative clip has nothing to measure: it is skipped, not an error.
+  const json before = ok(*f.engine, "audio.match", {{"project", f.project}, {"clips", json::array({f.a})}});
+  REQUIRE(before["clips"].size() == 1);
+  CHECK(before["clips"][0].contains("skipped"));
+  REQUIRE(f.wait(f.run())["state"] == "done");
+  const json after = ok(*f.engine, "audio.match", {{"project", f.project}, {"clips", json::array({f.a, f.b})}, {"lufs", -20}});
+  REQUIRE(after["clips"].size() == 2);
+  for (const json &c : after["clips"]) {
+    CHECK((c.contains("gain_db") || c.contains("skipped")));
+    if (c.contains("gain_db")) // the gain is on the clip
+      CHECK(f.get(c["clip"])["audio"]["gain_db"] == c["gain_db"]);
+  }
+}
+
 TEST_CASE("gen.check_take measures the selected Take of a generative clip and says what is wrong with it", "[gen][generate][check]") {
   Film f;
   // Nothing to check before the clip is made, and only a generative clip can be checked.

@@ -353,6 +353,28 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
      R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},"clip":{"type":"string"},
        "over":{"type":"array","items":{"type":"string"}},"db":{"type":"number"},"ramp":{"type":"number"}},"required":["project","clip","over"]})",
      &Impl::audio_duck},
+    {"audio.match", "core", true,
+     "Bring clips to one loudness: each clip named (clips: [...], or track: all of its clips) gets the gain (audio.gain_db) that takes its own sound to "
+     "`lufs` (default -17, right for speech in a film; a shot of only the place's air: about -30). Generated takes come out at different levels: run this on "
+     "the spoken clips of a film before the music goes under them. Clips without sound are skipped. One edit; Undo takes it back.",
+     R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},
+       "clips":{"type":"array","items":{"type":"string"}},"track":{"type":"string","description":"Instead of clips: every clip of this track"},
+       "lufs":{"type":"number","description":"Default -17"}},"required":["project"]})",
+     &Impl::audio_match},
+    {"music.make", "core", true,
+     "Make a piece of music from words (ACE-Step 1.5, run by the user's ComfyUI; about 10 s for a minute of music once loaded). tags: the genre, the "
+     "instruments and the mood (\"gentle warm piano, soft strings, wonder, slow\"); bpm and key (\"C major\", \"E minor\") set tempo and colour; lyrics default "
+     "to [instrumental]. Writes a 48 kHz stereo WAV: pass output (a file), or project to keep it in the project and import it (asset_id comes back for "
+     "timeline.edit add_clip). A piece stays at one level from start to end: for a scene that changes, make one piece for each part and cut between them. "
+     "Put it under speech with audio.duck. seed gives another piece for the same words.",
+     R"({"type":"object","properties":{"tags":{"type":"string","description":"Genre, instruments, mood"},
+       "seconds":{"type":"number","description":"5 to 240, default 30"},"bpm":{"type":"integer","description":"40 to 220, default 100"},
+       "key":{"type":"string","description":"Such as C major or E minor; default C major"},
+       "lyrics":{"type":"string","description":"Default [instrumental]"},"language":{"type":"string","description":"Of the lyrics, a code; default en"},
+       "seed":{"type":"integer"},"output":{"type":"string","description":"The .wav to write"},
+       "project":{"type":"string","description":"Instead of output: path of the .attome project folder, or its prj_ ID"}},
+       "required":["tags"]})",
+     &Impl::music_make},
     {"sfx.make", "core", true,
      "Make a sound effect: whoosh (builds and lands on a cut), click, pop, riser (builds up to its end; seconds sets the length), impact. "
      "Writes a 48 kHz stereo WAV: pass output (a file), or project to put it in the project and import it (asset_id comes back for "

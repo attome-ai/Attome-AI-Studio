@@ -326,6 +326,8 @@ struct Engine::Impl {
   Result<json> music_cuts(const json &params);
   Result<json> audio_duck(const json &params);
   Result<json> sfx_make(const json &params);
+  Result<json> audio_match(const json &params);
+  Result<json> music_make(const json &params);
   static std::string speech_node_of(const json &clip);
   Result<json> voice_make(const json &params);
   Result<json> voice_fit(const json &params);
