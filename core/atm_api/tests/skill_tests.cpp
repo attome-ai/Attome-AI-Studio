@@ -49,6 +49,23 @@ TEST_CASE("Skills: the built-in ones are listed and readable, and a project keep
   CHECK(body.find("short-video-concept") != std::string::npos);
   CHECK(body.rfind("---", 0) != 0); // the front matter is not part of the body
 
+  // The film skill: what experiments taught about people, places and fights that stay the same, with its evidence and recipes.
+  const json *film = find_skill(listed["skills"], "film");
+  REQUIRE(film);
+  CHECK((*film)["files"].size() >= 5);
+  const std::string rules = ok(e, "skill.get", {{"id", "film"}}).value("body", std::string());
+  for (const char *rule : {"tight crop of the whole face", "A place has no reference picture", "Cause and effect are never two shots made on their own",
+                           "Judge a take first for what the shot is for", "The checks every take must pass",
+                           "what would another video of this kind need to know?", "LAB.md", "niche-anime-action"})
+    CHECK(rules.find(rule) != std::string::npos);
+  CHECK(ok(e, "skill.get", {{"id", "film"}, {"file", "LAB.md"}}).dump().find("Mistakes not to repeat") != std::string::npos);
+
+  // What is special to one kind of film is a niche of its own, so the general rules stay general.
+  REQUIRE(find_skill(listed["skills"], "niche-anime-action"));
+  const std::string action = ok(e, "skill.get", {{"id", "niche-anime-action"}}).value("body", std::string());
+  for (const char *rule : {"Read `film` first", "two fighters, whole in one frame, seen from the side", "Close action shots have no place", "CHECKS"})
+    CHECK(action.find(rule) != std::string::npos);
+
   // The niche skills: the rules and the default niche are built in, and the Short entry point sends the agent to them.
   CHECK(body.find("niche-rules") != std::string::npos);
   REQUIRE(find_skill(listed["skills"], "niche-rules"));
