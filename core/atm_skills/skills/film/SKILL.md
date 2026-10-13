@@ -111,6 +111,10 @@ Decide shot by shot, as a film does. Most shots are separate (a cut); a few carr
   blades lock / the counter that ends it. It stays one fight in one place.
   - **At most four clips in a chain.** A chain of nine went dark from the fifth clip on and the fighters shrank to small
     dark figures. Start a new chain (a new duel) after three or four.
+  - Keep the two close enough to fill the frame. Written "far apart" (an archer and a swordsman across the courtyard) both
+    are tiny and the exchange is lost: bring the swordsman to her first, or show the arrows in a shot of him alone.
+  - Use the plain anime look, not the fight wording, for the quiet shots after the fight: the fight wording puts an impact
+    frame into them.
   - A new fighter is not brought into a clip that carries on (he is drawn as a dark silhouette): begin a new chain with him.
 - **The hit is made by the cut, not inside a shot.** The one who strikes, then what is struck, then the reaction: the
   hammer lifted / the stone floor cracking (no people in the picture) / him in the air above the dust. A shot of only the
