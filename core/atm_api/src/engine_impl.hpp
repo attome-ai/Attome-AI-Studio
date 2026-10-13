@@ -150,6 +150,13 @@ void run_gen(const std::shared_ptr<Job> &job, GenRun run, std::shared_ptr<Finish
 void run_fetch(const std::shared_ptr<Job> &job, models::CatalogEntry entry, fs::path dir, std::vector<fs::path> also,
                std::shared_ptr<net::Transport> transport);
 
+#if defined(_WIN32)
+// Runs a program without a window, its output (both streams) handed to on_line line by line; stops it when `cancel` is set. Returns its
+// exit code, or -1 (engine_ytdlp.cpp).
+int run_process(const fs::path &exe, const std::vector<std::wstring> &args, const std::atomic<bool> &cancel,
+                const std::function<void(const std::string &)> &on_line);
+#endif
+
 // A transcription as a job (asr.transcribe): the sound of [run.from, run.to) of the file goes to the speech program. The job's result is the words
 // that start in [want_from, want_to), in the clip's time. With a project, the whole transcript (every word, in the file's time) is queued to be
 // kept there by the engine's own thread, at its next call.
@@ -317,6 +324,12 @@ struct Engine::Impl {
   Result<json> ytdlp_status(const json &params);
   Result<json> ytdlp_install(const json &params);
   Result<json> video_fetch(const json &params);
+  // ComfyUI as something the engine installs and starts itself (engine_comfyui.cpp).
+  fs::path comfyui_root() const;
+  Result<json> comfyui_status(const json &params);
+  Result<json> comfyui_install(const json &params);
+  Result<json> comfyui_start(const json &params);
+  Result<json> comfyui_stop(const json &params);
   Result<json> asr_transcribe(const json &params);
   Result<asr::Options> asr_options(const std::string &wanted_model, const std::string &language, const std::string &device, std::string &model_id);
   Result<json> music_fit(const json &params);

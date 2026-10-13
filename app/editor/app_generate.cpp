@@ -1645,6 +1645,136 @@ void App::draw_models_panel() {
       ImGui::TextColored(hexv(look::fg3), "Your own ComfyUI can run the models. Give its address.");
     ImGui::PopTextWrapPos();
     ImGui::Spacing();
+
+    // Get ComfyUI: one button puts it on this computer with every node pack the engine uses, and starts it.
+    const double now = ImGui::GetTime();
+    if (!comfy_job_.empty() && now >= comfy_poll_at_) {
+      comfy_poll_at_ = now + 0.5;
+      json state;
+      RpcError error;
+      if (client_.call("jobs.get", {{"job_id", comfy_job_}}, state, error)) {
+        comfy_job_state_ = state;
+        const std::string what = state.value("state", std::string());
+        if (what != "running") {
+          comfy_job_.clear();
+          comfy_get_known_ = false;
+          engines_loaded_ = false; // the address is the new ComfyUI's
+          if (what == "done") {
+            const json made = state.value("result", json::object());
+            say(made.value("running", false) ? "ComfyUI is installed and running." : "ComfyUI is installed. " + made.value("problem", std::string()));
+            pending_ = [this] { refresh_gen_status(); };
+          } else if (what == "failed") {
+            const json e = state.value("error", json::object());
+            say(e.value("message", std::string("ComfyUI could not be installed.")) + (e.contains("data") ? "  " + e["data"].value("hint", std::string()) : std::string()), true);
+          } else {
+            say("Stopped. Press Install again to continue from where it was.");
+          }
+        }
+      } else {
+        comfy_job_.clear();
+      }
+    }
+    if (comfy_starting_ && now >= comfy_poll_at_) {
+      comfy_poll_at_ = now + 2.0;
+      comfy_get_known_ = false;
+    }
+    if (!comfy_get_known_) {
+      comfy_get_known_ = true;
+      RpcError error;
+      json status;
+      if (client_.call("comfyui.status", json::object(), status, error))
+        comfy_get_ = status;
+      if (comfy_get_.value("job_id", std::string()) != "" && comfy_job_.empty())
+        comfy_job_ = comfy_get_.value("job_id", std::string());
+      if (comfy_starting_ && comfy_get_.value("running", false)) {
+        comfy_starting_ = false;
+        engines_loaded_ = false;
+        say("ComfyUI is running.");
+        pending_ = [this] { refresh_gen_status(); };
+      }
+    }
+    section_label("GET COMFYUI");
+    ImGui::PushTextWrapPos(0.0f);
+    const bool own = comfy_get_.value("installed", false), supported = comfy_get_.value("supported", false);
+    if (!comfy_job_.empty()) {
+      ImGui::PushStyleColor(ImGuiCol_PlotHistogram, hexv(look::accent));
+      ImGui::ProgressBar(float(comfy_job_state_.value("progress", 0.0)), ImVec2(-1.0f, 8.0f), "");
+      ImGui::PopStyleColor();
+      ImGui::TextColored(hexv(look::fg2), "%s", comfy_job_state_.value("detail", std::string("Installing ComfyUI")).c_str());
+      if (soft_button("comfy_get_stop", "Stop", ImVec2(0.0f, 26.0f))) {
+        json stopped;
+        rpc("jobs.cancel", {{"job_id", comfy_job_}}, stopped);
+      }
+    } else if (!supported) {
+      ImGui::TextColored(hexv(look::fg3), "Attome can install ComfyUI itself on Windows with an NVIDIA card. On this computer install it yourself and give its address above.");
+    } else if (!own) {
+      if (!comfy_get_confirm_) {
+        ImGui::TextColored(hexv(look::fg3), "No ComfyUI yet? Attome can put it on this computer with everything it uses, and start it.");
+        if (soft_button("comfy_get_install", "Install ComfyUI  (2 GB)", ImVec2(0.0f, 30.0f), true, true))
+          comfy_get_confirm_ = true;
+      } else {
+        ImGui::TextColored(hexv(look::fg2), "This downloads, from their own publishers:");
+        ImGui::TextColored(hexv(look::fg3), "  ComfyUI %s, 2.0 GB (GPL-3.0), from Comfy-Org on GitHub", comfy_get_.value("version", "").c_str());
+        for (const json &p : comfy_get_.value("packs", json::array()))
+          ImGui::TextColored(hexv(look::fg3), "  %s (%s): %s", p.value("name", "").c_str(), p.value("licence", "").c_str(), p.value("for", "").c_str());
+        ImGui::TextColored(hexv(look::fg3), "They are programs of their own that Attome asks to generate; Attome does not contain them. It goes into %s and "
+                                            "needs about 8 GB there. The models are separate downloads, listed above.",
+                           comfy_get_.value("path", "").c_str());
+        if (soft_button("comfy_get_go", "Download and install", ImVec2(0.0f, 30.0f), true, true)) {
+          json started;
+          if (rpc("comfyui.install", json::object(), started)) {
+            comfy_job_ = started.value("job_id", std::string());
+            comfy_job_state_ = json::object();
+            comfy_get_confirm_ = false;
+          }
+        }
+        ImGui::SameLine();
+        if (soft_button("comfy_get_cancel", "Not now", ImVec2(0.0f, 30.0f)))
+          comfy_get_confirm_ = false;
+      }
+    } else {
+      const bool mine = comfy_get_.value("started_by_attome", false);
+      int missing = 0;
+      for (const json &p : comfy_get_.value("nodes", json::object()).value("packs", json::array()))
+        missing += p.value("ready", true) ? 0 : 1;
+      missing += int(comfy_get_.value("nodes", json::object()).value("core_missing", json::array()).size());
+      if (comfy_starting_)
+        ImGui::TextColored(hexv(look::fg2), "Starting ComfyUI (up to a minute the first time)...");
+      else if (mine && comfy_get_.value("running", false) && missing == 0)
+        ImGui::TextColored(hexv(look::ok), "Attome's ComfyUI %s is running, with every node Attome uses.", comfy_get_.value("version", "").c_str());
+      else if (mine && comfy_get_.value("running", false))
+        ImGui::TextColored(kError, "Attome's ComfyUI is running, but %d of the nodes Attome uses are missing. Repair adds them.", missing);
+      else
+        ImGui::TextColored(hexv(look::fg3), "Attome's ComfyUI %s is installed and not running.", comfy_get_.value("version", "").c_str());
+      if (!mine && !comfy_starting_) {
+        if (soft_button("comfy_get_start", "Start ComfyUI", ImVec2(0.0f, 28.0f), true, true)) {
+          json started;
+          if (rpc("comfyui.start", {{"wait", 0}}, started)) {
+            comfy_starting_ = true;
+            comfy_poll_at_ = now + 2.0;
+          }
+        }
+      } else if (mine) {
+        if (soft_button("comfy_get_stop_run", "Stop ComfyUI", ImVec2(0.0f, 28.0f))) {
+          json stopped;
+          rpc("comfyui.stop", json::object(), stopped);
+          comfy_get_known_ = false;
+          comfy_starting_ = false;
+          engines_loaded_ = false;
+        }
+      }
+      ImGui::SameLine();
+      if (soft_button("comfy_get_repair", "Repair", ImVec2(0.0f, 28.0f))) {
+        json started;
+        if (rpc("comfyui.install", json::object(), started)) {
+          comfy_job_ = started.value("job_id", std::string());
+          comfy_job_state_ = json::object();
+        }
+      }
+    }
+    ui_mark("section:get_comfyui");
+    ImGui::PopTextWrapPos();
+    ImGui::Spacing();
   }
   ImGui::EndChild();
 }

@@ -725,6 +725,14 @@ private:
   std::string gen_len_for_; // "<clip>@<revision>" it was read for
   json comfy_status_ = json::object();
   bool engines_loaded_ = false;
+  // "Get ComfyUI": Attome's own copy with the node packs the engine uses (comfyui.status / install / start / stop).
+  json comfy_get_ = json::object();  // the last comfyui.status
+  bool comfy_get_known_ = false;     // false: ask again
+  bool comfy_get_confirm_ = false;   // the user pressed Install once: what is fetched and the licences are shown before it starts
+  std::string comfy_job_;            // the running comfyui.install
+  json comfy_job_state_ = json::object();
+  double comfy_poll_at_ = 0.0;       // when the job or a starting ComfyUI is asked about next
+  bool comfy_starting_ = false;
   void start_generation(json params);     // gen.run; the Takes arrive by themselves as the project changes
   double next_gen_poll_ = 0.0;
   void refresh_gen_status();

@@ -589,6 +589,8 @@ int main(int argc, char **argv) {
   std::string call_tool, call_params = "-";
   cmd_call->add_option("tool", call_tool, "A Tool name from attome tools")->required();
   cmd_call->add_option("params", call_params, "JSON file with the parameters, or \"-\" for stdin (default)");
+  bool call_no_wait = false;
+  cmd_call->add_flag("--no-wait", call_no_wait, "Do not wait for a job the Tool starts (without a daemon the job then ends with this command)");
   cmd_call->callback([&] {
     std::string text;
     if (call_params == "-") {
@@ -606,7 +608,46 @@ int main(int argc, char **argv) {
       exit_status = finish(opt, {{"ok", false}, {"error", {{"message", "The parameters are not a JSON object."}, {"hint", "Write them as {\"project\": \"Demo.attome\", ...}."}}}});
       return;
     }
-    exit_status = finish(opt, call(opt, call_tool.c_str(), params));
+    // A Tool that starts a job (comfyui.install, asr.transcribe, render.sequence, ...) answers at once with job_id. Without a daemon the job
+    // lives in this process, so the command stays until it has ended and answers with how it ended: {..., "job": <the last jobs.get>}.
+    const bool remote = opt.daemon != "never" && bool(atm::api::connect(opt.endpoint));
+    if (remote || call_no_wait) {
+      exit_status = finish(opt, call(opt, call_tool.c_str(), params));
+      return;
+    }
+    atm::api::Engine local(atm::api::EngineConfig{.user_settings = true});
+    const auto invoke = [&](const char *tool, const json &p) -> json {
+      auto r = local.call(tool, p);
+      if (r)
+        return {{"ok", true}, {"result", std::move(*r)}};
+      return {{"ok", false}, {"error", atm::error_to_json(r.error())}};
+    };
+    json outcome = invoke(call_tool.c_str(), params);
+    if (outcome.value("ok", false) && outcome["result"].is_object() && outcome["result"].contains("job_id") && outcome["result"]["job_id"].is_string()) {
+      const json job = {{"job_id", outcome["result"]["job_id"]}};
+      for (;;) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        const json polled = invoke("jobs.get", job);
+        if (!polled.value("ok", false))
+          break;
+        const json &state = polled["result"];
+        if (!opt.as_json)
+          std::fprintf(stderr, "\r%5.1f%%  %-90.90s", state.value("progress", 0.0) * 100.0, state.value("detail", std::string()).c_str());
+        if (state.value("state", "") == "running")
+          continue;
+        if (!opt.as_json)
+          std::fputc('\n', stderr);
+        outcome["result"]["job"] = state;
+        if (state.value("state", "") != "done") { // exit 13: the job failed
+          json error = state.value("error", json{{"code", 1600}, {"message", "The job was stopped."}});
+          error["exit"] = 13;
+          outcome = {{"ok", false}, {"error", std::move(error)}};
+        }
+        break;
+      }
+    }
+    local.save_all();
+    exit_status = finish(opt, outcome);
   });
 
   auto *cmd_profile = app.add_subcommand("profile", "Zone timings of the running daemon, slowest first");

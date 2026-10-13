@@ -387,6 +387,37 @@ TEST_CASE("generate: a project that is moved keeps its Takes", "[gen][generate]"
   CHECK(f.mock->samples == 2);
 }
 
+TEST_CASE("comfyui.status says what the engine needs of ComfyUI and where it comes from; comfyui.install refuses what it cannot do", "[gen][comfyui]") {
+  Film f;
+  const json status = ok(*f.engine, "comfyui.status", json::object());
+  CHECK(status["installed"] == false);
+  CHECK(status["running"] == false);
+  CHECK(status["version"] == "0.38.0");
+  CHECK(status["download"]["bytes"].get<int64_t>() > 1000000000);
+  CHECK(status["licence"].get<std::string>().find("GPL-3.0") != std::string::npos);
+  // Every node pack names its licence, its source and the one commit that is fetched; Attome's own has no source to fetch.
+  REQUIRE(status["packs"].size() == 4);
+  for (const json &p : status["packs"]) {
+    CHECK_FALSE(p["licence"].get<std::string>().empty());
+    CHECK(p["installed"] == false);
+    if (p["name"] == "attome_kokoro")
+      CHECK(p["source"] == "Attome");
+    else
+      CHECK(p["commit"].get<std::string>().size() == 40);
+  }
+#if defined(_WIN32)
+  CHECK(status["supported"] == true);
+  CHECK(err(*f.engine, "comfyui.install", {{"folder", "relative/place"}}).rule == "E_PARAM");
+  CHECK(err(*f.engine, "comfyui.install", {{"folder", (f.dir / "cf").string()}, {"port", 80}}).rule == "E_PARAM");
+  CHECK(err(*f.engine, "comfyui.install", {{"folder", (f.dir / "cf").string()}, {"packs", json::array({"no-such-pack"})}}).rule == "E_PARAM");
+  CHECK(ok(*f.engine, "comfyui.stop", json::object())["stopped"] == false); // nothing of Attome's is running
+  CHECK(err(*f.engine, "comfyui.start", {{"port", 18188}}).rule == "C_NOT_INSTALLED");
+#else
+  CHECK(status["supported"] == false);
+  CHECK(err(*f.engine, "comfyui.install", json::object()).rule == "C_UNSUPPORTED");
+#endif
+}
+
 TEST_CASE("music.make asks for what it needs before it calls an engine", "[gen][music]") {
   Film f;
   CHECK(err(*f.engine, "music.make", {{"project", f.project}}).rule == "E_PARAM");                                   // no tags

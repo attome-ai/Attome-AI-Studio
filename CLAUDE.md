@@ -22,6 +22,9 @@ experiment and is kept **inside the engine as skills**:
 
 If `skill.list` shows no `film`, the build is older than the sources: build first.
 
+The models run in ComfyUI, a separate program. `comfyui.status` says whether one answers; `comfyui.install` puts it on the computer with the
+node packs the engine uses and `models.fetch` gets a model. These are large downloads: ask the user first, with the sizes.
+
 ## Working on the engine itself
 
 C++20, CMake presets, MSVC (`vcvars64.bat`, then `cmake --build build/win-msvc-release`). Tests:

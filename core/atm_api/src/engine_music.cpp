@@ -60,7 +60,7 @@ Result<json> Engine::Impl::music_make(const json &params) {
     return fail(ErrorCode::ModelMissing, "E_MODEL_FILE", "The music model (ACE-Step 1.5 XL turbo) is not on this computer.", {}, kMusicFilesHint);
   if (comfyui_address.empty())
     return fail(ErrorCode::WorkerUnavailable, "G_ENGINE", "Music is made by ComfyUI, and no ComfyUI address is set.", {},
-                "Set it with gen.set_comfyui {address: \"http://127.0.0.1:8188\"} (the address is remembered).");
+                "comfyui.install puts ComfyUI on this computer and starts it; for one you run yourself: gen.set_comfyui {address: \"http://127.0.0.1:8188\"}.");
   const std::shared_ptr<net::Transport> transport = cfg.transport ? cfg.transport : std::shared_ptr<net::Transport>(net::system_transport());
   const auto node = [](const char *type, json inputs) { return json{{"class_type", type}, {"inputs", std::move(inputs)}}; };
   const std::string prefix = "attome/music_" + new_id("m");
@@ -82,7 +82,7 @@ Result<json> Engine::Impl::music_make(const json &params) {
 
   const auto unreachable = [&](const Error &e) {
     return fail(ErrorCode::WorkerUnavailable, "E_UNREACHABLE", "ComfyUI at " + comfyui_address + " did not answer: " + e.message, {},
-                "Start ComfyUI, or correct its address with gen.set_comfyui.");
+                "Start it with comfyui.start, or correct its address with gen.set_comfyui.");
   };
   const auto queued = net::fetch(*transport, comfyui_address + "/prompt", json{{"prompt", g}}.dump());
   if (!queued)

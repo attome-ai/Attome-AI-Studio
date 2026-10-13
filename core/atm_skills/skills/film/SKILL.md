@@ -36,9 +36,11 @@ Everything is a Tool of the engine; nothing here needs a program of your own bey
 - The engine: `attome` (`attome tools` lists the Tools with their parameters). Call one with
   `attome --daemon never --json call <tool> -` and the parameters as JSON on standard input; every Tool takes `project`
   (the path of the `.attome` folder).
-- Where the models are and where the generator runs: `gen.engines` shows what is set. If nothing is, set the environment
-  variables `ATTOME_MODELS_DIR` and `ATTOME_COMFYUI`, or once `models.set_folder` and `gen.set_comfyui` (remembered).
-  Ask the owner where they are; never download a model without listing the files and sizes and a clear yes.
+- The generator (ComfyUI) and the models: `comfyui.status` says whether ComfyUI answers and has the nodes the engine uses;
+  `models.list` says which models are on the computer. What is missing the engine fetches itself: `comfyui.install`
+  (ComfyUI with its node packs, 2 GB, then started), `comfyui.start`, `models.fetch {id}` (20-47 GB each).
+  **Ask the owner before any of these downloads, with the sizes, and wait for a clear yes.** A ComfyUI or a models
+  folder the owner already has: `gen.set_comfyui`, `models.set_folder` (or `ATTOME_COMFYUI`, `ATTOME_MODELS_DIR`).
 - A project: `attome new <folder>/<Name>.attome --name <Name> --rate 24 --canvas 1920x1080`.
 - A shot: `gen.dialogue_prompt` -> `gen.create_clip` (**`megapixels: 0.45`** for a draft; returns `clip`) ->
   `attome gen run <project> --clip <clip>` (`--new-take` for another take) -> **`gen.check_take {clip}`**.

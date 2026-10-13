@@ -57,7 +57,10 @@ fs::path find_ytdlp(const fs::path &tools) {
   return {};
 }
 
+} // namespace
+
 #if defined(_WIN32)
+namespace {
 std::wstring quote(const std::wstring &arg) {
   std::wstring out = L"\"";
   for (wchar_t ch : arg) {
@@ -67,6 +70,7 @@ std::wstring quote(const std::wstring &arg) {
   }
   return out + L"\"";
 }
+} // namespace
 
 // Runs a program with its output (both streams) handed to on_line, line by line. Stops it when `cancel` is set. Returns its exit code, or -1.
 int run_process(const fs::path &exe, const std::vector<std::wstring> &args, const std::atomic<bool> &cancel,
@@ -137,6 +141,8 @@ int run_process(const fs::path &exe, const std::vector<std::wstring> &args, cons
   return code;
 }
 #endif
+
+namespace {
 
 // Text from a program that may not be UTF-8: bad bytes become '?', and a cut never lands inside a character.
 std::string clean_utf8(const std::string &text, size_t max_bytes = std::string::npos) {

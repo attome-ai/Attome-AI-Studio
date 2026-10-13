@@ -265,6 +265,29 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
        "output":{"type":"string","description":"A .wav path to write instead of importing"},
        "from":{"type":"number","description":"Seconds"},"to":{"type":"number","description":"Seconds"}},"required":["path"]})",
      &Impl::video_extract_audio},
+    {"comfyui.status", "gen", false,
+     "ComfyUI, the program that runs the generating models: is Attome's own copy installed (installed, path), is it running, does the ComfyUI the engine talks "
+     "to answer (running, address) and has it the nodes the engine uses (nodes: core_missing, and for each node pack ready and missing). Also what "
+     "comfyui.install would fetch (download, packs with their licence and source). The models are separate: models.list.",
+     R"({"type":"object","properties":{}})", &Impl::comfyui_status},
+    {"comfyui.install", "gen", false,
+     "Put ComfyUI on this computer with everything the engine uses, in one go, as a job (jobs.get): Comfy-Org's own portable release (2 GB, one pinned version, "
+     "checked against the release's SHA-256), unpacked into Attome's tools folder; the node packs the engine's graphs use, each at one pinned commit "
+     "(ComfyUI-KJNodes: low memory; the MiniMax H3 latent upscaler; omnivoice_comfy and Attome's Kokoro node: speech) with what they need of Python; "
+     "it is pointed at Attome's models folder, started on 127.0.0.1, and its nodes are checked. A pack that fails is reported and the rest still works. "
+     "ASK THE USER FIRST and show comfyui.status: 2 GB, and ComfyUI and KJNodes are GPL-3.0 programs of their own (Attome does not contain them). "
+     "Windows with an NVIDIA card. Run again to add what is missing; what is already there is kept.",
+     R"({"type":"object","properties":{"folder":{"type":"string","description":"Where to put it (absolute); default Attome's tools folder. A short path is safer: ComfyUI has deep folders."},
+       "port":{"type":"integer","description":"Default 8188; the next free one when another ComfyUI already answers there"},
+       "packs":{"type":"array","items":{"type":"string"},"description":"Default all four. An empty list: ComfyUI alone, enough for video and music."}}})",
+     &Impl::comfyui_install},
+    {"comfyui.start", "gen", false,
+     "Start Attome's own ComfyUI (installed by comfyui.install) and wait until it answers; the engine then talks to it. It listens on 127.0.0.1 only and keeps "
+     "running until comfyui.stop. Returns {running, address, nodes}. What it prints is in attome_comfyui.log beside it.",
+     R"({"type":"object","properties":{"port":{"type":"integer"},"wait":{"type":"number","description":"Seconds to wait for it to answer, default 300"}}})",
+     &Impl::comfyui_start},
+    {"comfyui.stop", "gen", false, "Stop the ComfyUI that Attome started. A ComfyUI the user started is left alone.",
+     R"({"type":"object","properties":{}})", &Impl::comfyui_stop},
     {"ytdlp.status", "core", false,
      "Whether the optional video downloader (yt-dlp, open source, Unlicense) is on this computer: found, path, tools_dir, and what ytdlp.install would fetch. "
      "It is needed only to save a video from a link (video.fetch).",
