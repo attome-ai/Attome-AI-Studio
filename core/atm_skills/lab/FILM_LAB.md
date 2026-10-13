@@ -2,7 +2,8 @@
 
 What was tried to make a film with consistent people, voices and places, and what happened. The rules that came out of it are
 in the built-in skill `film` (`core/atm_skills/skills/film/SKILL.md`): **that is what agents read**. This file is the evidence
-behind it, newest last. Add an entry for every experiment, also the ones that fail.
+behind it, newest last, kept for the engine's developers. It is NOT part of any skill and is not served by `skill.get`: it names
+the films, people and lines of each experiment, which a skill must never do.
 
 **Goal:** a person describes the characters and the idea; an agent makes the whole film with little or no help.
 Film first; other niches later.

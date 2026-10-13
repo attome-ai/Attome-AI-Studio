@@ -11,12 +11,14 @@ experiment and is kept **inside the engine as skills**:
 1. `attome --json call skill.list -` (parameters `{}` on stdin) lists them. Read `niche-rules`, then the entry skill of
    the kind of video (`film` for anything with characters; `short-video` for a Short), then its niche
    (`niche-explainer-film`, `niche-anime-action`, ...). Read with `skill.get {"id": "film"}`; a skill's other files with
-   `skill.get {"id": "film", "file": "LAB.md"}`.
+   `skill.get {"id": "film", "file": "scripts/attome_film.py"}`.
 2. Follow them, including their checks and their "Setting up" section. The work is done with the engine's Tools
    (`gen.create_clip`, `gen.check_take`, `timeline.edit`, `audio.match`, `music.make`, `render`), not with programs of your own
    around ffmpeg; `skill.get {"id": "film", "file": "scripts/attome_film.py"}` is a ready driver over them.
-3. What you learn that they do not say goes back into them, in general terms (the skill `film` says how). The sources are
-   in `core/atm_skills/skills/`; they are compiled into the engine, so rebuild after changing them.
+3. What you learn that they do not say goes back into them, in general terms (the skill `film` says how): rules for the
+   kind of video, never the story, names or subject of the one video you made. The sources are in `core/atm_skills/skills/`;
+   they are compiled into the engine, so rebuild after changing them. The record of the experiments behind the rules is for the
+   engine's developers (`core/atm_skills/lab/FILM_LAB.md`); it is not a skill and not a template.
 
 If `skill.list` shows no `film`, the build is older than the sources: build first.
 

@@ -7,28 +7,27 @@ description: Make a film with Attome - any story with characters (a scene, a sho
 
 The goal: a person describes the characters and the idea; an agent makes the film. These are **general rules**: each one is
 about how the model behaves, not about one video. They were found by experiment and are written as: the rule, why (what the
-model does otherwise), and the words that work. The films they were found on are only evidence (`LAB.md`).
+model does otherwise), and the words that work. Nothing here is about one video: the films the rules were found on are not part of this skill.
 
 A kind of video with rules of its own is a **niche** (a skill named `niche-...`, see `niche-rules`): for action and fights
 read `niche-anime-action` after this; for a film that explains something, `niche-explainer-film`.
 
 ## Keeping what is learned (part of the work, every time)
 
-1. **Before a film:** read this skill whole, and the niche's. Do not repeat an experiment `LAB.md` already has
-   (`skill.get {id: "film", file: "LAB.md"}`): every experiment, what changed, what happened, the owner's verdict, the mistakes.
+1. **Before a film:** read this skill whole, and the niche's. Each rule says how sure it is (how many shots, how many films).
 2. **Before building a scene on an idea that is not a rule here: probe it.** A few 2-3 s shots, one take each, a few
    minutes; look; then build. A whole scene built on a guess costs ten times more and teaches less.
-3. **After a person judges a film:** write their words into `LAB.md` as a row. Then turn it into a rule **in general
-   terms**: not "the swordsman's sword changed" but "what a person carries changes from shot to shot unless ...". Ask of
-   every lesson: *what would another video of this kind need to know?* Put a rule that holds for any film here, one that
-   holds for a kind of video in its niche skill. Say how sure it is (how many shots, how many films).
+3. **After a person judges a film:** turn what they said into a rule **in general terms**: not "this character's sword
+   changed" but "what a person carries changes from shot to shot unless ...". Ask of every lesson: *what would another
+   video of this kind need to know?* Put a rule that holds for any film here, one that holds for a kind of video in
+   its niche skill (`skill.save` for a niche of the project; the built-in ones are in the engine's sources). Say how sure
+   it is. **Never write a video's own story, names, lines or subject into a skill**: only what the next video can use.
 4. A rule that turns out wrong is rewritten, not left beside its correction.
 5. Notes with a time in the film ("at 0:23 the kick does not lead to her pose") are the best evidence: find the shot, find
    the cause, fix that shot, and write the cause as a rule.
 
-Files of this skill: `LAB.md` (the evidence) and `scripts/`. **`scripts/attome_film.py` is the one to use**: a driver of a
-hundred lines over the Tools (a shot made and checked, the cut, the score, the export), with no path of any machine in it.
-The others are the records of the experiments, with the paths of the machine they ran on: read them for their prompts.
+One file comes with this skill: `scripts/attome_film.py`, a driver of a hundred lines over the Tools (a shot made and
+checked, the cut, the score, the export), with no path of any machine and nothing of any one film in it.
 
 ## Setting up (once for a film)
 
@@ -109,8 +108,8 @@ Model: `minimax-h3.singularity-ref2va.int8` (the only one that takes reference p
   - A prop's picture: a 2 s shot of the object alone, "a locked-off product shot, the whole object in the centre of the
     frame, seen from the side, on a plain pale grey surface; no people, no hands"; the frame at 1 s.
   - Three subjects in a shot at most (two people and one object): with four, one of the people is lost.
-- **A voice from off screen is a cast entry with a voice sample and no picture** ("the warm slow voice of an old man,
-  heard from off screen, never seen"). In the shot: "nobody is in the picture; the voice of <Subject 1> is heard from off
+- **A voice from off screen is a cast entry with a voice sample and no picture** ("the voice of ..., heard from off
+  screen, never seen"). In the shot: "nobody is in the picture; the voice of <Subject 1> is heard from off
   screen". The speaker was never drawn (10 of 10 cutaways). Someone else may be in the picture and stays silent if told so.
 - **A place has no reference picture.** Named as a subject with a picture, shots open on that exact picture, empty, and
   then cut to the action. A place is words (next section) and a master (the section after).
@@ -234,9 +233,9 @@ thing you made it again to fix: a take with the right detail and no action made 
   take passed on the first try, about 7 minutes at draft size. The same people were recognisable in a second scene.
 - Four drawn characters, each recognisable in every shot, also four in one frame.
 - A film of three minutes (two people at a table, 23 shots, 10 of them with a voice from off screen): 19 of 23 first
-  takes passed, about 35 minutes at draft size (LAB 53).
+  takes passed, about 35 minutes at draft size.
 - **The rules carry to a new video**: a second drawn fight with other people, place and weapons, made from this skill
-  and `niche-anime-action` alone: 17 of 24 first takes usable, the rest fixed in one round of retakes (LAB 51-52).
+  and `niche-anime-action` alone: 17 of 24 first takes usable, the rest fixed in one round of retakes.
 
 ## Not known yet
 

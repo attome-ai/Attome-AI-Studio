@@ -1,5 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
+#include <cctype>
 #include <filesystem>
 
 #include "atm/api/engine.hpp"
@@ -52,13 +54,22 @@ TEST_CASE("Skills: the built-in ones are listed and readable, and a project keep
   // The film skill: what experiments taught about people, places and fights that stay the same, with its evidence and recipes.
   const json *film = find_skill(listed["skills"], "film");
   REQUIRE(film);
-  CHECK((*film)["files"].size() >= 5);
+  REQUIRE((*film)["files"].size() == 1); // one generic driver; the records of the experiments are not part of the skill
   const std::string rules = ok(e, "skill.get", {{"id", "film"}}).value("body", std::string());
   for (const char *rule : {"tight crop of the whole face", "A place has no reference picture", "Cause and effect are never two shots made on their own",
                            "Judge a take first for what the shot is for", "The checks every take must pass",
-                           "what would another video of this kind need to know?", "LAB.md", "niche-anime-action"})
+                           "what would another video of this kind need to know?", "Never write a video's own story", "gen.check_take",
+                           "niche-anime-action"})
     CHECK(rules.find(rule) != std::string::npos);
-  CHECK(ok(e, "skill.get", {{"id", "film"}, {"file", "LAB.md"}}).dump().find("Mistakes not to repeat") != std::string::npos);
+  CHECK(ok(e, "skill.get", {{"id", "film"}, {"file", "scripts/attome_film.py"}}).dump().find("gen.check_take") != std::string::npos);
+  CHECK_FALSE(e.call("skill.get", {{"id", "film"}, {"file", "LAB.md"}})); // the lab notebook names films and people: not served
+  // A skill holds rules for a kind of video, never one video's story: none of the films the rules were found on is named.
+  for (const char *id : {"film", "niche-anime-action", "niche-explainer-film"}) {
+    std::string text = ok(e, "skill.get", {{"id", id}}).value("body", std::string());
+    std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+    for (const char *word : {"gravity", "mira", "elias", "kaito", "katana", "newsroom", "einstein", "trampoline", "north pole"})
+      CHECK(text.find(word) == std::string::npos);
+  }
 
   // What is special to one kind of film is a niche of its own, so the general rules stay general.
   REQUIRE(find_skill(listed["skills"], "niche-anime-action"));

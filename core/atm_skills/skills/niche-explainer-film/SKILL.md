@@ -8,7 +8,7 @@ description: Niche - a short film that explains one idea (science, history, how 
 KIND: film
 
 One idea, 2-4 minutes, told by people: someone asks, someone who knows answers, and the thing itself is shown while they
-talk. Read `film` first. This holds for any subject; the evidence is one film (`film`'s `LAB.md`, experiment 53).
+talk. Read `film` first. This holds for any subject (found on one film of three minutes so far: treat it as a first version).
 
 STRUCTURE
 - **A question a child would ask opens it**, set off by something that happens in the picture (a thing falls, a light goes
@@ -29,19 +29,19 @@ WORDS
 
 PICTURES OF THE THING
 - Say "the camera is locked off and does not move" for a close shot of a small thing: a camera that pulls back makes it
-  grow (a hoop became a trampoline).
-- Slow, simple motion is drawn: a thing falls, a ball goes up and comes back, a marble circles, a planet turns, someone
-  floats. **Exact motion is not**: let the words carry the exactness.
-- Something that goes round something: film it from above ("seen from above the north pole"), camera locked off, and say
-  the path as a picture: "travels steadily all the way around ... along a wide circle, like the hand of a clock" (a
-  third of a circle in 9 s, 3 of 3). "Moves in a curve around it" hardly moved.
+  grow to many times its size.
+- Slow, simple motion of one thing is drawn: it falls, rises and comes back, rolls, turns, floats, flows. **Exact
+  motion is not** (speeds, distances, a path that must close): let the words carry the exactness.
+- A thing that moves along a path: film it from the side that shows the whole path (from above for a path on the
+  ground or around something), camera locked off, and say the path as a picture a child knows ("all the way around,
+  like the hand of a clock"), not as a term ("moves in a curve"): the term gave almost no motion, the picture gave it in
+  3 of 3 takes.
 - A demonstration by one of the people happens in the scene's own framing: start the shot on a frame of that scene.
   Made on its own it is in another corner of the place.
 - No written text, labels or diagrams in the picture: they come out as nonsense letters. Titles belong in the edit.
 
 SOUND
-- All speech at one level (`audio.match`); one quiet score under the whole film (`music.make`: "gentle warm piano, soft
-  strings, wonder, slow", 72 bpm), pulled down under the voices (`audio.duck`); no effects needed.
+- All speech at one level (`audio.match`); one quiet score under the whole film (`music.make`: quiet instruments, a slow tempo, no drums), pulled down under the voices (`audio.duck`); no effects needed.
 
 CHECKS (besides those of `film`)
 - Hear the whole finished film (`asr.transcribe`, in parts of a minute: a longer piece made the listener repeat a

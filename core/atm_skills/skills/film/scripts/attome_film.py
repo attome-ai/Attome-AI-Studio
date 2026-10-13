@@ -2,11 +2,11 @@
 is one Tool call, and the rules are in the skill `film`.
 
     from attome_film import Film
-    f = Film('C:/work/MyFilm')                                  # makes C:/work/MyFilm/MyFilm.attome
-    f.call('character.create', name='Mira', description='...', references=[{'path': 'mira.mp4', 'at': 0.4, 'crop': [x, y, w, h]}], voice='mira.wav')
-    a = f.shot('a1', ['@Mira', '@Elias'], camera='...', action='...', lines=[(1, 'Why does it fall?', 'curious')], setting='{Garden.description}')
-    b = f.shot('a2', ..., continue_from=a)                      # or start_from=a, start_at=6.0, start_crop=[...]
-    f.cut([a, b], 'C:/work/MyFilm/film.mp4', music={'tags': 'gentle warm piano', 'bpm': 72, 'key': 'C major'})
+    f = Film('<folder>/MyFilm')                                 # makes <folder>/MyFilm/MyFilm.attome
+    f.call('character.create', name='A', description='...', references=[{'path': 'a_portrait.mp4', 'at': 0.4, 'crop': [x, y, w, h]}], voice='a.wav')
+    a = f.shot('s1', ['@A', '@B'], camera='...', action='...', lines=[(1, '<a line>', '<its tone>')], setting='{Place.description}')
+    b = f.shot('s2', ..., continue_from=a)                      # or start_from=a, start_at=6.0, start_crop=[...]
+    f.cut([a, b], '<folder>/MyFilm/film.mp4', music={'tags': '<genre, instruments, mood>', 'bpm': 90, 'key': 'C major'})
 
 The engine is found in ATTOME_BIN (or `attome` on the PATH). It needs to know where the models are and where the generator runs:
 ATTOME_MODELS_DIR and ATTOME_COMFYUI in the environment, or once `attome call models.set_folder` / `gen.set_comfyui` (remembered)."""

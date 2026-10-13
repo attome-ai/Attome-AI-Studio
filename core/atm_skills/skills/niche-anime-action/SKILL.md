@@ -8,8 +8,7 @@ description: Niche - an anime action scene (a fight, a duel, one against many, a
 KIND: film
 
 A drawn action scene of 30-90 s. Read `film` first: the cast, the place, how shots join and the checks are the same.
-What follows is only what action adds, for any fight and any fighters. The evidence is in `film`'s `LAB.md`
-(experiments 29-50). A lesson from a new action video goes here in general terms; one that holds for any film goes into `film`.
+What follows is only what action adds, for any fight and any fighters. A lesson from a new action video goes here in general terms; one that holds for any film goes into `film`.
 
 LOOK
 - Calm shots: "a shot from a hand-drawn 2D anime action series, cel shading, bold ink lines, dramatic shadows, saturated
