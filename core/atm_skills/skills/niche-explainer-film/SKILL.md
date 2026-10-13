@@ -31,14 +31,20 @@ PICTURES OF THE THING
 - Say "the camera is locked off and does not move" for a close shot of a small thing: a camera that pulls back makes it
   grow (a hoop became a trampoline).
 - Slow, simple motion is drawn: a thing falls, a ball goes up and comes back, a marble circles, a planet turns, someone
-  floats. **Exact motion is not**: an orbit is only a small body beside a large one. Let the words carry the exactness.
+  floats. **Exact motion is not**: let the words carry the exactness.
+- Something that goes round something: film it from above ("seen from above the north pole"), camera locked off, and say
+  the path as a picture: "travels steadily all the way around ... along a wide circle, like the hand of a clock" (a
+  third of a circle in 9 s, 3 of 3). "Moves in a curve around it" hardly moved.
+- A demonstration by one of the people happens in the scene's own framing: start the shot on a frame of that scene.
+  Made on its own it is in another corner of the place.
 - No written text, labels or diagrams in the picture: they come out as nonsense letters. Titles belong in the edit.
 
 SOUND
 - All speech at one level; one quiet score under the whole film, pulled down under the voices; no effects needed.
 
 CHECKS (besides those of `film`)
-- Hear the whole finished film once (`asr.transcribe`) and read it as a text: does it explain the idea in order, is
+- Hear the whole finished film (`asr.transcribe`, in parts of a minute: a longer piece made the listener repeat a
+  sentence over and over) and read it as a text: does it explain the idea in order, is
   every fact right, is nothing said twice?
 - The length: the lines add up before generating (the words / 2 = seconds of speech; add a quarter for pauses).
 

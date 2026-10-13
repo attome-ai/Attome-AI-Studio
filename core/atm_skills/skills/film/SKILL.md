@@ -181,8 +181,8 @@ thing you made it again to fix: a take with the right detail and no action made 
 | The line is over before the cut | the level of the sound in the last 0.15 s of the clip | above -34 dB (speech about -20, a quiet place about -45). Not the word times of `asr.transcribe`: the last word is stretched to the end of the file |
 | A shot told to hold its place does | 1 - the correlation of a 48 x 27 grey copy of the first frame with each later frame; the largest | above 0.85 (held: 0.06-0.71; left: 1.05; one bad example, a thin margin). Not for a moving camera |
 | The words are the script | `asr.transcribe`, word by word against the lines | less than 90 % alike, or extra words (a sigh, a name said twice) |
-| A shot without lines is silent | `asr.transcribe` on it too | words are heard: people who are told nothing murmur (1 of 3). Give the shot the sound of an empty shot of the place |
-| Nothing foreign in the picture | look at the corners of the frames | a broadcaster's mark, a caption, letters (1 of 10 cutaways): crop it out or retake |
+| A shot without lines is silent | `asr.transcribe` on it too | words are heard: people who are told nothing murmur (1 of 3). Retake with "their mouths are closed, nobody speaks, no voice is heard", or give the shot the sound of an empty shot of the place |
+| Nothing foreign in the picture | look at the corners of the frames | a broadcaster's mark, a caption, letters (1 of 10 cutaways): retake with "no logo, no watermark and no letters anywhere in the picture" (clean 2 of 2) |
 | Continuity | compare with the shot before and after | a thing held differently, on the back, a different length; a person somewhere they could not have got to |
 
 ## How to experiment (so a lesson is a lesson)
