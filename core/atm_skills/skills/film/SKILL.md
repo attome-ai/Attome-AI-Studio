@@ -37,16 +37,18 @@ Model: `minimax-h3.singularity-ref2va.int8` (the only one that takes reference p
 - **A prop** (a product, an object) is the opposite of a person: give the whole picture, it must look exactly like it.
 - **A place has no reference picture.** Named as a subject with a picture, shots open on that exact picture (the empty
   room) and then cut to the action. Describe the place in words (next section).
-- **A weapon (or any object someone carries) is a prop of the cast with a picture of its own**, and how it is held is
-  written into its owner's description ("she holds one short dagger in each hand in a reverse grip, the blades pointing
-  down along her forearms"). Without this the weapon changes from shot to shot (the owner: "the sword keeps changing, she
-  holds it in the wrong direction").
-  - Its picture: a 2 s shot of the object alone, "a locked-off product shot, the whole object in the centre of the frame,
-    seen from the side ... on a plain pale grey surface; no people, no hands", in a "prop design" look; the frame at 1 s.
-  - In a shot, name it as a subject of its own: "<Subject 1> ..., <Subject 2> held up beside her face".
-  - Measured on four shots: a pair of daggers then matched their picture and the grip in a close-up and in a two-person
-    shot. **A blade swung at the lens is still drawn as a broad cleaver** (the model exaggerates the perspective), and
-    a shot with four subjects (two people, two weapons) lost one of the people: keep it to three.
+- **What someone carries is written into their description, exactly and with its limits**: "one slim katana with a
+  narrow blade, which he holds in his right hand; he carries no other sword"; "she holds one short dagger in each hand in
+  a reverse grip, the blades pointing down along her forearms". Without this the weapon changes from shot to shot (the
+  owner: "the sword keeps changing, she holds it in the wrong direction"). Five shots of a swordsman made again with only
+  these words all showed the same slim blade.
+  - **A picture of the weapon as a prop helps a small, distinct object and harms a long thin one.** A pair of crescent
+    daggers named as a second subject ("<Subject 2> held up beside her face") matched their picture in every shot. A
+    katana as a prop was drawn as a huge broad blade in most shots (the pictured object is enlarged): use words for it.
+  - A prop's picture: a 2 s shot of the object alone, "a locked-off product shot, the whole object in the centre of the
+    frame, seen from the side ... on a plain pale grey surface; no people, no hands", in a "prop design" look; the frame at 1 s.
+  - Do not write "the blade fills the frame": it is drawn as a cleaver. Write "the slim blade crosses the frame".
+  - Two people and their two weapons as four subjects lose one of the people: three subjects at most.
   - A face crop that shows a hilt behind the shoulder gives the person a second sword in every shot: crop it out.
 - In a prompt, a cast entry is `{Name}` (its name and look) or `{Name.attribute}`: the clip then follows every change to it.
 
