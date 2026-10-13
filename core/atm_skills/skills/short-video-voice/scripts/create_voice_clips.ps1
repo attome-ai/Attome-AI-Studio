@@ -26,14 +26,14 @@ $lines = @(
 $ids = @()
 foreach ($l in $lines) {
   $ms = [int][math]::Round($l.at * 1000)
-  $r = Call gen.create_clip @{ project = $p; model = 'omnivoice.bf16'; prompt = $l.say; at = "$($ms)@1000"; seconds = 3.2 }
+  $r = Call gen.create_clip @{ project = $p; model = 'kokoro.82m'; prompt = $l.say; at = "$($ms)@1000"; seconds = 3.2 }
   $ids += $r.clip
 }
 # The same voice for all of them, a little faster than normal: the energetic narrator of the brief.
 $ops = New-Object System.Collections.ArrayList
 foreach ($id in $ids) {
   $o = (& $bin\attome.exe --json get $p $id | ConvertFrom-Json).result.object
-  [void]$ops.Add(@{ op = 'add'; path = "$id/media_ref/inputs/voice"; value = 'male, young adult, high pitch' })
+  [void]$ops.Add(@{ op = 'add'; path = "$id/media_ref/inputs/voice"; value = 'am_michael' })
   $node = ($o.media_ref.workflow.nodes.PSObject.Properties | Where-Object { $_.Value.kind -eq 'attome.generate_speech' }).Name
   [void]$ops.Add(@{ op = 'replace'; path = "$node/settings/speed"; value = 1.2 })
 }

@@ -396,7 +396,7 @@ TEST_CASE("comfyui.status says what the engine needs of ComfyUI and where it com
   CHECK(status["download"]["bytes"].get<int64_t>() > 1000000000);
   CHECK(status["licence"].get<std::string>().find("GPL-3.0") != std::string::npos);
   // Every node pack names its licence, its source and the one commit that is fetched; Attome's own has no source to fetch.
-  REQUIRE(status["packs"].size() == 4);
+  REQUIRE(status["packs"].size() == 3);
   for (const json &p : status["packs"]) {
     CHECK_FALSE(p["licence"].get<std::string>().empty());
     CHECK(p["installed"] == false);

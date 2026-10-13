@@ -273,13 +273,13 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
     {"comfyui.install", "gen", false,
      "Put ComfyUI on this computer with everything the engine uses, in one go, as a job (jobs.get): Comfy-Org's own portable release (2 GB, one pinned version, "
      "checked against the release's SHA-256), unpacked into Attome's tools folder; the node packs the engine's graphs use, each at one pinned commit "
-     "(ComfyUI-KJNodes: low memory; the MiniMax H3 latent upscaler; omnivoice_comfy and Attome's Kokoro node: speech) with what they need of Python; "
+     "(ComfyUI-KJNodes: low memory; the MiniMax H3 latent upscaler; Attome's Kokoro node: speech) with what they need of Python; "
      "it is pointed at Attome's models folder, started on 127.0.0.1, and its nodes are checked. A pack that fails is reported and the rest still works. "
      "ASK THE USER FIRST and show comfyui.status: 2 GB, and ComfyUI and KJNodes are GPL-3.0 programs of their own (Attome does not contain them). "
      "Windows with an NVIDIA card. Run again to add what is missing; what is already there is kept.",
      R"({"type":"object","properties":{"folder":{"type":"string","description":"Where to put it (absolute); default Attome's tools folder. A short path is safer: ComfyUI has deep folders."},
        "port":{"type":"integer","description":"Default 8188; the next free one when another ComfyUI already answers there"},
-       "packs":{"type":"array","items":{"type":"string"},"description":"Default all four. An empty list: ComfyUI alone, enough for video and music."}}})",
+       "packs":{"type":"array","items":{"type":"string"},"description":"Default all three. An empty list: ComfyUI alone, enough for video and music."}}})",
      &Impl::comfyui_install},
     {"comfyui.start", "gen", false,
      "Start Attome's own ComfyUI (installed by comfyui.install) and wait until it answers; the engine then talks to it. It listens on 127.0.0.1 only and keeps "

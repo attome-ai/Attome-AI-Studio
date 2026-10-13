@@ -24,7 +24,7 @@ Run the steps in order. Each is its own skill; read it when you reach it.
 |---|-------|---------------|
 | 1 | `short-video-concept` | brief: hook, script (word counts), shot list, scene prompts, description, hashtags |
 | 2 | `short-video-scenes-and-text` | the Attome project: AI scene clips, titles, word captions, pop words, motion, mood, transitions |
-| 3 | `short-video-voice` | voiceover (Kokoro or OmniVoice on the user's ComfyUI), speeds fitted to the scenes, captions timed from the voice |
+| 3 | `short-video-voice` | voiceover (Kokoro on the user's ComfyUI), speeds fitted to the scenes, captions timed from the voice |
 | 4 | `short-video-music-and-sfx` | song cut on the beat, ducked under the voice, whooshes on the cuts, scene sound muted |
 | 5 | `short-video-edit-shots` | a new shot every 1-1.5 s inside each scene (the retention trick), render, check, export |
 
@@ -51,6 +51,6 @@ twist:        <last 4-5 s, reverses the premise>
 cta:          <follow line>
 character:    <one recurring character, described once, reused as {character}>
 style:        <one style sentence, reused as {style}>
-voice:        <kokoro am_michael | omnivoice description>
+voice:        <kokoro am_michael>
 music:        <track + start second, tempo>
 ```

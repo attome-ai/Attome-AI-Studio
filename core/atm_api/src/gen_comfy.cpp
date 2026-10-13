@@ -29,15 +29,11 @@ using json = nlohmann::json;
 constexpr std::string_view kModels[] = {"minimax-h3.fl2va.turbo8-int8", "fasth3.8step-v2.int8", "minimax-h3.singularity-ref2va.int8"};
 bool known(std::string_view model) { return std::find(std::begin(kModels), std::end(kModels), model) != std::end(kModels); }
 
-// Speech: OmniVoice (k2-fsa, 0.6 B, 600+ languages, voice design from words) through the "omnivoice_comfy" node pack. Its two weight
-// files live in ComfyUI's own models/tts/omnivoice folder, which the pack looks in, so they are not part of the Attome catalog: the
-// model is declared here, and is ready when ComfyUI answers.
-constexpr std::string_view kSpeechModel = "omnivoice.bf16";
-// Kokoro-82M (hexgrad, 82 M, English voices ready-made): the "attome_kokoro" node in ComfyUI's custom_nodes, weights in
+// Speech: Kokoro-82M (hexgrad, 82 M, English voices ready-made) through the "attome_kokoro" node in ComfyUI's custom_nodes, weights in
 // models/Kokorotts/Kokoro-82M. Its voice is a name ("am_michael"); the Voice input of a speech workflow carries it.
 constexpr std::string_view kKokoroModel = "kokoro.82m";
 bool kokoro(std::string_view model) { return model == kKokoroModel; }
-bool speaks(std::string_view model) { return model == kSpeechModel || kokoro(model); }
+bool speaks(std::string_view model) { return kokoro(model); }
 
 gen::ModelDecl kokoro_declaration() {
   const nlohmann::json d = {{"id", kKokoroModel},
@@ -49,21 +45,6 @@ gen::ModelDecl kokoro_declaration() {
                                         "bm_lewis", "bm_fable", "af_heart", "af_bella", "af_nicole", "af_sarah", "af_sky", "bf_emma"}},
                             {"default_voice", "am_michael"},
                             {"settings", {{"speed", {{"type", "number"}, {"min", 0.5}, {"max", 2.0}, {"default", 1.0}}}}}};
-  return *gen::parse_model(d);
-}
-
-gen::ModelDecl speech_declaration() {
-  const nlohmann::json d = {
-      {"id", kSpeechModel},
-      {"title", "OmniVoice: speech from text, with a voice you describe"},
-      {"note", "Describe the voice in words (\"male, young adult, low pitch, british accent\"); 600+ languages. Slower and less steady than Kokoro."},
-      {"kinds", {"generate_speech"}},
-      {"needs_files", false},
-      {"settings",
-       {{"language", {{"type", "text"}, {"default", "English"}}},
-        {"speed", {{"type", "number"}, {"min", 0.5}, {"max", 2.0}, {"default", 1.1}}},
-        {"steps", {{"type", "integer"}, {"min", 4}, {"max", 64}, {"default", 16}}},
-        {"cfg", {{"type", "number"}, {"min", 0.0}, {"max", 10.0}, {"default", 3.0}}}}}};
   return *gen::parse_model(d);
 }
 
@@ -96,29 +77,12 @@ Result<void> write_wav(const fs::path &path, const std::vector<float> &stereo) {
 json speech_graph(const gen::StepRequest &r, const std::string &prefix) {
   const auto node = [](const char *type, json inputs) { return json{{"class_type", type}, {"inputs", std::move(inputs)}}; };
   json g = json::object();
-  if (kokoro(r.model)) { // a voice name like "am_michael"; anything else (a description for OmniVoice) falls back to the default
-    std::string voice = r.inputs.value("instruct", std::string());
-    const bool named = voice.size() >= 4 && voice[2] == '_' && voice.find(' ') == std::string::npos;
-    if (!named)
-      voice = "am_michael";
-    g["t"] = node("AttomeKokoroTTS", {{"text", r.inputs.value("text", std::string())}, {"voice", voice}, {"speed", r.settings.value("speed", 1.0)}});
-    g["s"] = node("SaveAudio", {{"audio", {"t", 0}}, {"filename_prefix", prefix}});
-    return g;
-  }
-  g["l"] = node("OmniVoiceLoader", {{"OmniVoice Model", "model.safetensors"}, {"Audio Tokenizer Model", "audio_tokenizer.safetensors"}, {"Keep model in VRAM", true}});
-  g["t"] = node("OmniVoiceTTS", {{"model", {"l", 0}},
-                                 {"text", r.inputs.value("text", std::string())},
-                                 {"language", r.settings.value("language", std::string("English"))},
-                                 {"instruct", r.inputs.value("instruct", std::string())},
-                                 {"speed", r.settings.value("speed", 1.1)},
-                                 {"duration", 0.0},
-                                 {"num_step", r.settings.value("steps", 16)},
-                                 {"cfg", r.settings.value("cfg", 3.0)},
-                                 {"seed", std::max<int64_t>(0, r.inputs.value("seed", int64_t(0)))},
-                                 {"t_shift", 1.0},
-                                 {"denoise", false},
-                                 {"preprocess_prompt", true},
-                                 {"postprocess_output", true}});
+  // A voice name like "am_michael"; anything else falls back to the default.
+  std::string voice = r.inputs.value("instruct", std::string());
+  const bool named = voice.size() >= 4 && voice[2] == '_' && voice.find(' ') == std::string::npos;
+  if (!named)
+    voice = "am_michael";
+  g["t"] = node("AttomeKokoroTTS", {{"text", r.inputs.value("text", std::string())}, {"voice", voice}, {"speed", r.settings.value("speed", 1.0)}});
   g["s"] = node("SaveAudio", {{"audio", {"t", 0}}, {"filename_prefix", prefix}});
   return g;
 }
@@ -315,7 +279,6 @@ ComfyProvider::ComfyProvider(std::string address, std::shared_ptr<net::Transport
     address_.pop_back();
   if (address_.find("://") == std::string::npos)
     address_ = "http://" + address_;
-  gen::register_model(speech_declaration());
   gen::register_model(kokoro_declaration());
 }
 
@@ -324,7 +287,7 @@ bool ComfyProvider::offers(std::string_view model, std::string_view kind) const 
 }
 
 std::string ComfyProvider::fingerprint(std::string_view model) const {
-  return known(model) ? "comfyui-graph-1" : kokoro(model) ? "comfyui-kokoro-1" : speaks(model) ? "comfyui-omnivoice-1" : std::string();
+  return known(model) ? "comfyui-graph-1" : kokoro(model) ? "comfyui-kokoro-1" : std::string();
 }
 
 json ComfyProvider::status() {
@@ -471,11 +434,7 @@ Result<gen::StepResult> ComfyProvider::run(const gen::StepRequest &r) {
     const std::string text = queued->body.substr(0, 600);
     if (speech && kokoro(r.model) && (text.find("AttomeKokoroTTS") != std::string::npos || text.find("missing_node_type") != std::string::npos))
       return engine_error("E_MODEL_FILE", "ComfyUI has no Kokoro node.",
-                          "Put the attome_kokoro node pack in ComfyUI's custom_nodes, the Kokoro weights in ComfyUI/models/Kokorotts/Kokoro-82M, and restart ComfyUI.");
-    if (speech && (text.find("OmniVoice") != std::string::npos || text.find("missing_node_type") != std::string::npos))
-      return engine_error("E_MODEL_FILE", "ComfyUI has no OmniVoice nodes.",
-                          "Install the omnivoice_comfy node pack in ComfyUI's custom_nodes, put model.safetensors and audio_tokenizer.safetensors in "
-                          "ComfyUI/models/tts/omnivoice, and restart ComfyUI.");
+                          "comfyui.install adds it (to Attome's own ComfyUI) and models.fetch {id: \"kokoro.82m\"} gets the voices.");
     if (r.settings.value("stage", std::string("preview")) == "final" && text.find(kLatentUpscaler) != std::string::npos)
       return engine_error("E_MODEL_FILE", "ComfyUI cannot see the latent upscaler for the final stage.",
                           "Download \"MiniMax H3 latent upscaler\" in the Models panel into ComfyUI's models/latent_upscale_models, put the "

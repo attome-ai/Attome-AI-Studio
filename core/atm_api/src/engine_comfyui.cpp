@@ -48,9 +48,6 @@ const std::vector<Pack> &packs() {
        "MiniMax H3 with less memory (the low_memory setting)", {"MiniMaxChunkFeedForward", "MiniMaxLowVRAMAttention"}, {}, {}},
       {"Comfyui_Minimax_h3_latent_Upscaler", "LBH-123-AI/Comfyui_Minimax_h3_latent_Upscaler", "40316cf008b2fd8663263270669eb4da23f89d2c", "MIT",
        "MiniMax H3's final stage (the latent upscaler)", {"MinimaxH3LatentUpscaler3D"}, {}, {}},
-      // pydub reads sound through a module Python 3.13 no longer has: audioop-lts brings it back.
-      {"omnivoice_comfy", "komikndr/omnivoice_comfy", "70b40f5d88c98951f0ef76373614956ca0ed3af5", "Apache-2.0",
-       "OmniVoice: speech with a voice described in words", {"OmniVoiceLoader", "OmniVoiceTTS"}, {"audioop-lts==0.2.2"}, {}},
       // kokoro asks for an old numpy and a misaki that has no build for Python 3.13: it goes in alone, with the versions that work beside it
       // (the set a working ComfyUI 0.38.0 was measured with, 2026-10-13).
       {"attome_kokoro", "", "", "Attome's own",
