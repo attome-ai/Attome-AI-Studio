@@ -105,6 +105,16 @@ void App::draw_generate_panel() {
   panel_tabs("tab", tabs, gen_tab_);
   ImGui::NewLine();
   ImGui::Spacing();
+  // One tile size for the whole panel: the sections (video, audio, your workflows) share the size of the fullest one, so a section with a
+  // single card does not get a bigger card than the rest.
+  int shared = 3;
+  for (const std::string &type : types) {
+    int of_type = 0;
+    for (const json &m : gen_models_)
+      of_type += m.value("clip_type", "video") == type ? 1 : 0;
+    shared = std::max(shared, of_type);
+  }
+  shared = std::max<int>(shared, int(object_in(doc_, "workflows").size()));
   for (size_t ti = 0; ti < types.size(); ++ti) {
     const std::string &type = types[ti];
     if (gen_tab_ != 0 && size_t(gen_tab_) != ti + 1)
@@ -119,7 +129,7 @@ void App::draw_generate_panel() {
     for (const json &m : gen_models_)
       of_type += m.value("clip_type", "video") == type ? 1 : 0;
     std::string family = "\x01";
-    TileGrid grid = tile_grid(of_type);
+    TileGrid grid = tile_grid(shared);
     for (const json &m : gen_models_) {
       if (m.value("clip_type", "video") != type)
         continue;
@@ -187,7 +197,7 @@ void App::draw_generate_panel() {
   if (!library.empty() && (gen_tab_ == 0 || gen_tab_ == 1)) {
     section_label("YOUR WORKFLOWS");
     ImGui::Spacing();
-    TileGrid grid = tile_grid(std::max<int>(3, int(library.size()))); // the size of the model cards
+    TileGrid grid = tile_grid(shared); // the size of the model cards
     for (auto w = library.begin(); w != library.end(); ++w) {
       const std::string id = w.key(), name = w->value("name", id);
       Tile t;

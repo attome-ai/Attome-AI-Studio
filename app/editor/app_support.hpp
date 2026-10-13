@@ -502,14 +502,15 @@ struct TileGrid {
   int cols = 3, n = 0;
 };
 
-// `count` is how many tiles will be drawn. A tile is never smaller than kMinTile or larger than kMaxTile: a wide panel
-// shows more tiles in a row, and a row that the tiles do not fill keeps them at their largest.
+// A tile is never smaller than kMinTile or larger than kMaxTile: a wide panel shows more tiles in a row. All the cards of a panel have the
+// same size, however many there are (`count` is kept for the callers that pass it).
 inline TileGrid tile_grid(int count) {
   constexpr float kMinTile = 80.0f, kMaxTile = 132.0f;
   TileGrid g;
   const float w = ImGui::GetContentRegionAvail().x;
   const int fits = std::max(1, int((w + g.gap) / (kMinTile + g.gap)));
-  g.cols = std::max(1, std::min(fits, std::max(1, count)));
+  (void)count; // the same size whatever is shown: a chip with few cards, or a section with one, does not get bigger cards than the rest
+  g.cols = std::max(1, fits);
   g.size = std::min(kMaxTile, (w - g.gap * float(g.cols - 1)) / float(g.cols));
   return g;
 }
