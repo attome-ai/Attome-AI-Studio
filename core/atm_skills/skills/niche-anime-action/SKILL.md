@@ -45,6 +45,12 @@ THE FIGHTING ITSELF
   clip of each duel starting on that frame with the opponent coming in from the empty side.
 - Keep the two close enough to fill the frame. Written "far apart" both are tiny: bring one to the other first.
 - A held pose with a delayed fall is not drawn (two people stand). A fall is a clip that carries on from the blow.
+- **Blows that are drawn**: a strike to the body that knocks the other back; a strike that knocks the weapon out of
+  the hand (it flies off, 2 of 2). A sweep of the legs was not drawn (0 of 1).
+- **End a duel inside the frame**: "drops to one knee in front of her". A loser knocked out of the frame cannot be
+  shown in the next clip of the chain; cut to a close shot of them instead, with their new state as a cast entry of
+  its own (see `film`: a person whose state changes).
+- A fighter without a weapon (fists, gauntlets) has nothing that can change between shots: the easiest opponent.
 
 THE ORDER OF A DUEL (a pattern that held)
 1. eyes of one, eyes of the other (speed lines)
@@ -56,6 +62,8 @@ THE ORDER OF A DUEL (a pattern that held)
 WEAPONS
 - In words, with limits, in the owner's description; where it is in every shot (see `film`, the cast).
 - Small distinct weapons may be props with a picture; long thin ones are words only.
+- A weapons-only shot (the flurry) names no fighter as a subject (see `film`: a shot of things only).
+- A weapon thrust at the lens: "its narrow point comes at the lens". "The blade crosses the frame" drew a broad blade.
 
 SOUND
 - An impact frame is a flash: find the flashes in the picture (a scene-change score above 0.5 between two frames, at

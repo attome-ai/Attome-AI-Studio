@@ -71,6 +71,15 @@ Model: `minimax-h3.singularity-ref2va.int8` (the only one that takes reference p
     ground in front of her, out of her hands". In a close-up the model otherwise puts it on the back or drops it.
   - Ask the owner how a thing is held before writing it: a grip written by guess was the wrong one.
   - Do not write that a thing "fills the frame": it is drawn huge. Write that it "crosses the frame".
+  - A size written against the body stops a thing growing wildly; the exact size is not obeyed. When the model draws a
+    thing the same way in most shots, change the description to what it draws: the same in every shot matters more
+    than the size you had in mind.
+- **A person whose state changes is a second cast entry**: disarmed, wounded, in other clothes. Same face picture and
+  voice, a description of the new state ("her hands are empty; she has no sword"). The description is stronger than the
+  shot: with "she holds a sword" in it, a shot that says the sword is gone still shows it (0 of 3); with the second
+  entry it is gone (2 of 2).
+- **A shot of things only has no cast in it**: name the people as subjects and a person is drawn. Describe what is seen
+  as a plain subject ("two pairs of hands, a staff and a sword") and write "no faces and no bodies in the picture".
 - **An object as a `prop` with its own picture helps a small, distinct object and harms a long thin one.** A product, a
   pair of small blades, a mask: name it as a subject of its own and it matches its picture. A long thin thing (a sword,
   a staff) is enlarged into a broad one: describe it in words instead.
@@ -108,11 +117,14 @@ Shots made on their own share nothing. Decide for each shot which of these it is
   - A person who was not in the chain cannot enter it (drawn as a dark figure). A person CAN enter a shot that starts on
     a still frame ("<Subject 2> comes in from the right edge of the frame").
   - When checking such a clip leave out its first 22 frames (0.92 s): they repeat the clip before.
+  - **Who leaves the frame is gone**: the next clip of the chain does not bring them back. Write the end of each clip so
+    that everyone needed next is still in the picture ("drops to one knee in front of her", not "falls").
 - **Several sequences in one exact place: a stage.** One shot with the constant person at one side and the rest of the
   frame empty; the first clip of every sequence starts on the same frame of it (`start_crop: [0, 0, 1, 1]`) and the
   other person comes in from the empty side.
 - **A shot made on its own** only for what does not have to join anything: an eye, a hand, an object, an empty place,
-  a reaction. It opens on about 0.45 s of a posed frame: cut that off.
+  a reaction. It opens on a posed frame, 0.45 s as a rule and up to 0.9 s: cut the shot in after it (the largest
+  scene-change score in the first second shows where).
 - **Cause and effect are never two shots made on their own.** A blow and where the struck person ends up, a jump and
   where it lands, a throw and the catch: the poses and the places do not join and the viewer sees it. One shot holds
   both, or the result carries on from the cause.
@@ -127,7 +139,8 @@ Shots made on their own share nothing. Decide for each shot which of these it is
   right edge of the frame, out of focus; <Subject 1> looks at <Subject 2> and speaks to her; <Subject 2> does not
   speak". Alone in a tight close-up the speaker looks into the camera, and "look off to the right" only half works.
 - Name people by `<Subject N>` in the action, and say what each **does** from the first second.
-- Lines: short; at most three in a 9 s shot; a tone for each.
+- Lines: short; at most three in a 9 s shot; a tone for each. Ask for a second more than the line needs: a line that
+  just fits ends on the cut.
 - **Do not shorten a generated clip.** `gen.create_clip` gives the clip the length the model really makes (9 s asked is
   9.42 s) and says so in `note`. The model paces speech to the end of the take: a shorter clip cuts the last word, and
   "finish the lines early" in the prompt does nothing.
@@ -174,6 +187,8 @@ thing you made it again to fix: a take with the right detail and no action made 
 - A scene of a minute with two people in a place they had never been in: a four-part master and two dirty singles, every
   take passed on the first try, about 7 minutes at draft size. The same people were recognisable in a second scene.
 - Four drawn characters, each recognisable in every shot, also four in one frame.
+- **The rules carry to a new video**: a second drawn fight with other people, place and weapons, made from this skill
+  and `niche-anime-action` alone: 17 of 24 first takes usable, the rest fixed in one round of retakes (LAB 51-52).
 
 ## Not known yet
 
