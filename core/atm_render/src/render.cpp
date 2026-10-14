@@ -1115,6 +1115,68 @@ void grade_nv12(uint8_t *nv12, int W, int H, float brightness, float contrast, f
   });
 }
 
+// The colour effects that change each plane by a table of its own: the new luma byte for each old one, and the new U
+// and the new V byte. Black and white, sepia, invert, posterize, temperature and tint, exposure, highlights and shadows.
+// The CPU and the GPU both apply these, so they agree to the byte. False for a kind that is not one of them.
+bool tone_tables(const std::string &kind, const std::array<float, eval::kMaxEffectParams> &v, uint8_t luma[256], uint8_t u[256], uint8_t vv[256]) {
+  const auto video = [](float l) { return uint8_t(std::lround(16.0f + 219.0f * std::clamp(l, 0.0f, 1.0f))); };
+  const auto chroma = [](float c) { return uint8_t(std::lround(std::clamp(c, 16.0f, 240.0f))); };
+  const auto unit = [](int i) { return std::clamp((float(i) - 16.0f) / 219.0f, 0.0f, 1.0f); };
+  for (int i = 0; i < 256; ++i) {
+    const float l = unit(i), c = float(i) - 128.0f;
+    float ly = float(i), cu = float(i), cv = float(i);
+    if (kind == "black_white") { // the colour goes toward grey; the contrast is on the grey
+      const float a = v[0];
+      ly = float(video((l - 0.5f) * (1.0f + v[1] * a) + 0.5f));
+      cu = cv = 128.0f + c * (1.0f - a);
+    } else if (kind == "sepia") { // the chroma goes toward a warm brown, the brightness stays
+      const float a = v[0];
+      cu = float(i) + (108.0f - float(i)) * a;
+      cv = float(i) + (150.0f - float(i)) * a;
+    } else if (kind == "invert") {
+      const float a = v[0];
+      ly = float(i) + (251.0f - 2.0f * float(i)) * a;
+      cu = cv = float(i) + (256.0f - 2.0f * float(i)) * a;
+    } else if (kind == "posterize") {
+      const float n = std::max(2.0f, std::round(v[0])) - 1.0f;
+      ly = float(video(std::round(l * n) / n));
+      const float q = std::round((c / 112.0f * 0.5f + 0.5f) * n) / n; // 16..240 as 0..1
+      cu = cv = 128.0f + (q - 0.5f) * 2.0f * 112.0f;
+    } else if (kind == "temperature") { // warm: more red (V up) and less blue (U down); magenta: both up
+      cu = float(i) - v[0] * 24.0f + v[1] * 16.0f;
+      cv = float(i) + v[0] * 24.0f + v[1] * 16.0f;
+    } else if (kind == "exposure") { // in linear light, taken as gamma 2.2
+      ly = float(video(std::pow(std::pow(l, 2.2f) * std::pow(2.0f, v[0]), 1.0f / 2.2f)));
+    } else if (kind == "highlights_shadows") {
+      const float d = 1.0f - l;
+      ly = float(video(l + v[0] * 2.5f * l * d * d + v[1] * 2.5f * l * l * d));
+    } else
+      return false;
+    luma[i] = uint8_t(std::clamp(int(std::lround(ly)), 16, 235));
+    u[i] = chroma(cu);
+    vv[i] = chroma(cv);
+  }
+  return true;
+}
+
+void tone_nv12(uint8_t *nv12, int W, int H, const uint8_t luma[256], const uint8_t u[256], const uint8_t v[256]) {
+  ATM_PROFILE_SCOPE("effect.tone");
+  parallel_for(H + H / 2, 16, [&](int64_t first, int64_t last) {
+    for (int64_t y = first; y < last; ++y) {
+      uint8_t *row = nv12 + size_t(y) * size_t(W);
+      if (y < H) {
+        for (int x = 0; x < W; ++x)
+          row[x] = luma[row[x]];
+      } else {
+        for (int x = 0; x + 1 < W; x += 2) {
+          row[x] = u[row[x]];
+          row[x + 1] = v[row[x + 1]];
+        }
+      }
+    }
+  });
+}
+
 // Darkens towards the corners: the distance from the centre is 0 in the middle and 1 in the corners (it follows the
 // picture's shape), nothing changes inside `radius`, and the full `strength` is reached `softness` further out. Luma
 // (above 16) and chroma (around 128) scale by the same factor, which is what multiplying RGB by it does, so the
@@ -1847,6 +1909,8 @@ void apply_effect(const std::string &kind, const std::array<float, eval::kMaxEff
     blur_nv12(nv12, W, H, v[0] * float(H) * 0.5f, scratch);
   else if (kind == "color_grade")
     grade_nv12(nv12, W, H, v[0], v[1], v[2]);
+  else if (uint8_t ty[256], tu[256], tv[256]; tone_tables(kind, v, ty, tu, tv))
+    tone_nv12(nv12, W, H, ty, tu, tv);
   else if (kind == "vignette")
     vignette_nv12(nv12, W, H, v[0], v[1], v[2]);
   else if (kind == "sharpen") // radius in canvas heights, like the blur
@@ -2521,6 +2585,14 @@ bool Renderer::gpu_chain(const Layer &l, int64_t frame, std::vector<gpu::Effect>
       for (int i = 0; i < 256; ++i) {
         g.table[size_t(i)] = luma_lut[i];
         g.table[size_t(256 + i)] = chroma_lut[i];
+      }
+    } else if (uint8_t ty[256], tu[256], tv[256]; tone_tables(e.kind, v, ty, tu, tv)) {
+      g.kind = gpu::Effect::Kind::table3;
+      g.table.resize(768);
+      for (int i = 0; i < 256; ++i) {
+        g.table[size_t(i)] = ty[i];
+        g.table[size_t(256 + i)] = tu[i];
+        g.table[size_t(512 + i)] = tv[i];
       }
     } else if (e.kind == "vignette") {
       g.kind = gpu::Effect::Kind::vignette;

@@ -17,14 +17,19 @@ const char *effect_blurb(const std::string &name) {
   static const std::pair<const char *, const char *> kBlurb[] = {
       {"blur", "Softens everything below it."},      {"grade", "Brightness, contrast and colour."}, {"vignette", "Darkens the corners."},
       {"sharpen", "Crisper edges."},                 {"grain", "Film grain, new on every frame."},   {"lut", "A look from a .cube file."},
-      {"key", "Makes a screen colour transparent."}, {"luma", "Makes the dark or the bright parts transparent."}};
+      {"key", "Makes a screen colour transparent."}, {"luma", "Makes the dark or the bright parts transparent."},
+      {"bw", "Takes the colour out, with a contrast on the grey."}, {"sepia", "An old brown photograph."}, {"invert", "The negative of the picture."},
+      {"posterize", "Flat steps of colour, like a print."}, {"temp", "Warmer or cooler, greener or pinker."},
+      {"exposure", "Brighter or darker, in stops of light: +1 doubles it."}, {"tones", "Lift or deepen the shadows, calm or brighten the highlights."}};
   for (const auto &[n, text] : kBlurb)
     if (name == n)
       return text;
   return "";
 }
 
-const char *effect_group(const std::string &name) { return name == "grade" || name == "lut" || name == "vignette" ? "Colour" : name == "key" || name == "luma" ? "Key" : "Detail"; }
+const char *effect_group(const std::string &name) { return name == "grade" || name == "lut" || name == "vignette" || name == "bw" || name == "sepia" || name == "invert" || name == "posterize" || name == "temp" ||
+                                                    name == "exposure" || name == "tones"
+                                                ? "Colour" : name == "key" || name == "luma" ? "Key" : "Detail"; }
 
 struct TransitionInfo {
   const char *id, *title, *text;

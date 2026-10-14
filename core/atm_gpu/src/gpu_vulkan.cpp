@@ -738,6 +738,9 @@ struct Context::Impl : Vulkan {
       case Effect::Kind::table:
         record_pixels({0, uw, uh, P, 0.0f, 0, 0, 0, table_at[i]}, P, uh);
         break;
+      case Effect::Kind::table3:
+        record_pixels({8, uw, uh, P, 0.0f, 0, 0, 0, table_at[i]}, P, uh);
+        break;
       case Effect::Kind::vignette:
         record_pixels({1, uw, uh, P, 0.0f, 0, 0, 1025u + uw + uh, table_at[i]}, P, uh);
         break;

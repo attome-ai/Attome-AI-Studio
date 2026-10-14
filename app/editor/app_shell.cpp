@@ -785,6 +785,8 @@ void App::draw_media() {
             used.push_back(c.id);
       if (menu_item("Add to the timeline"))
         add_by_menu = true;
+      if (menu_item("Add to the library"))
+        pending_ = [this, path] { add_media_to_library(path); };
       if (menu_item("Show in folder")) {
         std::string url = "file:///" + fs::path(std::u8string(path.begin(), path.end())).parent_path().string();
         std::replace(url.begin(), url.end(), '\\', '/');

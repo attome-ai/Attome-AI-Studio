@@ -164,6 +164,28 @@ TEST_CASE("gpu video: a frame of video clips decoded and drawn on the GPU is the
     atm::render::Layer full = layer("clp_a", a, 0);
     full.effects = {effect("gaussian_blur", {0.02f}), effect("color_grade", {0.05f, 0.3f, 1.4f}), effect("vignette", {0.6f, 0.4f, 0.5f})};
     cases.push_back({"a clip that fills the frame, with effects", {full}});
+    const auto tone_case = [&](const char *name, atm::render::Effect fx) { // `name` is a literal: the Case keeps the pointer
+      atm::render::Layer tone = layer("clp_a", a, 0);
+      tone.effects = {std::move(fx), effect("gaussian_blur", {0.004f})};
+      cases.push_back({name, {tone}});
+    };
+    tone_case("black_white", effect("black_white", {0.8f, 0.3f}));
+    tone_case("sepia", effect("sepia", {0.9f}));
+    tone_case("invert", effect("invert", {1.0f}));
+    tone_case("posterize", effect("posterize", {5.0f}));
+    tone_case("temperature", effect("temperature", {0.6f, -0.4f}));
+    tone_case("exposure", effect("exposure", {0.8f}));
+    tone_case("highlights_shadows", effect("highlights_shadows", {0.7f, -0.6f}));
+    atm::render::Layer toned = layer("clp_b", b, 3);
+    toned.xf.scale_x = toned.xf.scale_y = 0.6f;
+    toned.opacity = 0.8f;
+    toned.effects = {effect("sepia", {1.0f}), effect("temperature", {-0.5f, 0.5f}), effect("invert", {0.5f})};
+    atm::render::Layer tint;
+    tint.clip_id = "clp_tone";
+    tint.is_adjustment = true;
+    tint.frames = tint.clip_end_frame = 45;
+    tint.effects = {effect("black_white", {0.5f, 0.0f}), effect("exposure", {-0.7f})};
+    cases.push_back({"colour effects on a part of the frame and on an adjustment layer", {layer("clp_a", a, 0), toned, tint}});
   }
   {
     atm::render::Layer small = layer("clp_b", b, 3);

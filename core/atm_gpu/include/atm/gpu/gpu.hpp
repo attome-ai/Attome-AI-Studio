@@ -44,12 +44,12 @@ struct Timing {
 // One effect of a chain run on the GPU (Context::run_effects). The numbers that must match the CPU exactly come from the
 // renderer, made by the same code its CPU path uses: the GPU only applies them.
 struct Effect {
-  enum class Kind { blur, sharpen, table, vignette, grain, lut, luma_key, chroma_key };
+  enum class Kind { blur, sharpen, table, table3, vignette, grain, lut, luma_key, chroma_key };
   Kind kind = Kind::blur;
   float sigma = 0.0f;          // blur, sharpen: the blur's sigma in pixels
   float amount = 0.0f;         // sharpen: the amount; grain: the amplitude (strength * 48); lut: the strength
   uint32_t cell = 1, seed = 0; // grain: the size of a grain in pixels, the frame's seed
-  // table: 512 words, the new byte of each luma value (0..255) then of each chroma value; luma_key: 256 words, how much
+  // table3: 768 words, the new byte of each luma value, then of each U value, then of each V value; table: 512 words, the new byte of each luma value (0..255) then of each chroma value; luma_key: 256 words, how much
   // of each luma value is kept (0..255; it needs the clip's coverage);
   // vignette: floats as their bits: the mask (1025), x terms (width), y terms (height), chroma x (width / 2), chroma y (height / 2);
   // chroma_key: the renderer's ChromaKeyTables words (it needs the clip's coverage).

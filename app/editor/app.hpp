@@ -694,6 +694,7 @@ private:
   double next_niche_poll_ = 0.0;
   void poll_niche_job();
   void draw_niche_link();
+  void add_media_to_library(const std::string &path); // a file of the Media panel: the clips made from it, or a clip made for the purpose, become one item
   void add_to_library(bool with_linked = true, const std::string &only = {}, const std::string &part = {});            // the selected clips (and, unless with_linked is false, what is linked to them) become one item
   void insert_library(const std::string &id, int64_t at, const std::string &track = {}, bool follow = false); // an item at `at`, its clips on tracks of their kind; follow: select them, playhead to their end
   char text_buf_[1024] = {};

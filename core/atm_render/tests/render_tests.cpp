@@ -1519,6 +1519,40 @@ TEST_CASE("render: colour grade and vignette change the picture below an adjustm
     CHECK(std::abs(int(px(same, 160, 40)[2]) - int(px(plain, 160, 40)[2])) < 3);
     CHECK(std::abs(int(px(same, 160, 200)[0]) - int(px(plain, 160, 200)[0])) < 3);
   }
+  { // the colour effects: red above, blue below
+    const auto red = [&](const std::vector<uint8_t> &img) { return px(img, 160, 40); };
+    const auto blue = [&](const std::vector<uint8_t> &img) { return px(img, 160, 200); };
+    const auto bw = render_with(fx("attome.black_white", json::object()));
+    CHECK(std::abs(int(red(bw)[2]) - int(red(bw)[1])) < 14);
+    CHECK(std::abs(int(blue(bw)[0]) - int(blue(bw)[1])) < 14);
+    const auto half = render_with(fx("attome.black_white", {{"amount", 0.0}}));
+    CHECK(std::abs(int(red(half)[2]) - int(red(plain)[2])) < 3); // amount 0 changes nothing
+    const auto sepia = render_with(fx("attome.sepia", json::object()));
+    CHECK(int(blue(sepia)[2]) > int(blue(sepia)[0])); // brown: red over blue, even where the picture was blue
+    const auto negative = render_with(fx("attome.invert", json::object()));
+    CHECK(int(red(negative)[2]) < 60); // red turns to cyan
+    CHECK(int(red(negative)[1]) > 180);
+    const auto two = render_with(fx("attome.posterize", {{"levels", 2.0}}));
+    const auto many = render_with(fx("attome.posterize", {{"levels", 32.0}}));
+    int far = 0, near = 0;
+    for (int c = 0; c < 3; ++c) {
+      far = std::max(far, std::abs(int(red(two)[c]) - int(red(plain)[c])));
+      near = std::max(near, std::abs(int(red(many)[c]) - int(red(plain)[c])));
+    }
+    CHECK(far > 20); // two steps change the picture a lot, thirty-two hardly at all
+    CHECK(near < 20);
+    const auto warm = render_with(fx("attome.temperature", {{"temperature", 1.0}}));
+    CHECK(int(blue(warm)[2]) > int(blue(plain)[2]) + 10); // more red where it was blue
+    CHECK(int(blue(warm)[0]) < int(blue(plain)[0]));
+    const auto over = render_with(fx("attome.exposure", {{"stops", 1.5}}));
+    const auto under = render_with(fx("attome.exposure", {{"stops", -1.5}}));
+    CHECK(int(red(over)[1]) > int(red(plain)[1]) + 20);
+    CHECK(int(red(under)[1]) <= int(red(plain)[1]) + 2); // pure red and blue clip in their own channel, so a darker picture shows nowhere else
+    const auto same_tones = render_with(fx("attome.highlights_shadows", json::object()));
+    CHECK(std::abs(int(red(same_tones)[2]) - int(red(plain)[2])) < 3);
+    const auto lifted = render_with(fx("attome.highlights_shadows", {{"shadows", 1.0}}));
+    CHECK(int(blue(lifted)[0]) + int(blue(lifted)[1]) + int(blue(lifted)[2]) > int(blue(plain)[0]) + int(blue(plain)[1]) + int(blue(plain)[2]));
+  }
   { // vignette: the middle stays, the corners go dark
     const auto vig = render_with(fx("attome.vignette@1.0.0", {{"strength", 1.0}, {"radius", 0.3}, {"softness", 0.3}}));
     CHECK(std::abs(int(px(vig, 160, 100)[2]) - int(px(plain, 160, 100)[2])) < 8);

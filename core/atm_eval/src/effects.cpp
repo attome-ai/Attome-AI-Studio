@@ -1,4 +1,4 @@
-#include "atm/eval/effects.hpp"
+﻿#include "atm/eval/effects.hpp"
 
 #include <array>
 
@@ -44,6 +44,31 @@ constexpr EffectParam kLumaKey[] = {
     {"softness", "Softness", 0.0, 1.0, 0.1, false, 1.0},   // the soft edge between removed and kept
 };
 
+constexpr EffectParam kBlackWhite[] = {
+    {"amount", "Amount", 0.0, 1.0, 1.0, false, 1.0},     // 0 leaves the colour, 1 is grey
+    {"contrast", "Contrast", -1.0, 1.0, 0.0, false, 1.0}, // on the grey picture
+};
+constexpr EffectParam kSepia[] = {
+    {"amount", "Amount", 0.0, 1.0, 1.0, false, 1.0},
+};
+constexpr EffectParam kInvert[] = {
+    {"amount", "Amount", 0.0, 1.0, 1.0, false, 1.0}, // 1 is the negative, 0.5 is flat grey
+};
+constexpr EffectParam kPosterize[] = {
+    {"levels", "Levels", 2.0, 32.0, 4.0, false, 16.0}, // steps of brightness and of each colour axis
+};
+constexpr EffectParam kTemperature[] = {
+    {"temperature", "Temperature", -1.0, 1.0, 0.0, false, 1.0}, // below 0 cooler (blue), above warmer (orange)
+    {"tint", "Tint", -1.0, 1.0, 0.0, false, 1.0},               // below 0 greener, above more magenta
+};
+constexpr EffectParam kExposure[] = {
+    {"stops", "Exposure", -3.0, 3.0, 0.0, false, 3.0}, // photographic stops: +1 doubles the light
+};
+constexpr EffectParam kHighlightsShadows[] = {
+    {"shadows", "Shadows", -1.0, 1.0, 0.0, false, 1.0},       // above 0 lifts the dark parts, below deepens them
+    {"highlights", "Highlights", -1.0, 1.0, 0.0, false, 1.0}, // above 0 brightens the light parts, below calms them
+};
+
 constexpr EffectDef kEffects[] = {
     {"gaussian_blur", "Blur", "blur", kBlur},
     {"color_grade", "Color grade", "grade", kGrade},
@@ -53,6 +78,13 @@ constexpr EffectDef kEffects[] = {
     {"lut", "LUT", "", kLut, "file"},
     {"chroma_key", "Chroma key", "key", kKey, "", true},
     {"luma_key", "Luma key", "luma", kLumaKey, "", true},
+    {"black_white", "Black and white", "bw", kBlackWhite},
+    {"sepia", "Sepia", "", kSepia},
+    {"invert", "Invert", "", kInvert},
+    {"posterize", "Posterize", "", kPosterize},
+    {"temperature", "Temperature and tint", "temp", kTemperature},
+    {"exposure", "Exposure", "", kExposure},
+    {"highlights_shadows", "Highlights, shadows", "tones", kHighlightsShadows},
 };
 
 constexpr std::array<std::pair<const char *, WipeDirection>, 4> kDirections = {{

@@ -895,6 +895,32 @@ inline void draw_effect_art(const std::string &name, ImDrawList *dl, ImVec2 p, I
     for (int i = 0; i < 6; ++i)
       dl->AddRectFilled(ImVec2(c.x - (33.0f - float(i) * 11.0f) * k, c.y - 18.0f * k), ImVec2(c.x - (23.0f - float(i) * 11.0f) * k, c.y + 18.0f * k),
                         i < 2 ? IM_COL32(255, 255, 255, 25) : IM_COL32(60 + i * 36, 60 + i * 36, 60 + i * 36, 255), 3.0f);
+  } else if (name == "bw" || name == "sepia" || name == "temp" || name == "tones") { // a ramp of what the effect makes of a gradient
+    const ImVec2 a(c.x - 32.0f * k, c.y - 17.0f * k), b(c.x + 32.0f * k, c.y + 17.0f * k);
+    const ImU32 left = name == "bw" ? IM_COL32(20, 20, 20, 255) : name == "sepia" ? IM_COL32(48, 30, 16, 255) : name == "temp" ? IM_COL32(70, 130, 235, 255) : IM_COL32(8, 8, 10, 255);
+    const ImU32 right = name == "bw" ? IM_COL32(240, 240, 240, 255) : name == "sepia" ? IM_COL32(236, 206, 160, 255) : name == "temp" ? IM_COL32(245, 160, 60, 255) : IM_COL32(250, 250, 250, 255);
+    dl->AddRectFilledMultiColor(a, b, left, right, right, left);
+    if (name == "tones") { // a shadow lifted and a highlight calmed
+      dl->AddCircleFilled(ImVec2(a.x + 9.0f * k, c.y), 4.0f * k, IM_COL32(120, 120, 130, 255));
+      dl->AddCircleFilled(ImVec2(b.x - 9.0f * k, c.y), 4.0f * k, IM_COL32(190, 190, 196, 255));
+    }
+    dl->AddRect(a, b, hex(look::adj, 110), 3.0f);
+  } else if (name == "invert") { // the same ramp turned the other way in the second half
+    const ImVec2 a(c.x - 32.0f * k, c.y - 17.0f * k), b(c.x + 32.0f * k, c.y + 17.0f * k), m(c.x, c.y);
+    dl->AddRectFilledMultiColor(a, ImVec2(m.x, b.y), IM_COL32(20, 20, 20, 255), IM_COL32(130, 130, 130, 255), IM_COL32(130, 130, 130, 255), IM_COL32(20, 20, 20, 255));
+    dl->AddRectFilledMultiColor(ImVec2(m.x, a.y), b, IM_COL32(125, 125, 125, 255), IM_COL32(235, 235, 235, 255), IM_COL32(235, 235, 235, 255), IM_COL32(125, 125, 125, 255));
+    dl->AddRect(a, b, hex(look::adj, 110), 3.0f);
+  } else if (name == "posterize") { // a ramp cut into a few flat steps
+    for (int i = 0; i < 5; ++i) {
+      const int g = 30 + i * 48;
+      dl->AddRectFilled(ImVec2(c.x - (33.0f - float(i) * 13.0f) * k, c.y - 17.0f * k), ImVec2(c.x - (20.0f - float(i) * 13.0f) * k, c.y + 17.0f * k), IM_COL32(g, g + 10, g + 30, 255));
+    }
+  } else if (name == "exposure") { // a sun with its rays
+    dl->AddCircleFilled(c, 9.0f * k, IM_COL32(250, 214, 110, 255));
+    for (int i = 0; i < 8; ++i) {
+      const float a = float(i) * 0.7853982f;
+      dl->AddLine(ImVec2(c.x + std::cos(a) * 14.0f * k, c.y + std::sin(a) * 14.0f * k), ImVec2(c.x + std::cos(a) * 21.0f * k, c.y + std::sin(a) * 21.0f * k), IM_COL32(250, 214, 110, 220), 2.2f);
+    }
   } else { // vignette: a frame whose edges fade to dark
     for (int i = 0; i < 5; ++i)
       dl->AddRect(ImVec2(c.x - (28.0f - float(i) * 3.0f) * k, c.y - (20.0f - float(i) * 2.0f) * k),

@@ -3,6 +3,7 @@
 // renderer as tables (binding 2), made by the same code its CPU path uses, and the arithmetic below is written in the CPU's
 // order with `precise` (no fused multiply-add), so both give the same bytes.
 //   kind 0 table:    data[0..255] new luma byte for each old one, data[256..511] the chroma's (a colour grade)
+//   kind 8 table3:   data[0..255] new luma byte, data[256..511] new U byte, data[512..767] new V byte (the even and odd chroma bytes)
 //   kind 1 vignette: data = mask[1025] (floats), then x and y terms for the luma (W, H) and the chroma (W/2, H/2)
 //   kind 2 grain:    hash noise on the luma; f0 = amplitude, u0 = cell size, u1 = the frame's seed
 //   kind 3 sharpen:  luma + amount * (luma - blurred luma), the blurred luma in binding 3; f0 = amount
@@ -181,6 +182,8 @@ void main() {
     if (x < pc.width) {
       if (pc.kind == 0u) {
         v = int(table[pc.table_at + (luma ? 0u : 256u) + uint(v)]);
+      } else if (pc.kind == 8u) { // a table each for luma, U and V (the even and the odd chroma bytes)
+        v = int(table[pc.table_at + (luma ? 0u : ((x & 1u) == 0u ? 256u : 512u)) + uint(v)]);
       } else if (pc.kind == 1u) {
         if (luma) {
           precise float d2 = tablef(1025u + x) + tablef(1025u + pc.width + y);

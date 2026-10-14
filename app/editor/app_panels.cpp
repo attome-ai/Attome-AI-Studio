@@ -276,6 +276,36 @@ void App::add_to_library(bool with_linked, const std::string &only, const std::s
   say("\"" + result.value("name", std::string("Clip")) + "\" is in the library. Any project can use it: the Library panel on the left.");
 }
 
+void App::add_media_to_library(const std::string &path) {
+  const auto clips_of = [&] {
+    std::vector<std::string> ids;
+    for (const TrackUi &t : tracks_)
+      for (const ClipUi &c : t.clips)
+        if (c.path == path)
+          ids.push_back(c.id);
+    return ids;
+  };
+  std::vector<std::string> ids = clips_of();
+  const bool made = ids.empty(); // not on the timeline: put it there for a moment, as the item needs a clip to be made from
+  if (made) {
+    import_files({path});
+    refresh();
+    ids = clips_of();
+  }
+  if (ids.empty())
+    return;
+  json result;
+  const bool ok = rpc("library.add", {{"project", project_path_}, {"clips", ids}, {"linked", true}}, result);
+  if (made) { // the clips that were only a means go again (Undo brings them back)
+    select_clips(ids, false);
+    delete_selected();
+  }
+  if (!ok)
+    return;
+  library_stale_ = true;
+  say("\"" + result.value("name", std::string("Clip")) + "\" is in the library. Any project can use it: the Library panel on the left.");
+}
+
 void App::insert_library(const std::string &id, int64_t at, const std::string &track, bool follow) {
   // The engine puts each clip of the item on a track that is free where it goes (the one it was dropped on first), or on a new one:
   // nothing already on the timeline moves and nothing overlaps.
@@ -789,7 +819,10 @@ void App::draw_effects_panel() {
   }
   // The tab an effect is under: colour (grade, LUT, vignette), detail (blur, sharpen, grain) or key (chroma, luma).
   const auto tab_of = [](const std::string &name) {
-    return name == "grade" || name == "lut" || name == "vignette" ? 1 : name == "key" || name == "luma" ? 3 : 2;
+    return name == "grade" || name == "lut" || name == "vignette" || name == "bw" || name == "sepia" || name == "invert" || name == "posterize" || name == "temp" ||
+                   name == "exposure" || name == "tones"
+               ? 1
+               : name == "key" || name == "luma" ? 3 : 2;
   };
   int in_tab = 0;
   for (const eval::EffectDef &def : eval::effect_defs())
@@ -797,7 +830,9 @@ void App::draw_effects_panel() {
   static const std::pair<const char *, const char *> kBlurb[] = {
       {"blur", "Softens everything below"}, {"grade", "Brightness, contrast and colour"}, {"vignette", "Darkens the corners"},
       {"sharpen", "Crisper edges"}, {"grain", "Film grain, new every frame"},
-      {"lut", "A look from a .cube file"}};
+      {"lut", "A look from a .cube file"}, {"bw", "Takes the colour out"}, {"sepia", "An old brown photograph"}, {"invert", "The negative of the picture"},
+      {"posterize", "Flat steps of colour, like a print"}, {"temp", "Warmer or cooler, greener or pinker"}, {"exposure", "Brighter or darker, in stops of light"},
+      {"tones", "Lift the shadows, calm the highlights"}};
   TileGrid grid = tile_grid(in_tab);
   for (const eval::EffectDef &def : eval::effect_defs()) {
     const std::string name = def.short_name();
