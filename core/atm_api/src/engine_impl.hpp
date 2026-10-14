@@ -283,6 +283,7 @@ struct Engine::Impl {
   std::map<std::string, std::shared_ptr<Job>> jobs;
   std::vector<std::shared_ptr<gen::Provider>> providers;
   std::string comfyui_address;
+  std::string freesound_key_set; // the key given with sfx.key in this run (also saved in the settings when there are any)
   fs::path chosen_models_dir;
           // the user's own place for downloads; empty = the default one
   std::vector<fs::path> model_folders;
@@ -328,6 +329,13 @@ struct Engine::Impl {
   Result<json> ytdlp_status(const json &params);
   Result<json> ytdlp_install(const json &params);
   Result<json> video_fetch(const json &params);
+  // Sound effects from Freesound (engine_sounds.cpp): search, download (CC0 only), the user's API key.
+  std::string freesound_key() const;
+  fs::path sounds_dir() const;
+  Result<json> sfx_key(const json &params);
+  Result<json> sfx_search(const json &params);
+  Result<json> sfx_fetch(const json &params);
+  Result<json> sfx_downloaded(const json &params);
   // Web motion graphics drawn by a headless browser (engine_web.cpp).
   Result<json> web_status(const json &params);
   Result<json> web_preview(const json &params);

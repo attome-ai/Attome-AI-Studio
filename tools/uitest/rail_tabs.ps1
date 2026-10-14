@@ -26,7 +26,7 @@ try {
   } finally { Remove-Item Env:\ATTOME_ENDPOINT -ErrorAction SilentlyContinue }
 
   $script = @('wait 1200')
-  foreach ($tab in 'Media', 'Text', 'Effects', 'Generate', 'Library', 'Cast', 'Niches', 'Models') {
+  foreach ($tab in 'Media', 'Text', 'Effects', 'Generate', 'Library', 'Sounds', 'Cast', 'Niches', 'Models') {
     $script += "click @rail:$tab", 'wait 700', "shot $work\tab_$($tab.ToLower()).jpg"
   }
   $run = Invoke-EditorScript -Project $proj -TimeoutSeconds 200 -Script $script

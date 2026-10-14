@@ -213,6 +213,9 @@ Shots made on their own share nothing. Decide for each shot which of these it is
   `audio.analyze {path}` (peak under -1 dB), frames (`see.contact_sheet`), and hear it in parts of a minute
   (`asr.transcribe {path, from, duration: 60}`): every line there, in order, nothing extra.
 - Under a fight: an impact (`sfx.make`) on every flash (see `niche-anime-action`).
+- **Sound effects follow the actions**, not the cuts: each thing that happens on screen (a smash, a reveal, a laugh, a failure, an
+  exit) gets a real recorded sound that fits it and exaggerates it, on the frame where it lands. `sfx.search` and `sfx.fetch` get them
+  (Freesound, CC0); `short-video-music-and-sfx` says how. Whooshes on every cut alone sound random.
 
 ## The checks every take must pass
 

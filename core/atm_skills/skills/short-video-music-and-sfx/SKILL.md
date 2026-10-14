@@ -1,6 +1,6 @@
 ﻿---
 name: short-video-music-and-sfx
-description: Music for a Short - cut a user-chosen song so its beat lands on the scene cuts (tempo detection, stretch to a round BPM), bake ducking under the voice into the file, mute the scene sound, add synthesized whooshes/clicks at cuts. No downloads, no licence trouble for the SFX.
+description: Music for a Short - cut a user-chosen song so its beat lands on the scene cuts (tempo detection, stretch to a round BPM), bake ducking under the voice into the file, mute the scene sound, real recorded sound effects for each on-screen action (Freesound, CC0, sfx.search/sfx.fetch), synthesized whooshes for a few cuts.
 ---
 
 > An Attome skill: built into Attome, and a project can keep its own (`skill.save`). Find them with `skill.list`, read one with
@@ -26,6 +26,21 @@ Needs: `%TEMP%\voices.json` from `short-video-voice` (voice start/end seconds) a
 - Copyright: a commercial track will likely get a Content ID claim on YouTube. Say so once.
 
 ## SFX
+**A sound for each action, not a whoosh for each cut.** The owner rejected an ad whose effects were whooshes, risers and pops spread over
+the cuts: they read as random. What holds attention is a sound that belongs to what happens on screen and makes it bigger than life:
+a crack when a shell breaks, a clank when metal is slammed down, a sparkle on a magic reveal, a crowd laugh on the joke, a sad trombone or
+a fizzle on a failure, a boing on a bounce, a slide whistle or fast footsteps on a run-off, a cash register or a choir on a big win.
+List the actions of each shot, find the frame where each one lands (look at the frames, not the script), and put its sound there, a
+little louder than real life (-6 to -2 dB against speech at -15 LUFS). Keep the synthesised whoosh for a few cuts that need a push.
+
+**Real recordings: `sfx.search` and `sfx.fetch`** (Freesound, CC0 only: any use, no credit). `sfx.search {query, max_seconds}` returns
+sounds with `id`, `name`, `seconds`, `tags` and a `preview` link; pick by name and length (a 0.3-2 s sound for a hit), then
+`sfx.fetch {id, project}` downloads it into the user's sound folder (every project can use it again; `sfx.downloaded` lists them) and
+returns an `asset_id` for `timeline.edit add_clip`. Search in plain words for the sound, not the scene ("egg shell crack", "metal clang",
+"cartoon boing", "sitcom laugh"); try two or three words if the first is thin. It needs the user's own free Freesound API key:
+`S_NO_KEY` means ask the user to get one at freesound.org/apiv2/apply and paste it in the Sounds panel (or give it to `sfx.key`).
+Never make an account or a key for them. The editor's Sounds panel does the same by hand.
+
 - `scripts/make_whoosh.py` - 0.7 s band-pass noise sweep landing at 0.5 s with a low thump, panned left to right. Place one **0.5 s before each cut** on an `SFX` audio track, `audio.gain_db` -5.
 - `scripts/make_click.py` - UI tick. The user found the synthesized click "bad"; prefer whoosh, pop, riser+impact on the twist. Real recordings (Pixabay, Freesound CC0, Mixkit, YouTube Audio Library) sound better: the user must supply or approve them.
 - Sound-word pops (POOF!) and inner-scene cuts can get quieter whooshes (-12 dB).

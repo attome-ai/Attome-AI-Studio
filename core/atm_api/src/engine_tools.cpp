@@ -488,6 +488,29 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
        "project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},"seed":{"type":"integer"},"seconds":{"type":"number"}},
        "required":["kind"]})",
      &Impl::sfx_make},
+    {"sfx.search", "core", false,
+     "Find real recorded sound effects on Freesound (freesound.org, ~600,000 sounds): only CC0 ones, which need no credit and allow any use. "
+     "query says the sound (\"cartoon boing\", \"egg shell crack\", \"crowd laughing\", \"sad trombone\", \"record scratch\"); max_seconds (default 15) "
+     "keeps out long ones. Each result: id, name, seconds, author, tags, preview (an MP3 link to listen to), url, downloaded. Then sfx.fetch {id}. "
+     "Needs the user's own free Freesound API key, given once with sfx.key (S_NO_KEY says how to get one).",
+     R"({"type":"object","properties":{"query":{"type":"string"},"page":{"type":"integer","description":"From 1"},
+       "page_size":{"type":"integer","description":"1 to 50, default 15"},"max_seconds":{"type":"number","description":"Longest sound, default 15"}},
+       "required":["query"]})",
+     &Impl::sfx_search},
+    {"sfx.fetch", "core", true,
+     "Download one Freesound sound (an id from sfx.search; CC0 only) into the user's sound folder, where every project can use it, with a .json of "
+     "its name, author and link. With project it is imported too (asset_id comes back for timeline.edit add_clip); with output it is also copied "
+     "there. A sound downloaded before is used from disk (cached true).",
+     R"({"type":"object","properties":{"id":{"type":["integer","string"]},"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},
+       "output":{"type":"string","description":"Also copy the MP3 here"}},"required":["id"]})",
+     &Impl::sfx_fetch},
+    {"sfx.downloaded", "core", false,
+     "The sound effects downloaded so far (sfx.fetch), newest first: id, name, seconds, author, license, tags, path; the folder; has_key.",
+     R"({"type":"object","properties":{}})", &Impl::sfx_downloaded},
+    {"sfx.key", "core", true,
+     "Keep the user's Freesound API key (free from https://freesound.org/apiv2/apply) for sfx.search and sfx.fetch, in the user's settings; \"\" "
+     "takes it away. Only the user gives a key: never make an account or a key for them.",
+     R"({"type":"object","properties":{"key":{"type":"string"}},"required":["key"]})", &Impl::sfx_key},
     {"media.remove", "core", true,
      "Take a file out of the project: every clip made from it (and the clips linked to them) is deleted, then the asset itself. "
      "Pass asset (its ast_ ID) or the file's path. A clip on a locked track stops it. Undo takes two steps: the clips, then the asset.",
