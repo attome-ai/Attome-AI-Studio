@@ -1029,20 +1029,76 @@ void App::draw_workflow_card(const ClipUi &c) {
       if (std::find(used_ids.begin(), used_ids.end(), e.key()) == used_ids.end())
         others.emplace_back(e.key(), e->value("name", e.key()));
     if (face.contains("references") && (!used_ids.empty() || !others.empty())) {
+      // Who is in the shot, as tags on one line that wraps: a tag has an x when the pointer is on it, and the + at the end adds someone from the cast.
+      const float left = ImGui::GetCursorScreenPos().x;
       ImGui::AlignTextToFramePadding();
       ImGui::TextColored(hexv(look::fg2), "Cast");
       ImGui::SameLine(96.0f);
-      std::string joined;
-      for (const std::string &n : used_names)
-        joined += (joined.empty() ? "" : ", ") + n;
-      ImGui::AlignTextToFramePadding();
-      ImGui::TextColored(hexv(used_names.empty() ? look::fg3 : look::fg), "%s", used_names.empty() ? "no one yet" : joined.c_str());
-      ui_mark("text:gen_cast");
-      if (!others.empty()) {
-        ImGui::PushStyleColor(ImGuiCol_FrameBg, hexv(look::raised));
-        ImGui::SetNextItemWidth(-1.0f);
-        if (ImGui::BeginCombo("##gen_cast_add", "Add someone from the cast")) {
-          for (const auto &[eid, name] : others)
+      const ImVec2 first = ImGui::GetCursorScreenPos();
+      const float right = ImGui::GetWindowPos().x + ImGui::GetContentRegionMax().x;
+      const float chip_h = 24.0f, gap = 6.0f;
+      float x = first.x, y = first.y;
+      ImDrawList *dl = ImGui::GetWindowDrawList();
+      std::string removed;
+      const auto place = [&](float w) { // the next place on the line, or the start of the next line
+        if (x > first.x && x + w > right) {
+          x = first.x;
+          y += chip_h + gap;
+        }
+        const ImVec2 at(x, y);
+        x += w + gap;
+        return at;
+      };
+      if (used_ids.empty()) {
+        ImGui::SetCursorScreenPos(ImVec2(x, y + 4.0f));
+        ImGui::TextColored(hexv(look::fg3), "no one yet");
+        x += text_size("no one yet").x + gap + 4.0f;
+      }
+      for (size_t i = 0; i < used_ids.size(); ++i) {
+        const float w = text_size(used_names[i].c_str()).x + 12.0f + 20.0f;
+        const ImVec2 p = place(w), q(p.x + w, p.y + chip_h);
+        ImGui::PushID(int(i));
+        ImGui::SetCursorScreenPos(p);
+        ImGui::InvisibleButton("##chip", ImVec2(w - 20.0f, chip_h));
+        ui_mark("cast_chip:" + used_names[i]);
+        const bool over_chip = ImGui::IsItemHovered();
+        ImGui::SetCursorScreenPos(ImVec2(q.x - 20.0f, p.y));
+        if (ImGui::InvisibleButton("##chip_x", ImVec2(20.0f, chip_h)))
+          removed = used_ids[i];
+        ui_mark("cast_chip_x:" + used_names[i]);
+        const bool over_x = ImGui::IsItemHovered();
+        if (over_x)
+          ImGui::SetTooltip("Take %s out of this clip", used_names[i].c_str());
+        const bool over = over_chip || over_x;
+        dl->AddRectFilled(p, q, hex(over ? look::line2 : look::raised), chip_h * 0.5f);
+        dl->AddText(ImVec2(p.x + 10.0f, p.y + (chip_h - ImGui::GetFontSize()) * 0.5f), hex(look::fg), used_names[i].c_str());
+        if (over) { // the x, only while the pointer is on the tag
+          const ImVec2 mid(q.x - 12.0f, p.y + chip_h * 0.5f);
+          const ImU32 ink = hex(over_x ? look::accent : look::fg2);
+          dl->AddLine(ImVec2(mid.x - 3.5f, mid.y - 3.5f), ImVec2(mid.x + 3.5f, mid.y + 3.5f), ink, 1.6f);
+          dl->AddLine(ImVec2(mid.x - 3.5f, mid.y + 3.5f), ImVec2(mid.x + 3.5f, mid.y - 3.5f), ink, 1.6f);
+        }
+        ImGui::PopID();
+      }
+      {
+        const float w = 28.0f;
+        const ImVec2 p = place(w), q(p.x + w, p.y + chip_h);
+        ImGui::SetCursorScreenPos(p);
+        ImGui::InvisibleButton("##cast_add", ImVec2(w, chip_h));
+        ui_mark("button:gen_cast_add");
+        const bool hot = ImGui::IsItemHovered(), can = !others.empty();
+        if (ImGui::IsItemClicked() && can)
+          ImGui::OpenPopup("##gen_cast_pick");
+        if (hot)
+          ImGui::SetTooltip("%s", can ? "Add someone from the cast" : cast.empty() ? "The cast is empty: add people in the Cast tab" : "Everyone in the cast is in this clip");
+        dl->AddRectFilled(p, q, hex(hot && can ? look::line2 : look::raised), chip_h * 0.5f);
+        const ImU32 ink = hex(can ? (hot ? look::accent : look::fg2) : look::fg3);
+        const ImVec2 mid((p.x + q.x) * 0.5f, (p.y + q.y) * 0.5f);
+        dl->AddLine(ImVec2(mid.x - 5.0f, mid.y), ImVec2(mid.x + 5.0f, mid.y), ink, 1.8f);
+        dl->AddLine(ImVec2(mid.x, mid.y - 5.0f), ImVec2(mid.x, mid.y + 5.0f), ink, 1.8f);
+        ImGui::SetNextWindowPos(ImVec2(p.x, q.y + 4.0f));
+        if (ImGui::BeginPopup("##gen_cast_pick")) {
+          for (const auto &[eid, name] : others) {
             if (ImGui::Selectable((name + "##" + eid).c_str(), false))
               pending_ = [this, id, eid] {
                 json done;
@@ -1052,34 +1108,22 @@ void App::draw_workflow_card(const ClipUi &c) {
                   say("Added to the clip. Write " + done.value("prompt_name", std::string()) + " in its prompt.", false, true);
                 }
               };
-            else
-              ui_mark("cast_option:" + name);
-          ImGui::EndCombo();
+            ui_mark("cast_option:" + name);
+          }
+          ImGui::EndPopup();
         }
-        ui_mark("combo:gen_cast_add");
-        ImGui::PopStyleColor();
       }
-      if (!used_ids.empty()) {
-        ImGui::PushStyleColor(ImGuiCol_FrameBg, hexv(look::raised));
-        ImGui::SetNextItemWidth(-1.0f);
-        if (ImGui::BeginCombo("##gen_cast_remove", "Take someone out of this clip")) {
-          for (size_t i = 0; i < used_ids.size(); ++i)
-            if (ImGui::Selectable((used_names[i] + "##r" + used_ids[i]).c_str(), false))
-              pending_ = [this, id, who = used_ids[i]] {
-                json done;
-                if (rpc("character.unuse", {{"project", project_path_}, {"clip", id}, {"character", who}}, done)) {
-                  refresh();
-                  insp_rev_ = 0;
-                  say("Taken out of the clip. Take " + done.value("prompt_name", std::string()) + " out of its prompt too.", false, true);
-                }
-              };
-            else
-              ui_mark("cast_remove_option:" + used_names[i]);
-          ImGui::EndCombo();
-        }
-        ui_mark("combo:gen_cast_remove");
-        ImGui::PopStyleColor();
-      }
+      ImGui::SetCursorScreenPos(ImVec2(left, y + chip_h + 4.0f)); // below the last line of tags
+      ImGui::Dummy(ImVec2(0.0f, 0.0f));
+      if (!removed.empty())
+        pending_ = [this, id, who = removed] {
+          json done;
+          if (rpc("character.unuse", {{"project", project_path_}, {"clip", id}, {"character", who}}, done)) {
+            refresh();
+            insp_rev_ = 0;
+            say("Taken out of the clip. Take " + done.value("prompt_name", std::string()) + " out of its prompt too.", false, true);
+          }
+        };
       small_note("Their pictures and voices go to the model. The Cast tab keeps them; delete one there to remove it from the project.");
       ImGui::Dummy(ImVec2(0.0f, 4.0f));
     }
