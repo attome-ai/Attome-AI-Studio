@@ -200,7 +200,14 @@ Shots made on their own share nothing. Decide for each shot which of these it is
 - **The cut**: one `timeline.edit` with `add_track {id: "$new:film", kind: video, position: top}`, then for each clip of
   the film in order `move {clip, to: "<seconds>s", track: "$new:film"}` (the time is the sum of the lengths before it:
   `project.get` -> `timing.duration`), then `delete_track` of the track the clips were made on (the takes not used go
-  with it). A clip that carries on already skips the 22 frames it repeats: do not trim it.
+  with it). A clip that carries on already skips the 22 frames it repeats: do not trim it. If you set its `source_in` yourself (to trim or
+  re-time it), set it to those 22 frames (at 24 fps, 0.917 s), never 0: from 0 the end of the shot before plays twice. When its
+  first line starts inside those 22 frames (the model often speaks at once, over the last words of the shot before), keep from
+  just before the word and end the shot before as many frames earlier (the join stays one take), and give the earlier shot's
+  sound its last words on a sound track of its own, the next shot's sound that much later (`video.extract_audio` of each take).
+- Changing a cast entry (`character.update`) marks every clip that shows it out of date; `gen.run` on the whole project, or a
+  shot that carries on from one of them, then makes those clips again and the film changes under you. Make clips one by one
+  (`gen.run --clip`), and look at a clip's newest take before you cut it.
 - **One level for all speech**: `audio.match {clips: [the spoken clips], lufs: -17}`; the shots with only the place's
   air: `lufs: -30`. Generated takes come out at different levels.
 - **Music**: `music.make {project, tags, seconds, bpm, key}` (genre, instruments and mood in words; about 10 s for a
