@@ -311,6 +311,27 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
      "running until comfyui.stop. Returns {running, address, nodes}. What it prints is in attome_comfyui.log beside it.",
      R"({"type":"object","properties":{"port":{"type":"integer"},"wait":{"type":"number","description":"Seconds to wait for it to answer, default 300"}}})",
      &Impl::comfyui_start},
+    {"web.status", "web", false,
+     "Whether web motion graphics can be drawn here: the Chromium browser found (Edge or Chrome; ATTOME_BROWSER names another). Nothing is downloaded. "
+     "Read the skill web-motion before using web.preview and web.render.",
+     R"({"type":"object","properties":{}})", &Impl::web_status},
+    {"web.preview", "web", false,
+     "Draw one frame of a web page (HTML, CSS, JavaScript) at `at` seconds into a PNG, to look at before rendering. The page's clock, its CSS animations "
+     "and Web Animations are set to that time. page_errors lists what the page threw.",
+     R"({"type":"object","properties":{"html":{"type":"string","description":"The page, whole"},"path":{"type":"string","description":"Or an .html file, or a folder with index.html"},
+       "at":{"type":"number","description":"Seconds into the animation, default 0"},"output":{"type":"string","description":"The .png to write"},
+       "width":{"type":"integer"},"height":{"type":"integer"},"transparent":{"type":"boolean"},"network":{"type":"boolean","description":"Let the page fetch from the internet; default false"},
+       "timeout":{"type":"number"}},"required":["output"]})",
+     &Impl::web_preview},
+    {"web.render", "web", false,
+     "Render a web page's animation frame by frame: a job (jobs.get shows the frames). output: a folder for a PNG sequence that keeps transparency "
+     "(frame_000000.png ..., with sequence.json; the default for a folder is transparent), or an .mp4 (opaque). Every frame is exact: the page's clock, "
+     "requestAnimationFrame, CSS animations and Web Animations are set to the frame's time, whatever the page's speed. Put the result on the timeline "
+     "with timeline.edit add_clip {path: <the folder or the .mp4>, track: \"new\"}: a sequence keeps its transparency over the video below.",
+     R"({"type":"object","properties":{"html":{"type":"string"},"path":{"type":"string"},"output":{"type":"string","description":"A folder, or an .mp4"},
+       "seconds":{"type":"number"},"frames":{"type":"integer"},"fps":{"type":"number","description":"Default 24; match the sequence"},
+       "width":{"type":"integer"},"height":{"type":"integer"},"transparent":{"type":"boolean"},"network":{"type":"boolean"},"timeout":{"type":"number"}},"required":["output"]})",
+     &Impl::web_render},
     {"blender.status", "blender", false,
      "Is a Blender on this computer, which one and its version, and what blender.install would fetch (a file, its size, its licence). Attome runs "
      "Blender headless to draw 3D scenes, titles and motion graphics for the film; a Blender that is already installed is used as it is. "

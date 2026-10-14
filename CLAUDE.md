@@ -22,6 +22,9 @@ experiment and is kept **inside the engine as skills**:
 
 If `skill.list` shows no `film`, the build is older than the sources: build first.
 
+For titles, lower thirds, kinetic type, lists, counters, charts and end cards read the skill `web-motion`: you write a web page and the
+engine draws it frame by frame (`web.preview`, `web.render`) with its transparency, to lay over the film. Nothing to download.
+
 For 3D titles, objects, diagrams and precise camera moves read the skill `blender`: the engine runs a headless Blender for you
 (`blender.status`, `blender.run`, `blender.render`; `blender.install` is a 400 MB download: ask the user first).
 

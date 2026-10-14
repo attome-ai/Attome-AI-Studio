@@ -1,10 +1,93 @@
-// Looking at and exporting a sequence: render.*, see.* (frames, contact sheet) and media.probe.
+﻿// Looking at and exporting a sequence: render.*, see.* (frames, contact sheet) and media.probe.
 #include "engine_impl.hpp"
 
 namespace atm::api {
 
+// A picture sequence: a folder of numbered pictures (frame_000000.png ...), or a path with a printf number in it (frame_%06d.png). Its rate is the
+// folder's sequence.json {"rate": "24"} (web.render and blender.render write one), else 24. Nothing when the path is not one.
+static std::optional<json> probe_sequence(const std::string &given) {
+  fs::path p = to_path(given);
+  std::error_code ec;
+  std::string pattern;
+  fs::path dir;
+  if (fs::is_directory(p, ec)) {
+    dir = p;
+    // the numbered pictures in it: a stem ending in digits, all with one prefix, one width of number and one extension
+    std::map<std::string, std::vector<int64_t>> groups; // "prefix|digits|ext" -> numbers
+    for (const auto &e : fs::directory_iterator(p, ec)) {
+      const std::string name = to_utf8(e.path().filename());
+      std::string ext = to_utf8(e.path().extension());
+      std::string lower = ext;
+      std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+      if (lower != ".png" && lower != ".jpg" && lower != ".jpeg")
+        continue;
+      const std::string stem = to_utf8(e.path().stem());
+      size_t d = stem.size();
+      while (d > 0 && std::isdigit(static_cast<unsigned char>(stem[d - 1])))
+        --d;
+      if (d == stem.size())
+        continue;
+      groups[stem.substr(0, d) + "|" + std::to_string(stem.size() - d) + "|" + ext].push_back(std::stoll(stem.substr(d)));
+    }
+    const auto best = std::max_element(groups.begin(), groups.end(), [](const auto &a, const auto &b) { return a.second.size() < b.second.size(); });
+    if (best == groups.end())
+      return std::nullopt;
+    const std::string key = best->first;
+    const size_t a = key.find('|'), b = key.find('|', a + 1);
+    pattern = to_utf8(p / to_path(key.substr(0, a) + "%0" + key.substr(a + 1, b - a - 1) + "d" + key.substr(b + 1)));
+  } else if (given.find('%') != std::string::npos) {
+    pattern = given;
+    dir = p.parent_path();
+  } else {
+    return std::nullopt;
+  }
+  // the numbers present, from the first, without gaps
+  const auto name_of = [&](int64_t n) {
+    char buf[1024];
+    std::snprintf(buf, sizeof buf, pattern.c_str(), int(n));
+    return std::string(buf);
+  };
+  int64_t first = -1;
+  for (int64_t n = 0; n <= 1; ++n)
+    if (fs::is_regular_file(to_path(name_of(n)), ec)) {
+      first = n;
+      break;
+    }
+  if (first < 0)
+    return std::nullopt;
+  int64_t count = 0;
+  while (fs::is_regular_file(to_path(name_of(first + count)), ec))
+    ++count;
+  std::string rate = "24";
+  if (const auto text = storage::read_file(dir / "sequence.json")) {
+    const json meta = json::parse(*text, nullptr, false);
+    if (meta.is_object() && meta.contains("rate"))
+      rate = meta["rate"].is_string() ? meta["rate"].get<std::string>() : std::to_string(meta["rate"].get<int>());
+  }
+  auto r = Rational::parse(rate);
+  if (!r || r->num() <= 0)
+    r = Rational::make(24, 1);
+  auto info = media::probe(name_of(first));
+  if (!info)
+    return std::nullopt;
+  const auto duration = Rational::make(count * r->den(), r->num());
+  return json{{"path", pattern},
+              {"has_video", true},
+              {"has_audio", false},
+              {"sequence", true},
+              {"first", first},
+              {"frames", count},
+              {"rate", r->to_string()},
+              {"duration", duration ? duration->to_string() : std::string("0")},
+              {"seconds", duration ? duration->to_seconds_lossy() : 0.0},
+              {"width", info->width},
+              {"height", info->height}};
+}
+
 Result<json> Engine::Impl::media_probe(const json &params) {
   ATM_TRY(const std::string *path, string_param(params, "path"));
+  if (auto seq = probe_sequence(*path))
+    return *seq;
   ATM_TRY(media::MediaInfo info, media::probe(*path));
   if (info.is_image) // a still: any length on the timeline
     return json{{"path", *path},           {"has_video", true},      {"has_audio", false},
@@ -75,7 +158,7 @@ Result<json> Engine::Impl::render_sequence(const json &params) {
   ATM_TRY(render::Composition comp, render::compile(*root, sequence, to_utf8(pr->dir)));
   if (comp.frames <= 0)
     return fail(ErrorCode::InvalidArgument, "R_EMPTY", "The sequence has no media clips to render.", {},
-                "Add a clip whose media_ref is {\"type\": \"file\", \"path\": …} first.");
+                "Add a clip whose media_ref is {\"type\": \"file\", \"path\": â€¦} first.");
   const std::string format = params.value("format", std::string("mp4"));
   if (format != "mp4" && format != "prores" && format != "dnxhr" && format != "wav" && format != "jpeg" && format != "png_sequence")
     return bad_param("format", "is \"mp4\" (video, the default), \"prores\" or \"dnxhr\" (a .mov made by your own FFmpeg: see media.codecs), \"wav\" (the sound only), \"jpeg\" (a picture of the frame at \"from\") or \"png_sequence\" (a numbered PNG for each frame, in the folder \"output\")");
@@ -106,7 +189,7 @@ Result<json> Engine::Impl::render_sequence(const json &params) {
     const int h = params.value("height", comp.height);
     const int w = params.contains("width") ? params.value("width", comp.width) : int(int64_t(comp.width) * h / std::max(1, comp.height));
     if (w < 16 || h < 16 || w > 16384 || h > 16384)
-      return bad_param("height", "gives a size outside 16 x 16 … 16384 x 16384");
+      return bad_param("height", "gives a size outside 16 x 16 â€¦ 16384 x 16384");
     auto job = std::make_shared<Job>();
     job->id = new_id("job");
     job->kind = "render.sequence";
@@ -157,9 +240,9 @@ Result<json> Engine::Impl::render_sequence(const json &params) {
     ATM_TRY(media::FfmpegInfo found, media::find_ffmpeg(settings.ffmpeg)); // fails now, not later in the job, when there is none
     (void)found;
     if (settings.width < 16 || settings.height < 16 || settings.width > 8192 || settings.height > 4608)
-      return bad_param("height", "gives a size outside 16 x 16 … 8192 x 4608");
+      return bad_param("height", "gives a size outside 16 x 16 â€¦ 8192 x 4608");
   } else if (!media::h264_size_ok(settings.width, settings.height)) {
-    return bad_param("height", "gives a size the H.264 encoder does not take (each side 16 … 4096, at most 4096 x 2304 pixels)");
+    return bad_param("height", "gives a size the H.264 encoder does not take (each side 16 â€¦ 4096, at most 4096 x 2304 pixels)");
   }
 
   auto job = std::make_shared<Job>();

@@ -88,6 +88,56 @@ def world(color=(0.05, 0.05, 0.08), strength=1.0, hdri=None):
     return w
 
 
+def bloom(threshold=0.8, size=0.7, strength=0.8, kind="Bloom"):
+    """A real glow round bright things (the compositor's glare): neon, light bulbs, hot metal. Without it emission is only a flat bright colour."""
+    scene = bpy.context.scene
+    ng = bpy.data.node_groups.new("AttomeGlow", "CompositorNodeTree")
+    scene.compositing_node_group = ng
+    ng.interface.new_socket("Image", in_out="OUTPUT", socket_type="NodeSocketColor")
+    rl = ng.nodes.new("CompositorNodeRLayers")
+    gl = ng.nodes.new("CompositorNodeGlare")
+    out = ng.nodes.new("NodeGroupOutput")
+    gl.inputs["Type"].default_value = kind
+    gl.inputs["Threshold"].default_value = threshold
+    gl.inputs["Size"].default_value = size
+    gl.inputs["Strength"].default_value = strength
+    ng.links.new(rl.outputs["Image"], gl.inputs["Image"])
+    ng.links.new(gl.outputs["Image"], out.inputs["Image"])
+    return gl
+
+
+def dof(cam, focus, fstop=2.8):
+    """Depth of field: what is at `focus` (an object or a point) is sharp, the rest softens. A lower fstop softens more."""
+    cam.data.dof.use_dof = True
+    cam.data.dof.aperture_fstop = fstop
+    if hasattr(focus, "location"):
+        cam.data.dof.focus_object = focus
+    else:
+        cam.data.dof.focus_distance = (Vector(focus) - Vector(cam.location)).length
+
+
+def motion_blur(shutter=0.5):
+    """Blur what moves fast, as a real camera would: it makes a quick move read as speed."""
+    bpy.context.scene.render.use_motion_blur = True
+    bpy.context.scene.render.motion_blur_shutter = shutter
+
+
+def cut_camera(cam, shots):
+    """Jump the camera between framings on given frames (a hard cut each time): shots = [(frame, location, target, lens), ...]."""
+    for frame, loc, target, lens in shots:
+        cam.location = loc
+        look_at(cam, target)
+        cam.data.lens = lens
+        for path in ("location", "rotation_euler"):
+            cam.keyframe_insert(path, frame=frame)
+        cam.data.keyframe_insert("lens", frame=frame)
+    for action_owner in (cam, cam.data):
+        if action_owner.animation_data and action_owner.animation_data.action:
+            for fc in _fcurves(action_owner.animation_data.action):
+                for k in fc.keyframe_points:
+                    k.interpolation = "CONSTANT"
+
+
 # ---- things ----------------------------------------------------------------------------------------------------------------------------
 
 def material(name="Material", color=(0.8, 0.8, 0.8), metallic=0.0, roughness=0.5, emission=None, emission_strength=5.0, alpha=1.0):

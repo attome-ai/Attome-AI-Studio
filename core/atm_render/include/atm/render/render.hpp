@@ -88,6 +88,11 @@ struct Layer {
   float line_spacing = 1.0f;  // content.line_spacing: a multiple of the font's own line height
   // Picture clips (media_ref.type "image"): a still file, the same on every frame, with its transparency.
   bool is_image = false;
+  // Picture sequences (media_ref.type "sequence"): one numbered picture per frame, with their transparency (a render of web or 3D graphics). `path` is
+  // the pattern with a printf number in it (frame_%06d.png); the pictures are numbered from seq_first, there are seq_count of them, seq_rate a second.
+  bool is_sequence = false;
+  int64_t seq_first = 0, seq_count = 0;
+  double seq_rate = 24.0;
   std::string text;
   float text_size = 0.08f;
   uint32_t text_color = 0xFFFFFF;
@@ -244,7 +249,9 @@ private:
   };
   std::vector<TextPart> text_parts(const Layer &l, int64_t frame, const Pose &p);
   std::unordered_map<std::string, media::Still> stills_; // picture clips, read once, by clip ID
-  bool still_of(const Layer &l); // reads a picture clip's still into stills_ once; false (and a warning) when it does not read
+  bool still_of(const Layer &l, int64_t frame); // reads a picture clip's still into stills_ (once; a sequence's at each new picture); false (and a warning) when it does not read
+  std::string picture_path(const Layer &l, int64_t frame) const; // the file a picture clip shows on a frame: its own, or the sequence's picture of that frame
+  std::unordered_map<std::string, std::string> still_paths_; // the file each still in stills_ was read from
   std::vector<uint8_t> mix_;                          // the incoming clip of a dissolve, drawn over the same background
   std::vector<uint8_t> adjust_, scratch_;             // an adjustment layer's copy of the picture below it
   std::vector<uint8_t> over_black_, over_white_, cover_; // a clip with effects, drawn on its own (see draw_isolated)

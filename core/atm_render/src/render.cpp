@@ -650,16 +650,23 @@ Result<Composition> compile(const json &project, std::string_view sequence_id, c
           type = "file";
         }
         if (timing == clip.end() ||
-            !(type == "text" || type == "adjustment" || ((type == "file" || type == "image") && (ref->contains("path") || !take_path.empty()))))
+            !(type == "text" || type == "adjustment" || ((type == "file" || type == "image" || type == "sequence") && (ref->contains("path") || !take_path.empty()))))
           continue;
         ATM_TRY(Rational in, rational_field(*timing, "record_in", "0"));
         ATM_TRY(Rational duration, rational_field(*timing, "duration", "0"));
         ATM_TRY(Rational source_in, rational_field(*timing, "source_in", "0"));
         Layer l;
         l.clip_id = it.key();
-        if (type == "file" || type == "image")
+        if (type == "file" || type == "image" || type == "sequence")
           l.path = take_path.empty() ? (*ref)["path"].get<std::string>() : take_path;
-        l.is_image = type == "image";
+        l.is_image = type == "image" || type == "sequence";
+        if (type == "sequence") {
+          l.is_sequence = true;
+          l.seq_first = ref->value("first", int64_t(0));
+          l.seq_count = std::max<int64_t>(1, ref->value("frames", int64_t(1)));
+          if (const auto r = Rational::parse(ref->value("rate", std::string("24"))); r && r->num() > 0)
+            l.seq_rate = r->to_seconds_lossy();
+        }
         if (type == "text") {
           l.is_text = true;
           if (const auto content = clip.find("content"); content != clip.end() && content->is_object()) {
@@ -2223,17 +2230,30 @@ std::vector<Renderer::TextPart> Renderer::text_parts(const Layer &l, int64_t fra
   return parts;
 }
 
-bool Renderer::still_of(const Layer &l) {
-  if (stills_.count(l.clip_id))
+std::string Renderer::picture_path(const Layer &l, int64_t frame) const {
+  if (!l.is_sequence)
+    return l.path;
+  // The clip's own time on this frame, as the video path counts it, then the picture of that moment.
+  const double t = (double(l.source_in_hns) + double(comp_.frame_hns(frame - l.start_frame)) * l.speed) / double(media::kHnsPerSecond);
+  const int64_t n = l.seq_first + std::clamp<int64_t>(int64_t(std::floor(t * l.seq_rate + 1e-6)), 0, l.seq_count - 1);
+  char name[1024];
+  std::snprintf(name, sizeof name, l.path.c_str(), static_cast<long long>(n) > INT32_MAX ? 0 : int(n));
+  return name;
+}
+
+bool Renderer::still_of(const Layer &l, int64_t frame) {
+  const std::string file = picture_path(l, frame);
+  if (stills_.count(l.clip_id) && still_paths_[l.clip_id] == file)
     return true;
-  auto still = media::read_still(l.path, width_, height_);
+  auto still = media::read_still(file, width_, height_);
   if (!still) {
     failed_[l.clip_id] = true;
     if (warning_.empty())
       warning_ = still.error().message;
     return false;
   }
-  stills_.emplace(l.clip_id, std::move(*still));
+  stills_.insert_or_assign(l.clip_id, std::move(*still));
+  still_paths_[l.clip_id] = file;
   return true;
 }
 
@@ -2372,7 +2392,7 @@ void Renderer::draw(const Layer &l, int64_t frame, uint8_t *out, bool &cleared, 
     return;
   std::optional<media::FrameView> view;
   if (l.is_image) { // read once, fitted to this renderer's output like a video frame
-    if (!still_of(l))
+    if (!still_of(l, frame))
       return;
     view = stills_.at(l.clip_id).view();
   } else {
@@ -2840,11 +2860,11 @@ bool Renderer::render_on_gpu(int64_t frame, uint8_t *out) {
     int vw = 0, vh = 0;
     bool transparent = false;
     if (l->is_image) {
-      if (!still_of(*l))
+      if (!still_of(*l, frame))
         return true; // left out, as on the CPU (which reports it)
       const media::FrameView v = stills_.at(l->clip_id).view();
       // Read fitted to this renderer's size: another renderer on the same GPU may hold the same file at another.
-      still.key = std::hash<std::string>{}(l->clip_id + "\x1f" + l->path + "\x1f" + std::to_string(v.width) + "x" + std::to_string(v.height));
+      still.key = std::hash<std::string>{}(l->clip_id + "\x1f" + still_paths_[l->clip_id] + "\x1f" + std::to_string(v.width) + "x" + std::to_string(v.height));
       still.width = vw = v.width;
       still.height = vh = v.height;
       still.y = v.y;

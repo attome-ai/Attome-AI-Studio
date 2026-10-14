@@ -480,9 +480,12 @@ private:
     const Rational start = at ? *at : (track(track_id) ? track_end(track_id) : Rational());
 
     const std::string path = media.value("path", std::string());
+    const bool sequence = media.value("sequence", false); // numbered pictures, one a frame, with their transparency
     json ref = image ? json{{"type", "image"}, {"path", path}}
-                     : json{{"type", "file"}, {"path", path}, {"duration", media.value("duration", std::string("0"))},
-                            {"has_audio", media.value("has_audio", false)}};
+               : sequence ? json{{"type", "sequence"}, {"path", path}, {"duration", media.value("duration", std::string("0"))}, {"first", media.value("first", 0)},
+                                 {"frames", media.value("frames", 0)}, {"has_audio", false}}
+                          : json{{"type", "file"}, {"path", path}, {"duration", media.value("duration", std::string("0"))},
+                                 {"has_audio", media.value("has_audio", false)}};
     if (!asset.empty())
       ref["asset"] = asset;
     if (has_video)
@@ -496,7 +499,7 @@ private:
     // sound on an audio track), for edits that treat them apart from the start; detach_audio does that to a clip later.
     const bool has_sound = has_video && !image && media.value("has_audio", false) && op_.value("with_audio", true);
     const bool sound = has_sound && op_.value("separate_audio", false);
-    if (has_video && !image && (sound || !has_sound))
+    if (has_video && !image && !sequence && (sound || !has_sound))
       ref["stream"] = "video"; // a picture with no sound of its own
     json sound_ref = ref;
     sound_ref["stream"] = "audio";

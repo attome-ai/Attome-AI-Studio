@@ -1,0 +1,42 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  /* A number that counts up to its value, with a ring that fills and a label. Drawn from window.attomeFrame(seconds), which Attome calls
+     on every frame with the film's time, so the count is exact on every frame. Transparent: render to a folder. */
+  :root { --brand: #10a090; --accent: #30b060; --text: #ffffff; }
+  html, body { margin: 0; width: 1920px; height: 1080px; overflow: hidden; background: transparent; font-family: "Segoe UI", "Inter", sans-serif; }
+  .wrap { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 24px; }
+  svg { width: 420px; height: 420px; }
+  .num { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -62%); color: var(--text); font-size: 150px; font-weight: 800; }
+  .label { color: rgba(255,255,255,.9); font-size: 46px; font-weight: 600; opacity: 0; }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <svg viewBox="0 0 200 200">
+      <circle cx="100" cy="100" r="86" fill="none" stroke="rgba(255,255,255,.14)" stroke-width="10"/>
+      <circle id="ring" cx="100" cy="100" r="86" fill="none" stroke="url(#g)" stroke-width="10" stroke-linecap="round"
+              transform="rotate(-90 100 100)" stroke-dasharray="540.35" stroke-dashoffset="540.35"/>
+      <defs><linearGradient id="g" x1="0" x2="1"><stop offset="0" stop-color="#30b060"/><stop offset="1" stop-color="#7060a0"/></linearGradient></defs>
+    </svg>
+    <div class="num" id="num">0</div>
+    <div class="label" id="label">Years of digital transformation</div>
+  </div>
+  <script>
+    const VALUE = 10, START = 0.2, LENGTH = 1.6;           // counts from START to START + LENGTH seconds
+    const ease = (u) => 1 - Math.pow(1 - u, 3);
+    window.attomeFrame = (s) => {
+      const u = Math.min(1, Math.max(0, (s - START) / LENGTH));
+      document.getElementById('num').textContent = Math.round(VALUE * ease(u));
+      document.getElementById('ring').setAttribute('stroke-dashoffset', String(540.35 * (1 - ease(u))));
+      const l = Math.min(1, Math.max(0, (s - START - LENGTH + 0.2) / 0.5));
+      const label = document.getElementById('label');
+      label.style.opacity = l;
+      label.style.transform = `translateY(${(1 - l) * 20}px)`;
+    };
+    window.attomeFrame(0);
+  </script>
+</body>
+</html>

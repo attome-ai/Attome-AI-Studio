@@ -328,6 +328,10 @@ struct Engine::Impl {
   Result<json> ytdlp_status(const json &params);
   Result<json> ytdlp_install(const json &params);
   Result<json> video_fetch(const json &params);
+  // Web motion graphics drawn by a headless browser (engine_web.cpp).
+  Result<json> web_status(const json &params);
+  Result<json> web_preview(const json &params);
+  Result<json> web_render(const json &params);
   // Blender, run headless for an agent's Python (engine_blender.cpp).
   struct BlenderSpec {
     std::string blend;
