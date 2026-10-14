@@ -553,7 +553,7 @@ void App::draw_settings() {
     return;
   ImGuiViewport *vp = ImGui::GetMainViewport();
   ImGui::SetNextWindowPos(vp->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-  ImGui::SetNextWindowSizeConstraints(ImVec2(620.0f * s_, 0.0f), ImVec2(620.0f * s_, std::max(300.0f, vp->Size.y * 0.88f))); // grows with its content, then scrolls
+  ImGui::SetNextWindowSizeConstraints(ImVec2(620.0f * s_, 0.0f), ImVec2(620.0f * s_, std::max(300.0f, vp->Size.y * 0.94f))); // grows with its content, then scrolls
   ImGui::PushStyleColor(ImGuiCol_WindowBg, hexv(look::panel));
   ImGui::PushStyleColor(ImGuiCol_Border, hexv(look::line2));
   ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 16.0f);

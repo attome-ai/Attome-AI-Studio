@@ -328,6 +328,19 @@ struct Engine::Impl {
   Result<json> ytdlp_status(const json &params);
   Result<json> ytdlp_install(const json &params);
   Result<json> video_fetch(const json &params);
+  // Blender, run headless for an agent's Python (engine_blender.cpp).
+  struct BlenderSpec {
+    std::string blend;
+    json values; // what the runner script reads: empty, save, render
+  };
+  fs::path blender_root() const;
+  std::pair<fs::path, std::string> blender_exe() const;
+  Result<BlenderSpec> blender_spec(const json &params) const;
+  Result<json> blender_status(const json &params);
+  Result<json> blender_install(const json &params);
+  Result<json> blender_run(const json &params);
+  Result<json> blender_inspect(const json &params);
+  Result<json> blender_render(const json &params);
   // ComfyUI as something the engine installs and starts itself (engine_comfyui.cpp).
   fs::path comfyui_root() const;
   Result<json> comfyui_status(const json &params);

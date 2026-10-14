@@ -311,6 +311,41 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
      "running until comfyui.stop. Returns {running, address, nodes}. What it prints is in attome_comfyui.log beside it.",
      R"({"type":"object","properties":{"port":{"type":"integer"},"wait":{"type":"number","description":"Seconds to wait for it to answer, default 300"}}})",
      &Impl::comfyui_start},
+    {"blender.status", "blender", false,
+     "Is a Blender on this computer, which one and its version, and what blender.install would fetch (a file, its size, its licence). Attome runs "
+     "Blender headless to draw 3D scenes, titles and motion graphics for the film; a Blender that is already installed is used as it is. "
+     "Read the skill blender before using it.",
+     R"({"type":"object","properties":{"quick":{"type":"boolean","description":"Do not ask the program its version, for an interface that must not wait"}}})", &Impl::blender_status},
+    {"blender.install", "blender", false,
+     "Fetch Blender (the Blender Foundation's own portable release, 5.2.2, checked against its published SHA-256) when the computer has none: a job "
+     "(jobs.get shows the bytes). ASK THE USER FIRST and show blender.status: about 400 MB, and Blender is a GPL-3.0 program of its own that Attome "
+     "only runs. It is not needed when blender.status says installed.",
+     R"({"type":"object","properties":{"folder":{"type":"string","description":"Where to put it (absolute); default Attome's tools folder"}}})",
+     &Impl::blender_install},
+    {"blender.run", "blender", false,
+     "Run Python in a headless Blender and get back what it printed and `result`. The scene lives in a .blend file: pass blend to open one, save (true = "
+     "back into blend, or a path) to keep the changes; with no blend it starts from an empty scene. `bpy` and the helper module `ab` (camera, lights, "
+     "materials, 3D text, models, spins and orbits) are ready; the skill blender lists them. A script that fails returns the Python traceback. "
+     "To draw the scene use blender.render; to read a file use blender.inspect.",
+     R"({"type":"object","properties":{"code":{"type":"string","description":"Python for Blender"},"script":{"type":"string","description":"The path of a .py file, instead of code"},
+       "blend":{"type":"string","description":"A .blend file to open first"},"save":{"description":"true: write the changes back into blend; a path: save a new .blend there"},
+       "empty":{"type":"boolean","description":"Start from an empty scene; the default when no blend is given"},"timeout":{"type":"number","description":"Seconds allowed, default 300"}}})",
+     &Impl::blender_run},
+    {"blender.inspect", "blender", false,
+     "What a .blend file holds: its objects with place, size and materials, lights, the camera, the render settings and the frame range.",
+     R"({"type":"object","properties":{"blend":{"type":"string"}},"required":["blend"]})", &Impl::blender_inspect},
+    {"blender.render", "blender", false,
+     "Draw a scene with Blender: a job (jobs.get shows the frames). Give blend, or code that builds the scene (as blender.run), and output: a .png or "
+     ".jpg file draws one frame, a .mp4 file draws the frame range as a video, a folder draws a PNG sequence (frame_0001.png ...). transparent keeps the "
+     "background clear in PNGs, to lay the result over the film. quality draft draws at half size with few samples: use it to look, then draw final. "
+     "The result is a file: add it to the film with timeline.edit add_clip.",
+     R"({"type":"object","properties":{"blend":{"type":"string"},"code":{"type":"string","description":"Python that builds the scene first"},
+       "output":{"type":"string","description":"An absolute path: .png, .jpg, .mp4, or a folder"},"engine":{"type":"string","enum":["eevee","cycles","workbench"]},
+       "quality":{"type":"string","enum":["draft","final"]},"width":{"type":"integer"},"height":{"type":"integer"},"fps":{"type":"integer"},
+       "samples":{"type":"integer"},"transparent":{"type":"boolean"},"frame":{"type":"integer","description":"The frame of a single picture"},
+       "start":{"type":"integer"},"end":{"type":"integer"},"gpu":{"type":"boolean","description":"Cycles on the graphics card, true by default"},
+       "timeout":{"type":"number","description":"Seconds allowed, default 3600"}},"required":["output"]})",
+     &Impl::blender_render},
     {"comfyui.stop", "gen", false, "Stop the ComfyUI that Attome started. A ComfyUI the user started is left alone.",
      R"({"type":"object","properties":{}})", &Impl::comfyui_stop},
     {"ytdlp.status", "core", false,

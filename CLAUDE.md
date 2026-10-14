@@ -22,6 +22,9 @@ experiment and is kept **inside the engine as skills**:
 
 If `skill.list` shows no `film`, the build is older than the sources: build first.
 
+For 3D titles, objects, diagrams and precise camera moves read the skill `blender`: the engine runs a headless Blender for you
+(`blender.status`, `blender.run`, `blender.render`; `blender.install` is a 400 MB download: ask the user first).
+
 The models run in ComfyUI, a separate program. `comfyui.status` says whether one answers; `comfyui.install` puts it on the computer with the
 node packs the engine uses and `models.fetch` gets a model. These are large downloads: ask the user first, with the sizes.
 

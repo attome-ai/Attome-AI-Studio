@@ -2148,6 +2148,84 @@ void App::draw_settings_models() {
   ui_mark("section:get_comfyui");
   ImGui::PopTextWrapPos();
   ImGui::Spacing();
+
+  // Get Blender: an agent draws 3D titles, objects and moves with it. A Blender already on the computer is used as it is; otherwise one button
+  // fetches the Blender Foundation's own release, after the person has seen what and from whom.
+  if (!blender_job_.empty() && now >= blender_poll_at_) {
+    blender_poll_at_ = now + 0.5;
+    json state;
+    RpcError error;
+    if (client_.call("jobs.get", {{"job_id", blender_job_}}, state, error)) {
+      blender_job_state_ = state;
+      const std::string what = state.value("state", std::string());
+      if (what != "running") {
+        blender_job_.clear();
+        blender_get_known_ = false;
+        if (what == "done") {
+          say("Blender is installed. An agent can use it now.");
+        } else if (what == "failed") {
+          const json e = state.value("error", json::object());
+          say(e.value("message", std::string("Blender could not be installed.")), true);
+        } else {
+          say("Stopped. Press Download again to continue from where it was.");
+        }
+      }
+    } else {
+      blender_job_.clear();
+    }
+  }
+  if (!blender_get_known_) {
+    blender_get_known_ = true;
+    RpcError error;
+    json status;
+    if (client_.call("blender.status", {{"quick", true}}, status, error))
+      blender_get_ = status;
+    if (blender_get_.value("job_id", std::string()) != "" && blender_job_.empty())
+      blender_job_ = blender_get_.value("job_id", std::string());
+  }
+  section_label("BLENDER");
+  ImGui::PushTextWrapPos(0.0f);
+  if (!blender_job_.empty()) {
+    ImGui::PushStyleColor(ImGuiCol_PlotHistogram, hexv(look::accent));
+    ImGui::ProgressBar(float(blender_job_state_.value("progress", 0.0)), ImVec2(-1.0f, 8.0f), "");
+    ImGui::PopStyleColor();
+    ImGui::TextColored(hexv(look::fg2), "%s", blender_job_state_.value("detail", std::string("Downloading Blender")).c_str());
+    if (soft_button("blender_get_stop", "Stop", ImVec2(0.0f, 26.0f))) {
+      json stopped;
+      rpc("jobs.cancel", {{"job_id", blender_job_}}, stopped);
+    }
+  } else if (blender_get_.value("installed", false)) {
+    ImGui::TextColored(hexv(look::ok), "Blender is ready (%s). An agent can draw 3D with it.", blender_get_.value("source", std::string()).c_str());
+    ui_mark("text:blender_ready");
+    if (ImGui::IsItemHovered())
+      ImGui::SetTooltip("%s", blender_get_.value("path", std::string()).c_str());
+  } else if (!blender_get_.value("supported", true)) {
+    ImGui::TextColored(hexv(look::fg3), "Attome runs Blender on Windows in this version. Install Blender yourself and set ATTOME_BLENDER to it.");
+  } else if (!blender_get_confirm_) {
+    ImGui::TextColored(hexv(look::fg3), "Blender lets an agent make 3D titles, objects and camera moves for your film. None is on this computer yet.");
+    if (soft_button("blender_get_install", "Download Blender  (400 MB)", ImVec2(0.0f, 30.0f), true, true))
+      blender_get_confirm_ = true;
+  } else {
+    const json d = blender_get_.value("download", json::object());
+    ImGui::TextColored(hexv(look::fg2), "This downloads, from the Blender Foundation (download.blender.org):");
+    ImGui::TextColored(hexv(look::fg3), "  Blender %s for Windows, %.0f MB (GPL-3.0), checked against the checksum they publish.", d.value("version", std::string()).c_str(),
+                       double(d.value("bytes", int64_t(0))) / 1048576.0);
+    ImGui::TextColored(hexv(look::fg3), "It is a program of its own that Attome runs; Attome does not contain it. It needs about 1.5 GB of room.");
+    if (soft_button("blender_get_go", "Download and install", ImVec2(0.0f, 30.0f), true, true)) {
+      json started;
+      if (rpc("blender.install", json::object(), started)) {
+        blender_job_ = started.value("job_id", std::string());
+        blender_job_state_ = json::object();
+        blender_get_confirm_ = false;
+      }
+    }
+    ImGui::SameLine();
+    if (soft_button("blender_get_cancel", "Not now", ImVec2(0.0f, 30.0f)))
+      blender_get_confirm_ = false;
+  }
+  ui_mark("section:get_blender");
+  ImGui::PopTextWrapPos();
+  ImGui::Spacing();
   
   ImGui::PopTextWrapPos();
 }

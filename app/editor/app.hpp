@@ -782,6 +782,12 @@ private:
   json comfy_job_state_ = json::object();
   double comfy_poll_at_ = 0.0;       // when the job or a starting ComfyUI is asked about next
   bool comfy_starting_ = false;
+  // "Get Blender": the 3D program the agent draws with (blender.status / install).
+  json blender_get_ = json::object();  // the last blender.status
+  bool blender_get_known_ = false, blender_get_confirm_ = false;
+  std::string blender_job_;
+  json blender_job_state_ = json::object();
+  double blender_poll_at_ = 0.0;
   void start_generation(json params);     // gen.run; the Takes arrive by themselves as the project changes
   double next_gen_poll_ = 0.0;
   void refresh_gen_status();
