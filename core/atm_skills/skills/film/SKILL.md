@@ -257,6 +257,17 @@ thing you made it again to fix: a take with the right detail and no action made 
   takes in all, 12 of the 18 first takes kept; the 6 remade were the two rules above (3 each), and all 6 remakes held. About 15 minutes of generation at 0.9
   megapixels. Silent shots are cut freely: each starts after its posed first half second.
 
+## Live-action people: the few-step add-on decides the skin
+
+- **For photoreal people use `settings: {speed_lora: "turbo_v4", sampler: "euler", scheduler: "beta"}`** (with `stage: "final"`
+  for the film). One close-up, same prompt, light and seed, four versions: this one gave sharper eyes, defined freckles and
+  real skin texture with the same mood and motion, and the person watching chose it over the model's own add-on and over the
+  realism add-on below (1 shot, 4 versions; confirm on more). It needs the add-on `minimax-h3.turbo-v4-lora` (`models.fetch`,
+  780 MB: ask first).
+- `realism_lora: 1.0` (add-on `minimax-h3.realism-people-lora`, 131 MB; its trigger word is added for you) made skin matte and
+  colour natural, but less glamorous; on its own it changed little. Try it when the brief is documentary rather than beauty.
+- None of this is for drawn, anime or stylised looks: leave these settings out there (their defaults change nothing).
+
 ## Known not to work (measured)
 
 - **Fixing "plastic" skin in a live-action close-up with settings and words.** One face shot, same seed, final stage, seven

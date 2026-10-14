@@ -17,6 +17,10 @@ namespace {
 #define ATM_H3KIJAI "https://huggingface.co/Kijai/MiniMax-H3-experimental/resolve/d8023be02fefbb3633b0cd335c3879f91177299d/"
 // LBH-123-AI/Minimax_h3_latent_Upscaler at revision 3f941d5d182014dd5c0a5e16330420ee2d4aa0c6 (read 2026-10-11).
 #define ATM_H3UPSCALER "https://huggingface.co/LBH-123-AI/Minimax_h3_latent_Upscaler/resolve/3f941d5d182014dd5c0a5e16330420ee2d4aa0c6/"
+// fal/MiniMax-H3-Realism-People-LoRA at revision 039cc8579d7aa357a882d7f4111b25da4f72dccc (read 2026-10-14; MiniMax H3 Community License).
+#define ATM_H3REALISM "https://huggingface.co/fal/MiniMax-H3-Realism-People-LoRA/resolve/039cc8579d7aa357a882d7f4111b25da4f72dccc/"
+// larryvrh/MiniMax-H3-Turbo-Lora at revision 43a74557ac3f6539db8e0f2a959d03feb7a81480 (read 2026-10-14; Apache-2.0).
+#define ATM_H3TURBOV4 "https://huggingface.co/larryvrh/MiniMax-H3-Turbo-Lora/resolve/43a74557ac3f6539db8e0f2a959d03feb7a81480/"
 // ggerganov/whisper.cpp at revision 5359861c739e955e79d9a303bcbc70fb988958b1 (read 2026-10-09: the revision, size and hash are what the
 // repository's own headers report for ggml-small.bin, and the hash matches the file as downloaded).
 #define ATM_WHISPER "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/"
@@ -52,6 +56,8 @@ constexpr const char *kCatalog = R"json({
           "final_megapixels": {"type": "number", "min": 0.5, "max": 4.0, "default": 2.0},
           "sparse_keep_percent": {"type": "integer", "min": 0, "max": 100, "default": 0},
           "lora_strength": {"type": "number", "min": 0.0, "max": 1.5, "default": 1.0},
+          "speed_lora": {"type": "choice", "options": ["standard", "turbo_v4"], "default": "standard"},
+          "realism_lora": {"type": "number", "min": 0.0, "max": 1.5, "default": 0.0},
           "low_memory": {"type": "choice", "options": ["off", "on"], "default": "off"}
         }
       },
@@ -137,6 +143,8 @@ constexpr const char *kCatalog = R"json({
           "final_megapixels": {"type": "number", "min": 0.5, "max": 4.0, "default": 2.0},
           "sparse_keep_percent": {"type": "integer", "min": 0, "max": 100, "default": 0},
           "lora_strength": {"type": "number", "min": 0.0, "max": 1.5, "default": 1.0},
+          "speed_lora": {"type": "choice", "options": ["standard", "turbo_v4"], "default": "standard"},
+          "realism_lora": {"type": "number", "min": 0.0, "max": 1.5, "default": 0.0},
           "low_memory": {"type": "choice", "options": ["off", "on"], "default": "off"}
         }
       },
@@ -169,6 +177,32 @@ constexpr const char *kCatalog = R"json({
         {"path": "latent_upscale_models/minimax_h3_latent_upscaler_3d_conv_v1_fp16.safetensors", "size": 690592672,
          "sha256": "043e5a48e161610ef6c3ea974645220354d06fa618abca15f76d084812eb55c2",
          "url": ")json" ATM_H3UPSCALER R"json(minimax_h3_latent_upscaler_3d_conv_v1/minimax_h3_latent_upscaler_3d_conv_v1_fp16.safetensors"}
+      ]
+    },
+    {
+      "id": "minimax-h3.realism-people-lora",
+      "title": "MiniMax H3 Realism People: an add-on for live-action people (skin, faces, film light)",
+      "kind": "model",
+      "licence": "The MiniMax H3 Community License, as the model it adds to.",
+      "licence_url": "https://huggingface.co/fal/MiniMax-H3-Realism-People-LoRA",
+      "notes": "A LoRA trained by fal on live-action clips of people: skin that keeps its texture, faces that hold up in close-up, film-style light. Used by the H3 setting realism_lora (0 = off; 0.6-1.0); its trigger word is added to the prompt. Only for photoreal shots. Put in the models/loras folder ComfyUI reads.",
+      "files": [
+        {"path": "loras/h3-realism-people-t2v-i2v-r2v.safetensors", "size": 131229656,
+         "sha256": "acc529601d2da117fb81179e76c56e488a3beab1171659d305f04fa3655b787e",
+         "url": ")json" ATM_H3REALISM R"json(h3-realism-people-t2v-i2v-r2v.safetensors"}
+      ]
+    },
+    {
+      "id": "minimax-h3.turbo-v4-lora",
+      "title": "MiniMax H3 Turbo v4 (EMA): a few-step add-on with finer faces and hands",
+      "kind": "model",
+      "licence": "Apache-2.0 for the add-on; the MiniMax H3 Community License applies to what you generate.",
+      "licence_url": "https://huggingface.co/larryvrh/MiniMax-H3-Turbo-Lora",
+      "notes": "larryvrh's few-step LoRA, used in place of a model's own add-on by the H3 setting speed_lora: turbo_v4. Its author suggests 6-8 steps, euler, beta. Put in the models/loras folder ComfyUI reads.",
+      "files": [
+        {"path": "loras/minimax_h3_turbo_v4_step600_ema.safetensors", "size": 779849816,
+         "sha256": "5f3a626cd72c93a8b9318d6760c510bc5092d2ab13aaba1f932c5bab07a416d3",
+         "url": ")json" ATM_H3TURBOV4 R"json(minimax_h3_turbo_v4_step600_ema.safetensors"}
       ]
     },
     {

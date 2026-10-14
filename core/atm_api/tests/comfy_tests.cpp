@@ -195,6 +195,24 @@ TEST_CASE("comfyui: continuation, voice, the final stage and the memory options 
   CHECK(server->graph["select"]["inputs"]["sampler_name"] == "res_multistep");
   CHECK(server->graph["sigmas"]["inputs"]["scheduler"] == "simple");
   CHECK(server->graph["lora"]["inputs"]["strength_model"] == 1.0);
+  CHECK(server->graph["lora"]["inputs"]["lora_name"] == "minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors");
+  CHECK_FALSE(server->graph.contains("realism"));
+  CHECK(server->graph["cond"]["inputs"]["prompt"] == "Two people talk");
+
+  // The add-ons for live-action people: another few-step add-on in place of the model's own, the realism add-on after it, and
+  // the realism add-on's trigger word at the start of the prompt (once).
+  server->history_calls = 0;
+  REQUIRE(comfy.run(request({{"steps", 8}, {"speed_lora", "turbo_v4"}, {"realism_lora", 0.8}}, base)));
+  CHECK(server->graph["lora"]["inputs"]["lora_name"] == "minimax_h3_turbo_v4_step600_ema.safetensors");
+  CHECK(server->graph["realism"]["inputs"]["lora_name"] == "h3-realism-people-t2v-i2v-r2v.safetensors");
+  CHECK(server->graph["realism"]["inputs"]["strength_model"] == 0.8);
+  CHECK(server->graph["realism"]["inputs"]["model"] == json::array({"lora", 0}));
+  CHECK(server->graph["cond"]["inputs"]["prompt"] == "r34l1sm, Two people talk");
+  json triggered = base;
+  triggered["prompt"] = "r34l1sm, Two people talk";
+  server->history_calls = 0;
+  REQUIRE(comfy.run(request({{"steps", 8}, {"realism_lora", 1.0}}, triggered)));
+  CHECK(server->graph["cond"]["inputs"]["prompt"] == "r34l1sm, Two people talk");
 
   // A schedule and a weaker add-on, asked for (a live-action look: less waxy skin).
   server->history_calls = 0;

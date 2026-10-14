@@ -142,6 +142,10 @@ int frames_for(double seconds) { // 24 frames per second, up to the model's 17k 
 
 // The latent upscaler's file (ComfyUI's models/latent_upscale_models); used only by the "final" stage.
 constexpr const char *kLatentUpscaler = "minimax_h3_latent_upscaler_3d_conv_v1_fp16.safetensors";
+// Add-ons a clip may ask for (settings speed_lora and realism_lora); off by default, so every other look is unchanged.
+constexpr const char *kTurboV4Lora = "minimax_h3_turbo_v4_step600_ema.safetensors";
+constexpr const char *kRealismLora = "h3-realism-people-t2v-i2v-r2v.safetensors";
+constexpr const char *kRealismTrigger = "r34l1sm";
 // MiniMax H3 anchors 5, 22, 39, 56 ... (17k + 5) frames; 22 is what a continuation carries over from the clip before.
 constexpr int kOverlapFrames = 22;
 
@@ -159,7 +163,8 @@ struct H3Media {
 //  - voice: a sound whose timbre the speaker takes (the prompt cites it as <Audio 1>);
 //  - stage "final": the latent is enlarged by the latent upscaler and refined by a short second sampling pass;
 //  - sparse_keep_percent: block-sparse attention (faster, softer); low_memory: chunked feed-forward and attention;
-//  - scheduler (default simple) and lora_strength (the few-step add-on, default 1.0): other values change the look, the defaults do not.
+//  - scheduler (default simple) and lora_strength (the few-step add-on, default 1.0): other values change the look, the defaults do not;
+//  - speed_lora (standard | turbo_v4) and realism_lora (0 = off): add-ons for live-action people, off by default.
 json h3_graph(const gen::StepRequest &r, const H3Media &media, const std::string &prefix) {
   const H3Files f = h3_files(r.model);
   const auto node = [](const char *type, json inputs) { return json{{"class_type", type}, {"inputs", std::move(inputs)}}; };
@@ -174,10 +179,20 @@ json h3_graph(const gen::StepRequest &r, const H3Media &media, const std::string
     g["lowvram"] = node("MiniMaxLowVRAMAttention", {{"model", {"chunk", 0}}, {"head_chunks", 4}});
     model = {"lowvram", 0};
   }
-  if (!f.lora.empty()) { // the few-step add-on, for a model that has one
-    g["lora"] = node("LoraLoaderModelOnly", {{"model", model}, {"lora_name", f.lora}, {"strength_model", r.settings.value("lora_strength", 1.0)}});
+  if (!f.lora.empty()) { // the few-step add-on, for a model that has one (or the one the clip asks for instead)
+    const std::string speed = r.settings.value("speed_lora", std::string("standard")) == "turbo_v4" ? std::string(kTurboV4Lora) : f.lora;
+    g["lora"] = node("LoraLoaderModelOnly", {{"model", model}, {"lora_name", speed}, {"strength_model", r.settings.value("lora_strength", 1.0)}});
     model = {"lora", 0};
   }
+  const double realism = r.settings.value("realism_lora", 0.0);
+  if (realism > 0.0) { // live-action people: skin, faces, film light
+    g["realism"] = node("LoraLoaderModelOnly", {{"model", model}, {"lora_name", kRealismLora}, {"strength_model", realism}});
+    model = {"realism", 0};
+  }
+  // The realism add-on was trained with its trigger word at the start of every prompt.
+  std::string prompt = r.inputs.value("prompt", std::string());
+  if (realism > 0.0 && prompt.rfind(kRealismTrigger, 0) != 0)
+    prompt = std::string(kRealismTrigger) + ", " + prompt;
   if (r.settings.value("attention", std::string("int8")) == "int8") {
     g["attn"] = node("ModelAttentionBackend", {{"model", model}, {"attention", "comfy kitchen attention"}});
     model = {"attn", 0};
@@ -198,7 +213,7 @@ json h3_graph(const gen::StepRequest &r, const H3Media &media, const std::string
   const int length = frames_for(seconds);
   json start_guide; // the start picture of a voiced step, anchored at frame 0 (set below)
   if (!media.voices.empty() || !media.references.empty()) { // reference to video: the voice to follow and the pictures to reproduce; the start picture is the clip's real first frame
-    json cond = {{"clip", {"clip", 0}}, {"vae", {"vae", 0}}, {"audio_vae", {"avae", 0}}, {"prompt", r.inputs.value("prompt", std::string())},
+    json cond = {{"clip", {"clip", 0}}, {"vae", {"vae", 0}}, {"audio_vae", {"avae", 0}}, {"prompt", prompt},
                  {"width", width}, {"height", height}, {"length", length}, {"ref_image_size", "max"}};
     for (size_t n = 0; n < media.voices.size(); ++n) {
       const std::string key = n == 0 ? std::string("voice") : "voice" + std::to_string(n);
@@ -218,7 +233,7 @@ json h3_graph(const gen::StepRequest &r, const H3Media &media, const std::string
       start_guide = {"start_guide", 0};
     }
   } else {
-    json cond = {{"clip", {"clip", 0}}, {"vae", {"vae", 0}}, {"prompt", r.inputs.value("prompt", std::string())},
+    json cond = {{"clip", {"clip", 0}}, {"vae", {"vae", 0}}, {"prompt", prompt},
                  {"width", width}, {"height", height}, {"length", length}};
     if (!media.start_image.empty()) {
       g["first"] = node("LoadImage", {{"image", media.start_image}});
@@ -443,6 +458,12 @@ Result<gen::StepResult> ComfyProvider::run(const gen::StepRequest &r) {
     if (text.find("MinimaxH3LatentUpscaler3D") != std::string::npos && text.find("missing_node_type") != std::string::npos)
       return engine_error("E_MODEL_FILE", "ComfyUI has no node for the final stage's latent upscaler.",
                           "Put the Comfyui_Minimax_h3_latent_Upscaler node pack in ComfyUI's custom_nodes, and restart ComfyUI.");
+    if (r.settings.value("realism_lora", 0.0) > 0.0 && text.find(kRealismLora) != std::string::npos)
+      return engine_error("E_MODEL_FILE", "ComfyUI cannot see the realism add-on.",
+                          "Get it with models.fetch {id: \"minimax-h3.realism-people-lora\"} into the models/loras folder ComfyUI reads, or set realism_lora to 0.");
+    if (r.settings.value("speed_lora", std::string("standard")) == "turbo_v4" && text.find(kTurboV4Lora) != std::string::npos)
+      return engine_error("E_MODEL_FILE", "ComfyUI cannot see the Turbo v4 add-on.",
+                          "Get it with models.fetch {id: \"minimax-h3.turbo-v4-lora\"} into the models/loras folder ComfyUI reads, or set speed_lora to standard.");
     if (text.find("not in") != std::string::npos || text.find("value_not_in_list") != std::string::npos)
       return engine_error("E_MODEL_FILE", "ComfyUI cannot see the files of the model " + r.model + ".",
                           "ComfyUI only looks in its own models folder. In the Models panel, choose ComfyUI's models folder as the folder for "
