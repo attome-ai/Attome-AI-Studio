@@ -257,6 +257,16 @@ thing you made it again to fix: a take with the right detail and no action made 
   takes in all, 12 of the 18 first takes kept; the 6 remade were the two rules above (3 each), and all 6 remakes held. About 15 minutes of generation at 0.9
   megapixels. Silent shots are cut freely: each starts after its posed first half second.
 
+## Known not to work (measured)
+
+- **Fixing "plastic" skin in a live-action close-up with settings and words.** One face shot, same seed, final stage, seven
+  versions: soft shade light and "visible pores, matte skin, unretouched" in the prompt; `sampler`/`scheduler` (euler, er_sde,
+  euler_ancestral with beta); `lora_strength` 0.7 with 10 steps. The best (er_sde + beta + lora_strength 0.7) showed pores
+  and fine lines at full size, but a person watching saw only a tiny gain, still plastic, and **preferred the original**: the
+  shade light had taken the mood, and the weaker add-on made her move less. The smooth skin is the model's: do not spend
+  shots on it, keep the light and motion that carry the emotion, and frame people the way real brand films do (medium shots,
+  backlit, from behind; close-ups of hands and things, not of faces).
+
 ## Not known yet
 
 - A place *identical* (not just alike) between shots that do not start inside a master.
