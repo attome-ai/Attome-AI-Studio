@@ -10,7 +10,8 @@ about how the model behaves, not about one video. They were found by experiment 
 model does otherwise), and the words that work. Nothing here is about one video: the films the rules were found on are not part of this skill.
 
 A kind of video with rules of its own is a **niche** (a skill named `niche-...`, see `niche-rules`): for action and fights
-read `niche-anime-action` after this; for a film that explains something, `niche-explainer-film`.
+read `niche-anime-action` after this; for a film that explains something, `niche-explainer-film`. For real-looking people
+(live action, ads, UGC) also read `photoreal-people`.
 
 ## Keeping what is learned (part of the work, every time)
 
@@ -257,26 +258,10 @@ thing you made it again to fix: a take with the right detail and no action made 
   takes in all, 12 of the 18 first takes kept; the 6 remade were the two rules above (3 each), and all 6 remakes held. About 15 minutes of generation at 0.9
   megapixels. Silent shots are cut freely: each starts after its posed first half second.
 
-## Live-action people: the few-step add-on decides the skin
+## Live-action people (photoreal skin and faces)
 
-- **For photoreal people use `settings: {speed_lora: "turbo_v4", sampler: "euler", scheduler: "beta"}`** (with `stage: "final"`
-  for the film). One close-up, same prompt, light and seed, four versions: this one gave sharper eyes, defined freckles and
-  real skin texture with the same mood and motion, and the person watching chose it over the model's own add-on and over the
-  realism add-on below (1 shot, 4 versions; confirm on more). It needs the add-on `minimax-h3.turbo-v4-lora` (`models.fetch`,
-  780 MB: ask first).
-- `realism_lora: 1.0` (add-on `minimax-h3.realism-people-lora`, 131 MB; its trigger word is added for you) made skin matte and
-  colour natural, but less glamorous; on its own it changed little. Try it when the brief is documentary rather than beauty.
-- None of this is for drawn, anime or stylised looks: leave these settings out there (their defaults change nothing).
-
-## Known not to work (measured)
-
-- **Fixing "plastic" skin in a live-action close-up with settings and words.** One face shot, same seed, final stage, seven
-  versions: soft shade light and "visible pores, matte skin, unretouched" in the prompt; `sampler`/`scheduler` (euler, er_sde,
-  euler_ancestral with beta); `lora_strength` 0.7 with 10 steps. The best (er_sde + beta + lora_strength 0.7) showed pores
-  and fine lines at full size, but a person watching saw only a tiny gain, still plastic, and **preferred the original**: the
-  shade light had taken the mood, and the weaker add-on made her move less. The smooth skin is the model's: do not spend
-  shots on it, keep the light and motion that carry the emotion, and frame people the way real brand films do (medium shots,
-  backlit, from behind; close-ups of hands and things, not of faces).
+Read the skill `photoreal-people` for any shot of real-looking people: which add-ons and settings give real skin on H3, what
+does not, and how to light and frame people so they read as filmed. Drawn, anime and stylised films do not need it.
 
 ## Not known yet
 
