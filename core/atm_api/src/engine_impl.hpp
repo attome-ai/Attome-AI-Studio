@@ -370,6 +370,8 @@ struct Engine::Impl {
   Result<json> library_remove(const json &params);
   Result<json> skill_list(const json &params);
   Result<json> skill_get(const json &params);
+  Result<json> skill_add_image(const json &params);
+  Result<json> skill_remove_image(const json &params);
   Result<json> skill_save(const json &params);
   Result<json> skill_delete(const json &params);
   Result<json> guide_get(const json &params);

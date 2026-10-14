@@ -20,6 +20,7 @@
 //   key <name> [ctrl] [shift]       press and release a key: A..Z, 0..9, Space, Delete, Enter, Escape, Left, Right, Up, Down, Home, End, Tab, F1, F2, F6, Slash, BracketLeft, BracketRight, Plus, Minus
 //   type <text>                     type the rest of the line into the field that has the keyboard (click it first;
 //                                   `key A ctrl` before it selects what is there, so the text replaces it)
+//   drop <path>                     drop a file on the window, as the file manager does
 //   shot <file.jpg>                 save what the window shows
 //   where @<id>                     print where the widget was last drawn and in which windows (to debug a script)
 //   quit                            stop (also at the end of the file)
@@ -29,6 +30,7 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 
 #include <SDL3/SDL.h>
 
@@ -51,6 +53,7 @@ public:
   void before_frame();                     // after the backend's NewFrame, before ImGui::NewFrame
   void after_render(SDL_Renderer *renderer); // after the draw data is rendered, before present
   bool done() const { return done_; }
+  std::vector<std::string> take_drops();   // files a script dropped on the window ("drop <path>"): the editor handles them as it does a real drop
   int exit_code() const { return failed_ ? 3 : 0; }
 
   struct Impl;

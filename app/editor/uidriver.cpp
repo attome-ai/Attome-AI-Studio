@@ -72,6 +72,7 @@ struct UiDriver::Impl {
     std::vector<std::string> words;
   };
   std::vector<Command> commands;
+  std::vector<std::string> drops;    // "drop <path>": handed to the editor as dropped files
   size_t next = 0;
   std::deque<std::function<void(ImGuiIO &)>> frames; // input to feed, one entry per frame
   ImVec2 mouse{-1.0f, -1.0f};
@@ -217,6 +218,12 @@ bool UiDriver::passes(const SDL_Event &e) {
          e.type == SDL_EVENT_DROP_FILE || e.type == SDL_EVENT_DROP_BEGIN || e.type == SDL_EVENT_DROP_COMPLETE;
 }
 
+std::vector<std::string> UiDriver::take_drops() {
+  std::vector<std::string> out;
+  out.swap(impl_->drops);
+  return out;
+}
+
 void UiDriver::before_frame() {
   Impl &d = *impl_;
   ImGuiIO &io = ImGui::GetIO();
@@ -305,6 +312,8 @@ void UiDriver::before_frame() {
       else if (a->second.rect.Max.y > b->second.rect.Min.y + 1.0f)
         fail(c.line, arg(1) + " (ends at " + std::to_string(int(a->second.rect.Max.y)) + ") is not above " + arg(2) + " (starts at " +
                          std::to_string(int(b->second.rect.Min.y)) + ")");
+    } else if (op == "drop") {
+      d.drops.push_back(arg(1));
     } else if (op == "shot") {
       d.shot = arg(1);
     } else if (op == "type") {

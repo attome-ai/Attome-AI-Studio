@@ -82,9 +82,11 @@ void App::cast_open(const std::string &id) {
   for (auto it = attributes.begin(); it != attributes.end(); ++it)
     cast_attrs_.push_back({it.key(), shown(*it)});
   cast_attr_name_[0] = cast_attr_value_[0] = '\0';
+  cast_pending_pictures_.clear();
 }
 
 void App::cast_new(int kind) {
+  cast_pending_pictures_.clear();
   cast_sel_.clear();
   cast_editing_ = true;
   cast_dirty_ = true;
@@ -112,9 +114,10 @@ void App::cast_save() {
   json done;
   if (cast_sel_.empty()) {
     if (!rpc("character.create", {{"project", project_path_}, {"name", cast_name_}, {"kind", kKinds[cast_kind_]}, {"description", cast_look_},
-                                  {"personality", cast_manner_}, {"attributes", attributes}},
+                                  {"personality", cast_manner_}, {"attributes", attributes}, {"references", cast_pending_pictures_}},
              done))
       return;
+    cast_pending_pictures_.clear();
     cast_sel_ = done.value("character", std::string());
   } else {
     const json &before = object_in(object_in(object_in(doc_, "cast"), cast_sel_.c_str()), "attributes");
@@ -144,8 +147,15 @@ void App::cast_delete() {
 
 // A picture or a voice sample for the entry that is open: the engine copies the file into the project.
 void App::cast_add_file(const std::string &path, bool voice) {
-  if (cast_sel_.empty() || path.empty())
+  if (path.empty())
     return;
+  if (cast_sel_.empty()) { // not saved yet: a picture waits for the save, a voice cannot
+    if (!voice && cast_editing_ && std::find(cast_pending_pictures_.begin(), cast_pending_pictures_.end(), path) == cast_pending_pictures_.end()) {
+      cast_pending_pictures_.push_back(path);
+      thumbs_.request(path);
+    }
+    return;
+  }
   json params = {{"project", project_path_}, {"character", cast_sel_}};
   if (voice)
     params["voice"] = path;
@@ -183,6 +193,94 @@ void App::ask_cast_file(bool voice) {
             app->dialog_cast_picture_ = *files;
         },
         this, window_, pictures, 2, user_folder(SDL_FOLDER_PICTURES).c_str(), false);
+}
+
+void App::picture_strip(const std::vector<PicTile> &pics, std::string &remove, const char *add_mark, const std::function<void()> &add) {
+  const float tile = 68.0f;
+  const float room = ImGui::GetContentRegionAvail().x;
+  float x = 0.0f;
+  int n = 0;
+  for (const PicTile &pic : pics) {
+    thumbs_.request(pic.path);
+    if (x > 0.0f && x + tile > room)
+      x = 0.0f;
+    else if (n > 0)
+      ImGui::SameLine(0.0f, 8.0f);
+    ImGui::PushID(n);
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    ImGui::InvisibleButton("##pic", ImVec2(tile, tile));
+    const bool hovered = ImGui::IsItemHovered();
+    if (ImGui::IsItemClicked() && hovered && ImGui::GetMousePos().x > p.x + tile - 22.0f && ImGui::GetMousePos().y < p.y + 22.0f)
+      remove = pic.key;
+    ui_mark("castpicture:" + std::to_string(n + 1));
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(p, ImVec2(p.x + tile, p.y + tile), hex(look::bg), 8.0f);
+    if (const auto tex = thumb_tex_.find(pic.path); tex != thumb_tex_.end() && tex->second) {
+      float tw = tile, th = tile;
+      if (SDL_GetTextureSize(tex->second, &tw, &th) && tw > 0.0f && th > 0.0f) {
+        const float fit = std::min(tile / tw, tile / th);
+        tw *= fit;
+        th *= fit;
+      }
+      const ImVec2 corner(p.x + (tile - tw) * 0.5f, p.y + (tile - th) * 0.5f);
+      dl->AddImageRounded(ImTextureID(reinterpret_cast<intptr_t>(tex->second)), corner, ImVec2(corner.x + tw, corner.y + th), ImVec2(0, 0), ImVec2(1, 1),
+                          IM_COL32_WHITE, 8.0f);
+    }
+    if (hovered) { // the cross, top right
+      const ImVec2 c(p.x + tile - 12.0f, p.y + 12.0f);
+      dl->AddCircleFilled(c, 9.0f, hex(look::bg, 220));
+      dl->AddLine(ImVec2(c.x - 4.0f, c.y - 4.0f), ImVec2(c.x + 4.0f, c.y + 4.0f), hex(look::fg), 1.6f);
+      dl->AddLine(ImVec2(c.x - 4.0f, c.y + 4.0f), ImVec2(c.x + 4.0f, c.y - 4.0f), hex(look::fg), 1.6f);
+      ImGui::SetTooltip("%s", pic.tip.c_str());
+    }
+    ImGui::PopID();
+    x += tile + 8.0f;
+    ++n;
+  }
+  if (n > 0 && x + 120.0f <= room)
+    ImGui::SameLine(0.0f, 8.0f);
+  if (soft_button(add_mark, "Add picture...", ImVec2(120.0f, 30.0f)))
+    add();
+}
+
+// Pictures dropped on the window while the Cast or the Niches panel is shown: they go to the entry or the niche that is open. In the Cast panel with
+// nothing open, a dropped picture makes a new entry named after the file (a place or a prop in those chips), ready to be renamed. What is
+// taken is removed from `files`; the rest is imported as media as before.
+void App::route_dropped_pictures(std::vector<std::string> &files) {
+  if (files.empty() || (rail_tab_ != 9 && rail_tab_ != 8))
+    return;
+  const auto is_picture = [](const std::string &file) {
+    std::string ext = std::filesystem::path(std::u8string(file.begin(), file.end())).extension().string();
+    std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+    return ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".webp" || ext == ".bmp";
+  };
+  std::vector<std::string> rest;
+  for (const std::string &file : files) {
+    if (!is_picture(file) || project_path_.empty()) {
+      rest.push_back(file);
+      continue;
+    }
+    if (rail_tab_ == 8) {
+      if (niche_editing_)
+        niche_add_image(file);
+      else
+        rest.push_back(file);
+    } else if (cast_editing_) {
+      cast_add_file(file, false);
+    } else {
+      const std::string stem = std::filesystem::path(std::u8string(file.begin(), file.end())).stem().string();
+      json done;
+      if (rpc("character.create", {{"project", project_path_}, {"name", stem.empty() ? std::string("New") : stem}, {"kind", kKinds[cast_tab_ >= 1 && cast_tab_ <= 3 ? cast_tab_ - 1 : 0]},
+                                   {"references", json::array({file})}},
+              done)) {
+        refresh();
+        cast_open(done.value("character", std::string()));
+        set_pick("cast", cast_sel_);
+        say("Added \"" + stem + "\" to the cast from the picture. Rename it and say how it looks.", false, true);
+      }
+    }
+  }
+  files.swap(rest);
 }
 
 // The picture an entry shows on its card: its first reference picture, resolved against the project.
@@ -278,7 +376,7 @@ void App::draw_cast_panel() {
     }
   }
   panel_hint("The people, places and things that must look and sound the same in every clip. Click one to see and change it; a clip that uses one "
-             "follows every change to it.");
+             "follows every change to it. Drop a picture file here to add one from it.");
 }
 
 // The Inspector for the picked cast entry: its name, look, pictures, voice and attributes.
@@ -339,59 +437,29 @@ void App::draw_cast_inspector() {
 
   // the pictures the model must reproduce: kept in the project; a click on the cross takes one out
   section_label("PICTURES");
-  if (!saved) {
-    ImGui::TextColored(hexv(look::fg3), "Save first, then add pictures and a voice.");
+  if (!saved) { // pictures can be chosen now: they go in with the entry when it is saved
+    std::vector<PicTile> pics;
+    for (const std::string &p : cast_pending_pictures_)
+      pics.push_back({p, p, file_name(p)});
+    std::string drop;
+    picture_strip(pics, drop, "cast_add_picture", [this] { ask_cast_file(false); });
+    if (!drop.empty())
+      std::erase(cast_pending_pictures_, drop);
+    if (cast_pending_pictures_.empty())
+      ImGui::TextColored(hexv(look::fg3), "%s", cast_kind_ == 0 ? "Choose pictures of the person now, or drop them here. A voice can be added after saving."
+                                                                : "Choose pictures of it now, or drop picture files here.");
+    ImGui::Spacing();
   } else {
     const json refs = entry.value("references", json::array());
-    const float tile = 68.0f;
-    const float room = ImGui::GetContentRegionAvail().x;
-    float x = 0.0f;
-    int n = 0;
-    std::string remove;
+    std::vector<PicTile> pics;
     for (const json &r : refs) {
       const std::string rel = r.is_string() ? r.get<std::string>() : r.value("path", std::string());
       const std::filesystem::path raw(std::u8string(rel.begin(), rel.end()));
-      const std::string path = (raw.is_absolute() ? raw : std::filesystem::path(std::u8string(project_path_.begin(), project_path_.end())) / raw).string();
-      thumbs_.request(path);
-      if (x > 0.0f && x + tile > room)
-        x = 0.0f;
-      else if (n > 0)
-        ImGui::SameLine(0.0f, 8.0f);
-      ImGui::PushID(n);
-      const ImVec2 p = ImGui::GetCursorScreenPos();
-      ImGui::InvisibleButton("##pic", ImVec2(tile, tile));
-      const bool hovered = ImGui::IsItemHovered();
-      if (ImGui::IsItemClicked() && hovered && ImGui::GetMousePos().x > p.x + tile - 22.0f && ImGui::GetMousePos().y < p.y + 22.0f)
-        remove = rel;
-      ui_mark("castpicture:" + std::to_string(n + 1));
-      ImDrawList *dl = ImGui::GetWindowDrawList();
-      dl->AddRectFilled(p, ImVec2(p.x + tile, p.y + tile), hex(look::bg), 8.0f);
-      if (const auto tex = thumb_tex_.find(path); tex != thumb_tex_.end() && tex->second) {
-        float tw = tile, th = tile;
-        if (SDL_GetTextureSize(tex->second, &tw, &th) && tw > 0.0f && th > 0.0f) {
-          const float fit = std::min(tile / tw, tile / th);
-          tw *= fit;
-          th *= fit;
-        }
-        const ImVec2 corner(p.x + (tile - tw) * 0.5f, p.y + (tile - th) * 0.5f);
-        dl->AddImageRounded(ImTextureID(reinterpret_cast<intptr_t>(tex->second)), corner, ImVec2(corner.x + tw, corner.y + th), ImVec2(0, 0),
-                            ImVec2(1, 1), IM_COL32_WHITE, 8.0f);
-      }
-      if (hovered) { // the cross, top right
-        const ImVec2 c(p.x + tile - 12.0f, p.y + 12.0f);
-        dl->AddCircleFilled(c, 9.0f, hex(look::bg, 220));
-        dl->AddLine(ImVec2(c.x - 4.0f, c.y - 4.0f), ImVec2(c.x + 4.0f, c.y + 4.0f), hex(look::fg), 1.6f);
-        dl->AddLine(ImVec2(c.x - 4.0f, c.y + 4.0f), ImVec2(c.x + 4.0f, c.y - 4.0f), hex(look::fg), 1.6f);
-        ImGui::SetTooltip("%s%s", file_name(rel).c_str(), r.is_object() && r.contains("label") ? ("  (" + r.value("label", std::string()) + ")").c_str() : "");
-      }
-      ImGui::PopID();
-      x += tile + 8.0f;
-      ++n;
+      pics.push_back({rel, (raw.is_absolute() ? raw : std::filesystem::path(std::u8string(project_path_.begin(), project_path_.end())) / raw).string(),
+                      file_name(rel) + (r.is_object() && r.contains("label") ? "  (" + r.value("label", std::string()) + ")" : std::string())});
     }
-    if (n > 0 && x + 120.0f <= room)
-      ImGui::SameLine(0.0f, 8.0f);
-    if (soft_button("cast_add_picture", "Add picture...", ImVec2(120.0f, 30.0f)))
-      ask_cast_file(false);
+    std::string remove;
+    picture_strip(pics, remove, "cast_add_picture", [this] { ask_cast_file(false); });
     if (!remove.empty()) {
       const std::string id = cast_sel_;
       pending_ = [this, id, remove] {

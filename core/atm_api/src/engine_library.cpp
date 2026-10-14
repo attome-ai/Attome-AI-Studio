@@ -656,6 +656,72 @@ Result<json> Engine::Impl::skill_list(const json &params) {
   return json{{"skills", std::move(list)}};
 }
 
+  // skill.add_image {project, id, path, label?}: a picture that shows what a niche (or any skill the project keeps) is about: a look, a place, a
+  // frame to match. It is copied into the project (skills/<id>/); skill.get returns the project's skills with their images as full paths, for an agent
+  // to look at (see.*) or to give a model as a reference.
+Result<json> Engine::Impl::skill_add_image(const json &params) {
+  ATM_TRY(Project *pr, project(params));
+  ATM_TRY(const std::string *id, string_param(params, "id"));
+  ATM_TRY(const std::string *path, string_param(params, "path"));
+  const json &mine = skills_of(*pr);
+  if (!mine.contains(*id))
+    return fail(ErrorCode::UnknownId, "S_SKILL", "The project has no skill \"" + *id + "\".", {},
+                "Only a skill the project keeps has pictures: save a copy of a built-in one first (skill.save).");
+  fs::path from = to_path(*path);
+  if (from.is_relative())
+    from = pr->dir / from;
+  std::error_code ec;
+  if (!fs::is_regular_file(from, ec))
+    return fail(ErrorCode::NotFound, "S_IMAGE", "The file \"" + to_utf8(from) + "\" was not found.", {}, "Give the path of a PNG, JPEG or WebP picture.");
+  std::string ext = to_utf8(from.extension());
+  std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+  if (ext != ".png" && ext != ".jpg" && ext != ".jpeg" && ext != ".webp" && ext != ".bmp")
+    return fail(ErrorCode::InvalidArgument, "S_IMAGE", "\"" + to_utf8(from.filename()) + "\" is not a picture file.", {}, "Give a PNG, JPEG, WebP or BMP picture.");
+  const fs::path folder = pr->dir / "skills" / to_path(*id);
+  ATM_CHECK(storage::make_dirs(folder));
+  fs::path target = folder / from.filename();
+  for (int n = 2; fs::exists(target, ec); ++n)
+    target = folder / to_path(to_utf8(from.stem()) + "-" + std::to_string(n) + to_utf8(from.extension()));
+  fs::copy_file(from, target, fs::copy_options::none, ec);
+  if (ec)
+    return fail(ErrorCode::IoError, "S_IMAGE", "The picture could not be copied into the project: " + ec.message() + ".");
+  json images = mine[*id].value("images", json::array());
+  json one = {{"path", "skills/" + *id + "/" + to_utf8(target.filename())}};
+  if (params.contains("label") && params["label"].is_string() && !params["label"].get<std::string>().empty())
+    one["label"] = params["label"];
+  images.push_back(one);
+  ATM_TRY(json applied, project_patch({{"project", to_utf8(pr->dir)},
+                                       {"patch", {{"ops", json::array({{{"op", mine[*id].contains("images") ? "replace" : "add"}, {"path", *id + "/images"}, {"value", images}}})},
+                                                  {"label", "Add a picture to the skill"}}}}));
+  return json{{"skill", *id}, {"image", one["path"]}, {"images", images.size()}, {"revision", applied["revision"]}};
+}
+
+  // skill.remove_image {project, id, image}: take a picture out of a skill: its path, or its number from 1. The file stays in the project's folder.
+Result<json> Engine::Impl::skill_remove_image(const json &params) {
+  ATM_TRY(Project *pr, project(params));
+  ATM_TRY(const std::string *id, string_param(params, "id"));
+  const json &mine = skills_of(*pr);
+  if (!mine.contains(*id))
+    return fail(ErrorCode::UnknownId, "S_SKILL", "The project has no skill \"" + *id + "\".", {}, "skill.list names the project's skills.");
+  json images = mine[*id].value("images", json::array());
+  size_t at = images.size();
+  if (params.contains("image") && params["image"].is_number_integer()) {
+    const int64_t n = params["image"].get<int64_t>();
+    if (n >= 1 && size_t(n) <= images.size())
+      at = size_t(n - 1);
+  } else if (params.contains("image") && params["image"].is_string()) {
+    for (size_t i = 0; i < images.size(); ++i)
+      if (images[i].value("path", std::string()) == params["image"].get<std::string>())
+        at = i;
+  }
+  if (at >= images.size())
+    return fail(ErrorCode::InvalidArgument, "S_IMAGE", "The skill has no such picture.", {}, "Pass a path from skill.get's images, or its number from 1.");
+  images.erase(images.begin() + std::ptrdiff_t(at));
+  ATM_TRY(json applied, project_patch({{"project", to_utf8(pr->dir)},
+                                       {"patch", {{"ops", json::array({{{"op", "replace"}, {"path", *id + "/images"}, {"value", images}}})}, {"label", "Take a picture out of the skill"}}}}));
+  return json{{"skill", *id}, {"images", images.size()}, {"revision", applied["revision"]}};
+}
+
 Result<json> Engine::Impl::skill_get(const json &params) {
   ATM_TRY(const std::string *id, string_param(params, "id"));
   const std::string file = params.value("file", std::string());
@@ -667,8 +733,17 @@ Result<json> Engine::Impl::skill_get(const json &params) {
   if (pr && file.empty()) {
     const json &mine = skills_of(*pr);
     if (const auto it = mine.find(*id); it != mine.end() && it->is_object())
+    {
+      json images = json::array(); // the pictures, as full paths
+      for (const json &img : it->value("images", json::array()))
+        if (img.is_object() && img.value("path", std::string()).size()) {
+          json one = img;
+          one["path"] = to_utf8(pr->dir / to_path(img.value("path", std::string())));
+          images.push_back(std::move(one));
+        }
       return json{{"id", *id}, {"title", it->value("name", *id)}, {"description", it->value("description", std::string())},
-                  {"source", "project"}, {"body", it->value("body", std::string())}, {"files", json::array()}};
+                  {"source", "project"}, {"body", it->value("body", std::string())}, {"files", json::array()}, {"images", std::move(images)}};
+    }
   }
   const skills::Skill *built = skills::find_builtin(*id);
   if (!built)

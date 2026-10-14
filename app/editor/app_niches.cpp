@@ -107,9 +107,13 @@ void App::niche_open(const std::string &id) {
     copy_to(niche_title_, sizeof niche_title_, got.value("title", id));
   }
   niche_dirty_ = false;
+  niche_pending_images_.clear();
+  niche_images_ = got.value("images", json::array());
 }
 
 void App::niche_new(bool from_default) {
+  niche_pending_images_.clear();
+  niche_images_ = json::array();
   niche_sel_.clear();
   niche_builtin_ = false;
   niche_text_.clear();
@@ -140,6 +144,16 @@ void App::niche_save() {
   niche_sel_ = done.value("skill", niche_sel_);
   niche_builtin_ = false;
   niche_dirty_ = false;
+  if (!niche_pending_images_.empty()) { // the pictures chosen before it was saved go in with it
+    for (const std::string &file : niche_pending_images_) {
+      json added;
+      rpc("skill.add_image", {{"project", project_path_}, {"id", niche_sel_}, {"path", file}}, added);
+    }
+    niche_pending_images_.clear();
+    json got;
+    if (rpc("skill.get", {{"id", niche_sel_}, {"project", project_path_}}, got))
+      niche_images_ = got.value("images", json::array());
+  }
   niches_stale_ = true;
   say("Saved \"" + title + "\" in the project", false, true);
 }
@@ -395,6 +409,42 @@ void App::draw_niche_link() {
   ImGui::Spacing();
 }
 
+// A picture for the open niche: kept in the project at once when the niche is saved, else it waits for the save.
+void App::niche_add_image(const std::string &path) {
+  if (path.empty() || !niche_editing_)
+    return;
+  if (niche_sel_.empty() || niche_builtin_) {
+    if (std::find(niche_pending_images_.begin(), niche_pending_images_.end(), path) == niche_pending_images_.end()) {
+      niche_pending_images_.push_back(path);
+      thumbs_.request(path);
+    }
+    return;
+  }
+  json added;
+  if (!rpc("skill.add_image", {{"project", project_path_}, {"id", niche_sel_}, {"path", path}}, added))
+    return;
+  json got;
+  if (rpc("skill.get", {{"id", niche_sel_}, {"project", project_path_}}, got))
+    niche_images_ = got.value("images", json::array());
+}
+
+void App::ask_niche_picture() {
+  if (const char *picked = std::getenv("ATTOME_EDITOR_PICK_NICHE_PICTURE")) { // a UI test
+    std::lock_guard lock(dialog_mutex_);
+    dialog_niche_picture_ = picked;
+    return;
+  }
+  static const SDL_DialogFileFilter pictures[] = {{"Pictures", "png;jpg;jpeg;webp;bmp"}, {"All files", "*"}};
+  SDL_ShowOpenFileDialog(
+      [](void *self, const char *const *files, int) {
+        App *app = static_cast<App *>(self);
+        std::lock_guard lock(app->dialog_mutex_);
+        if (files && *files)
+          app->dialog_niche_picture_ = *files;
+      },
+      this, window_, pictures, 2, user_folder(SDL_FOLDER_PICTURES).c_str(), false);
+}
+
 void App::ask_niche_video() {
   if (const char *picked = std::getenv("ATTOME_EDITOR_PICK_NICHE_VIDEO")) { // a UI test: a script cannot drive the native dialog
     std::lock_guard lock(dialog_mutex_);
@@ -479,7 +529,7 @@ void App::draw_niches_panel() {
     }
   }
   panel_hint("A niche is text that tells the agent how a kind of video is made. Click one to read or change it; it follows whatever is written "
-             "there. Start your own, or learn one from a video.");
+             "there. Start your own, or learn one from a video. Pictures can go with it: drop them on an open niche.");
 }
 
 // The Inspector for a picked niche card: the text to read and change, or the options of the way to start a new one.
@@ -561,6 +611,36 @@ void App::draw_niche_inspector() {
       niche_dirty_ = true;
     ui_mark("field:niche_text");
     ImGui::PopStyleColor();
+    ImGui::Spacing();
+    section_label("PICTURES");
+    wrapped_text("A look, a place or a frame to match. The agent looks at them with the text.", look::fg3);
+    {
+      std::vector<PicTile> pics;
+      const bool kept = !niche_sel_.empty() && !niche_builtin_;
+      if (kept) {
+        int n = 0;
+        for (const json &img : niche_images_)
+          pics.push_back({std::to_string(++n), img.value("path", std::string()), stem_of(img.value("path", std::string()))});
+      } else {
+        for (const std::string &p : niche_pending_images_)
+          pics.push_back({p, p, stem_of(p)});
+      }
+      std::string remove;
+      picture_strip(pics, remove, "niche_add_picture", [this] { ask_niche_picture(); });
+      if (!remove.empty())
+        pending_ = [this, remove, kept] {
+          if (!kept) {
+            std::erase(niche_pending_images_, remove);
+            return;
+          }
+          json done, got;
+          if (rpc("skill.remove_image", {{"project", project_path_}, {"id", niche_sel_}, {"image", std::stoi(remove)}}, done) &&
+              rpc("skill.get", {{"id", niche_sel_}, {"project", project_path_}}, got))
+            niche_images_ = got.value("images", json::array());
+        };
+      if (!kept && !niche_pending_images_.empty())
+        ImGui::TextColored(hexv(look::fg3), "They are kept when you save.");
+    }
     ImGui::Spacing();
     const bool can_delete = !niche_sel_.empty() && !niche_builtin_;
     const bool can_reset = !niche_sel_.empty();

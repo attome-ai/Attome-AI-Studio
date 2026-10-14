@@ -656,6 +656,18 @@ private:
   bool cast_editing_ = false, cast_dirty_ = false;
   std::vector<std::pair<std::string, std::string>> cast_attrs_; // the attributes of the open entry, as typed
   void draw_cast_panel();
+  // A row of small pictures with a cross on the one under the pointer, then the button that adds one. `remove` gets the key of the one whose cross was clicked.
+  struct PicTile {
+    std::string key, path, tip;
+  };
+  void picture_strip(const std::vector<PicTile> &pics, std::string &remove, const char *add_mark, const std::function<void()> &add);
+  std::vector<std::string> cast_pending_pictures_;  // pictures chosen for an entry that is not saved yet: they go in with it
+  std::vector<std::string> niche_pending_images_;   // the same for a niche
+  std::string dialog_niche_picture_;
+  json niche_images_ = json::array(); // the open niche's pictures, as skill.get gives them
+  void ask_niche_picture();
+  void niche_add_image(const std::string &path);
+  void route_dropped_pictures(std::vector<std::string> &files); // pictures dropped on the Cast or Niches panel go to the entry or niche that is open
   void cast_open(const std::string &id);
   void cast_new(int kind);
   void cast_save();

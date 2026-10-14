@@ -23,6 +23,13 @@ by its title, find it there first.
 4. **Check before "done".** Run the niche's CHECKS if it has any. Look at frames (`see.contact_sheet`, `see.frames`) and read them.
    You cannot hear: report audio as "not heard" and say what you measured (`audio.analyze`: loudness, peak).
 
+## Pictures of a niche
+
+A niche of the user's may come with pictures: `skill.get {"id": <the niche>, "project": ...}` lists them as `images` (full paths, each with
+an optional label). They show what the words cannot: a look, a colour mood, a kind of place, a frame to match. Open
+and look at them (they are ordinary picture files) before you say the niche back, and treat them as part of the brief: the same rule 1 applies.
+Give them to an image or video model as references only when the niche's words say that is what they are for.
+
 ## When the niche is empty or only a topic
 
 Use the default niche whole, still say it back (rule 3).

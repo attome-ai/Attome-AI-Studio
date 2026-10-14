@@ -280,6 +280,8 @@ int main(int argc, char **argv) {
       }
       if (driver) {
         driver->before_frame();
+        for (const std::string &file : driver->take_drops())
+          app.on_drop(file.c_str());
         if (driver->done())
           running = false;
       }

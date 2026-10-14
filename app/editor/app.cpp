@@ -2411,7 +2411,7 @@ namespace {
 
 void App::take_dialog_results() {
   std::vector<std::string> import;
-  std::string out, project, lut, models_folder, input, wf_import, wf_export, niche_video, niche_cookies, cast_picture, cast_voice;
+  std::string out, project, lut, models_folder, input, wf_import, wf_export, niche_video, niche_cookies, cast_picture, cast_voice, niche_picture;
   {
     std::lock_guard lock(dialog_mutex_);
     import.swap(dialog_import_);
@@ -2426,7 +2426,10 @@ void App::take_dialog_results() {
     niche_cookies.swap(dialog_niche_cookies_);
     cast_picture.swap(dialog_cast_picture_);
     cast_voice.swap(dialog_cast_voice_);
+    niche_picture.swap(dialog_niche_picture_);
   }
+  if (!niche_picture.empty())
+    niche_add_image(niche_picture);
   if (!cast_picture.empty())
     cast_add_file(cast_picture, false);
   if (!cast_voice.empty())
@@ -2502,6 +2505,7 @@ void App::take_dialog_results() {
     gen_models_loaded_ = false;
     refresh_gen_status();
   }
+  route_dropped_pictures(dropped_); // pictures dropped on an open entry or niche belong to it, not to the media
   import.insert(import.end(), dropped_.begin(), dropped_.end());
   dropped_.clear();
   if (!project.empty()) {
