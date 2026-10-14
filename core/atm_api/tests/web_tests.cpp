@@ -91,6 +91,28 @@ TEST_CASE("web.preview and web.render draw a page frame by frame, exactly, with 
   CHECK(probed["frames"] == 12);
   CHECK(probed["duration"] == "1");
 
+  // Shared out between three pages, every frame is the same as one page draws it; an .mp4 is encoded in order from several pages.
+  const std::string seq3 = (root / "seq3").string();
+  const json job3 = ok_json(engine, "web.render", {{"path", page}, {"output", seq3}, {"frames", 12}, {"fps", 12}, {"width", 320}, {"height", 180}, {"workers", 3}});
+  const json done3 = wait_job(engine, job3["job_id"], 60);
+  REQUIRE(done3["state"] == "done");
+  CHECK(done3["result"]["workers"] == 3);
+  for (int f = 0; f < 12; ++f) {
+    char name[32];
+    std::snprintf(name, sizeof name, "frame_%06d.png", f);
+    auto one = atm::media::read_still((fs::path(seq) / name).string(), 0, 0), three = atm::media::read_still((fs::path(seq3) / name).string(), 0, 0);
+    REQUIRE(one);
+    REQUIRE(three);
+    CHECK(one->nv12 == three->nv12);
+    CHECK(one->alpha == three->alpha);
+  }
+  const std::string mp4 = (root / "web.mp4").string();
+  const json job4 = ok_json(engine, "web.render", {{"path", page}, {"output", mp4}, {"frames", 12}, {"fps", 12}, {"width", 320}, {"height", 180}, {"workers", 2}});
+  REQUIRE(wait_job(engine, job4["job_id"], 60)["state"] == "done");
+  const double mp4_seconds = ok_json(engine, "media.probe", {{"path", mp4}})["seconds"].get<double>();
+  CHECK(mp4_seconds > 0.95);
+  CHECK(mp4_seconds < 1.05);
+
   const std::string project = (root / "Web.attome").string();
   ok_json(engine, "project.create", {{"path", project}, {"rate", "12"}, {"canvas", {{"width", 320}, {"height", 180}}}});
   ok_json(engine, "timeline.edit", {{"project", project}, {"ops", json::array({{{"op", "add_clip"}, {"path", seq}, {"at", "0s"}}})}});

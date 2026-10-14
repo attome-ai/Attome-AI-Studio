@@ -7,8 +7,13 @@
 // so a frame is the same however slow the page is, and a render is repeatable. The page has no network unless asked for.
 #include "engine_impl.hpp"
 
+#include <atomic>
+#include <condition_variable>
 #include <cstdio>
 #include <fstream>
+#include <map>
+#include <mutex>
+#include <optional>
 #include <thread>
 #include <utility>
 
@@ -328,14 +333,17 @@ void collect_console(Page &pg) {
     pg.console.resize(20);
 }
 
-// Moves the page's clock to `seconds` and returns the frame as PNG bytes.
-Result<std::string> frame_at(Page &pg, double seconds, double timeout) {
+// Moves the page's clock to `seconds` and returns the frame as PNG bytes (or JPEG, for a frame that is encoded into a video anyway).
+Result<std::string> frame_at(Page &pg, double seconds, double timeout, const char *format = "png") {
   char expr[96];
   std::snprintf(expr, sizeof expr, "window.__attomeSeek(%.6f)", seconds * 1000.0);
   ATM_TRY(json r, pg.browser.call("Runtime.evaluate", {{"expression", expr}, {"awaitPromise", true}}, pg.session, timeout));
   if (r.contains("exceptionDetails"))
     pg.console.push_back(r["exceptionDetails"].value("text", std::string("an error in the page")));
-  ATM_TRY(json shot, pg.browser.call("Page.captureScreenshot", {{"format", "png"}, {"fromSurface", true}, {"captureBeyondViewport", false}}, pg.session, timeout));
+  json shot_params = {{"format", format}, {"fromSurface", true}, {"captureBeyondViewport", false}, {"optimizeForSpeed", true}};
+  if (std::string_view(format) == "jpeg")
+    shot_params["quality"] = 95;
+  ATM_TRY(json shot, pg.browser.call("Page.captureScreenshot", std::move(shot_params), pg.session, timeout));
   collect_console(pg);
   return base64_decode(shot.value("data", std::string()));
 }
@@ -468,23 +476,19 @@ Result<json> Engine::Impl::web_render(const json &params) {
   const bool network = params.value("network", false);
   const double timeout = params.value("timeout", 60.0);
   const std::string rate_text = std::abs(fps - std::round(fps)) < 1e-9 ? std::to_string(int(std::lround(fps))) : std::to_string(int(std::lround(fps * 1000))) + "/1000";
-  job->thread = std::thread([job, exe, work, url, out, mp4, width, height, fps, frames, transparent, network, timeout, rate_text] {
+  // Pages drawing at once, each in its own browser: a frame is drawn from its time alone, so any page can draw any frame. A page that carries
+  // something from one frame to the next renders with workers: 1.
+  int workers = params.value("workers", 0);
+  if (workers <= 0)
+    workers = int(std::clamp<int64_t>(frames / 24, 1, std::clamp(int(std::thread::hardware_concurrency()) / 4, 1, 6)));
+  workers = std::clamp(workers, 1, 8);
+  job->thread = std::thread([job, exe, work, url, out, mp4, width, height, fps, frames, transparent, network, timeout, rate_text, workers] {
     prof::set_thread_name("atm-web");
     std::error_code ec;
-    Page pg;
-    const auto cleanup = [&] {
-      pg.browser.close();
-      fs::remove_all(work, ec);
-    };
     try {
       {
         std::lock_guard lock(job->mutex);
         job->detail = "Opening the page";
-      }
-      if (auto opened = open_page(pg, exe, work / "profile", url, width, height, transparent, network, timeout); !opened) {
-        cleanup();
-        const Error e = opened.error();
-        return finish_job(job, Job::failed, "", &e);
       }
       fs::path folder = mp4 ? work / "frames" : to_path(out);
       fs::create_directories(folder, ec);
@@ -506,41 +510,128 @@ Result<json> Engine::Impl::web_render(const json &params) {
         es.bitrate = 16'000'000;
         auto enc = media::Encoder::create(es);
         if (!enc) {
-          cleanup();
+          fs::remove_all(work, ec);
           const Error e = enc.error();
           return finish_job(job, Job::failed, "", &e);
         }
         encoder = std::move(*enc);
       }
-      for (int64_t f = 0; f < frames; ++f) {
-        if (job->cancel.load()) {
-          cleanup();
-          return finish_job(job, Job::cancelled, "Stopped");
-        }
-        auto png = frame_at(pg, double(f) / fps, timeout);
-        if (!png) {
-          cleanup();
-          const Error e = png.error();
-          return finish_job(job, Job::failed, "", &e);
-        }
-        char name[32];
-        std::snprintf(name, sizeof name, "frame_%06lld.png", static_cast<long long>(f));
-        const fs::path file = folder / name;
-        if (!storage::atomic_write(file, *png)) {
-          cleanup();
-          const Error e{ErrorCode::IoError, "W_WRITE", "A frame could not be written to " + to_utf8(folder) + ".", {}, {}};
-          return finish_job(job, Job::failed, "", &e);
-        }
-        if (encoder) {
-          auto still = media::read_still(to_utf8(file), width, height);
-          if (!still || !encoder->video(still->nv12.data(), f)) {
-            cleanup();
-            const Error e{ErrorCode::IoError, "W_ENCODE", "A frame could not be encoded.", {}, {}};
-            return finish_job(job, Job::failed, "", &e);
+
+      // What the pages share. An .mp4 is encoded in order on this thread, so the pages draw at most a few frames ahead of it.
+      std::mutex m;
+      std::condition_variable cv;
+      int64_t handed = 0, encoded = 0;              // the next frame to draw; frames encoded so far
+      std::map<int64_t, std::vector<uint8_t>> drawn; // .mp4: frames drawn and not yet encoded, as NV12
+      std::optional<Error> failure;
+      std::vector<std::string> console;
+      int running = workers;
+      std::atomic<int64_t> written{0};
+      const int64_t lead = int64_t(workers) * 3;
+      const auto stopped = [&] { return failure.has_value() || job->cancel.load(); };
+      const auto draw = [&](int k) {
+        prof::set_thread_name("atm-web-page");
+        std::error_code wec;
+        Page pg;
+        const auto give_up = [&](const Error &e) {
+          std::lock_guard lock(m);
+          if (!failure)
+            failure = e;
+        };
+        try {
+        if (auto opened = open_page(pg, exe, work / ("profile" + std::to_string(k)), url, width, height, transparent, network, timeout); !opened)
+          give_up(opened.error());
+        else
+          for (;;) {
+            int64_t f = 0;
+            {
+              std::unique_lock lock(m);
+              while (!stopped() && handed < frames && mp4 && handed >= encoded + lead)
+                cv.wait_for(lock, std::chrono::milliseconds(100));
+              if (stopped() || handed >= frames)
+                break;
+              f = handed++;
+            }
+            auto shot = frame_at(pg, double(f) / fps, timeout, mp4 ? "jpeg" : "png");
+            if (!shot) {
+              give_up(shot.error());
+              break;
+            }
+            char name[32];
+            std::snprintf(name, sizeof name, mp4 ? "frame_%06lld.jpg" : "frame_%06lld.png", static_cast<long long>(f));
+            const fs::path file = folder / name;
+            if (!storage::atomic_write(file, *shot)) {
+              give_up(Error{ErrorCode::IoError, "W_WRITE", "A frame could not be written to " + to_utf8(folder) + ".", {}, {}});
+              break;
+            }
+            if (mp4) {
+              auto still = media::read_still(to_utf8(file), width, height);
+              fs::remove(file, wec);
+              if (!still) {
+                give_up(Error{ErrorCode::IoError, "W_ENCODE", "A frame could not be read back to encode.", {}, {}});
+                break;
+              }
+              std::lock_guard lock(m);
+              drawn.emplace(f, std::move(still->nv12));
+            } else {
+              job->units_done.store(written.fetch_add(1) + 1);
+            }
+            cv.notify_all();
           }
-          fs::remove(file, ec);
+        } catch (const std::exception &e) {
+          give_up(Error{ErrorCode::Internal, "W_INTERNAL", std::string("A page stopped drawing: ") + e.what(), {}, {}});
         }
-        job->units_done.store(f + 1);
+        pg.browser.close();
+        std::lock_guard lock(m);
+        console.insert(console.end(), pg.console.begin(), pg.console.end());
+        --running;
+        cv.notify_all();
+      };
+      std::vector<std::thread> pages;
+      for (int k = 0; k < workers; ++k)
+        pages.emplace_back(draw, k);
+      {
+        std::lock_guard lock(job->mutex);
+        job->detail = "Drawing";
+      }
+      while (encoder) {
+        std::vector<uint8_t> nv12;
+        {
+          std::unique_lock lock(m);
+          while (!stopped() && running > 0 && !drawn.count(encoded))
+            cv.wait_for(lock, std::chrono::milliseconds(100));
+          if (stopped() || !drawn.count(encoded))
+            break;
+          nv12 = std::move(drawn[encoded]);
+          drawn.erase(encoded);
+        }
+        if (!encoder->video(nv12.data(), encoded)) {
+          std::lock_guard lock(m);
+          failure = Error{ErrorCode::IoError, "W_ENCODE", "A frame could not be encoded.", {}, {}};
+          break;
+        }
+        {
+          std::lock_guard lock(m);
+          ++encoded;
+        }
+        cv.notify_all();
+        job->units_done.store(encoded);
+        if (encoded == frames)
+          break;
+      }
+      cv.notify_all();
+      for (std::thread &t : pages)
+        t.join();
+      const auto cleanup = [&] {
+        encoder.reset();
+        fs::remove_all(work, ec);
+      };
+      if (job->cancel.load()) {
+        cleanup();
+        return finish_job(job, Job::cancelled, "Stopped");
+      }
+      if (failure) {
+        cleanup();
+        return finish_job(job, Job::failed, "", &*failure);
       }
       if (encoder)
         if (auto done = encoder->finish(); !done) {
@@ -548,17 +639,18 @@ Result<json> Engine::Impl::web_render(const json &params) {
           const Error e = done.error();
           return finish_job(job, Job::failed, "", &e);
         }
-      const std::vector<std::string> console = pg.console;
       cleanup();
+      if (console.size() > 20)
+        console.resize(20);
       {
         std::lock_guard lock(job->mutex);
-        job->result = {{"path", out}, {"frames", frames}, {"fps", fps}, {"width", width}, {"height", height}, {"transparent", transparent}};
+        job->result = {{"path", out}, {"frames", frames}, {"fps", fps}, {"width", width}, {"height", height}, {"transparent", transparent}, {"workers", workers}};
         if (!console.empty())
           job->result["page_errors"] = console;
       }
       finish_job(job, Job::done, "Drawn");
     } catch (const std::exception &e) {
-      cleanup();
+      fs::remove_all(work, ec);
       const Error err{ErrorCode::Internal, "W_INTERNAL", std::string("The render stopped: ") + e.what(), {}, {}};
       finish_job(job, Job::failed, "", &err);
     }

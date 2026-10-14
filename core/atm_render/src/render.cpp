@@ -2245,7 +2245,30 @@ bool Renderer::still_of(const Layer &l, int64_t frame) {
   const std::string file = picture_path(l, frame);
   if (stills_.count(l.clip_id) && still_paths_[l.clip_id] == file)
     return true;
-  auto still = media::read_still(file, width_, height_);
+  std::optional<Result<media::Still>> read;
+  if (l.is_sequence) {
+    // The pictures of the next frames are read ahead on other threads (decoding a PNG takes longer than drawing it); one
+    // already read is taken, the rest that are no longer ahead are dropped.
+    auto &ahead = ahead_[l.clip_id];
+    std::vector<std::pair<std::string, std::future<Result<media::Still>>>> kept;
+    for (auto &entry : ahead)
+      if (entry.first == file)
+        read = entry.second.get();
+      else
+        kept.push_back(std::move(entry));
+    std::vector<std::string> wanted;
+    for (int64_t next = frame + 1; next <= frame + 24 && next < l.start_frame + l.frames && wanted.size() < 6; ++next)
+      if (std::string path = picture_path(l, next); path != file && std::find(wanted.begin(), wanted.end(), path) == wanted.end())
+        wanted.push_back(std::move(path));
+    ahead.clear();
+    for (auto &entry : kept)
+      if (std::find(wanted.begin(), wanted.end(), entry.first) != wanted.end())
+        ahead.push_back(std::move(entry));
+    for (const std::string &path : wanted)
+      if (std::none_of(ahead.begin(), ahead.end(), [&](const auto &entry) { return entry.first == path; }))
+        ahead.emplace_back(path, std::async(std::launch::async, [path, w = width_, h = height_] { return media::read_still(path, w, h); }));
+  }
+  auto still = read ? std::move(*read) : media::read_still(file, width_, height_);
   if (!still) {
     failed_[l.clip_id] = true;
     if (warning_.empty())

@@ -536,6 +536,7 @@ TEST_CASE("gen: the Clip node's Duration is held to what the model behind it can
   const auto long_clip = check_clip(json::object(), clips, "clp_a");
   CHECK(rules(long_clip) == "G_RANGE");
   CHECK(long_clip[0].path == "clp_a/timing/duration");
+  // Shorter than the model's shortest take is allowed: the take is made at the shortest length and the timeline shows the clip's part.
   clips["clp_a"]["timing"]["duration"] = "1/2";
-  CHECK(rules(check_clip(json::object(), clips, "clp_a")) == "G_RANGE");
+  CHECK(check_clip(json::object(), clips, "clp_a").empty());
 }

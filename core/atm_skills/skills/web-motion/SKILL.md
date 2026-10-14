@@ -24,7 +24,8 @@ Use generated video for people, places and things that move in the world; put we
 4. **Put it in the film**: `timeline.edit add_clip {path: "<folder>", at, track: "new"}`. A sequence on a track above the video
    lays its transparent parts over it. Trim, move and fade it like any clip.
 
-About 10-15 frames a second at 1080p: a 5 s title takes about 10 s to render.
+Several pages draw at once (one per second of animation, up to 6): about 25-40 frames a second at 1080p, so a 5 s title renders
+in about 5 s. Putting a long sequence on the timeline does not slow the export: its pictures are read ahead.
 
 ## How to animate so every frame is exact
 
@@ -37,6 +38,9 @@ Attome does not play the page in real time: before each frame it sets the page's
   animations were set; draw everything that depends on time in it (counters, charts, canvas).
 - **Do not use** `setTimeout` or `setInterval` for animation, CSS `transition` on hover or class changes made later, or anything
   that waits for the network. Put every library and font in the folder (the page has no internet unless `network: true`).
+- **Draw each frame from its time alone.** The frames are shared out between several pages, so one page does not see every
+  frame or see them in order. Compute positions from `t` (an easing of `t`, a seeded random); never step a simulation from the
+  frame before. A page that must carry something from frame to frame renders with `workers: 1`.
 - Animations start at time 0 when the page loads. Stagger with `animation-delay`, not with timers.
 - Use `animation-fill-mode: both` (or `forwards`) so a thing stays where it ends and is hidden before it starts.
 

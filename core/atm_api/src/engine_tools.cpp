@@ -330,7 +330,8 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
      "with timeline.edit add_clip {path: <the folder or the .mp4>, track: \"new\"}: a sequence keeps its transparency over the video below.",
      R"({"type":"object","properties":{"html":{"type":"string"},"path":{"type":"string"},"output":{"type":"string","description":"A folder, or an .mp4"},
        "seconds":{"type":"number"},"frames":{"type":"integer"},"fps":{"type":"number","description":"Default 24; match the sequence"},
-       "width":{"type":"integer"},"height":{"type":"integer"},"transparent":{"type":"boolean"},"network":{"type":"boolean"},"timeout":{"type":"number"}},"required":["output"]})",
+       "width":{"type":"integer"},"height":{"type":"integer"},"transparent":{"type":"boolean"},"network":{"type":"boolean"},"timeout":{"type":"number"},
+       "workers":{"type":"integer","description":"Pages that draw at once (default: one a second of animation, up to 6). 1 for a page that carries anything from one frame to the next"}},"required":["output"]})",
      &Impl::web_render},
     {"blender.status", "blender", false,
      "Is a Blender on this computer, which one and its version, and what blender.install would fetch (a file, its size, its licence). Attome runs "

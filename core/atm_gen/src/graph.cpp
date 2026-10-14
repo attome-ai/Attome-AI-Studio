@@ -861,7 +861,9 @@ void check_clip(const json &library, const json &variables, const json &cast, co
       if (it->is_object() && read_end(*it, "from", from_node, from_port) && read_end(*it, "to", to_node, to_port) && wf_nodes.contains(from_node) &&
           wf_nodes.contains(to_node) && short_name(string_at(wf_nodes[from_node], "kind")) == "clip" && from_port == "duration")
         if (const ModelDecl *model = model_of(wf_nodes[to_node]))
-          if (const std::string wrong = input_problem(*model, to_port, seconds); !wrong.empty())
+          // A clip shorter than the model's shortest take is made at that length and cut on the timeline.
+          if (const std::string wrong = input_problem(*model, to_port, to_port == "seconds" && !run_time_length && seconds > 0.0 ? std::max(seconds, model->seconds_min) : seconds);
+              !wrong.empty())
             add_at("G_RANGE", clip_id + (run_time_length ? "/media_ref/asked_length" : "/timing/duration"), "The length clip " + clip_id + " asks for " + wrong + ".",
                    "Ask for a length the model " + model->id + " can make.");
     }

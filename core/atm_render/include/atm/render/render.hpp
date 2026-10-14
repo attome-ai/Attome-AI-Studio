@@ -7,6 +7,7 @@
 
 #include <array>
 #include <cstdint>
+#include <future>
 #include <memory>
 #include <optional>
 #include <string>
@@ -252,6 +253,8 @@ private:
   bool still_of(const Layer &l, int64_t frame); // reads a picture clip's still into stills_ (once; a sequence's at each new picture); false (and a warning) when it does not read
   std::string picture_path(const Layer &l, int64_t frame) const; // the file a picture clip shows on a frame: its own, or the sequence's picture of that frame
   std::unordered_map<std::string, std::string> still_paths_; // the file each still in stills_ was read from
+  // A sequence's next pictures, being read on other threads while this one draws, by clip ID: (file, its read).
+  std::unordered_map<std::string, std::vector<std::pair<std::string, std::future<Result<media::Still>>>>> ahead_;
   std::vector<uint8_t> mix_;                          // the incoming clip of a dissolve, drawn over the same background
   std::vector<uint8_t> adjust_, scratch_;             // an adjustment layer's copy of the picture below it
   std::vector<uint8_t> over_black_, over_white_, cover_; // a clip with effects, drawn on its own (see draw_isolated)

@@ -201,6 +201,10 @@ std::vector<GenOutcome> run_generation(const GenRun &run, const GenProgress &pro
         request.inputs["width"] = w;
         request.inputs["height"] = h;
       }
+      // A clip shorter than the model's shortest take gets that take; the timeline plays only the clip's own length of it.
+      if (const gen::ModelDecl *decl = gen::find_model(model); decl && request.inputs.value("seconds", json()).is_number() &&
+                                                                request.inputs["seconds"].get<double>() < decl->seconds_min)
+        request.inputs["seconds"] = decl->seconds_min;
       if (const gen::KindDef *def = gen::find_kind(kind))
         for (const gen::PortDef &port : def->outputs)
           request.outputs[port.name] = to_utf8(part / gen::output_file(port.name));

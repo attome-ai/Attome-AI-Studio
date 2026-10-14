@@ -54,17 +54,42 @@ tl::unexpected<Error> unreadable(const std::string &path) {
 
 // Colours under fully transparent pixels take the mean of their known neighbours, a ring at a time (two rings: enough
 // for bilinear sampling, even scaled up). Visible pixels count by their opacity, filled ones a little.
+// Only pixels next to a known one can take a colour, so each ring visits just those (an overlay that is mostly
+// transparent is not walked pixel by pixel).
 void bleed(std::vector<uint8_t> &rgba, int w, int h) {
   std::vector<uint8_t> known(size_t(w) * size_t(h));
+  std::vector<size_t> edge; // the known pixels the next ring grows from
   for (size_t i = 0; i < known.size(); ++i)
-    known[i] = rgba[i * 4 + 3] != 0 ? 2 : 0; // 2: seen, 1: filled, 0: not yet
+    known[i] = rgba[i * 4 + 3] != 0 ? 2 : 0; // 2: seen, 1: filled, 3: in this ring, 0: not yet
+  for (int y = 0; y < h; ++y)
+    for (int x = 0; x < w; ++x) {
+      const size_t i = size_t(y) * size_t(w) + size_t(x);
+      if (known[i] == 2 && ((x > 0 && !known[i - 1]) || (x + 1 < w && !known[i + 1]) || (y > 0 && !known[i - size_t(w)]) ||
+                            (y + 1 < h && !known[i + size_t(w)]) || (x > 0 && y > 0 && !known[i - size_t(w) - 1]) ||
+                            (x + 1 < w && y > 0 && !known[i - size_t(w) + 1]) || (x > 0 && y + 1 < h && !known[i + size_t(w) - 1]) ||
+                            (x + 1 < w && y + 1 < h && !known[i + size_t(w) + 1])))
+        edge.push_back(i);
+    }
   for (int pass = 0; pass < 2; ++pass) {
+    std::vector<size_t> ring;
+    for (const size_t e : edge) {
+      const int ex = int(e % size_t(w)), ey = int(e / size_t(w));
+      for (int dy = -1; dy <= 1; ++dy)
+        for (int dx = -1; dx <= 1; ++dx) {
+          const int nx = ex + dx, ny = ey + dy;
+          if (nx < 0 || ny < 0 || nx >= w || ny >= h)
+            continue;
+          const size_t j = size_t(ny) * size_t(w) + size_t(nx);
+          if (!known[j]) {
+            known[j] = 3;
+            ring.push_back(j);
+          }
+        }
+    }
     std::vector<size_t> filled;
-    for (int y = 0; y < h; ++y)
-      for (int x = 0; x < w; ++x) {
-        const size_t i = size_t(y) * size_t(w) + size_t(x);
-        if (known[i])
-          continue;
+    for (const size_t i : ring) {
+      const int x = int(i % size_t(w)), y = int(i / size_t(w));
+      {
         int sum[3] = {0, 0, 0}, weight = 0;
         for (int dy = -1; dy <= 1; ++dy)
           for (int dx = -1; dx <= 1; ++dx) {
@@ -77,16 +102,20 @@ void bleed(std::vector<uint8_t> &rgba, int w, int h) {
               sum[c] += rgba[j * 4 + size_t(c)] * k;
             weight += k;
           }
-        if (weight == 0)
+        if (weight == 0) {
+          known[i] = 0;
           continue;
+        }
         for (int c = 0; c < 3; ++c)
           rgba[i * 4 + size_t(c)] = uint8_t(sum[c] / weight);
         filled.push_back(i);
       }
+    }
     if (filled.empty())
       break;
     for (size_t i : filled) // marked after the pass, so a ring only reads the rings inside it
       known[i] = 1;
+    edge = std::move(filled);
   }
 }
 
