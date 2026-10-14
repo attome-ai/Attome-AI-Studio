@@ -64,5 +64,12 @@ at the origin sees a text made by `ab.text3d` the right way round.
 - **Time:** eevee at 1080p draws a frame in about a second on a graphics card; cycles ten to a hundred times that. Choose by the
   shot, say the estimate before a long render, and use `quality: "draft"` to measure.
 - **Colour:** a title in pure white on pure black looks harsh; keep a little colour in the light and the world.
+- **Glow:** Blender's default view transform (AgX) turns bright emission pastel. For saturated neon set
+  `bpy.context.scene.view_settings.view_transform = 'Standard'` and keep emission strength near 1 to 2: above that it clips to white.
+- **Floors:** a glossy floor under an area light shows a hot white spot. Use roughness 0.9 and a dark colour, or no floor.
+- **Words that must face the camera** while their parent turns: a `TRACK_TO` constraint with `track_axis = 'TRACK_Z'` and `up_axis = 'UP_Y'`
+  (a text's front is its +Z); `TRACK_NEGATIVE_Z` shows it mirrored.
+- **Many moving objects:** a driver with a simple `sin(frame * ...)` expression moves hundreds of them for nothing (no keyframes).
+- **Check the framing at the widest moment of the move:** text that fits at the start of a push-in is cropped at its end.
 - **Do not write a person's name, a brand or a story into a general recipe**; keep what you learn here in general terms (the
   skill `film` says how).
