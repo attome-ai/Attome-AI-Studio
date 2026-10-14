@@ -85,6 +85,12 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
        "part":{"type":"string","enum":["both","sound","picture"],"description":"For a video with its sound inside it: keep only its sound, or only its picture"}},"required":["project","clips"]})",
      &Impl::library_add},
     {"library.list", "library", false, "The items of the user's clip library, the newest first.", R"({"type":"object","properties":{}})", &Impl::library_list},
+    {"library.add_character", "library", false,
+     "Keep an entry of the project's cast in the user's library, with copies of its pictures and voice, so any other project can use it. "
+     "library.insert on the item then adds a copy of it to that project's cast (under another name when the cast already has the name).",
+     R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},
+       "character":{"type":"string","description":"The entry's name or chr_ ID"},"name":{"type":"string"}},"required":["project","character"]})",
+     &Impl::library_add_character},
     {"library.get", "library", false,
      "One library item with its clips: each {clip, audio, offset}. To put it in a project, pass them as snapshots to timeline.edit's duplicate "
      "op ({\"snapshot\": clip, \"track\", \"at\": start + offset}).",

@@ -558,6 +558,7 @@ struct Tile {
   std::function<void(ImDrawList *, ImVec2, ImVec2)> art;  // draws the preview inside the tile's rectangle
   std::string payload;                                    // "<kind>:<id>": what the tile carries when it is dragged
   bool selected = false;                                  // the card that is picked: the Inspector shows it
+  std::function<void()> menu;                             // the items of its right-click menu, "" none
 };
 
 // What a card of a left panel answers to: one click picks it (the Inspector shows its properties), a double click or a drag adds it.
@@ -589,6 +590,10 @@ inline TileHit tile_hit(TileGrid &g, const Tile &t) {
   if (!t.mark.empty())
     ui_mark(t.mark);
   const bool hovered = ImGui::IsItemHovered();
+  if (t.menu && ImGui::BeginPopupContextItem(("##tctx_" + t.id).c_str())) {
+    t.menu();
+    ImGui::EndPopup();
+  }
   const bool by_key = tile_pressed && !ImGui::IsMouseReleased(0); // Enter or Space on the focused card opens it, as a double click does
   const bool clicked = card_source(t.payload, t.label.c_str());
   // A double click opens; the release that ends it is not a second pick.

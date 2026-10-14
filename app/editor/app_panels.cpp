@@ -352,13 +352,13 @@ void App::draw_library_panel() {
     if (client_.call("library.list", json::object(), result, error))
       library_items_ = result.value("items", json::array());
   }
-  static const std::string kinds[] = {"All", "Video", "Audio"};
+  static const std::string kinds[] = {"All", "Video", "Audio", "Cast"};
   panel_tabs("tab", kinds, library_kind_);
   ImGui::NewLine();
   ImGui::Spacing();
   if (library_items_.empty()) {
     ImGui::TextColored(hexv(look::fg2), "Nothing is kept yet.");
-    panel_hint("Clips kept here can be used in any project. Right-click clips on the timeline and choose Add to the library.");
+    panel_hint("What is kept here can be used in any project. Right-click a clip, a file or a cast card and choose Add to the library.");
     return;
   }
   ImGui::SetNextItemWidth(-1.0f);
@@ -382,10 +382,13 @@ void App::draw_library_panel() {
     const std::string id = item.value("id", std::string()), name = item.value("name", std::string("Clip"));
     if (!wanted.empty() && lower(name).find(wanted) == std::string::npos)
       continue;
-    if (library_kind_ == 1 && !item.value("picture", false))
+    const bool person = item.value("kind", std::string("clip")) == "character";
+    if (library_kind_ == 1 && (person || !item.value("picture", false)))
       continue; // Video: it has a picture
-    if (library_kind_ == 2 && item.value("picture", false))
+    if (library_kind_ == 2 && (person || item.value("picture", false)))
       continue; // Audio: sound only
+    if (library_kind_ == 3 && !person)
+      continue; // Cast: a character kept from a project's cast
     std::string thumb = item.value("picture_path", std::string()); // the clip's own file; the item's frame is canvas-shaped, with bars
     if (thumb.empty())
       thumb = item.value("thumb", std::string());
@@ -405,7 +408,7 @@ void App::draw_library_panel() {
     const bool add_by_double_click = (hovered && ImGui::IsMouseDoubleClicked(0)) || (card_pressed && !ImGui::IsMouseReleased(0)); // or Enter on the card
     bool add_now = add_by_double_click;
     if (ImGui::BeginPopupContextItem("##libctx")) {
-      if (menu_item("Add at the playhead"))
+      if (menu_item(person ? "Add to the cast" : "Add at the playhead"))
         add_now = true;
       if (menu_item("Rename")) {
         library_renaming_ = id;
@@ -434,7 +437,7 @@ void App::draw_library_panel() {
       const auto pk = peaks_.find(sound);
       draw_wave_bars(dl, pk != peaks_.end() ? &pk->second : nullptr, p, cell, thumb_h);
     } else { // not read yet: a sign of what it is
-      const std::string g = glyph(item.value("picture", false) ? icon::video : icon::audio);
+      const std::string g = glyph(person ? icon::eye : item.value("picture", false) ? icon::video : icon::audio);
       ImGui::PushFont(g_fonts.ui, 22.0f);
       const ImVec2 gs = text_size(g.c_str());
       dl->AddText(ImVec2(p.x + (cell - gs.x) * 0.5f, p.y + (thumb_h - gs.y) * 0.5f), hex(look::fg3), g.c_str());
@@ -480,7 +483,10 @@ void App::draw_library_panel() {
       }
       dl->AddText(ImVec2(p.x + 2.0f, p.y + thumb_h + 4.0f), hex(look::fg), shown.c_str());
       char info[48];
-      std::snprintf(info, sizeof info, "%.1f s  -  %d %s", item.value("seconds", 0.0), item.value("clips", 1), item.value("clips", 1) == 1 ? "clip" : "clips");
+      if (person)
+        std::snprintf(info, sizeof info, "Cast");
+      else
+        std::snprintf(info, sizeof info, "%.1f s  -  %d %s", item.value("seconds", 0.0), item.value("clips", 1), item.value("clips", 1) == 1 ? "clip" : "clips");
       dl->AddText(ImVec2(p.x + 2.0f, p.y + thumb_h + 20.0f), hex(look::fg3), info);
     }
     if (hovered && !ImGui::IsMouseDown(0))
@@ -494,7 +500,7 @@ void App::draw_library_panel() {
   if (column == 0 && !wanted.empty() && std::none_of(library_items_.begin(), library_items_.end(), [&](const json &i) { return lower(i.value("name", std::string())).find(wanted) != std::string::npos; }))
     ImGui::TextColored(hexv(look::fg2), "Nothing kept matches.");
   ImGui::EndChild();
-  panel_hint("Clips kept here can be used in any project. Right-click clips on the timeline and choose Add to the library. Click one to see it; "
+  panel_hint("What is kept here can be used in any project: clips and people from the cast. Right-click one on the timeline, in Media or in Cast and choose Add to the library. Click one to see it; "
              "double-click it, or drag it onto the timeline, to add it.");
   if (!remove_id.empty()) {
     json ignored;

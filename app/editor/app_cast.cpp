@@ -244,6 +244,16 @@ void App::draw_cast_panel() {
       }
       draw_icon_art(dl, p, q, kind == 0 ? icon::eye : kind == 1 ? icon::video : icon::star, look::fg3, 34.0f);
     };
+    t.menu = [this, id, name] {
+      if (menu_item("Add to the library"))
+        pending_ = [this, id, name] {
+          json result;
+          if (rpc("library.add_character", {{"project", project_path_}, {"character", id}}, result)) {
+            library_stale_ = true;
+            say("\"" + name + "\" is in the library. Any project can use it: the Library panel on the left.");
+          }
+        };
+    };
     const TileHit hit = tile_hit(grid, t);
     if (hit != TileHit::none) {
       cast_open(id);

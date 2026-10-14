@@ -1,6 +1,8 @@
 // The library, the skills and the guide: library.*, media import and removal, skill.*, guide.get, fonts.
 #include "engine_impl.hpp"
 
+#include "atm/gen/cast.hpp"
+
 namespace atm::api {
 
   // Skills: how-to guides for agents. The built-in ones ship with Attome; a project keeps its own under "skills" (skl_ IDs), and those
@@ -221,6 +223,94 @@ Result<json> Engine::Impl::library_add(const json &params) {
   return json{{"id", item_id}, {"name", name}, {"clips", clips.size()}, {"seconds", seconds}};
 }
 
+  // library.add_character {project, character, name?}: an entry of the project's cast becomes an item of the library, with copies of its
+  // pictures and its voice, so any project can use it. The item has kind "character" and keeps the entry as it is ("entry"), its files
+  // named relative to the item's folder.
+Result<json> Engine::Impl::library_add_character(const json &params) {
+  ATM_TRY(Project *pr, project(params));
+  ATM_TRY(const std::string *who, string_param(params, "character"));
+  const json cast = pr->doc.root().value("cast", json::object());
+  const std::string cid = gen::cast_id(cast, *who);
+  if (cid.empty())
+    return fail(ErrorCode::UnknownId, "L_CAST", "The cast has no \"" + *who + "\".", {}, "character.list names the entries.");
+  json entry = cast[cid];
+  ATM_TRY(fs::path base, library_root());
+  const std::string item_id = new_id("lib");
+  const fs::path dir = base / item_id;
+  ATM_CHECK(storage::make_dirs(dir / "media"));
+  int n = 0;
+  const auto keep = [&](const std::string &given) -> Result<std::string> {
+    fs::path from = to_path(given);
+    if (from.is_relative())
+      from = pr->dir / from;
+    std::error_code ec;
+    if (!fs::is_regular_file(from, ec))
+      return fail(ErrorCode::NotFound, "L_MISSING", "The file \"" + to_utf8(from) + "\" of the entry is not there, so it cannot be kept in the library.");
+    const std::string rel = "media/" + std::to_string(n++) + "_" + to_utf8(from.filename());
+    fs::copy_file(from, dir / to_path(rel), fs::copy_options::overwrite_existing, ec);
+    if (ec)
+      return fail(ErrorCode::Internal, "L_COPY", "The file \"" + to_utf8(from) + "\" could not be copied into the library: " + ec.message());
+    return rel;
+  };
+  std::string thumb;
+  if (entry.contains("references") && entry["references"].is_array())
+    for (json &r : entry["references"])
+      if (r.is_object() && r.value("path", std::string()).size()) {
+        ATM_TRY(std::string rel, keep(r["path"].get<std::string>()));
+        r["path"] = rel;
+        if (thumb.empty())
+          thumb = rel;
+      }
+  if (entry.contains("voice") && entry["voice"].is_object() && entry["voice"].value("path", std::string()).size()) {
+    ATM_TRY(std::string rel, keep(entry["voice"]["path"].get<std::string>()));
+    entry["voice"]["path"] = rel;
+  }
+  std::string name = params.value("name", std::string());
+  if (name.empty())
+    name = entry.value("name", std::string("Character"));
+  json item = {{"id", item_id}, {"name", name}, {"kind", "character"}, {"made", utc_now_iso8601()}, {"seconds", 0.0},
+               {"picture", false}, {"sound", false}, {"clips", json::array()}, {"entry", std::move(entry)}};
+  if (!thumb.empty())
+    item["thumb"] = thumb;
+  ATM_CHECK(storage::atomic_write(dir / "item.json", item.dump(2)));
+  return json{{"id", item_id}, {"name", name}, {"kind", "character"}};
+}
+
+  // The cast entry of a library item of kind character goes into the project (library.insert does this for such an item): copies of its
+  // files go into the project and the entry is created under its name, or the name and a number when the cast already has it.
+Result<json> Engine::Impl::library_use_character(const json &params, const json &item) {
+  ATM_TRY(Project *pr, project(params));
+  ATM_TRY(fs::path base, library_root());
+  const fs::path dir = base / item.value("id", std::string());
+  json entry = item.value("entry", json::object());
+  const auto absolute = [&](json &file) {
+    if (file.is_object() && file.contains("path") && file["path"].is_string())
+      file["path"] = to_utf8(dir / to_path(file["path"].get<std::string>()));
+  };
+  json args = {{"project", to_utf8(pr->dir)}, {"kind", entry.value("kind", std::string("character"))}};
+  for (const char *text : {"description", "personality"})
+    if (entry.contains(text))
+      args[text] = entry[text];
+  if (entry.contains("attributes"))
+    args["attributes"] = entry["attributes"];
+  if (entry.contains("references") && entry["references"].is_array()) {
+    for (json &r : entry["references"])
+      absolute(r);
+    args["references"] = entry["references"];
+  }
+  if (entry.contains("voice") && entry["voice"].is_object()) {
+    absolute(entry["voice"]);
+    args["voice"] = entry["voice"].value("path", std::string());
+  }
+  const std::string wanted = entry.value("name", item.value("name", std::string("Character")));
+  const json cast = pr->doc.root().value("cast", json::object());
+  std::string name = wanted;
+  for (int n = 2; !gen::cast_id(cast, name).empty(); ++n)
+    name = wanted + " " + std::to_string(n);
+  args["name"] = name;
+  return character_create(args);
+}
+
 Result<json> Engine::Impl::library_read(const std::string &id) const {
   ATM_TRY(fs::path base, library_root());
   if (id.empty() || id.find_first_of("/\\.") != std::string::npos)
@@ -238,6 +328,8 @@ Result<json> Engine::Impl::library_read(const std::string &id) const {
 Result<json> Engine::Impl::library_insert(const json &params) {
   ATM_TRY(Project *pr, project(params));
   ATM_TRY(json item, library_read(params.value("id", std::string())));
+  if (item.value("kind", std::string("clip")) == "character")
+    return library_use_character(params, item);
   const json &root = pr->doc.root();
   ATM_TRY(const SequenceRef sq, sequence_of(root, params));
   const std::string &seq = sq.id;
@@ -368,7 +460,7 @@ Result<json> Engine::Impl::library_list(const json &) {
     const auto item = library_read(to_utf8(entry.path().filename()));
     if (!item)
       continue;
-    json brief = {{"id", (*item)["id"]}, {"name", item->value("name", std::string())}, {"made", item->value("made", std::string())},
+    json brief = {{"kind", item->value("kind", std::string("clip"))}, {"id", (*item)["id"]}, {"name", item->value("name", std::string())}, {"made", item->value("made", std::string())},
                   {"seconds", item->value("seconds", 0.0)}, {"picture", item->value("picture", false)}, {"sound", item->value("sound", false)},
                   {"clips", item->value("clips", json::array()).size()}};
     if (item->contains("thumb"))

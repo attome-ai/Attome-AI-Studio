@@ -456,7 +456,7 @@ void App::draw_pick_inspector() {
       return;
     }
     const std::string name = item.value("name", std::string("Clip"));
-    if (begin_card("##pick", name.c_str(), item.value("picture", false) ? "Video" : "Audio")) {
+    if (begin_card("##pick", name.c_str(), item.value("kind", std::string("clip")) == "character" ? "Cast" : item.value("picture", false) ? "Video" : "Audio")) {
       std::string thumb = item.value("picture_path", std::string());
       if (thumb.empty())
         thumb = item.value("thumb", std::string());
@@ -474,14 +474,15 @@ void App::draw_pick_inspector() {
           const ImVec2 corner(p.x + (w - tw) * 0.5f, p.y + (h - th) * 0.5f);
           dl->AddImageRounded(ImTextureID(reinterpret_cast<intptr_t>(tex->second)), corner, ImVec2(corner.x + tw, corner.y + th), ImVec2(0, 0), ImVec2(1, 1), IM_COL32_WHITE, 8.0f);
         } else {
-          draw_icon_art(dl, p, q, item.value("picture", false) ? icon::video : icon::audio, look::fg3, 36.0f);
+          draw_icon_art(dl, p, q, item.value("kind", std::string("clip")) == "character" ? icon::eye : item.value("picture", false) ? icon::video : icon::audio, look::fg3, 36.0f);
         }
       });
+      const bool person = item.value("kind", std::string("clip")) == "character";
       char info[64];
       std::snprintf(info, sizeof info, "%.1f s  -  %d %s", item.value("seconds", 0.0), item.value("clips", 1), item.value("clips", 1) == 1 ? "clip" : "clips");
-      ImGui::TextColored(hexv(look::fg2), "%s", info);
+      ImGui::TextColored(hexv(look::fg2), "%s", person ? "A person, place or thing from a cast, with its pictures and voice." : info);
       ImGui::Spacing();
-      if (soft_button("pick_add_library", "Add at the playhead", ImVec2(-1.0f, 30.0f), true, true))
+      if (soft_button("pick_add_library", person ? "Add to the cast" : "Add at the playhead", ImVec2(-1.0f, 30.0f), true, true))
         pending_ = [this, id = pick_.id] { insert_library(id, playhead_, {}, true); };
       if (soft_button("pick_remove_library", "Remove from the library", ImVec2(-1.0f, 28.0f)))
         pending_ = [this, id = pick_.id] {
