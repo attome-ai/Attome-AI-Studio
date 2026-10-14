@@ -151,6 +151,8 @@ TEST_CASE("gen.create_clip: a continuation starts where the clip before ends, sk
   CHECK(err(engine, "gen.create_clip", {{"project", project}, {"prompt", "x"}, {"model", kH3}, {"settings", {{"stage", "huge"}}}}).rule == "G_SETTING");
   CHECK(err(engine, "gen.create_clip", {{"project", project}, {"prompt", "x"}, {"model", kH3}, {"settings", {{"sparse_keep_percent", 250}}}}).rule ==
         "G_SETTING");
+  CHECK(err(engine, "gen.create_clip", {{"project", project}, {"prompt", "x"}, {"model", kH3}, {"settings", {{"scheduler", "bong_tangent"}}}}).rule == "G_SETTING");
+  CHECK(err(engine, "gen.create_clip", {{"project", project}, {"prompt", "x"}, {"model", kH3}, {"settings", {{"lora_strength", 3.0}}}}).rule == "G_SETTING");
   std::error_code ec;
   fs::remove_all(dir, ec);
 }

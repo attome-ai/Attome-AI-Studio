@@ -191,6 +191,18 @@ TEST_CASE("comfyui: continuation, voice, the final stage and the memory options 
     CHECK_FALSE(server->graph.contains(absent));
   CHECK(server->graph["dec"]["inputs"]["samples"] == json::array({"sample", 0}));
   CHECK(server->graph["cond"]["class_type"] == "MiniMaxH3ImageToVideo");
+  // Without them the sampler, the schedule and the few-step add-on are what they always were (every look, anime too, stays the same).
+  CHECK(server->graph["select"]["inputs"]["sampler_name"] == "res_multistep");
+  CHECK(server->graph["sigmas"]["inputs"]["scheduler"] == "simple");
+  CHECK(server->graph["lora"]["inputs"]["strength_model"] == 1.0);
+
+  // A schedule and a weaker add-on, asked for (a live-action look: less waxy skin).
+  server->history_calls = 0;
+  REQUIRE(comfy.run(request({{"steps", 10}, {"sampler", "er_sde"}, {"scheduler", "beta"}, {"lora_strength", 0.7}}, base)));
+  CHECK(server->graph["select"]["inputs"]["sampler_name"] == "er_sde");
+  CHECK(server->graph["sigmas"]["inputs"]["scheduler"] == "beta");
+  CHECK(server->graph["sigmas"]["inputs"]["steps"] == 10);
+  CHECK(server->graph["lora"]["inputs"]["strength_model"] == 0.7);
 
   // A continuation: the last 22 frames and the sound under them anchor frame 0, and the sampler follows the guided prompt.
   json cont = base;

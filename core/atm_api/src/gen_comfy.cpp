@@ -158,7 +158,8 @@ struct H3Media {
 //  - continue_from: the last 22 frames and sound of an earlier clip are anchored at frame 0 (a seamless continuation);
 //  - voice: a sound whose timbre the speaker takes (the prompt cites it as <Audio 1>);
 //  - stage "final": the latent is enlarged by the latent upscaler and refined by a short second sampling pass;
-//  - sparse_keep_percent: block-sparse attention (faster, softer); low_memory: chunked feed-forward and attention.
+//  - sparse_keep_percent: block-sparse attention (faster, softer); low_memory: chunked feed-forward and attention;
+//  - scheduler (default simple) and lora_strength (the few-step add-on, default 1.0): other values change the look, the defaults do not.
 json h3_graph(const gen::StepRequest &r, const H3Media &media, const std::string &prefix) {
   const H3Files f = h3_files(r.model);
   const auto node = [](const char *type, json inputs) { return json{{"class_type", type}, {"inputs", std::move(inputs)}}; };
@@ -174,7 +175,7 @@ json h3_graph(const gen::StepRequest &r, const H3Media &media, const std::string
     model = {"lowvram", 0};
   }
   if (!f.lora.empty()) { // the few-step add-on, for a model that has one
-    g["lora"] = node("LoraLoaderModelOnly", {{"model", model}, {"lora_name", f.lora}, {"strength_model", 1.0}});
+    g["lora"] = node("LoraLoaderModelOnly", {{"model", model}, {"lora_name", f.lora}, {"strength_model", r.settings.value("lora_strength", 1.0)}});
     model = {"lora", 0};
   }
   if (r.settings.value("attention", std::string("int8")) == "int8") {
@@ -245,7 +246,7 @@ json h3_graph(const gen::StepRequest &r, const H3Media &media, const std::string
   }
   g["noise"] = node("RandomNoise", {{"noise_seed", r.inputs.value("seed", int64_t(0))}});
   g["select"] = node("KSamplerSelect", {{"sampler_name", r.settings.value("sampler", std::string("res_multistep"))}});
-  g["sigmas"] = node("BasicScheduler", {{"model", model}, {"scheduler", "simple"}, {"steps", r.settings.value("steps", 8)}, {"denoise", 1.0}});
+  g["sigmas"] = node("BasicScheduler", {{"model", model}, {"scheduler", r.settings.value("scheduler", std::string("simple"))}, {"steps", r.settings.value("steps", 8)}, {"denoise", 1.0}});
   g["guider"] = node("BasicGuider", {{"model", model}, {"conditioning", conditioning}});
   g["sample"] = node("SamplerCustomAdvanced", {{"noise", {"noise", 0}}, {"guider", {"guider", 0}}, {"sampler", {"select", 0}},
                                                {"sigmas", {"sigmas", 0}}, {"latent_image", {"cond", 1}}});
