@@ -514,8 +514,8 @@ void App::draw_length_by(const ClipUi &c, const json &recipe, const json &media)
         if (o.type == gen::PortType::number || o.type == gen::PortType::integer)
           outs.push_back(o.name);
       const std::string primary_name = gen::primary_output(recipe);
-      ImGui::TextColored(hexv(look::fg2), "Length set by");
-      ImGui::SameLine(88.0f);
+      ImGui::TextColored(hexv(look::fg2), "Length by");
+      ImGui::SameLine(96.0f);
       ImGui::PushStyleColor(ImGuiCol_FrameBg, hexv(look::raised));
       ImGui::SetNextItemWidth(-1.0f);
       if (ImGui::BeginCombo("##length_by", by_workflow ? ("The workflow: " + length_from).c_str() : "I set it")) {
@@ -669,7 +669,7 @@ void App::draw_workflow_card(const ClipUi &c) {
         ImGui::TextColored(kError, "needed");
       }
     } else {
-      ImGui::SameLine(88.0f);
+      ImGui::SameLine(96.0f);
     }
     ImGui::PushStyleColor(ImGuiCol_FrameBg, hexv(look::raised));
     if (e.type == gen::PortType::boolean) {
@@ -963,7 +963,7 @@ void App::draw_workflow_card(const ClipUi &c) {
       };
       ImGui::AlignTextToFramePadding();
       ImGui::TextColored(hexv(look::fg2), "Follows");
-      ImGui::SameLine(88.0f);
+      ImGui::SameLine(96.0f);
       ImGui::PushStyleColor(ImGuiCol_FrameBg, hexv(look::raised));
       ImGui::SetNextItemWidth(-1.0f);
       if (ImGui::BeginCombo("##gen_after", shown.c_str())) {
@@ -1022,7 +1022,7 @@ void App::draw_workflow_card(const ClipUi &c) {
       if (n->value("kind", std::string()) == "attome.character") {
         const std::string who = n->value("character", std::string());
         used_ids.push_back(who);
-        used_names.push_back(cast.contains(who) ? cast[who].value("name", who) : who);
+        used_names.push_back(cast.contains(who) ? cast[who].value("name", who) : who + " (gone from the cast)");
       }
     std::vector<std::pair<std::string, std::string>> others; // cast entries not in the clip: id, name
     for (auto e = cast.begin(); e != cast.end(); ++e)
@@ -1031,7 +1031,7 @@ void App::draw_workflow_card(const ClipUi &c) {
     if (face.contains("references") && (!used_ids.empty() || !others.empty())) {
       ImGui::AlignTextToFramePadding();
       ImGui::TextColored(hexv(look::fg2), "Cast");
-      ImGui::SameLine(88.0f);
+      ImGui::SameLine(96.0f);
       std::string joined;
       for (const std::string &n : used_names)
         joined += (joined.empty() ? "" : ", ") + n;
@@ -1059,7 +1059,28 @@ void App::draw_workflow_card(const ClipUi &c) {
         ui_mark("combo:gen_cast_add");
         ImGui::PopStyleColor();
       }
-      small_note("Their pictures and voices go to the model. The Cast tab keeps them.");
+      if (!used_ids.empty()) {
+        ImGui::PushStyleColor(ImGuiCol_FrameBg, hexv(look::raised));
+        ImGui::SetNextItemWidth(-1.0f);
+        if (ImGui::BeginCombo("##gen_cast_remove", "Take someone out of this clip")) {
+          for (size_t i = 0; i < used_ids.size(); ++i)
+            if (ImGui::Selectable((used_names[i] + "##r" + used_ids[i]).c_str(), false))
+              pending_ = [this, id, who = used_ids[i]] {
+                json done;
+                if (rpc("character.unuse", {{"project", project_path_}, {"clip", id}, {"character", who}}, done)) {
+                  refresh();
+                  insp_rev_ = 0;
+                  say("Taken out of the clip. Take " + done.value("prompt_name", std::string()) + " out of its prompt too.", false, true);
+                }
+              };
+            else
+              ui_mark("cast_remove_option:" + used_names[i]);
+          ImGui::EndCombo();
+        }
+        ui_mark("combo:gen_cast_remove");
+        ImGui::PopStyleColor();
+      }
+      small_note("Their pictures and voices go to the model. The Cast tab keeps them; delete one there to remove it from the project.");
       ImGui::Dummy(ImVec2(0.0f, 4.0f));
     }
   }
@@ -1082,7 +1103,7 @@ void App::draw_workflow_card(const ClipUi &c) {
       };
       ImGui::AlignTextToFramePadding();
       ImGui::TextColored(hexv(look::fg2), "Quality");
-      ImGui::SameLine(88.0f);
+      ImGui::SameLine(96.0f);
       if (ImGui::RadioButton("Preview", stage != "final") && stage == "final")
         set("stage", "preview", "Preview quality");
       ui_mark("radio:gen_stage_preview");
@@ -1098,7 +1119,7 @@ void App::draw_workflow_card(const ClipUi &c) {
         bool low = settings.value("low_memory", std::string("off")) == "on";
         ImGui::AlignTextToFramePadding();
         ImGui::TextColored(hexv(look::fg2), "Memory");
-        ImGui::SameLine(88.0f);
+        ImGui::SameLine(96.0f);
         if (ImGui::Checkbox("Use less memory", &low))
           set("low_memory", low ? "on" : "off", "Low memory");
         ui_mark("check:gen_low_memory");
@@ -1109,7 +1130,7 @@ void App::draw_workflow_card(const ClipUi &c) {
         int keep = settings.value("sparse_keep_percent", 0);
         ImGui::AlignTextToFramePadding();
         ImGui::TextColored(hexv(look::fg2), "Faster");
-        ImGui::SameLine(88.0f);
+        ImGui::SameLine(96.0f);
         ImGui::SetNextItemWidth(-1.0f);
         ImGui::SliderInt("##gen_sparse", &keep, 0, 50, keep == 0 ? "off" : "on: softer detail, %d %% kept");
         ui_mark("slider:gen_sparse");
@@ -1118,7 +1139,6 @@ void App::draw_workflow_card(const ClipUi &c) {
         if (ImGui::IsItemHovered())
           ImGui::SetTooltip("Faster by looking at only part of the clip at each step; softer detail. Off keeps everything.");
       }
-      ImGui::TreePop();
       ImGui::Dummy(ImVec2(0.0f, 4.0f));
     }
   }
@@ -1135,7 +1155,6 @@ void App::draw_workflow_card(const ClipUi &c) {
     if (!more.empty() && fold("more_inputs", ("More inputs (" + std::to_string(more.size()) + ")").c_str(), any_set)) {
       for (const gen::ExposedInput *e : more)
         draw_row(*e);
-      ImGui::TreePop();
       ImGui::Dummy(ImVec2(0.0f, 4.0f));
     }
   }
@@ -1175,7 +1194,7 @@ void App::draw_workflow_card(const ClipUi &c) {
           }
           ImGui::AlignTextToFramePadding();
           ImGui::TextColored(hexv(look::fg2), "Asks for");
-          ImGui::SameLine(88.0f);
+          ImGui::SameLine(96.0f);
           slim_slider("gen_length", &gen_len_, lo, std::max(hi, lo + 0.5f), ImGui::GetContentRegionAvail().x - 56.0f, "");
           const bool done = slider_done();
           slider_number("%4.1fs", gen_len_);
@@ -1236,7 +1255,6 @@ void App::draw_workflow_card(const ClipUi &c) {
         if (soft_button("input_add_cancel", "Cancel", ImVec2(70.0f, 28.0f)))
           add_input_open_ = false;
       }
-      ImGui::TreePop();
     }
   }
   if (gen_problems_.count(c.id)) // it cannot run here yet: there is no Generate card below, so the next shot is offered here

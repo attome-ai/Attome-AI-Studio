@@ -446,6 +446,7 @@ struct Engine::Impl {
   Result<json> character_update(const json &params);
   Result<json> character_delete(const json &params);
   Result<json> character_use(const json &params);
+  Result<json> character_unuse(const json &params);
   Result<json> gen_save_to_library(const json &params);
   Result<json> gen_reset_clip(const json &params);
   Result<json> gen_save_preset(const json &params);

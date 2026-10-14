@@ -229,6 +229,19 @@ TEST_CASE("cast: a shot that uses characters gets their pictures and one voice, 
   ok(*s.engine, "project.undo", {{"project", s.project}});
   CHECK(s.state_of(clip) == "clean");
 
+  // Taking someone out of a clip is the reverse: the node and its links go, and the one who was never in it cannot be taken out.
+  s.call("character.use", {{"clip", clip}, {"character", "Kit"}});
+  CHECK(s.fails("character.delete", {{"character", "Kit"}}).rule == "G_CAST"); // a clip reads Kit: not while it does
+  const json unused = s.call("character.unuse", {{"clip", clip}, {"character", "Kit"}});
+  CHECK(unused["prompt_name"] == "{Kit}");
+  CHECK(s.fails("character.unuse", {{"clip", clip}, {"character", "Kit"}}).rule == "G_CAST");
+  CHECK(s.fails("character.unuse", {{"clip", clip}, {"character", "Nobody"}}).rule == "G_CAST");
+  s.call("character.delete", {{"character", "Kit"}}); // no clip reads Kit now
+  ok(*s.engine, "project.undo", {{"project", s.project}}); // Kit is back
+  ok(*s.engine, "project.undo", {{"project", s.project}}); // and in the clip again
+  ok(*s.engine, "project.undo", {{"project", s.project}}); // and out of the clip, as it was
+  CHECK(s.state_of(clip) == "clean");
+
   // Someone a clip reads cannot be taken out of the cast.
   CHECK(s.fails("character.delete", {{"character", "Ren"}}).rule == "G_CAST");
 

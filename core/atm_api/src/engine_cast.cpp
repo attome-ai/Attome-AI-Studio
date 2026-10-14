@@ -371,4 +371,54 @@ Result<json> Engine::Impl::character_use(const json &params) {
               {"prompt_name", "{" + name + "}"}, {"revision", applied["revision"]}};
 }
 
+  // character.unuse {project, clip, character}: the reverse of character.use. The Character node of the entry goes from the clip's workflow with its
+  // links; when nothing else feeds them, the model's references and voice are exposed on the clip again, as they were. The prompt is not changed:
+  // take {Name} out of it. The entry may already be gone from the cast (then `character` is its chr_ ID).
+Result<json> Engine::Impl::character_unuse(const json &params) {
+  ATM_TRY(Project *pr, project(params));
+  ATM_TRY(const std::string *clip, string_param(params, "clip"));
+  ATM_TRY(const std::string *who, string_param(params, "character"));
+  const json cast = pr->doc.root().value("cast", json::object());
+  std::string id = gen::cast_id(cast, *who);
+  if (id.empty())
+    id = *who; // an entry that was deleted from the cast: its ID is what the clip's node holds
+  const doc::NodeRef *ref = pr->doc.find(*clip);
+  const json media = ref ? ref->node->value("media_ref", json::object()) : json::object();
+  const json workflow = media.value("workflow", json::object());
+  if (media.value("type", std::string()) != "workflow" || !workflow.contains("nodes"))
+    return fail(ErrorCode::UnknownId, "G_WORKFLOW", "\"" + *clip + "\" is not a generative clip.", {}, "Pass the ID of a clip made by gen.create_clip.");
+  std::string gen_node;
+  std::set<std::string> gone; // the Character nodes of this entry
+  for (auto it = workflow["nodes"].begin(); it != workflow["nodes"].end(); ++it) {
+    const std::string kind = it->value("kind", std::string());
+    if (kind == "attome.generate_video")
+      gen_node = it.key();
+    else if (kind == "attome.character" && it->value("character", std::string()) == id)
+      gone.insert(it.key());
+  }
+  if (gone.empty())
+    return fail(ErrorCode::InvalidArgument, "G_CAST", "The clip does not use \"" + *who + "\".", {}, "Nothing to do.");
+  const std::string base = *clip + "/media_ref/workflow";
+  json ops = json::array();
+  std::set<std::string> still; // "<node>:<port>" targets that other links still feed
+  if (workflow.contains("links") && workflow["links"].is_object())
+    for (auto l = workflow["links"].begin(); l != workflow["links"].end(); ++l) {
+      const json from = l->value("from", json::array()), to = l->value("to", json::array());
+      const bool ours = from.is_array() && !from.empty() && from[0].is_string() && gone.count(from[0].get<std::string>());
+      if (ours)
+        ops.push_back({{"op", "remove"}, {"path", base + "/links/" + l.key()}});
+      else if (to.is_array() && to.size() == 2 && to[0].is_string() && to[1].is_string())
+        still.insert(to[0].get<std::string>() + ":" + to[1].get<std::string>());
+    }
+  for (const std::string &n : gone)
+    ops.push_back({{"op", "remove"}, {"path", base + "/nodes/" + n}});
+  const json inputs = workflow.value("exposed", json::object()).value("inputs", json::object());
+  for (const char *port : {"references", "voice"}) // exposed again when nothing else feeds them
+    if (inputs.contains(port) && !gen_node.empty() && !still.count(gen_node + ":" + port) && !inputs[port].contains("to"))
+      ops.push_back({{"op", "add"}, {"path", base + "/exposed/inputs/" + port + "/to"}, {"value", json::array({json::array({gen_node, port})})}});
+  const std::string name = cast.contains(id) ? cast[id].value("name", id) : id;
+  ATM_TRY(json applied, project_patch({{"project", to_utf8(pr->dir)}, {"patch", {{"ops", std::move(ops)}, {"label", "Take " + name + " out of the clip"}}}}));
+  return json{{"clip", *clip}, {"character", id}, {"prompt_name", "{" + name + "}"}, {"revision", applied["revision"]}};
+}
+
 } // namespace atm::api

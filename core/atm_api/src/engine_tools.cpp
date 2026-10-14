@@ -563,6 +563,13 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
        "character":{"type":"string","description":"Its name or its chr_ ID"},"voice":{"type":"boolean","description":"Default true: also give its voice sample"}},
        "required":["project","clip","character"]})",
      &Impl::character_use},
+    {"character.unuse", "cast", true,
+     "The reverse of character.use: take an entry of the cast out of a generative clip. Its Character node and links go from the clip's workflow, and the "
+     "model's references and voice are exposed on the clip again when nothing else feeds them. The prompt is not changed: take {Name} out of it (the answer "
+     "gives prompt_name). The entry may already be deleted from the cast: give its chr_ ID.",
+     R"({"type":"object","properties":{"project":{"type":"string"},"clip":{"type":"string","description":"A generative clip"},
+       "character":{"type":"string","description":"Its name or its chr_ ID"}},"required":["project","clip","character"]})",
+     &Impl::character_unuse},
     {"gen.save_to_library", "gen", true,
      "Publish a generative clip's own workflow to the project's library as a new Clip Workflow (a card in the Generate panel). "
      "The clip keeps its own; its input values are not part of the copy. name: the library's name for it (default: the workflow's).",

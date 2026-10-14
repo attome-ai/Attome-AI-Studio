@@ -675,11 +675,12 @@ inline bool soft_check(const char *id, const char *label, bool *value) {
 }
 
 // A part of a card that opens and closes (closed at first unless `open_first`; the choice is kept per clip while the editor is open). When it
-// returns true, draw the content and then call ImGui::TreePop(). Marked "fold:<id>" for UI tests.
+// returns true, draw the content (nothing to pop). Marked "fold:<id>" for UI tests.
 inline bool fold(const char *id, const char *title, bool open_first) {
   ImGui::SetNextItemOpen(open_first, ImGuiCond_Once);
   ImGui::PushStyleColor(ImGuiCol_Text, hexv(look::fg2));
-  const bool open = ImGui::TreeNodeEx(id, ImGuiTreeNodeFlags_SpanAvailWidth, "%s", title);
+  // No indent inside: the rows keep their label column, so a long name has the same room in a fold as outside it.
+  const bool open = ImGui::TreeNodeEx(id, ImGuiTreeNodeFlags_SpanAvailWidth | ImGuiTreeNodeFlags_NoTreePushOnOpen, "%s", title);
   ImGui::PopStyleColor();
   ui_mark(std::string("fold:") + id);
   return open;
