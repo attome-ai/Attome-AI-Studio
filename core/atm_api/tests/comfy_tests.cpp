@@ -214,13 +214,11 @@ TEST_CASE("comfyui: continuation, voice, the final stage and the memory options 
   REQUIRE(comfy.run(request({{"steps", 8}, {"realism_lora", 1.0}}, triggered)));
   CHECK(server->graph["cond"]["inputs"]["prompt"] == "r34l1sm, Two people talk");
 
-  // A schedule and a weaker add-on, asked for (a live-action look: less waxy skin).
+  // A schedule asked for (the photoreal recipe uses euler with beta).
   server->history_calls = 0;
-  REQUIRE(comfy.run(request({{"steps", 10}, {"sampler", "er_sde"}, {"scheduler", "beta"}, {"lora_strength", 0.7}}, base)));
-  CHECK(server->graph["select"]["inputs"]["sampler_name"] == "er_sde");
+  REQUIRE(comfy.run(request({{"steps", 8}, {"sampler", "euler"}, {"scheduler", "beta"}}, base)));
+  CHECK(server->graph["select"]["inputs"]["sampler_name"] == "euler");
   CHECK(server->graph["sigmas"]["inputs"]["scheduler"] == "beta");
-  CHECK(server->graph["sigmas"]["inputs"]["steps"] == 10);
-  CHECK(server->graph["lora"]["inputs"]["strength_model"] == 0.7);
 
   // A continuation: the last 22 frames and the sound under them anchor frame 0, and the sampler follows the guided prompt.
   json cont = base;

@@ -163,8 +163,8 @@ struct H3Media {
 //  - voice: a sound whose timbre the speaker takes (the prompt cites it as <Audio 1>);
 //  - stage "final": the latent is enlarged by the latent upscaler and refined by a short second sampling pass;
 //  - sparse_keep_percent: block-sparse attention (faster, softer); low_memory: chunked feed-forward and attention;
-//  - scheduler (default simple) and lora_strength (the few-step add-on, default 1.0): other values change the look, the defaults do not;
-//  - speed_lora (standard | turbo_v4) and realism_lora (0 = off): add-ons for live-action people, off by default.
+//  - scheduler (simple | beta), speed_lora (standard | turbo_v4), realism_lora (0 = off): the look of live-action people
+//    (skill photoreal-people); the defaults build the graph as before.
 json h3_graph(const gen::StepRequest &r, const H3Media &media, const std::string &prefix) {
   const H3Files f = h3_files(r.model);
   const auto node = [](const char *type, json inputs) { return json{{"class_type", type}, {"inputs", std::move(inputs)}}; };
@@ -181,7 +181,7 @@ json h3_graph(const gen::StepRequest &r, const H3Media &media, const std::string
   }
   if (!f.lora.empty()) { // the few-step add-on, for a model that has one (or the one the clip asks for instead)
     const std::string speed = r.settings.value("speed_lora", std::string("standard")) == "turbo_v4" ? std::string(kTurboV4Lora) : f.lora;
-    g["lora"] = node("LoraLoaderModelOnly", {{"model", model}, {"lora_name", speed}, {"strength_model", r.settings.value("lora_strength", 1.0)}});
+    g["lora"] = node("LoraLoaderModelOnly", {{"model", model}, {"lora_name", speed}, {"strength_model", 1.0}});
     model = {"lora", 0};
   }
   const double realism = r.settings.value("realism_lora", 0.0);

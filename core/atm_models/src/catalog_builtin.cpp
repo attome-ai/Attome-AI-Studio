@@ -49,13 +49,12 @@ constexpr const char *kCatalog = R"json({
         "sizes": {"multiple": 32, "max_pixels": 2088960},
         "settings": {
           "steps": {"type": "integer", "min": 1, "max": 50, "default": 8},
-          "sampler": {"type": "choice", "options": ["res_multistep", "euler", "euler_ancestral", "er_sde", "res_multistep_ancestral", "dpmpp_2m_sde"], "default": "res_multistep"},
-          "scheduler": {"type": "choice", "options": ["simple", "beta", "normal", "karras", "sgm_uniform", "linear_quadratic"], "default": "simple"},
+          "sampler": {"type": "choice", "options": ["res_multistep", "euler"], "default": "res_multistep"},
+          "scheduler": {"type": "choice", "options": ["simple", "beta"], "default": "simple"},
           "attention": {"type": "choice", "options": ["int8", "default"], "default": "int8"},
           "stage": {"type": "choice", "options": ["preview", "final"], "default": "preview"},
           "final_megapixels": {"type": "number", "min": 0.5, "max": 4.0, "default": 2.0},
           "sparse_keep_percent": {"type": "integer", "min": 0, "max": 100, "default": 0},
-          "lora_strength": {"type": "number", "min": 0.0, "max": 1.5, "default": 1.0},
           "speed_lora": {"type": "choice", "options": ["standard", "turbo_v4"], "default": "standard"},
           "realism_lora": {"type": "number", "min": 0.0, "max": 1.5, "default": 0.0},
           "low_memory": {"type": "choice", "options": ["off", "on"], "default": "off"}
@@ -97,8 +96,8 @@ constexpr const char *kCatalog = R"json({
         "sizes": {"multiple": 32, "max_pixels": 2088960},
         "settings": {
           "steps": {"type": "integer", "min": 1, "max": 50, "default": 8},
-          "sampler": {"type": "choice", "options": ["res_multistep", "euler", "euler_ancestral", "er_sde", "res_multistep_ancestral", "dpmpp_2m_sde"], "default": "res_multistep"},
-          "scheduler": {"type": "choice", "options": ["simple", "beta", "normal", "karras", "sgm_uniform", "linear_quadratic"], "default": "simple"},
+          "sampler": {"type": "choice", "options": ["res_multistep", "euler"], "default": "res_multistep"},
+          "scheduler": {"type": "choice", "options": ["simple", "beta"], "default": "simple"},
           "attention": {"type": "choice", "options": ["int8", "default"], "default": "int8"},
           "stage": {"type": "choice", "options": ["preview", "final"], "default": "preview"},
           "final_megapixels": {"type": "number", "min": 0.5, "max": 4.0, "default": 2.0},
@@ -136,13 +135,12 @@ constexpr const char *kCatalog = R"json({
         "sizes": {"multiple": 32, "max_pixels": 2088960},
         "settings": {
           "steps": {"type": "integer", "min": 1, "max": 50, "default": 8},
-          "sampler": {"type": "choice", "options": ["res_multistep", "euler", "euler_ancestral", "er_sde", "res_multistep_ancestral", "dpmpp_2m_sde"], "default": "res_multistep"},
-          "scheduler": {"type": "choice", "options": ["simple", "beta", "normal", "karras", "sgm_uniform", "linear_quadratic"], "default": "simple"},
+          "sampler": {"type": "choice", "options": ["res_multistep", "euler"], "default": "res_multistep"},
+          "scheduler": {"type": "choice", "options": ["simple", "beta"], "default": "simple"},
           "attention": {"type": "choice", "options": ["int8", "default"], "default": "int8"},
           "stage": {"type": "choice", "options": ["preview", "final"], "default": "preview"},
           "final_megapixels": {"type": "number", "min": 0.5, "max": 4.0, "default": 2.0},
           "sparse_keep_percent": {"type": "integer", "min": 0, "max": 100, "default": 0},
-          "lora_strength": {"type": "number", "min": 0.0, "max": 1.5, "default": 1.0},
           "speed_lora": {"type": "choice", "options": ["standard", "turbo_v4"], "default": "standard"},
           "realism_lora": {"type": "number", "min": 0.0, "max": 1.5, "default": 0.0},
           "low_memory": {"type": "choice", "options": ["off", "on"], "default": "off"}
