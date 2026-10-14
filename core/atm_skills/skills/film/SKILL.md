@@ -109,6 +109,14 @@ Model: `minimax-h3.singularity-ref2va.int8` (the only one that takes reference p
   a staff) is enlarged into a broad one: describe it in words instead.
   - A prop's picture: a 2 s shot of the object alone, "a locked-off product shot, the whole object in the centre of the
     frame, seen from the side, on a plain pale grey surface; no people, no hands"; the frame at 1 s.
+  - **A real product's photo** (a shop's packshot on white) works as the start of that: give it as the reference of a first
+    prop entry, make the 2 s shot on grey from it, and crop the jar out of its frame at 1 s (a little margin, no wall) for the
+    entry the film uses. The printed label then came out readable in every shot where the product was more than a tenth of
+    the frame tall, held in a hand or standing (9 of 9, one film). Say in the description which way the label faces ("its label facing the camera") in every product shot.
+  - **A product shot is close only when the setting is short.** With the room's full sentence as the setting, "a close
+    product shot" gave a wide view of the room with the product small in it (3 of 3). A setting of one surface and a blur
+    ("a pale stone window sill in warm low evening sunlight; behind it everything is a soft warm blur") and its size in the
+    frame ("as tall as half of the frame") gave a close, warm product shot (3 of 3). "Fills the frame" still must not be written.
   - Three subjects in a shot at most (two people and one object): with four, one of the people is lost.
 - **A voice from off screen is a cast entry with a voice sample and no picture** ("the voice of ..., heard from off
   screen, never seen"). In the shot: "nobody is in the picture; the voice of <Subject 1> is heard from off
@@ -125,6 +133,11 @@ Model: `minimax-h3.singularity-ref2va.int8` (the only one that takes reference p
   ("three in the morning") gave daylight.
 - **Not longer.** A detailed description makes the place more alike between shots but the film worse: brighter and
   flatter, lights on that should be off, and shots that open on the empty place before anyone appears.
+- **Whatever the sentence names is drawn in every shot that uses it**, even a macro: a building named in it stood behind a
+  close-up of a leaf and of water (3 of 3), and the shot lost its closeness. Give close-ups of things (a leaf, a flower,
+  water, skin, a product) a sentence of their own with nothing named in it: "a meadow in warm low evening sun; beyond the
+  subject everything is a soft blur of green and gold light, no buildings" (close and soft, 3 of 3). The light words stay
+  the same, so the shots still cut together.
 
 ## How shots join (the most important choice in a scene)
 
@@ -238,6 +251,11 @@ thing you made it again to fix: a take with the right detail and no action made 
   takes passed, about 35 minutes at draft size.
 - **The rules carry to a new video**: a second drawn fight with other people, place and weapons, made from this skill
   and `niche-anime-action` alone: 17 of 24 first takes usable, the rest fixed in one round of retakes.
+
+- **A wordless product film of 30 s in the style of a brand spot** (18 shots of 1.4-2.6 s: nature close-ups, one person in
+  a place, hands with the product, packshot; captions and an end card from `web-motion`, a score from `music.make`): 24
+  takes in all, 12 of the 18 first takes kept; the 6 remade were the two rules above (3 each), and all 6 remakes held. About 15 minutes of generation at 0.9
+  megapixels. Silent shots are cut freely: each starts after its posed first half second.
 
 ## Not known yet
 

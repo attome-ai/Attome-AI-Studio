@@ -92,7 +92,7 @@ class Film:
         old = [t for t in seq['tracks'] if any(c['id'] in order for c in t.get('clip_list', []))]
         ops, t = [{'op': 'add_track', 'id': '$new:film', 'kind': 'video', 'name': 'Film', 'position': 'top'}], Fraction(0)
         for clip in order:
-            ops.append({'op': 'move', 'clip': clip, 'to': f'{float(t):.6f}s', 'track': '$new:film'})
+            ops.append({'op': 'move', 'clip': clip, 'to': f'{t.numerator}/{t.denominator}', 'track': '$new:film'})
             t += Fraction(self.call('project.get', id=clip)['object']['timing']['duration'])
         ops += [{'op': 'delete_track', 'track': tr['id']} for tr in old]
         film = self.call('timeline.edit', ops=ops, label='The cut')['id_map']['$new:film']
