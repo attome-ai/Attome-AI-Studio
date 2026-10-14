@@ -314,3 +314,61 @@ TEST_CASE("music.cuts cuts a clip on the beats of the music, where the music pla
   (void)engine.call("project.close", {{"project", project}});
   fs::remove_all(dir, ec);
 }
+
+TEST_CASE("audio.match with limit: a quiet voice with one loud hit in it reaches the loudness, and a limiter keeps the mix under -1 dB", "[audio][engine]") {
+  const fs::path dir = fs::temp_directory_path() / "attome-audio-limit";
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+  fs::create_directories(dir);
+  Engine engine({.fsync = false});
+  const std::string project = (dir / "L.attome").string();
+  REQUIRE(engine.call("project.create", {{"path", project}}));
+  std::vector<float> pcm(size_t(3.0 * 48000) * 2); // a quiet tone (about -29 dBFS) with a 5 ms hit near full level at 1 s
+  for (size_t i = 0; i < pcm.size() / 2; ++i)
+    pcm[2 * i] = pcm[2 * i + 1] = 0.05f * float(std::sin(2.0 * 3.14159265 * 300.0 * double(i) / 48000.0));
+  for (size_t k = 0; k < 240; ++k)
+    pcm[2 * (48000 + k)] = pcm[2 * (48000 + k) + 1] = (k % 2 ? -0.95f : 0.95f);
+  const std::string voice = (dir / "voice.wav").string();
+  REQUIRE(audio::write_wav(voice, pcm));
+  const json added = engine.call("timeline.edit", {{"project", project}, {"ops", json::array({{{"op", "add_clip"}, {"id", "$new:v"}, {"path", voice}, {"at", "0s"}}})}}).value();
+  const std::string clip = added["id_map"]["$new:v"];
+
+  // without limit the hit keeps it where it is
+  const json plain = engine.call("audio.match", {{"project", project}, {"clips", {clip}}, {"lufs", -14}}).value();
+  CHECK(plain["clips"][0]["gain_db"].get<double>() < 1.5);
+  // with limit it gets its whole gain and the limiter
+  const json loud = engine.call("audio.match", {{"project", project}, {"clips", {clip}}, {"lufs", -14}, {"limit", true}}).value();
+  INFO(loud.dump());
+  const double gain = loud["clips"][0]["gain_db"].get<double>();
+  CHECK(gain > plain["clips"][0]["gain_db"].get<double>() + 4.0);
+  CHECK(loud["clips"][0].contains("limited_db"));
+  const json got = engine.call("project.get", {{"project", project}, {"id", clip}}).value();
+  CHECK(got["object"]["audio"]["limit_db"] == -1.0);
+
+  const std::string out = (dir / "mix.wav").string();
+  const auto started = engine.call("render.sequence", {{"project", project}, {"output", out}, {"format", "wav"}});
+  REQUIRE(started);
+  for (int i = 0; i < 3000; ++i) {
+    if ((*engine.call("jobs.get", {{"job_id", started->at("job_id")}}))["state"] != "running")
+      break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  std::ifstream in(out, std::ios::binary);
+  std::string bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  REQUIRE(bytes.size() > 44 + 48000 * 4 * 2);
+  double peak = 0.0, sum = 0.0;
+  size_t count = 0;
+  for (size_t i = 44; i + 1 < bytes.size(); i += 2) {
+    const double v = std::fabs(double(int16_t(uint8_t(bytes[i]) | (uint8_t(bytes[i + 1]) << 8))) / 32768.0);
+    peak = std::max(peak, v);
+    const size_t frame = (i - 44) / 4;
+    if (frame > 2 * 48000 && frame < 2 * 48000 + 24000) { // the tone after the hit: well past the limiter's release
+      sum += v * v;
+      ++count;
+    }
+  }
+  CHECK(peak <= std::pow(10.0, -1.0 / 20.0) + 0.002); // never above -1 dB
+  const double tone_db = 20.0 * std::log10(std::sqrt(sum / double(count)));
+  CHECK(std::fabs(tone_db - (20.0 * std::log10(0.05 / std::sqrt(2.0)) + gain)) < 1.0); // the voice came up by its whole gain: the limiter let go after the hit
+  fs::remove_all(dir, ec);
+}

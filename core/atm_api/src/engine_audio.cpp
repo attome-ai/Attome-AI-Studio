@@ -186,6 +186,7 @@ Result<json> Engine::Impl::audio_match(const json &params) {
   ATM_PROFILE_SCOPE("api.audio_match");
   ATM_TRY(Project *pr, project(params));
   const double target = params.value("lufs", -17.0);
+  const bool limit = params.value("limit", false);
   if (target < -50.0 || target > -6.0)
     return bad_param("lufs", "must be between -50 and -6 (speech in a film: -17; a quiet place: -30)");
   std::vector<std::string> wanted;
@@ -215,11 +216,17 @@ Result<json> Engine::Impl::audio_match(const json &params) {
       list.push_back({{"clip", id}, {"lufs", lufs}, {"skipped", "silent"}});
       continue;
     }
-    // Never louder than its own peak allows: 1.5 dB are left under full level, so the mix does not clip.
-    const double room = -1.5 - (*measured).value("peak_db", 0.0);
-    const double gain = std::round(std::clamp(std::min(target - lufs, room), -24.0, 24.0) * 10.0) / 10.0;
+    // Never louder than its own peak allows: 1.5 dB are left under full level, so the mix does not clip. With limit, the clip gets its
+    // full gain and a limiter (audio.limit_db -1) holds the peaks that would go over: a shout or a hit in a voice no longer keeps it quiet.
+    const double peak = (*measured).value("peak_db", 0.0), room = -1.5 - peak;
+    const double gain = std::round(std::clamp(limit ? target - lufs : std::min(target - lufs, room), -24.0, 24.0) * 10.0) / 10.0;
     ops.push_back({{"op", "set_property"}, {"target", id}, {"path", "audio.gain_db"}, {"value", gain}});
-    list.push_back({{"clip", id}, {"lufs", std::round(lufs * 10.0) / 10.0}, {"gain_db", gain}});
+    json one = {{"clip", id}, {"lufs", std::round(lufs * 10.0) / 10.0}, {"gain_db", gain}};
+    if (limit && peak + gain > -1.0) {
+      ops.push_back({{"op", "set_property"}, {"target", id}, {"path", "audio.limit_db"}, {"value", -1.0}});
+      one["limited_db"] = std::round((peak + gain + 1.0) * 10.0) / 10.0; // how far the limiter takes its loudest peak down
+    }
+    list.push_back(std::move(one));
   }
   json out = {{"lufs", target}, {"clips", std::move(list)}};
   if (!ops.empty()) {

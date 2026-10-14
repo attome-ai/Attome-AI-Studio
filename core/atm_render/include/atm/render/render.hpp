@@ -150,6 +150,7 @@ struct Layer {
   eval::Curve gain_keys;
   eval::Curve duck_keys; // audio.keyframes.duck_db: ducking, dB added to the level (its keys or gain_db) while it plays
   float level_db = 0.0f; // gain_db with the track's volume_db: `gain` in dB
+  float limit = 0.0f;    // audio.limit_db as a level (0: none): a limiter holds the clip's sound under it after its gain
   float track_db = 0.0f;
 };
 

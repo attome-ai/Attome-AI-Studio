@@ -355,7 +355,7 @@ void check_keyframes(const json &clip, const std::string &clip_id, json &problem
   }
 }
 
-// Sound settings (F1 §4.1): clip "audio" {gain_db, pan, fade_in, fade_out, fade_curve}; track volume_db and pan.
+// Sound settings (F1 §4.1): clip "audio" {gain_db, pan, limit_db, fade_in, fade_out, fade_curve}; track volume_db and pan.
 void check_number(const json &obj, const char *key, double lo, double hi, const std::string &owner, const std::string &path,
                   json &problems) {
   const auto v = obj.find(key);
@@ -381,6 +381,9 @@ void check_audio(const json &clip, const std::string &clip_id, const Rational &d
   }
   check_number(*it, "gain_db", -96.0, 24.0, clip_id, path, problems);
   check_number(*it, "pan", -1.0, 1.0, clip_id, path, problems);
+  // limit_db: a limiter holds the clip's sound (after its gain) under this peak, so a voice with a loud shout or hit in it can be
+  // made as loud as the others without clipping (audio.match {limit: true} sets it).
+  check_number(*it, "limit_db", -24.0, 0.0, clip_id, path, problems);
   // The level over time, {"gain_db": {"$new:k1": {"t": "0s", "v": -6}, …}}, and ducking, "duck_db": how far down, on top of the level.
   if (const auto kfs = it->find("keyframes"); kfs != it->end()) {
     bool known = kfs->is_object();

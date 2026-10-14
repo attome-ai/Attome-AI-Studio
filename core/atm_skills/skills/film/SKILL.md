@@ -209,7 +209,9 @@ Shots made on their own share nothing. Decide for each shot which of these it is
   shot that carries on from one of them, then makes those clips again and the film changes under you. Make clips one by one
   (`gen.run --clip`), and look at a clip's newest take before you cut it.
 - **One level for all speech**: `audio.match {clips: [the spoken clips], lufs: -17}`; the shots with only the place's
-  air: `lufs: -30`. Generated takes come out at different levels.
+  air: `lufs: -30`. Generated takes come out at different levels. A take with a shout or a hit in it (a hammer, a
+  crash) is only raised as far as that instant allows and stays quiet: add `limit: true` and the voice reaches the level while a
+  limiter holds the peaks. A fast ad wants its voices loud: about -12 LUFS each, the mix about -13.
 - **Music**: `music.make {project, tags, seconds, bpm, key}` (genre, instruments and mood in words; about 10 s for a
   minute; it needs ACE-Step 1.5 in the owner's ComfyUI and says so when it is missing). Put it on the timeline with
   `add_clip {asset, at: "0s", duration, gain_db: -25 - its lufs, fade_in, fade_out}`, then `audio.duck {clip: <music>,

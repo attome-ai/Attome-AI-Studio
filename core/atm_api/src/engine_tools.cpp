@@ -461,10 +461,12 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
     {"audio.match", "core", true,
      "Bring clips to one loudness: each clip named (clips: [...], or track: all of its clips) gets the gain (audio.gain_db) that takes its own sound to "
      "`lufs` (default -17, right for speech in a film; a shot of only the place's air: about -30). Generated takes come out at different levels: run this on "
-     "the spoken clips of a film before the music goes under them. Clips without sound are skipped. One edit; Undo takes it back.",
+     "the spoken clips of a film before the music goes under them. Clips without sound are skipped. One edit; Undo takes it back. A clip is "
+     "raised only as far as its loudest instant allows (a shout, a hammer hit in a voice take keeps it quiet), unless limit is true: then it gets "
+     "the whole gain and a limiter (audio.limit_db -1) holds those peaks under -1 dB; limited_db says by how much.",
      R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},
        "clips":{"type":"array","items":{"type":"string"}},"track":{"type":"string","description":"Instead of clips: every clip of this track"},
-       "lufs":{"type":"number","description":"Default -17"}},"required":["project"]})",
+       "lufs":{"type":"number","description":"Default -17"},"limit":{"type":"boolean","description":"Default false: reach lufs and limit the peaks"}},"required":["project"]})",
      &Impl::audio_match},
     {"music.make", "core", true,
      "Make a piece of music from words (ACE-Step 1.5, run by the user's ComfyUI; about 10 s for a minute of music once loaded). tags: the genre, the "

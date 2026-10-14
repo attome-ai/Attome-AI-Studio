@@ -805,6 +805,8 @@ Result<Composition> compile(const json &project, std::string_view sequence_id, c
           const double db = (audio.is_object() ? number(audio, "gain_db", 0.0) : 0.0) + track_db;
           l.gain = db <= -96.0 ? 0.0f : float(std::pow(10.0, std::min(db, 24.0) / 20.0));
           l.level_db = float(db);
+          if (audio.is_object() && audio.contains("limit_db") && audio["limit_db"].is_number())
+            l.limit = float(std::pow(10.0, std::clamp(audio["limit_db"].get<double>(), -24.0, 0.0) / 20.0));
           l.pan = std::clamp(float((audio.is_object() ? number(audio, "pan", 0.0) : 0.0) + track_pan), -1.0f, 1.0f);
           if (audio.is_object()) {
             ATM_TRY(Rational fade_in, rational_field(audio, "fade_in", "0"));
@@ -3140,6 +3142,38 @@ std::vector<float> stretch_keeping_pitch(const std::vector<float> &in, double sp
   return out;
 }
 
+// A look-ahead limiter on the first n interleaved stereo samples: no sample comes out above `ceiling`. The gain for a frame is the
+// least any frame of the next 3 ms needs (so it is already down when a peak arrives), and it comes back up over about 80 ms.
+static void limit_peaks(std::vector<float> &pcm, size_t n, float ceiling) {
+  const size_t frames = n / 2;
+  if (frames == 0)
+    return;
+  constexpr size_t kAhead = media::kAudioRate * 3 / 1000;
+  std::vector<float> need(frames);
+  for (size_t f = 0; f < frames; ++f) {
+    const float peak = std::max(std::abs(pcm[f * 2]), std::abs(pcm[f * 2 + 1]));
+    need[f] = peak > ceiling ? ceiling / peak : 1.0f;
+  }
+  // the least need over [f, f + kAhead], with a deque of candidates (each frame goes in and out once)
+  std::vector<size_t> q(frames + kAhead + 1);
+  size_t head = 0, tail = 0, next = 0;
+  const float release = 1.0f - std::exp(-1.0f / (0.08f * float(media::kAudioRate)));
+  float g = 1.0f;
+  for (size_t f = 0; f < frames; ++f) {
+    for (; next < frames && next <= f + kAhead; ++next) {
+      while (tail > head && need[q[tail - 1]] >= need[next])
+        --tail;
+      q[tail++] = next;
+    }
+    while (q[head] < f)
+      ++head;
+    const float want = need[q[head]];
+    g = want < g ? want : g + (want - g) * release;
+    pcm[f * 2] *= g;
+    pcm[f * 2 + 1] *= g;
+  }
+}
+
 Result<std::vector<float>> mix_audio(const Composition &c) {
   ATM_PROFILE_SCOPE("audio.mix");
   const size_t total = size_t(c.frame_hns(c.frames) * media::kAudioRate / media::kHnsPerSecond);
@@ -3231,7 +3265,15 @@ Result<std::vector<float>> mix_audio(const Composition &c) {
           const double p = double((at - f.from) / 2) / double(f.len / 2);
           gain *= float(f.out ? std::cos(p * 1.5707963267948966) : std::sin(p * 1.5707963267948966));
         }
-      mix[at] += (*pcm)[i] * gain;
+      if (l.limit > 0.0f)
+        (*pcm)[i] *= gain; // limited below, then added
+      else
+        mix[at] += (*pcm)[i] * gain;
+    }
+    if (l.limit > 0.0f) {
+      limit_peaks(*pcm, n, l.limit);
+      for (size_t i = 0; i < n; ++i)
+        mix[offset + i] += (*pcm)[i];
     }
   }
   return mix;
