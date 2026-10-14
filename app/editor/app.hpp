@@ -207,7 +207,11 @@ private:
   void draw_variable_hints(const std::string &text, const std::function<void(const std::string &)> &insert);
   void draw_presets(const ClipUi &clip, const std::string &source);  // the clip's Presets: apply one, save the clip's values as one
   void draw_presets_card();                                           // every Preset of the project, with a way to take one away
-  void draw_generate_card(const ClipUi &clip); // a generative clip: why it cannot run here, and the download that fixes it
+  // A generative clip, in two parts around the Workflow card: `top` is why it cannot run here and the download that fixes it (only then); the
+  // other is its state, its takes and the button that makes it, after the options they use.
+  void draw_generate_card(const ClipUi &clip, bool top);
+  void draw_next_shot(const ClipUi &clip);        // "Add the next shot": a clip after this one that follows it
+  void set_generative_duration(const std::string &clip, const std::string &text); // the Duration typed for a generated clip: the clips after it slide right
   void delete_selected();
   void ripple_delete_selected(); // Shift+Delete: the clips go and what follows on their tracks closes up
   void delete_beside_playhead(bool before); // Q / W: the part of the clip before / after the playhead goes, closing up

@@ -53,6 +53,7 @@ try {
     'expect @slider:input_strength'
     'expect @check:input_sharp'
     'expect @combo:input_style'
+    'click @fold:more_inputs', 'wait 200'    # the files a model is given are under More inputs
     'expect @button:input_choose_photo'
     "shot $work\card_rows.jpg"              # the rows in the workflow's order; the ones it does not use are dimmed
     'click @field:input_mood'
@@ -64,6 +65,7 @@ try {
     'click @check:input_sharp'
     'wait 300'
     "shot $work\card_edited.jpg"
+    'click @fold:workflow_tools', 'wait 200'
     'click @button:input_add'               # a new input: a name and a Data Type
     'expect @field:new_input_name'
     'click @field:new_input_name'
@@ -73,12 +75,14 @@ try {
     'click @button:input_add_ok'
     'wait 400'
     'expect @input:camera_move'
-    'click @button:input_remove_photo'      # an input taken away
-    'wait 400'
     "shot $work\card_added.jpg"
     'dblclick @clip:First'                  # the graph: the Clip Inputs node lists the same inputs
     'expect @clipin:camera_move'
     'expect @clipin:mood'
+    'click @row:in:photo'                   # an input is taken away in the workflow editor, not on the clip's card
+    'expect @button:wf_row_remove'
+    'click @button:wf_row_remove'
+    'wait 400'
     'wait 300'
     "shot $work\card_graph.jpg"
   )

@@ -68,8 +68,8 @@ try {
   $run = Invoke-EditorScript -Project $proj -TimeoutSeconds 180 -Script @(
     'click @clip:Second'
     'wait 400'
-    'expect @slider:gen_length'             # the length of the clip card is the Duration the Clip node gives
-    'expect @combo:gen_start'               # and what it starts from is the Clip Reference node
+    'expect @field:clip_Duration'           # the length is the Duration of the Clip card (the Clip node gives it to the workflow)
+    'expect @combo:gen_after'               # and what it follows is the Clip Reference node
     "shot $work\inputs_card.jpg"
     'dblclick @clip:Second'
     'expect @node:variable'

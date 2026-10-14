@@ -674,6 +674,17 @@ inline bool soft_check(const char *id, const char *label, bool *value) {
   return changed;
 }
 
+// A part of a card that opens and closes (closed at first unless `open_first`; the choice is kept per clip while the editor is open). When it
+// returns true, draw the content and then call ImGui::TreePop(). Marked "fold:<id>" for UI tests.
+inline bool fold(const char *id, const char *title, bool open_first) {
+  ImGui::SetNextItemOpen(open_first, ImGuiCond_Once);
+  ImGui::PushStyleColor(ImGuiCol_Text, hexv(look::fg2));
+  const bool open = ImGui::TreeNodeEx(id, ImGuiTreeNodeFlags_SpanAvailWidth, "%s", title);
+  ImGui::PopStyleColor();
+  ui_mark(std::string("fold:") + id);
+  return open;
+}
+
 // The keyframe diamond of a parameter row. state: 0 not animated, 1 animated, 2 there is a key at the playhead.
 inline bool key_diamond(const char *id, int state) {
   const ImVec2 p = ImGui::GetCursorScreenPos();

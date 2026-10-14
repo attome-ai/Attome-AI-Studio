@@ -37,10 +37,10 @@ try {
     'type It finds a lantern, and lifts it'
     'click @rail:Generate'                # leaves the field
     'wait 400'
-    'click @combo:gen_start'              # the clip's own setting: it starts from the last frame of the clip before
-    'click @option:gen_start_previous'
+    'click @combo:gen_after'              # the clip's own setting: it starts on the last frame of the clip before
+    'click @option:gen_after_start'
     'wait 400'
-    'expect @slider:gen_length'           # its length is on its card too
+    'expect @field:clip_Duration'         # its length is the Duration of its Clip card
     'click @button:gen_run'               # the second clip: the first is made too, because the second starts from it
     'wait 300'
     'expect @button:gen_run'             # the new clip is selected; its card is back from "Stop" when the run has ended

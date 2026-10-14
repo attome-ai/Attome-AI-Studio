@@ -35,10 +35,10 @@ try {
     'click @rail:Generate'               # leaves the field
     'wait 400'
     "shot $work\takes_before_combo.jpg"
-    'click @combo:gen_start'             # it starts from the last frame of the first clip
+    'click @combo:gen_after'             # it starts on the last frame of the first clip
     'wait 300'
     "shot $work\takes_after_combo.jpg"
-    'click @option:gen_start_previous'
+    'click @option:gen_after_start'
     'wait 400'
     'click @button:gen_run'
     'wait 300'

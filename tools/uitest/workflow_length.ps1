@@ -34,6 +34,7 @@ try {
     'wait 500'
     'click @clip:Shot_1'
     'wait 400'
+    'click @fold:workflow_tools', 'wait 200'   # who sets the length is in the workflow tools
     'expect @combo:length_by'
     'click @combo:length_by'
     'click @option:length_from_video'        # a Get Duration node and an Output "length" on the clip's own workflow

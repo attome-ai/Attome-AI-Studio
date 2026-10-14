@@ -164,19 +164,29 @@ void App::draw_inspector() {
     if (mono)
       ImGui::PushFont(g_fonts.mono, 14.0f);
     ImGui::InputText((std::string("##") + label).c_str(), buffer, size);
+    ui_mark(std::string("field:clip_") + label);
     if (mono)
       ImGui::PopFont();
+    // The length of a generated clip is its Duration here, and the clips after it slide right when it grows into them.
+    const bool generated_length = c->is_generative && std::string(path) == "/timing/duration";
     if (ImGui::IsItemActive())
-      live_commit_ = [this, id, p = std::string(path), value = std::string(buffer), what = std::string(what)] {
-        patch(json::array({{{"op", "replace"}, {"path", id + p}, {"value", value}}}), what.c_str());
+      live_commit_ = [this, id, p = std::string(path), value = std::string(buffer), what = std::string(what), generated_length] {
+        if (generated_length)
+          set_generative_duration(id, value);
+        else
+          patch(json::array({{{"op", "replace"}, {"path", id + p}, {"value", value}}}), what.c_str());
       };
     if (ImGui::IsItemDeactivatedAfterEdit()) {
       live_commit_ = nullptr;
       const std::string value = buffer;
       const std::string p = path;
-      commit_edit([this, id, p, value, what] {
-        if (!patch(json::array({{{"op", "replace"}, {"path", id + p}, {"value", value}}}), what))
+      commit_edit([this, id, p, value, what, generated_length] {
+        if (generated_length) {
+          set_generative_duration(id, value);
+          insp_rev_ = 0;
+        } else if (!patch(json::array({{{"op", "replace"}, {"path", id + p}, {"value", value}}}), what)) {
           insp_rev_ = 0; // show the stored value again
+        }
       });
     }
   };
@@ -303,8 +313,9 @@ void App::draw_inspector() {
   }
 
   if (c->is_generative) {
-    draw_generate_card(*c); // first: whether it is made, the button that makes it, or why it cannot be made here
-    draw_workflow_card(*c);
+    draw_generate_card(*c, true); // why it cannot be made here, first
+    draw_workflow_card(*c);       // what to make and how
+    draw_generate_card(*c, false); // then whether it is made, its takes and the button that makes it
     if (track->kind == "audio" && !c->takes.empty() && clip_json(c->id) &&
         clip_json(c->id)->value("media_ref", json::object()).value("inputs", json::object()).contains("text")) { // a voice: its words as captions
       if (begin_card("##captions", "Captions")) {

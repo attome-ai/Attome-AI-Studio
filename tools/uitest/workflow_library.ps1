@@ -28,6 +28,7 @@ try {
     'type A robot walks'
     'click @rail:Generate'
     'wait 400'
+    'click @fold:workflow_tools', 'wait 200'
     'click @button:input_add'                # the clip gets an input of its own, so the workflow is worth saving
     'click @field:new_input_name'
     'type Mood'
@@ -61,12 +62,19 @@ try {
   if (-not $failed) { # edit the second clip's own workflow; the first and the library stay; then reset it
     $before = (Get-Clips $run)[0] | ConvertTo-Json -Depth 30 -Compress
     $second = Invoke-EditorScript -Project $proj -Endpoint $run.Endpoint -TimeoutSeconds 180 -Script @(
-      'click @clip:Shot_2'
-      'wait 400'
-      'click @button:input_remove_mood'    # the second clip drops the input
+      'dblclick @clip:Shot_2'
+      'expect @clipin:mood'
+      'click @row:in:mood'                 # the second clip drops the input, in the workflow editor
+      'click @button:wf_row_remove'
       'wait 500'
       "shot $work\library_edited.jpg"
-      'click @button:workflow_reset'       # and gets it back from the library
+      'key Escape'
+      'key Escape'
+      'wait 400'
+      'click @clip:Shot_2'
+      'wait 400'
+      'click @fold:workflow_tools', 'wait 200'
+      'click @button:workflow_reset'       # and gets it back from the template
       'wait 600'
       'expect @input:mood'
       "shot $work\library_reset.jpg"

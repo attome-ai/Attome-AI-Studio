@@ -31,20 +31,21 @@ try {
     'wait 600'
     'click @clip:Shot_2'                    # its card is in the Inspector
     'wait 400'
-    'expect @combo:gen_continue'            # an H3 clip has the row, and the quality controls
+    'expect @combo:gen_after'               # an H3 clip has the row, and the quality controls (in the Speed and memory fold)
+    'click @fold:speed_memory', 'wait 200'
     'expect @radio:gen_stage_final'
     'expect @check:gen_low_memory'
     'expect @slider:gen_sparse'
     "shot $work\h3_card_before.jpg"
-    'click @combo:gen_continue'
-    'click @option:gen_continue_previous'
+    'click @combo:gen_after'
+    'click @option:gen_after_continue'
     'wait 400'
     'click @radio:gen_stage_final'
     'wait 400'
     'click @check:gen_low_memory'
     'wait 400'
     "shot $work\h3_card_after.jpg"
-    'click @button:gen_continue_new'        # a third clip, made in one click, after the second and carrying on from it
+    'click @button:gen_next_shot'        # a third clip, made in one click, after the second and carrying on from it
     'wait 700'
     "shot $work\h3_card_third.jpg"
   )

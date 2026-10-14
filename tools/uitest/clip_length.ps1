@@ -24,7 +24,7 @@ try {
   }
   function Show($l) { ($l | ForEach-Object { "$($_.Name)@$($_.At)+$($_.Len)" }) -join ', ' }
 
-  # Two 5-second shots, touching. The mock model makes 0.1 to 15 s: the slider at 0.5 sets the Duration (what the Clip node gives) to 7.5 s.
+  # Two 5-second shots, touching. The length of a generated clip is the Duration of its Clip card: typing 7.5s pushes the next clip along.
   $run = Invoke-EditorScript -Project $proj -Script @(
     'click @rail:Generate'
     'dblclick @model:attome-mock'
@@ -33,7 +33,7 @@ try {
     'wait 500'
     'click @clip:Shot_1'
     'wait 300'
-    'slide @slider:gen_length 0.5'
+    'click @field:clip_Duration', 'key A ctrl', 'type 7.5s', 'key Enter'
     'wait 600'
     "shot $work\length_longer.jpg"
   )
@@ -45,7 +45,7 @@ try {
       elseif ($l[1].At -ne 7.5) { $failed = "Shot 2 is at $($l[1].At) s, not slid to 7.5 s" }
     }
     if (-not $failed) {
-      $short = Invoke-EditorScript -Project $proj -Endpoint $run.Endpoint -Script @('click @clip:Shot_1', 'wait 300', 'slide @slider:gen_length 0.1', 'wait 600')
+      $short = Invoke-EditorScript -Project $proj -Endpoint $run.Endpoint -Script @('click @clip:Shot_1', 'wait 300', 'click @field:clip_Duration', 'key A ctrl', 'type 2s', 'key Enter', 'wait 600')
       $failed = $short.Errors
       if (-not $failed) {
         $l = Layout $run; "shorter: $(Show $l)"
@@ -57,5 +57,5 @@ try {
 } finally { Remove-Item Env:\ATTOME_MOCK_ENGINE -ErrorAction SilentlyContinue }
 
 if ($failed) { Write-Host "FAIL: $failed" -ForegroundColor Red; exit 1 }
-Write-Host "PASS: a clip's Length is set on its card, and a longer clip pushes the next one along (captures in $work)" -ForegroundColor Green
+Write-Host "PASS: a generated clip's Duration is set on its Clip card, and a longer clip pushes the next one along (captures in $work)" -ForegroundColor Green
 exit 0
