@@ -6,7 +6,6 @@
 #include <cstdint>
 #include <cstdlib>
 #include <functional>
-#include <future>
 #include <map>
 #include <mutex>
 #include <set>
@@ -627,7 +626,7 @@ private:
   int library_kind_ = 0; // the Library panel's filter: 0 all, 1 clips, 2 cast, 3 effects, 4 workflows, 5 text styles
   int text_tab_ = 0, fx_tab_ = 0, gen_tab_ = 0; // the tab chosen in the Text, Effects and Generate panels; 0 is All
   int inspector_tab_ = 0;
-  int rail_tab_ = 0; // 0 Media, 2 Text, 3 Effects, 4 Generate, 6 Models, 7 Library, 8 Niches, 9 Cast, 10 Sounds
+  int rail_tab_ = 0; // 0 Media, 2 Text, 3 Effects, 4 Generate, 6 Models, 7 Library, 8 Niches, 9 Cast
   // What is picked in a left panel (one click on a card): the Inspector shows its properties, as for a selected clip; a double click or a
   // drag adds it to the timeline. `clip` is the clip that was selected when it was picked: the one an effect would go on.
   struct Pick {
@@ -681,19 +680,6 @@ private:
   std::string library_renaming_;
   char library_name_buf_[128] = {};
   void draw_library_panel();
-  // The Sounds panel (rail tab 10): real sound effects from Freesound, CC0 only (sfx.search, sfx.fetch, sfx.downloaded, sfx.key).
-  json sounds_found_ = json::array(), sounds_mine_ = json::array();
-  bool sounds_stale_ = true, sounds_has_key_ = false, sounds_more_ = false;
-  int sounds_page_ = 1;
-  char sounds_query_[128] = {}, sounds_key_[96] = {};
-  std::string sounds_note_;          // what the last search or download said went wrong ("" when nothing did)
-  std::future<json> sounds_job_;     // a search or a download, on its own connection so the window keeps drawing
-  std::string sounds_job_what_;      // "search", or "fetch" and the id being downloaded
-  int64_t sounds_job_id_ = 0, sounds_add_after_ = 0;
-  void draw_sounds_panel();
-  void sounds_start(const char *method, json params, const std::string &what, int64_t id = 0);
-  void sounds_poll();
-  void sounds_add(const std::string &path);
   // The Niches panel (rail tab 8): niches are skills; see docs/plan/NICHES.md.
   json niches_ = json::array(); // {id, title, builtin}
   bool niches_stale_ = true;
