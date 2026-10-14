@@ -316,6 +316,8 @@ struct Engine::Impl {
   Result<fs::path> library_root() const;
   Result<json> library_add(const json &params);
   Result<json> library_add_character(const json &params);
+  Result<json> library_add_item(const json &params);
+  Result<json> library_use_item(const json &params, const json &item);
   Result<json> library_use_character(const json &params, const json &item);
   Result<json> library_read(const std::string &id) const;
   Result<json> library_insert(const json &params);

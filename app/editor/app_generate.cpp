@@ -215,6 +215,10 @@ void App::draw_generate_panel() {
         dl->AddCircleFilled(ImVec2(c.x + 12.0f, c.y), 4.0f, hex(look::accent2));
         dl->AddLine(ImVec2(c.x - 12.0f, c.y), ImVec2(c.x + 12.0f, c.y), hex(look::accent2), 2.0f);
       };
+      t.menu = [this, id] {
+        if (menu_item("Add to the library"))
+          pending_ = [this, id] { keep_in_library("workflow", id); };
+      };
       const TileHit hit = tile_hit(grid, t);
       if (hit == TileHit::pick || hit == TileHit::open)
         set_pick("model", id);
@@ -582,6 +586,12 @@ void App::workflow_library_buttons(const std::string &clip_id, const std::string
   ui_mark("button:workflow_save");
   if (ImGui::IsItemHovered())
     ImGui::SetTooltip("Make this workflow a template: a card in the Generate panel, to make more clips from.");
+  ImGui::SameLine();
+  if (soft_button("workflow_keep", "Add to the library", ImVec2(0.0f, 26.0f)))
+    pending_ = [this, clip_id] { keep_in_library("workflow", clip_id); };
+  ui_mark("button:workflow_keep");
+  if (ImGui::IsItemHovered())
+    ImGui::SetTooltip("Keep this workflow in your library, to use it in any project.");
   ImGui::SameLine();
   const bool known = source.rfind("shot:", 0) == 0 || (source.rfind("cwf_", 0) == 0 && object_in(doc_, "workflows").contains(source));
   if (soft_button("workflow_reset", "Reset to template", ImVec2(0.0f, 26.0f), known))

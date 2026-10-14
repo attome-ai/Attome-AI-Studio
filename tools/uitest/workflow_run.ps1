@@ -71,6 +71,8 @@ try {
       "shot $work\run_canvas_done.jpg"
       'click @button:wf_back'
       'click @clip:First'
+      'click @fold:more_inputs'
+      'wait 300'
       'expect @field:input_seed'
       'click @button:input_dice_seed'         # a new random seed
       'wait 600'

@@ -306,6 +306,39 @@ void App::add_media_to_library(const std::string &path) {
   say("\"" + result.value("name", std::string("Clip")) + "\" is in the library. Any project can use it: the Library panel on the left.");
 }
 
+void App::keep_in_library(const std::string &kind, const std::string &source) {
+  json result;
+  if (!rpc("library.add_item", {{"project", project_path_}, {"kind", kind}, {"source", source}}, result))
+    return;
+  library_stale_ = true;
+  say("\"" + result.value("name", std::string("It")) + "\" is in the library. Any project can use it: the Library panel on the left.");
+}
+
+void App::use_library_item(const std::string &id, const std::string &kind) {
+  if (kind == "effect" || kind == "text_style") {
+    if (selected_clip_.empty()) {
+      say(kind == "effect" ? "Select the clip that should get the effect first." : "Select the text clip that should take the style first.", true);
+      return;
+    }
+    json result;
+    if (rpc("library.insert", {{"project", project_path_}, {"id", id}, {"clip", selected_clip_}}, result)) {
+      refresh();
+      insp_rev_ = 0;
+      say(kind == "effect" ? "The effect is on the clip." : "The text has the style.", false, true);
+    }
+    return;
+  }
+  if (kind == "workflow") {
+    json result;
+    if (rpc("library.insert", {{"project", project_path_}, {"id", id}}, result)) {
+      refresh();
+      say("\"" + result.value("name", std::string("It")) + "\" is a template of this project now: a card in the Generate panel.", false, true);
+    }
+    return;
+  }
+  insert_library(id, playhead_, {}, true);
+}
+
 void App::insert_library(const std::string &id, int64_t at, const std::string &track, bool follow) {
   // The engine puts each clip of the item on a track that is free where it goes (the one it was dropped on first), or on a new one:
   // nothing already on the timeline moves and nothing overlaps.
@@ -352,7 +385,7 @@ void App::draw_library_panel() {
     if (client_.call("library.list", json::object(), result, error))
       library_items_ = result.value("items", json::array());
   }
-  static const std::string kinds[] = {"All", "Video", "Audio", "Cast"};
+  static const std::string kinds[] = {"All", "Clips", "Cast", "Effects", "Workflows", "Text"};
   panel_tabs("tab", kinds, library_kind_);
   ImGui::NewLine();
   ImGui::Spacing();
@@ -382,13 +415,12 @@ void App::draw_library_panel() {
     const std::string id = item.value("id", std::string()), name = item.value("name", std::string("Clip"));
     if (!wanted.empty() && lower(name).find(wanted) == std::string::npos)
       continue;
-    const bool person = item.value("kind", std::string("clip")) == "character";
-    if (library_kind_ == 1 && (person || !item.value("picture", false)))
-      continue; // Video: it has a picture
-    if (library_kind_ == 2 && (person || item.value("picture", false)))
-      continue; // Audio: sound only
-    if (library_kind_ == 3 && !person)
-      continue; // Cast: a character kept from a project's cast
+    const std::string item_kind = item.value("kind", std::string("clip"));
+    const bool person = item_kind == "character";
+    static const char *const kFilters[] = {"", "clip", "character", "effect", "workflow", "text_style"};
+    if (library_kind_ > 0 && item_kind != kFilters[library_kind_])
+      continue;
+    const bool other = item_kind == "effect" || item_kind == "workflow" || item_kind == "text_style"; // drawn, not a picture
     std::string thumb = item.value("picture_path", std::string()); // the clip's own file; the item's frame is canvas-shaped, with bars
     if (thumb.empty())
       thumb = item.value("thumb", std::string());
@@ -408,7 +440,8 @@ void App::draw_library_panel() {
     const bool add_by_double_click = (hovered && ImGui::IsMouseDoubleClicked(0)) || (card_pressed && !ImGui::IsMouseReleased(0)); // or Enter on the card
     bool add_now = add_by_double_click;
     if (ImGui::BeginPopupContextItem("##libctx")) {
-      if (menu_item(person ? "Add to the cast" : "Add at the playhead"))
+      if (menu_item(person ? "Add to the cast" : item_kind == "effect" ? "Add to the selected clip" : item_kind == "text_style" ? "Use on the selected text" :
+                    item_kind == "workflow" ? "Add to this project's templates" : "Add at the playhead"))
         add_now = true;
       if (menu_item("Rename")) {
         library_renaming_ = id;
@@ -421,7 +454,23 @@ void App::draw_library_panel() {
     }
     ImDrawList *dl = ImGui::GetWindowDrawList();
     dl->AddRectFilled(p, ImVec2(p.x + cell, p.y + thumb_h), hex(look::bg), 8.0f);
-    if (const auto tex = thumb_tex_.find(thumb); !thumb.empty() && tex != thumb_tex_.end() && tex->second) {
+    if (other) { // an effect, a workflow or a text style: its own picture
+      const ImVec2 q(p.x + cell, p.y + thumb_h);
+      dl->PushClipRect(p, q, true);
+      if (item_kind == "effect") {
+        const eval::EffectDef *def = eval::find_effect(item.value("effect", std::string()));
+        draw_effect_art(def ? def->short_name() : "grade", dl, p, q);
+      } else if (item_kind == "workflow") {
+        const ImVec2 c((p.x + q.x) * 0.5f, (p.y + q.y) * 0.5f);
+        dl->AddRect(ImVec2(c.x - 26.0f, c.y - 18.0f), ImVec2(c.x + 26.0f, c.y + 18.0f), hex(look::accent2), 6.0f, 0, 2.2f);
+        dl->AddCircleFilled(ImVec2(c.x - 12.0f, c.y), 4.0f, hex(look::accent2));
+        dl->AddCircleFilled(ImVec2(c.x + 12.0f, c.y), 4.0f, hex(look::accent2));
+        dl->AddLine(ImVec2(c.x - 12.0f, c.y), ImVec2(c.x + 12.0f, c.y), hex(look::accent2), 2.0f);
+      } else {
+        draw_icon_art(dl, ImVec2(p.x, p.y + 4.0f), q, icon::text, look::fg3, 30.0f);
+      }
+      dl->PopClipRect();
+    } else if (const auto tex = thumb_tex_.find(thumb); !thumb.empty() && tex != thumb_tex_.end() && tex->second) {
       float tw = cell, th = thumb_h; // fitted inside the card, keeping its shape
       if (SDL_GetTextureSize(tex->second, &tw, &th) && tw > 0.0f && th > 0.0f) {
         const float fit = std::min(cell / tw, thumb_h / th);
@@ -485,6 +534,8 @@ void App::draw_library_panel() {
       char info[48];
       if (person)
         std::snprintf(info, sizeof info, "Cast");
+      else if (other)
+        std::snprintf(info, sizeof info, "%s", item_kind == "effect" ? "Effect" : item_kind == "workflow" ? "Workflow" : "Text style");
       else
         std::snprintf(info, sizeof info, "%.1f s  -  %d %s", item.value("seconds", 0.0), item.value("clips", 1), item.value("clips", 1) == 1 ? "clip" : "clips");
       dl->AddText(ImVec2(p.x + 2.0f, p.y + thumb_h + 20.0f), hex(look::fg3), info);
@@ -492,7 +543,7 @@ void App::draw_library_panel() {
     if (hovered && !ImGui::IsMouseDown(0))
       ImGui::SetTooltip("Click to see it in the Inspector. Double-click or the plus: at the playhead. Drag it onto the timeline to choose where. Right-click for more.");
     if (add_now)
-      pending_ = [this, id] { insert_library(id, playhead_, {}, true); };
+      pending_ = [this, id, item_kind] { use_library_item(id, item_kind); };
     ImGui::PopID();
     ImGui::EndGroup();
     column = (column + 1) % columns;
@@ -500,7 +551,7 @@ void App::draw_library_panel() {
   if (column == 0 && !wanted.empty() && std::none_of(library_items_.begin(), library_items_.end(), [&](const json &i) { return lower(i.value("name", std::string())).find(wanted) != std::string::npos; }))
     ImGui::TextColored(hexv(look::fg2), "Nothing kept matches.");
   ImGui::EndChild();
-  panel_hint("What is kept here can be used in any project: clips and people from the cast. Right-click one on the timeline, in Media or in Cast and choose Add to the library. Click one to see it; "
+  panel_hint("What is kept here can be used in any project: clips, people from the cast, effects, workflows and text styles. Right-click one where you made it and choose Add to the library. Click one to see it; "
              "double-click it, or drag it onto the timeline, to add it.");
   if (!remove_id.empty()) {
     json ignored;

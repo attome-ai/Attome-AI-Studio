@@ -91,6 +91,14 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
      R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},
        "character":{"type":"string","description":"The entry's name or chr_ ID"},"name":{"type":"string"}},"required":["project","character"]})",
      &Impl::library_add_character},
+    {"library.add_item", "library", false,
+     "Keep something configured in the project in the user's library, for every project: kind effect (source: the fx_ ID of an effect of a clip, "
+     "kept with its settings), workflow (source: a cwf_ Clip Workflow of the project, or a generative clip whose own workflow is kept) or "
+     "text_style (source: a title or caption clip, kept as its looks without its words). library.insert then uses it: an effect or a text style "
+     "needs `clip` (the clip that gets it), a workflow becomes a Clip Workflow of that project.",
+     R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},
+       "kind":{"type":"string","enum":["effect","workflow","text_style"]},"source":{"type":"string"},"name":{"type":"string"}},"required":["project","kind","source"]})",
+     &Impl::library_add_item},
     {"library.get", "library", false,
      "One library item with its clips: each {clip, audio, offset}. To put it in a project, pass them as snapshots to timeline.edit's duplicate "
      "op ({\"snapshot\": clip, \"track\", \"at\": start + offset}).",
@@ -100,7 +108,8 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
      "item had them, each on a track that is free there (a new one when none is). One edit: Undo takes the item out again.",
      R"({"type":"object","properties":{"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},
        "id":{"type":"string","description":"The library item, as library.list names it"},"at":{"type":"string","description":"A time like 2.5s, 75@30 or timecode"},
-       "track":{"type":"string","description":"A track to try first for the clips of its kind"},"sequence":{"type":"string"}},"required":["project","id"]})",
+       "track":{"type":"string","description":"A track to try first for the clips of its kind"},"sequence":{"type":"string"},
+       "clip":{"type":"string","description":"For an item of kind effect or text_style: the clip it goes on"}},"required":["project","id"]})",
      &Impl::library_insert},
     {"library.rename", "library", false, "Give a library item another name.",
      R"({"type":"object","properties":{"id":{"type":"string"},"name":{"type":"string"}},"required":["id","name"]})", &Impl::library_rename},

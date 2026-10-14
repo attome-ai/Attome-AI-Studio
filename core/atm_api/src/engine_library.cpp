@@ -1,6 +1,7 @@
 // The library, the skills and the guide: library.*, media import and removal, skill.*, guide.get, fonts.
 #include "engine_impl.hpp"
 
+#include "atm/eval/effects.hpp"
 #include "atm/gen/cast.hpp"
 
 namespace atm::api {
@@ -311,6 +312,134 @@ Result<json> Engine::Impl::library_use_character(const json &params, const json 
   return character_create(args);
 }
 
+  // library.add_item {project, kind, source, name?}: something configured in the project is kept in the library, for every project:
+  //   kind effect: source is an effect of a clip (fx_), kept with its settings (a .cube table is copied along);
+  //   kind workflow: source is a Clip Workflow of the project (cwf_) or a generative clip (clp_), whose own workflow is kept;
+  //   kind text_style: source is a text clip (clp_), kept as its looks: font, size, colour, outline, shadow, box, motion and where it sits.
+  // The item holds it as "entry". library.insert uses it: an effect or a text style on the clip given as `clip`, a workflow as a new Clip Workflow.
+Result<json> Engine::Impl::library_add_item(const json &params) {
+  ATM_TRY(Project *pr, project(params));
+  ATM_TRY(const std::string *kind, string_param(params, "kind"));
+  ATM_TRY(const std::string *source, string_param(params, "source"));
+  if (*kind != "effect" && *kind != "workflow" && *kind != "text_style")
+    return bad_param("kind", "must be effect, workflow or text_style (a clip is kept with library.add, a person with library.add_character)");
+  const doc::NodeRef *ref = pr->doc.find(*source);
+  json entry;
+  std::string name = params.value("name", std::string());
+  if (*kind == "effect") {
+    if (!ref || source->rfind("fx_", 0) != 0 || !ref->node->is_object())
+      return fail(ErrorCode::UnknownId, "L_SOURCE", "\"" + *source + "\" is not an effect.", {}, "Pass the fx_ ID of an effect of a clip (project.get lists them).");
+    entry = {{"effect", ref->node->value("effect", std::string())}, {"params", ref->node->value("params", json::object())}};
+    if (name.empty())
+      if (const eval::EffectDef *def = eval::find_effect(entry["effect"].get<std::string>()))
+        name = def->title;
+  } else if (*kind == "workflow") {
+    json wf;
+    if (source->rfind("cwf_", 0) == 0) {
+      const json &lib = library_of(*pr);
+      if (const auto w = lib.find(*source); w != lib.end() && w->is_object())
+        wf = *w;
+    } else if (ref && ref->node->is_object()) {
+      wf = ref->node->value("media_ref", json::object()).value("workflow", json::object());
+    }
+    if (!wf.is_object() || !wf.contains("nodes"))
+      return fail(ErrorCode::UnknownId, "L_SOURCE", "\"" + *source + "\" is not a Clip Workflow or a generative clip.", {},
+                  "Pass a cwf_ ID of the project's Clip Workflows, or the ID of a clip made by gen.create_clip.");
+    entry = gen::fresh_copy(wf, std::string());
+    if (name.empty())
+      name = wf.value("name", std::string("Workflow"));
+  } else {
+    if (!ref || source->rfind("clp_", 0) != 0 || ref->node->value("media_ref", json::object()).value("type", std::string()) != "text")
+      return fail(ErrorCode::UnknownId, "L_SOURCE", "\"" + *source + "\" is not a text clip.", {}, "Pass the ID of a title or caption clip.");
+    json content = ref->node->value("content", json::object());
+    content.erase("text");
+    content.erase("words");
+    json transform = json::object();
+    const json from = ref->node->value("transform", json::object());
+    for (const char *k : {"position", "scale", "rotation", "anchor", "opacity"})
+      if (from.contains(k))
+        transform[k] = from[k];
+    entry = {{"content", std::move(content)}, {"transform", std::move(transform)}};
+    if (name.empty())
+      name = ref->node->value("name", std::string("Text")) + " style";
+  }
+  if (name.empty())
+    name = *kind;
+  ATM_TRY(fs::path base, library_root());
+  const std::string item_id = new_id("lib");
+  const fs::path dir = base / item_id;
+  ATM_CHECK(storage::make_dirs(dir / "media"));
+  if (*kind == "effect" && entry["params"].contains("file") && entry["params"]["file"].is_string() && !entry["params"]["file"].get<std::string>().empty()) {
+    fs::path from = to_path(entry["params"]["file"].get<std::string>());
+    if (from.is_relative())
+      from = pr->dir / from;
+    std::error_code ec;
+    if (fs::is_regular_file(from, ec)) { // a colour table goes along, so the preset grades the same in any project
+      fs::copy_file(from, dir / "media" / from.filename(), fs::copy_options::overwrite_existing, ec);
+      if (!ec)
+        entry["params"]["file"] = "media/" + to_utf8(from.filename());
+    }
+  }
+  json item = {{"id", item_id}, {"name", name}, {"kind", *kind}, {"made", utc_now_iso8601()}, {"seconds", 0.0},
+               {"picture", false}, {"sound", false}, {"clips", json::array()}, {"entry", std::move(entry)}};
+  ATM_CHECK(storage::atomic_write(dir / "item.json", item.dump(2)));
+  return json{{"id", item_id}, {"name", name}, {"kind", *kind}};
+}
+
+  // What library.insert does with an item of kind effect, workflow or text_style (see library_add_item).
+Result<json> Engine::Impl::library_use_item(const json &params, const json &item) {
+  ATM_TRY(Project *pr, project(params));
+  ATM_TRY(fs::path base, library_root());
+  const std::string kind = item.value("kind", std::string());
+  const json entry = item.value("entry", json::object());
+  const std::string root_id = pr->doc.root().value("id", std::string());
+  if (kind == "workflow") {
+    json copy = gen::fresh_copy(entry, std::string());
+    const std::string wanted = item.value("name", entry.value("name", std::string("Workflow")));
+    std::string name = wanted;
+    const json &lib = library_of(*pr);
+    for (int n = 2; std::any_of(lib.begin(), lib.end(), [&](const json &w) { return w.value("name", std::string()) == name; }); ++n)
+      name = wanted + " " + std::to_string(n);
+    copy["name"] = name;
+    ATM_TRY(json applied, project_patch({{"project", to_utf8(pr->dir)},
+                                         {"patch", {{"ops", json::array({{{"op", "add"}, {"path", root_id + "/workflows/$new:w"}, {"value", std::move(copy)}}})},
+                                                    {"label", "Add the workflow " + name}}}}));
+    return json{{"workflow", applied["id_map"].value("$new:w", std::string())}, {"name", name}, {"revision", applied["revision"]}};
+  }
+  const std::string clip = params.value("clip", std::string());
+  const doc::NodeRef *ref = clip.empty() ? nullptr : pr->doc.find(clip);
+  if (!ref || clip.rfind("clp_", 0) != 0 || !ref->node->is_object())
+    return fail(ErrorCode::InvalidArgument, "L_TARGET", "\"clip\" must be the ID of the clip this goes on.", {},
+                kind == "effect" ? "Pass the clip that gets the effect." : "Pass the text clip that takes the style.");
+  const std::string name = item.value("name", std::string());
+  if (kind == "effect") {
+    json value = {{"effect", entry.value("effect", std::string())}, {"enabled", true}, {"params", entry.value("params", json::object())}};
+    if (value["params"].contains("file") && value["params"]["file"].is_string()) {
+      const std::string f = value["params"]["file"].get<std::string>();
+      if (f.rfind("media/", 0) == 0)
+        value["params"]["file"] = to_utf8(base / item.value("id", std::string()) / to_path(f));
+    }
+    ATM_TRY(json applied, project_patch({{"project", to_utf8(pr->dir)},
+                                         {"patch", {{"ops", json::array({{{"op", "add"}, {"path", clip + "/effects/$new:fx"}, {"value", std::move(value)}}})},
+                                                    {"label", "Add " + name}}}}));
+    return json{{"effect", applied["id_map"].value("$new:fx", std::string())}, {"clip", clip}, {"revision", applied["revision"]}};
+  }
+  if (kind != "text_style")
+    return fail(ErrorCode::InvalidArgument, "L_KIND", "The item has kind \"" + kind + "\", which library.insert does not know.");
+  if (ref->node->value("media_ref", json::object()).value("type", std::string()) != "text")
+    return fail(ErrorCode::InvalidArgument, "L_TARGET", "\"" + clip + "\" is not a text clip.", {}, "A text style goes on a title or caption clip.");
+  json ops = json::array();
+  const auto put = [&](const std::string &group, const json &values) {
+    const json have = ref->node->value(group, json::object());
+    for (auto it = values.begin(); it != values.end(); ++it)
+      ops.push_back({{"op", have.contains(it.key()) ? "replace" : "add"}, {"path", clip + "/" + group + "/" + it.key()}, {"value", it.value()}});
+  };
+  put("content", entry.value("content", json::object()));
+  put("transform", entry.value("transform", json::object()));
+  ATM_TRY(json applied, project_patch({{"project", to_utf8(pr->dir)}, {"patch", {{"ops", std::move(ops)}, {"label", "Use the text style " + name}}}}));
+  return json{{"clip", clip}, {"revision", applied["revision"]}};
+}
+
 Result<json> Engine::Impl::library_read(const std::string &id) const {
   ATM_TRY(fs::path base, library_root());
   if (id.empty() || id.find_first_of("/\\.") != std::string::npos)
@@ -330,6 +459,8 @@ Result<json> Engine::Impl::library_insert(const json &params) {
   ATM_TRY(json item, library_read(params.value("id", std::string())));
   if (item.value("kind", std::string("clip")) == "character")
     return library_use_character(params, item);
+  if (const std::string k = item.value("kind", std::string("clip")); k == "effect" || k == "workflow" || k == "text_style")
+    return library_use_item(params, item);
   const json &root = pr->doc.root();
   ATM_TRY(const SequenceRef sq, sequence_of(root, params));
   const std::string &seq = sq.id;
@@ -463,6 +594,8 @@ Result<json> Engine::Impl::library_list(const json &) {
     json brief = {{"kind", item->value("kind", std::string("clip"))}, {"id", (*item)["id"]}, {"name", item->value("name", std::string())}, {"made", item->value("made", std::string())},
                   {"seconds", item->value("seconds", 0.0)}, {"picture", item->value("picture", false)}, {"sound", item->value("sound", false)},
                   {"clips", item->value("clips", json::array()).size()}};
+    if (const std::string k = item->value("kind", std::string("clip")); k == "effect")
+      brief["effect"] = item->value("entry", json::object()).value("effect", std::string());
     if (item->contains("thumb"))
       brief["thumb"] = to_utf8(entry.path() / item->value("thumb", std::string()));
     for (const json &c : item->value("clips", json::array())) { // the file of its sound, to draw its waveform from; of its picture, to show it

@@ -24,7 +24,7 @@ try {
 $steps = @('wait 1200', 'key Home', 'key F6', 'key F6', 'key F6', 'wait 300', "shot $work\first.jpg")
 foreach ($i in 1..6) { $steps += 'key Tab', 'wait 120' }           # Name, Start, Duration, the Text header, the text box, the Size slider
 $steps += "shot $work\size_ring.jpg", 'key Right', 'key Right', 'key Right', 'key Right', 'key Right', 'wait 800'   # Right moves the slider: 5 steps
-foreach ($i in 1..5) { $steps += 'key Tab', 'wait 120' }           # the number, Color, Bold, Font, the Italic box
+foreach ($i in 1..6) { $steps += 'key Tab', 'wait 120' }           # the number, Color, Bold, the look's library button, Font, the Italic box
 $steps += "shot $work\italic_ring.jpg", 'key Enter', 'wait 600'    # Enter presses it
 foreach ($i in 1..3) { $steps += 'key Down', 'wait 150' }
 $steps += 'key Home', 'wait 200', "shot $work\home_in_panel.jpg"   # Home is the panel's: the playhead stays at the start

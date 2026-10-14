@@ -32,7 +32,7 @@ Stop-Daemon $runA
 $runB = Invoke-EditorScript -Project $b -TimeoutSeconds 240 -Script @(
   'wait 1200'
   'click @rail:Library', 'wait 900', 'expect @library:wide'
-  'key F6', 'wait 300', 'key Tab', 'key Tab', 'key Tab', 'key Tab', 'key Tab', 'wait 300', "shot $work\ring_on_card.jpg"
+  'key F6', 'wait 300', 'key Tab', 'key Tab', 'key Tab', 'key Tab', 'key Tab', 'key Tab', 'key Tab', 'wait 300', "shot $work\ring_on_card.jpg"
   'key Enter', 'wait 1200'
   "shot $work\added.jpg"
 )

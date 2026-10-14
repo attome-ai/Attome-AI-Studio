@@ -125,6 +125,9 @@ void App::draw_text_style(const ClipUi &c) {
     };
   };
   ImGui::Spacing();
+  if (soft_button("keep_text_style", "Add this look to the library", ImVec2(-1.0f, 26.0f)))
+    pending_ = [this, id] { keep_in_library("text_style", id); };
+  ImGui::Spacing();
   {
     ImGui::TextColored(hexv(look::fg2), "Font");
     ImGui::SameLine(88.0f);
@@ -463,6 +466,8 @@ void App::draw_effect_card(const ClipUi &c, const eval::EffectDef &def, bool sho
     if (soft_button(("remove_" + name).c_str(), ("Remove " + lower).c_str(), ImVec2(-1.0f, 28.0f)))
       pending_ = [this, fx, label = "Remove " + lower] { patch(json::array({{{"op", "remove"}, {"path", fx}}}), label.c_str()); };
   }
+  if (soft_button(("keep_" + name).c_str(), "Add to the library", ImVec2(-1.0f, 28.0f)))
+    pending_ = [this, fx] { keep_in_library("effect", fx); };
   if (show_amount) {
     ImGui::TextColored(hexv(look::fg2), "Amount");
     ImGui::SameLine(88.0f);

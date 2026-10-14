@@ -623,7 +623,7 @@ private:
   char media_filter_[128] = {};
   char library_filter_[128] = {}; // the Library's search
   int media_kind_ = 0; // the Media panel's filter: 0 all, 1 video, 2 audio, 3 pictures
-  int library_kind_ = 0; // the Library panel's filter: 0 all, 1 video, 2 audio
+  int library_kind_ = 0; // the Library panel's filter: 0 all, 1 clips, 2 cast, 3 effects, 4 workflows, 5 text styles
   int text_tab_ = 0, fx_tab_ = 0, gen_tab_ = 0; // the tab chosen in the Text, Effects and Generate panels; 0 is All
   int inspector_tab_ = 0;
   int rail_tab_ = 0; // 0 Media, 2 Text, 3 Effects, 4 Generate, 6 Models, 7 Library, 8 Niches, 9 Cast
@@ -694,6 +694,8 @@ private:
   double next_niche_poll_ = 0.0;
   void poll_niche_job();
   void draw_niche_link();
+  void keep_in_library(const std::string &kind, const std::string &source); // an effect (fx_), a workflow (cwf_ or a generative clip) or a text style (a text clip)
+  void use_library_item(const std::string &id, const std::string &kind);   // a library item: a clip at the playhead, or the effect, text style or workflow of it
   void add_media_to_library(const std::string &path); // a file of the Media panel: the clips made from it, or a clip made for the purpose, become one item
   void add_to_library(bool with_linked = true, const std::string &only = {}, const std::string &part = {});            // the selected clips (and, unless with_linked is false, what is linked to them) become one item
   void insert_library(const std::string &id, int64_t at, const std::string &track = {}, bool follow = false); // an item at `at`, its clips on tracks of their kind; follow: select them, playhead to their end

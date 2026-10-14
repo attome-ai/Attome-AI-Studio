@@ -456,7 +456,9 @@ void App::draw_pick_inspector() {
       return;
     }
     const std::string name = item.value("name", std::string("Clip"));
-    if (begin_card("##pick", name.c_str(), item.value("kind", std::string("clip")) == "character" ? "Cast" : item.value("picture", false) ? "Video" : "Audio")) {
+    if (begin_card("##pick", name.c_str(), item.value("kind", std::string("clip")) == "character" ? "Cast" : item.value("kind", std::string("clip")) == "effect" ? "Effect" :
+                      item.value("kind", std::string("clip")) == "workflow" ? "Workflow" : item.value("kind", std::string("clip")) == "text_style" ? "Text style" :
+                      item.value("picture", false) ? "Video" : "Audio")) {
       std::string thumb = item.value("picture_path", std::string());
       if (thumb.empty())
         thumb = item.value("thumb", std::string());
@@ -477,13 +479,19 @@ void App::draw_pick_inspector() {
           draw_icon_art(dl, p, q, item.value("kind", std::string("clip")) == "character" ? icon::eye : item.value("picture", false) ? icon::video : icon::audio, look::fg3, 36.0f);
         }
       });
-      const bool person = item.value("kind", std::string("clip")) == "character";
+      const std::string item_kind = item.value("kind", std::string("clip"));
+      const bool person = item_kind == "character";
       char info[64];
       std::snprintf(info, sizeof info, "%.1f s  -  %d %s", item.value("seconds", 0.0), item.value("clips", 1), item.value("clips", 1) == 1 ? "clip" : "clips");
-      ImGui::TextColored(hexv(look::fg2), "%s", person ? "A person, place or thing from a cast, with its pictures and voice." : info);
+      ImGui::TextColored(hexv(look::fg2), "%s", person  ? "A person, place or thing from a cast, with its pictures and voice."
+                                                 : item_kind == "effect"     ? "An effect with its settings. It goes on the selected clip."
+                                                 : item_kind == "workflow"   ? "A Clip Workflow. It becomes a template of the project: a card in the Generate panel."
+                                                 : item_kind == "text_style" ? "How a text looks: font, colour, outline, shadow, box and place. It goes on the selected text."
+                                                                             : info);
       ImGui::Spacing();
-      if (soft_button("pick_add_library", person ? "Add to the cast" : "Add at the playhead", ImVec2(-1.0f, 30.0f), true, true))
-        pending_ = [this, id = pick_.id] { insert_library(id, playhead_, {}, true); };
+      if (soft_button("pick_add_library", person ? "Add to the cast" : item_kind == "effect" ? "Add to the selected clip" : item_kind == "text_style" ? "Use on the selected text" :
+                      item_kind == "workflow" ? "Add to this project's templates" : "Add at the playhead", ImVec2(-1.0f, 30.0f), true, true))
+        pending_ = [this, id = pick_.id, item_kind] { use_library_item(id, item_kind); };
       if (soft_button("pick_remove_library", "Remove from the library", ImVec2(-1.0f, 28.0f)))
         pending_ = [this, id = pick_.id] {
           json ignored;

@@ -58,6 +58,8 @@ try {
     'wait 500'
     'click @clip:First'
     'wait 500'
+    'click @fold:workflow_tools'             # the tools are in a fold
+    'wait 300'
     'click @button:preset_new'               # First's values, kept as a Preset
     'expect @field:preset_name'
     'click @field:preset_name'
@@ -66,6 +68,8 @@ try {
     'wait 500'
     'click @clip:Second'
     'wait 500'
+    'click @fold:workflow_tools'
+    'wait 300'
     'expect @combo:preset'
     'click @combo:preset'
     'click @preset_option:Close-up'          # put on the second clip
@@ -121,6 +125,8 @@ try {
     $pick = Invoke-EditorScript -Project $proj -Endpoint $run.Endpoint -TimeoutSeconds 240 -Script @(
       'click @clip:Second'
       'wait 500'
+      'click @fold:more_inputs'
+      'wait 300'
       'expect @combo:input_variable_photo'
       'click @combo:input_variable_photo'
       'click @variable_option:hero'

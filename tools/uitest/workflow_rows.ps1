@@ -64,6 +64,8 @@ try {
     'click @button:wf_back'
     'click @clip:First'
     'wait 400'
+    'click @fold:more_inputs'
+    'wait 300'
     'expect @input:end_image'               # the input added on the canvas is a row of the Workflow card
   )
   $failed = $run.Errors
