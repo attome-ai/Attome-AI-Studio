@@ -53,6 +53,12 @@ SOUND
   heard as the sound cutting out, and laughter from `sfx.from_video` over it sounded fake (owner's verdict, 1 film). Give the
   reacting person a one-word sound as the shot's line ("Ugh!", "a long, exasperated groan"), the shot about 2 s, the laughter in
   the action and the sound: the model makes the groan in the cast voice and real laughter after it (1 of 1).
+- A reaction to the line just said is not a cut: start it on the last frame used of that line's shot (`start_from`, `start_at`,
+  `start_crop: [0, 0, 1, 1]`, "the shot begins exactly on the first frame given and carries on from it"), both people as
+  subjects; not `continue_from`, which would give the reaction the speaker's voice. No jump at the join (1 of 1).
+- The face has to be written huge, step by step: "throws her head back, eyes squeezed shut, mouth stretched wide open in a huge,
+  over-the-top cartoonish groan, then slaps her palm over her face and drags it down". "Facepalms and groans" gave a small,
+  flat reaction the owner called bad.
 - Real sound effects on the actions, bigger than life: `sfx.from_video` on the shots where nobody speaks (a smash, a reveal, a ship,
   machines); on shots with talking it invents mumbling, so those keep their own sound. No synthesised tones over the actions.
 
