@@ -130,7 +130,8 @@ Model: `minimax-h3.singularity-ref2va.int8` (the only one that takes reference p
   `asr.transcribe {language}`. A brand in Latin letters is read by sound: write it as it is said, in that script. Kokoro has no
   Arabic: a narrator then is an off-screen cast entry (above), its voice sample from a take of a speaker of that language.
   Speech recognition hears a mispronounced word as the right one (it guesses from context), so it cannot catch it: ask a
-  speaker of the language to listen, and replace a word said wrongly with a simpler synonym (vowel marks did not help, 1 of 1).
+  speaker of the language to listen, and replace a word said wrongly with a simpler synonym (whether vowel marks fix it is not
+  known yet).
 - **A place has no reference picture.** Named as a subject with a picture, shots open on that exact picture, empty, and
   then cut to the action. A place is words (next section) and a master (the section after).
 - In a prompt a cast entry is `{Name}` (its name and look) or `{Name.attribute}`: the clip follows every change to it.
