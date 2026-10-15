@@ -49,8 +49,8 @@ EDIT
 SOUND
 - Voices loud: `audio.match {lufs: -12, limit: true}`; music (a playful, comic piece) about 7 dB under them, ducked
   only under the speech (a reaction shot with no line keeps the music up, or its sound seems to cut out).
-- A reaction shot (a facepalm, a crowd laughing) gets its own real effect too: `sfx.from_video` with the slap and the laughter
-  in words; laughter has no words, so the speech check still holds.
+- No `sfx.from_video` on a reaction shot of a crowd laughing: the made laughter sounded fake (owner's verdict, 1 film); keep the
+  shot's own sound and the music.
 - Real sound effects on the actions, bigger than life: `sfx.from_video` on the shots where nobody speaks (a smash, a reveal, a ship,
   machines); on shots with talking it invents mumbling, so those keep their own sound. No synthesised tones over the actions.
 
