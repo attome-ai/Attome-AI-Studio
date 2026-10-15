@@ -31,12 +31,23 @@ LOOK
 - Or the stylised look (the owner liked both): "a polished high-end mobile game cinematic in a stylised 3D animated style:
   caricature proportions with realistic detailed textures, big comic expressions", same light and settings. It holds the cast
   more easily (no drift to fight), so leave out the "never a cartoon" words. Ask which look before generating.
+- A held product vanishes when the action needs both hands (putting cream on the face: 2 of 2). Say where it goes and that it
+  stays seen: "sets the jar down on the edge of the sink in front of her, where it stays in view in the lower part of the frame
+  the whole time" (fixed 2 of 2).
+- A reveal: write every person's face in it, the one revealed too ("her eyes pop wide, her jaw drops, both hands fly to her
+  cheeks, then a huge open-mouthed grin"); "beaming" gave a frozen smile the owner called weird.
+- Make 2 takes of each shot and let the owner pick (the ComfyUI output names); the owner's pick was often not the take the check chose.
 - Cast every person who appears twice, side characters too. Two references each, from your own best frames: full body with
   empty hands, and the face; a small or busy reference loses the person.
 
 SPEECH
 - One line per shot, said at its start: the model speaks at once. A shot longer than its line fills itself with made-up words,
   so make the shot as short as the line (about 3 s), and put the action that follows into a shot that carries on, with nobody speaking.
+- But a line squeezed into its shot is said in a rush, and 1.75x on top of that sounded robotic to the owner (3 s shots with
+  lines of 6 to 9 words). Better: the shot 1.5 s longer, the tone "speaking slowly and clearly, drawing out every word, with
+  pauses between the phrases", then start the clip just before the line and cut soon after it (owner preferred it, 1 ad).
+- A voice sample cut from a scream or a gasp gives a flat, unreal copy. For a voice the owner likes, make 2-3 short clips of the
+  person saying a calm, chatty line ("like chatting with a friend"), one per seed, no voice sample, and let the owner choose (1 of 1).
 - A line that answers an action (a reveal) goes in a shot that carries on from the action, not in the action's shot.
 - Every speaking character has a voice sample in the cast. A shot that carries on from another keeps that shot's speaker's voice:
   a new speaker's first line starts with a cut, not a carry-on.

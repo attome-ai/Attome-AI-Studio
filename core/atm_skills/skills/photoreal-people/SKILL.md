@@ -49,7 +49,16 @@ or stylised looks, where the defaults change nothing.
 - silveroxides' merged few-step add-ons (his test repository, no licence): the most freckles and texture in stills, but the
   person preferred the recipe in motion, and they added jewellery the description forbids.
 
+## People talking with the recipe
+
+- Lines and lip sync held: every take said its line word for word (14 of 14, one ad of 7 talking shots, vertical, at `stage: final`).
+- **The add-on's trigger word is sometimes spoken**: 3 of those 14 takes opened with it as a nonsense word ("R34LS") before the
+  line. Run `asr.transcribe` on every take and start the clip after it (`source_in`), or take the other take.
+- A phone-filmed look made the people read as real more than the recipe alone (the owner chose it): "filmed on a smartphone like a
+  real social media video: a real apartment, natural soft window light, natural colours, slight handheld camera movement", and "a
+  phone camera held by hand, moving only slightly" in place of "the camera does not move". Big comic acting still came through.
+- A cast picture made with the glossy look fights the recipe (a different face came out): make new pictures from takes made with it.
+
 ## Not known yet
 
 - Grain, a softer grade or an enhancer after generation.
-- People talking (lip sync and the voice) with the recipe.
