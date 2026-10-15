@@ -490,6 +490,18 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
        "project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},"seed":{"type":"integer"},"seconds":{"type":"number"}},
        "required":["kind"]})",
      &Impl::sfx_make},
+    {"sfx.from_video", "core", true,
+     "The sound effects of what happens in a video: HunyuanVideo-Foley (in the user's ComfyUI) watches it and makes the sounds of its actions "
+     "in sync, as long as the video (at most 30 s). Give path, or project and clip (a generated shot: its Take's whole file). prompt: the sounds, "
+     "bigger than life (\"a hammer smashes an egg shell, exaggerated impact\"); negative: what to leave out (default: voices, speech, music, noise). "
+     "Use it on shots where nobody speaks or moves their mouth: with people talking it invents mumbling that sounds like a second voice. Check "
+     "each result with asr.transcribe (words = voices: another seed, or keep the shot's own sound). Writes a 48 kHz stereo WAV to output, or "
+     "imports it with project (asset_id); place it where the clip's file starts. size xxl or xl; offload for a smaller card.",
+     R"({"type":"object","properties":{"path":{"type":"string"},"project":{"type":"string","description":"Path of the .attome project folder, or its prj_ ID"},
+       "clip":{"type":"string"},"prompt":{"type":"string"},"negative":{"type":"string"},"seed":{"type":"integer"},
+       "steps":{"type":"integer","description":"10 to 100, default 50"},"guidance":{"type":"number","description":"Default 4.5"},
+       "size":{"type":"string","enum":["xxl","xl"]},"offload":{"type":"boolean"},"output":{"type":"string","description":"The .wav to write"}}})",
+     &Impl::sfx_from_video},
     {"media.remove", "core", true,
      "Take a file out of the project: every clip made from it (and the clips linked to them) is deleted, then the asset itself. "
      "Pass asset (its ast_ ID) or the file's path. A clip on a locked track stops it. Undo takes two steps: the clips, then the asset.",

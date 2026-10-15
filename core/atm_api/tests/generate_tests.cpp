@@ -396,11 +396,11 @@ TEST_CASE("comfyui.status says what the engine needs of ComfyUI and where it com
   CHECK(status["download"]["bytes"].get<int64_t>() > 1000000000);
   CHECK(status["licence"].get<std::string>().find("GPL-3.0") != std::string::npos);
   // Every node pack names its licence, its source and the one commit that is fetched; Attome's own has no source to fetch.
-  REQUIRE(status["packs"].size() == 3);
+  REQUIRE(status["packs"].size() == 4);
   for (const json &p : status["packs"]) {
     CHECK_FALSE(p["licence"].get<std::string>().empty());
     CHECK(p["installed"] == false);
-    if (p["name"] == "attome_kokoro")
+    if (p["name"] == "attome_kokoro" || p["name"] == "attome_foley")
       CHECK(p["source"] == "Attome");
     else
       CHECK(p["commit"].get<std::string>().size() == 40);
@@ -429,6 +429,25 @@ TEST_CASE("music.make asks for what it needs before it calls an engine", "[gen][
   INFO(catalog.substr(0, 600));
   CHECK(catalog.find("ace-step.1.5-xl-turbo") != std::string::npos);
   const atm::Error none = err(*f.engine, "music.make", {{"tags", "piano"}, {"project", f.project}});
+  CHECK(none.rule == "E_MODEL_FILE");
+  CHECK(none.hint.find("models.fetch") != std::string::npos);
+}
+
+TEST_CASE("sfx.from_video asks for what it needs before it calls an engine, and reads a generated shot's Take", "[gen][foley]") {
+  Film f;
+  CHECK(err(*f.engine, "sfx.from_video", json::object()).rule == "E_PARAM");                                           // no video
+  CHECK(err(*f.engine, "sfx.from_video", {{"clip", f.a}}).rule == "E_PARAM");                                          // a clip needs its project
+  CHECK(err(*f.engine, "sfx.from_video", {{"project", f.project}, {"clip", "clp_nothing"}}).rule == "E_UNKNOWN_CLIP");
+  CHECK(err(*f.engine, "sfx.from_video", {{"project", f.project}, {"clip", f.a}}).rule == "G_NOT_MADE");             // no Take yet
+  REQUIRE(f.wait(f.run())["state"] == "done");
+  CHECK(err(*f.engine, "sfx.from_video", {{"project", f.project}, {"clip", f.a}, {"size", "huge"}}).rule == "E_PARAM");
+  CHECK(err(*f.engine, "sfx.from_video", {{"project", f.project}, {"clip", f.a}, {"steps", 500}}).rule == "E_PARAM");
+  // Both sizes are in the catalog, so the engine can download them, and a computer without one is told how.
+  const std::string catalog = ok(*f.engine, "models.list", json::object()).dump();
+  CHECK(catalog.find("hunyuan-foley.xxl") != std::string::npos);
+  CHECK(catalog.find("hunyuan-foley.xl") != std::string::npos);
+  const atm::Error none = err(*f.engine, "sfx.from_video", {{"project", f.project}, {"clip", f.a}});
+  INFO(none.message);
   CHECK(none.rule == "E_MODEL_FILE");
   CHECK(none.hint.find("models.fetch") != std::string::npos);
 }

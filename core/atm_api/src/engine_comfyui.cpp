@@ -40,7 +40,15 @@ struct Pack {
   std::vector<const char *> nodes;
   std::vector<const char *> python; // packages it needs beyond its own requirements.txt
   std::vector<const char *> alone;  // packages installed without what they ask for (they ask for versions ComfyUI's Python cannot have)
+  const char *own = nullptr;        // Attome's own node (repo empty): the text of its __init__.py
 };
+
+const char *kKokoroNode =
+#include "comfy_kokoro_node.inc"
+    ;
+const char *kFoleyNode =
+#include "comfy_foley_node.inc"
+    ;
 
 const std::vector<Pack> &packs() {
   static const std::vector<Pack> all = {
@@ -55,7 +63,18 @@ const std::vector<Pack> &packs() {
        {"misaki==0.7.4", "loguru==0.7.3", "num2words==0.5.6", "phonemizer==3.4.0", "spacy==3.8.16", "spacy-curated-transformers==0.3.1", "soundfile",
         "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl"
         "#sha256=1932429db727d4bff3deed6b34cfc05df17794f4a52eeb26cf8928f7c1a0fb85"},
-       {"kokoro==0.7.16"}},
+       {"kokoro==0.7.16"}, kKokoroNode},
+      // HunyuanVideo-Foley: Tencent's package goes in alone at its pinned revision (its requirements pin numpy, a transformers fork and
+      // gradio, which would break ComfyUI); what it imports beyond ComfyUI's own packages goes in beside it.
+      {"attome_foley", "", "", "Attome's own (the model: Tencent Hunyuan Community License)",
+       "HunyuanVideo-Foley: sound effects that follow what happens in a video", {"AttomeFoley"},
+       // the set a working ComfyUI 0.38.0 (torch 2.14, transformers 5.17, numpy 2.5) was measured with, 2026-10-15
+       {"loguru", "einops", "timm", "diffusers", "accelerate", "sentencepiece"},
+       {"https://github.com/Tencent-Hunyuan/HunyuanVideo-Foley/archive/df7b005b5023df2a9b73e1d66dd51d452799884e.zip",
+        "descript-audiotools==0.7.2", "omegaconf==2.4.0", "antlr4-python3-runtime==4.9.3", "easydict==1.13", "julius==0.2.8", "ffmpy==1.0.0",
+        "flatten-dict==0.5.0", "argbind==0.3.9", "docstring-parser==0.18.0", "pyloudnorm==0.2.0", "importlib-resources==7.1.0",
+        "tensorboard==2.21.0", "absl-py==2.5.1", "randomname==0.2.1"},
+       kFoleyNode},
   };
   return all;
 }
@@ -66,10 +85,6 @@ constexpr const char *kCoreNodes[] = {"MiniMaxH3ImageToVideo", "MiniMaxH3Referen
                                       "EmptyAceStep1.5LatentAudio", "SamplerCustomAdvanced", "BasicGuider", "BasicScheduler", "KSamplerSelect", "RandomNoise",
                                       "CreateVideo", "SaveVideo", "LoadVideo", "GetVideoComponents", "LoadAudio", "SaveAudio", "VAEDecodeAudio",
                                       "TrimAudioDuration", "UNETLoader", "DualCLIPLoader", "CLIPLoader", "VAELoader", "LoraLoaderModelOnly"};
-
-const char *kKokoroNode =
-#include "comfy_kokoro_node.inc"
-    ;
 
 const char *kUnsupported = "Installing ComfyUI from Attome runs on Windows with an NVIDIA card in this version.";
 const char *kOwnHint = "On another system install ComfyUI yourself (github.com/Comfy-Org/ComfyUI), start it and give Attome its address with gen.set_comfyui.";
@@ -297,7 +312,7 @@ void run_install_body(const std::shared_ptr<Job> &job, const Install &in) {
     if (!fs::exists(dest / "__init__.py", ec)) {
       fs::create_directories(dest, ec);
       if (!*p.repo) {
-        if (!storage::atomic_write(dest / "__init__.py", std::string(kKokoroNode)))
+        if (!p.own || !storage::atomic_write(dest / "__init__.py", std::string(p.own)))
           problem = "its file could not be written";
       } else {
         say(std::string("Fetching the node pack ") + p.name);

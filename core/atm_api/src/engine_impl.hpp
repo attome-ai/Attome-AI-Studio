@@ -361,7 +361,17 @@ struct Engine::Impl {
   Result<json> audio_duck(const json &params);
   Result<json> sfx_make(const json &params);
   Result<json> audio_match(const json &params);
+  // A sound made by a ComfyUI graph that ends in SaveAudio (engine_music.cpp): music.make and sfx.from_video.
+  struct ComfyAsk {
+    std::string what, node_word, no_nodes, no_nodes_hint, no_files, files_hint, less;
+  };
+  struct ComfySound {
+    std::string body, name; // the saved file's bytes and its name in ComfyUI
+    Clock::time_point began;
+  };
+  Result<ComfySound> comfy_sound(const json &graph, const ComfyAsk &ask);
   Result<json> music_make(const json &params);
+  Result<json> sfx_from_video(const json &params);
   static std::string speech_node_of(const json &clip);
   Result<json> voice_make(const json &params);
   Result<json> voice_fit(const json &params);
