@@ -41,7 +41,7 @@ Use the default niche whole, still say it back (rule 3).
   or `asr.transcribe` finds them; the visuals follow the niche's look.
 - `KIND: film` - dialogue, music cues and shot scale lead; long; build in sequences and say each one back. Read the skill
   `film` first (the general rules for people, objects and places that stay the same); a niche of this kind adds only what is
-  special to it (`niche-anime-action`: fights; `niche-explainer-film`: a film that explains an idea).
+  special to it (`niche-anime-action`: fights; `niche-explainer-film`: a film that explains an idea; `niche-game-ad-skit`: a game advert told as a skit).
 
 If the kind is not written, assume `short`.
 

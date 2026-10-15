@@ -83,6 +83,8 @@ class Film:
     def file(self, clip):
         """The video file of the Take that plays (to look at its frames)."""
         m = self.call('project.get', id=clip)['object']['media_ref']
+        if m.get('type') == 'file':  # a clip of a file (a take brought back as a plain video)
+            return m['path'] if os.path.isabs(m['path']) else os.path.join(self.project, m['path'].replace('/', os.sep))
         return os.path.join(self.project, m['takes'][m['selected']]['outputs']['video']['path'].replace('/', os.sep))
 
     def cut(self, order, output, music=None, speech_lufs=-17.0, quiet=(), quiet_lufs=-30.0, music_lufs=-25.0, duck_db=8.0):

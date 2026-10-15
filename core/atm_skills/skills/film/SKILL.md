@@ -205,6 +205,11 @@ Shots made on their own share nothing. Decide for each shot which of these it is
   first line starts inside those 22 frames (the model often speaks at once, over the last words of the shot before), keep from
   just before the word and end the shot before as many frames earlier (the join stays one take), and give the earlier shot's
   sound its last words on a sound track of its own, the next shot's sound that much later (`video.extract_audio` of each take).
+- A shot that carries on keeps the voice of whoever spoke at the end of the shot before, even with another speaker's voice
+  sample: a new speaker's first line starts with a cut. Give every speaking character a voice sample (`character.update {voice}`:
+  a few seconds of that character alone, from a take you like, `video.extract_audio {from, to}`).
+- A shot longer than its line fills itself with made-up words: make it as long as the line, and carry the action that follows on in
+  a shot where nobody speaks.
 - Changing a cast entry (`character.update`) marks every clip that shows it out of date; `gen.run` on the whole project, or a
   shot that carries on from one of them, then makes those clips again and the film changes under you. Make clips one by one
   (`gen.run --clip`), and look at a clip's newest take before you cut it.

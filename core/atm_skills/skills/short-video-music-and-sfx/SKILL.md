@@ -34,6 +34,14 @@ each shot, find the frame where each one lands (look at the frames, not the scri
 life. A generated shot often has its own sound of the action already (a smash, a crowd): keep it, and put nothing synthetic over it.
 No sound at all is better than a synthesised one that does not fit.
 
+**Real sound effects from the picture: `sfx.from_video`** (HunyuanVideo-Foley in ComfyUI; `models.fetch {id: "hunyuan-foley.xxl"}`,
+15 GB, ask the user first). Give a shot (`project` + `clip`) and the sounds in words, bigger than life ("a heavy hammer smashes scrap
+metal: a loud crunch, then a sad fizzle"); it returns a WAV as long as the shot's file, in sync with what happens (about 10 s a shot
+once loaded). Lay it under the shot from its file's start, trimmed and sped up as the shot (set_speed with keep_pitch), about 6 dB
+under the voices with `audio.match {limit: true}`. Use it only on shots where nobody speaks or moves their mouth: shown people
+talking it invents mumbling that sounds like a second voice, whatever the negative says. Run `asr.transcribe` on every result:
+words in it are voices; take another seed, skip the start that has them, or keep the shot's own sound.
+
 - `scripts/make_whoosh.py` - 0.7 s band-pass noise sweep landing at 0.5 s with a low thump, panned left to right. Place one **0.5 s before each cut** on an `SFX` audio track, `audio.gain_db` -5.
 - `scripts/make_click.py` - UI tick. The user found the synthesized click "bad"; prefer whoosh, pop, riser+impact on the twist. Real recordings (Pixabay, Freesound CC0, Mixkit, YouTube Audio Library) sound better: the user must supply or approve them.
 - Sound-word pops (POOF!) and inner-scene cuts can get quieter whooshes (-12 dB).
