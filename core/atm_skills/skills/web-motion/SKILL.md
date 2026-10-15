@@ -19,7 +19,8 @@ Use generated video for people, places and things that move in the world; put we
    (`width: 1920px; height: 1080px` for 16:9; 1080 x 1920 for 9:16).
 2. **Look** at two or three moments: `web.preview {path or html, at: 0.5, output: ".../look.png", transparent: true}`. Open the picture.
    `page_errors` lists what the page threw: fix those first.
-3. **Render**: `web.render {path, output: "<folder>", seconds, fps: <the sequence's rate>}`. A folder gives a PNG sequence that keeps
+3. **Render**: `web.render {path, output: "<folder>", seconds, fps: <the sequence's rate>, width, height}` (give the canvas size: a vertical
+   film needs `width: 1080, height: 1920`, or the page is drawn landscape and shrunk to fit, captions and cards far too small). A folder gives a PNG sequence that keeps
    transparency (the default for a folder); an `.mp4` gives an opaque video (a full-screen card). A job: `jobs.get` until done.
 4. **Put it in the film**: `timeline.edit add_clip {path: "<folder>", at, track: "new"}`. A sequence on a track above the video
    lays its transparent parts over it. Trim, move and fade it like any clip.

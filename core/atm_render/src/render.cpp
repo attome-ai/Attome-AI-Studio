@@ -3276,6 +3276,10 @@ Result<std::vector<float>> mix_audio(const Composition &c) {
         mix[offset + i] += (*pcm)[i];
     }
   }
+  // The sum of loud tracks (voices, music, effects) can go over full level and crackle: a limiter on the whole mix holds it at -2 dB (room for
+  // the overshoot of AAC encoding, so the file stays under -1 dB true peak). Below
+  // that it changes nothing.
+  limit_peaks(mix, mix.size(), 0.7943282f);
   return mix;
 }
 

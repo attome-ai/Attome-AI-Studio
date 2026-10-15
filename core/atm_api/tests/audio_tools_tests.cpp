@@ -372,3 +372,38 @@ TEST_CASE("audio.match with limit: a quiet voice with one loud hit in it reaches
   CHECK(std::fabs(tone_db - (20.0 * std::log10(0.05 / std::sqrt(2.0)) + gain)) < 1.0); // the voice came up by its whole gain: the limiter let go after the hit
   fs::remove_all(dir, ec);
 }
+
+TEST_CASE("the export's mix never goes over -2 dB: two loud sounds at once are held by a limiter on the whole mix", "[audio][engine]") {
+  const fs::path dir = fs::temp_directory_path() / "attome-mix-limit";
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+  fs::create_directories(dir);
+  Engine engine({.fsync = false});
+  const std::string project = (dir / "M.attome").string();
+  REQUIRE(engine.call("project.create", {{"path", project}}));
+  std::vector<float> tone(size_t(2.0 * 48000) * 2);
+  for (size_t i = 0; i < tone.size() / 2; ++i)
+    tone[2 * i] = tone[2 * i + 1] = 0.7f * float(std::sin(2.0 * 3.14159265 * 200.0 * double(i) / 48000.0));
+  const std::string a = (dir / "a.wav").string(), b = (dir / "b.wav").string();
+  REQUIRE(audio::write_wav(a, tone));
+  REQUIRE(audio::write_wav(b, tone));
+  REQUIRE(engine.call("timeline.edit", {{"project", project}, {"ops", json::array({{{"op", "add_clip"}, {"path", a}, {"at", "0s"}},
+                                                                                      {{"op", "add_clip"}, {"path", b}, {"at", "0s"}, {"track", "new"}}})}}));
+  const std::string out = (dir / "mix.wav").string();
+  const auto started = engine.call("render.sequence", {{"project", project}, {"output", out}, {"format", "wav"}});
+  REQUIRE(started);
+  for (int i = 0; i < 3000; ++i) {
+    if ((*engine.call("jobs.get", {{"job_id", started->at("job_id")}}))["state"] != "running")
+      break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  std::ifstream in(out, std::ios::binary);
+  std::string bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  REQUIRE(bytes.size() > 44 + 48000 * 4);
+  double peak = 0.0;
+  for (size_t i = 44; i + 1 < bytes.size(); i += 2)
+    peak = std::max(peak, std::fabs(double(int16_t(uint8_t(bytes[i]) | (uint8_t(bytes[i + 1]) << 8))) / 32768.0));
+  CHECK(peak <= std::pow(10.0, -2.0 / 20.0) + 0.002); // 0.7 + 0.7 would be 1.4: clipped without the limiter
+  CHECK(peak > 0.75);                                  // and still loud
+  fs::remove_all(dir, ec);
+}
