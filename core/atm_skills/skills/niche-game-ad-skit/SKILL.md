@@ -44,9 +44,11 @@ SPEECH
 - The skit works for any product, not only games (a service, a job ad): the problem as a comic disaster, the product as the hero
   who fixes it in one tap, a happy twist, then the pitch and contact details on the end card. Clothes, rooms and lines in the
   culture and language of the audience (see `film` for lines in another language); the captions in that language too.
+  Done once for a service in Gulf Arabic, everyone in local dress, photoreal: the owner liked it (1 of 1).
 
 EDIT
-- Every spoken shot sped up 1.75x with its pitch kept (slower reads as slow); the pitch shots as fast as their narration allows.
+- Every spoken shot sped up 1.75x with its pitch kept (slower reads as slow); the pitch shots as fast as their narration allows
+  (1.3x kept a narrator clear, 1 film); the end card at 1x.
 - Trim each line's shot soon after its last word; never mute a mouth that moves (cut the shot or remake it).
 - Joins of shots that carry on: skip the repeated frames (see `film`); a line that starts inside them keeps them.
 
@@ -64,13 +66,21 @@ SOUND
 - A big reaction is written big, step by step: "throws her head back, eyes squeezed shut, mouth stretched wide open in a huge,
   over-the-top cartoonish groan, then slaps her palm over her face and drags it down". "Facepalms and groans" gave a small,
   flat reaction the owner called bad.
+- The same for a reveal with people in it (the hero product appears, everyone stares): muted, it was heard as "no sound" even
+  with the music up (owner, 1 film), and foley on it gave words. Give one person a one-word gasp as the shot's line
+  ("Wow!" in the audience's language), face and body huge, seen from the front: the sound filled and the reveal read (1 of 1).
 - Real sound effects on the actions, bigger than life: `sfx.from_video` on the shots where nobody speaks (a smash, a reveal, a ship,
   machines); on shots with talking it invents mumbling, so those keep their own sound. No synthesised tones over the actions.
 
 TEXT
 - A caption per line, whole line at once, bold italic, bright yellow with a dark outline, lower third.
 - Item tags as holograms (translucent, glowing, with a level) above the item, popping in with the reveal; a backlit sign for the place.
-- End: a big download button with the game's name, pulsing, and "download now" in the captions.
+- End: a big download button with the game's name, pulsing, and "download now" in the captions. For a service: the logo, the
+  slogan, the contact details from its own site, and a pulsing "contact us" button.
+- Screens in the picture (phones, chat bubbles, dashboards) come out with made-up letters: write "glowing dots only, no letters
+  or words anywhere" and lay the real words over them as tags (fixed 1 of 1).
+- Captions in a right-to-left script: `direction: rtl`, a heavy font that has the script (Segoe UI 900 for Arabic), digits in
+  that script; a long narrator line split at its commas, one part after another.
 
 CHECKS
 - `asr.transcribe` on the export: every line once, in order; no echo (a line heard twice), no made-up words, no words inside effects.

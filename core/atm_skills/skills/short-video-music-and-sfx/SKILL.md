@@ -42,7 +42,8 @@ under the voices with `audio.match {limit: true}`. Use it only on shots where no
 talking it invents mumbling that sounds like a second voice, whatever the negative says. Run `asr.transcribe` on every result:
 words in it are voices; take another seed, skip the start that has them, or keep the shot's own sound. A crowded shot (several
 people in the frame, even with closed mouths) gave words in 6 of 6 seeds: there mute the shot's sound and let the music carry it,
-not ducked.
+not ducked. But a muted shot with people in it was still heard as "the sound cuts out" (owner, 1 film): better remake it with one
+person saying a one-word exclamation as its line, so the shot has its own sound.
 
 - `scripts/make_whoosh.py` - 0.7 s band-pass noise sweep landing at 0.5 s with a low thump, panned left to right. Place one **0.5 s before each cut** on an `SFX` audio track, `audio.gain_db` -5.
 - `scripts/make_click.py` - UI tick. The user found the synthesized click "bad"; prefer whoosh, pop, riser+impact on the twist. Real recordings (Pixabay, Freesound CC0, Mixkit, YouTube Audio Library) sound better: the user must supply or approve them.
