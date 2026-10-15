@@ -220,8 +220,13 @@ Shots made on their own share nothing. Decide for each shot which of these it is
 - **Music**: `music.make {project, tags, seconds, bpm, key}` (genre, instruments and mood in words; about 10 s for a
   minute; it needs ACE-Step 1.5 in the owner's ComfyUI and says so when it is missing). Put it on the timeline with
   `add_clip {asset, at: "0s", duration, gain_db: -25 - its lufs, fade_in, fade_out}`, then `audio.duck {clip: <music>,
-  over: [<film track>], db: 8}`. A piece stays at one level from start to end: for a scene that changes make one piece
-  for each part (tension, action, after) and cut between them on the picture.
+  over: [<the spoken clips and the voice track>], db: 8}`: only under speech. Ducked under the whole film track it also dips
+  under the shots where nobody speaks, and with their thin sound that is heard as the sound cutting out. A piece stays at one
+  level from start to end: for a scene that changes make one piece for each part (tension, action, after) and cut between them on the picture.
+- **A piece that loops**: measure where it really ends (made music often ends in seconds of silence) and start the second pass
+  before that, past its soft opening (`source_in`), with a short fade in over the first one's fade out.
+- After the export, look at its level in 0.1 s steps: any stretch of more than a few tenths far under the rest (20 dB or more)
+  is a hole a viewer hears; find which shot or join it is and fill it (music not ducked there, a real effect, a retake).
 - A shot that should be silent but murmurs: retake it, or set its `audio.gain_db` to -60 and let the music carry it.
 - **The export**: `attome render <project> -o film.mp4` (a 3-minute film: seconds). Then check the film itself:
   `audio.analyze {path}` (peak under -1 dB), frames (`see.contact_sheet`), and hear it in parts of a minute

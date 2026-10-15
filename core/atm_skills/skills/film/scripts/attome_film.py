@@ -107,7 +107,8 @@ class Film:
             made = self.call('music.make', seconds=min(240.0, float(t) + 2.0), **music)
             added = self.call('timeline.edit', label='Score', ops=[{'op': 'add_clip', 'id': '$new:music', 'asset': made['asset_id'], 'at': '0s', 'duration': f'{float(t):.3f}s',
                                                                    'gain_db': round(music_lufs - made['lufs'], 1), 'fade_in': '1.5s', 'fade_out': '3s'}])
-            self.call('audio.duck', clip=added['id_map']['$new:music'], over=[film], db=duck_db, ramp=0.3)
+            # only under the speech: ducked under a quiet shot too, the music leaves a hole there
+            self.call('audio.duck', clip=added['id_map']['$new:music'], over=spoken or [film], db=duck_db, ramp=0.3)
         self.call('project.save')
         r = self._cli('render', self.project, '-o', output)
         if r.returncode or not os.path.exists(output):
