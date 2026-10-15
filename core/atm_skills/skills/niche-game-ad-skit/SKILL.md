@@ -28,6 +28,9 @@ LOOK
   `speed_lora: turbo_v4`, `sampler: euler`, `scheduler: beta`, no `realism_lora` (it fights the glossy look).
 - Big, comic faces and bodies (shock, rage, flirting, laughing); every person "a real photographed human, never a cartoon":
   without those words close shots and solo shots drift to a cartoon look.
+- Or the stylised look (the owner liked both): "a polished high-end mobile game cinematic in a stylised 3D animated style:
+  caricature proportions with realistic detailed textures, big comic expressions", same light and settings. It holds the cast
+  more easily (no drift to fight), so leave out the "never a cartoon" words. Ask which look before generating.
 - Cast every person who appears twice, side characters too. Two references each, from your own best frames: full body with
   empty hands, and the face; a small or busy reference loses the person.
 
