@@ -122,6 +122,13 @@ Model: `minimax-h3.singularity-ref2va.int8` (the only one that takes reference p
 - **A voice from off screen is a cast entry with a voice sample and no picture** ("the voice of ..., heard from off
   screen, never seen"). In the shot: "nobody is in the picture; the voice of <Subject 1> is heard from off
   screen". The speaker was never drawn (10 of 10 cutaways). Someone else may be in the picture and stays silent if told so.
+  - The style words count too: with a style about people acting ("every person ...", "wild comic acting", "everyone speaks ...")
+    a speaker was drawn talking into the camera in 3 of 4 empty shots, a person the film never had. Give the shots without
+    people a style of their own that says "an empty scene with no people in it at all; a voice-over speaks ..." (0 of 3 drawn).
+- **Lines in another language**: write the line in its own script and say the language and accent in the style ("everyone speaks
+  Gulf Arabic with a Bahraini accent"); the model speaks it (Gulf Arabic: 15 of 15 lines word for word, one film). Check with
+  `asr.transcribe {language}`. A brand in Latin letters is read by sound: write it as it is said, in that script. Kokoro has no
+  Arabic: a narrator then is an off-screen cast entry (above), its voice sample from a take of a speaker of that language.
 - **A place has no reference picture.** Named as a subject with a picture, shots open on that exact picture, empty, and
   then cut to the action. A place is words (next section) and a master (the section after).
 - In a prompt a cast entry is `{Name}` (its name and look) or `{Name.attribute}`: the clip follows every change to it.
@@ -223,6 +230,8 @@ Shots made on their own share nothing. Decide for each shot which of these it is
   over: [<the spoken clips and the voice track>], db: 8}`: only under speech. Ducked under the whole film track it also dips
   under the shots where nobody speaks, and with their thin sound that is heard as the sound cutting out. A piece stays at one
   level from start to end: for a scene that changes make one piece for each part (tension, action, after) and cut between them on the picture.
+- A made piece with drums stops briefly at the end of each phrase (every 4 s or so): measure where, and move the piece
+  (`source_in`) so those stops fall under speech, not on a shot where the music is alone.
 - **A piece that loops**: measure where it really ends (made music often ends in seconds of silence) and start the second pass
   before that, past its soft opening (`source_in`), with a short fade in over the first one's fade out.
 - After the export, look at its level in 0.1 s steps: any stretch of more than a few tenths far under the rest (20 dB or more)

@@ -41,6 +41,10 @@ SPEECH
 - Every speaking character has a voice sample in the cast. A shot that carries on from another keeps that shot's speaker's voice:
   a new speaker's first line starts with a cut, not a carry-on.
 
+- The skit works for any product, not only games (a service, a job ad): the problem as a comic disaster, the product as the hero
+  who fixes it in one tap, a happy twist, then the pitch and contact details on the end card. Clothes, rooms and lines in the
+  culture and language of the audience (see `film` for lines in another language); the captions in that language too.
+
 EDIT
 - Every spoken shot sped up 1.75x with its pitch kept (slower reads as slow); the pitch shots as fast as their narration allows.
 - Trim each line's shot soon after its last word; never mute a mouth that moves (cut the shot or remake it).
