@@ -87,7 +87,7 @@ Result<Engine::Impl::ComfySound> Engine::Impl::comfy_sound(const json &g, const 
     }
   }
   if (!saved.is_object())
-    return fail(ErrorCode::Internal, "E_INTERNAL", "ComfyUI finished without a sound file.");
+    return fail(ErrorCode::Internal, "E_INTERNAL", "ComfyUI finished without the " + ask.what + " file.");
   out.name = saved.value("filename", std::string());
   const auto bytes = net::fetch(*transport, comfyui_address + "/view?filename=" + url_part(out.name) + "&subfolder=" +
                                                 url_part(saved.value("subfolder", std::string())) + "&type=" + url_part(saved.value("type", std::string("output"))));

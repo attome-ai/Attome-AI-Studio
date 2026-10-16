@@ -361,7 +361,7 @@ struct Engine::Impl {
   Result<json> audio_duck(const json &params);
   Result<json> sfx_make(const json &params);
   Result<json> audio_match(const json &params);
-  // A sound made by a ComfyUI graph that ends in SaveAudio (engine_music.cpp): music.make and sfx.from_video.
+  // A file made by a ComfyUI graph that ends in SaveAudio or SaveImage (engine_music.cpp): music.make, sfx.from_video and gen.image.
   struct ComfyAsk {
     std::string what, node_word, no_nodes, no_nodes_hint, no_files, files_hint, less;
   };
@@ -372,6 +372,9 @@ struct Engine::Impl {
   Result<ComfySound> comfy_sound(const json &graph, const ComfyAsk &ask);
   Result<json> music_make(const json &params);
   Result<json> sfx_from_video(const json &params);
+  // A still picture from words (engine_image.cpp); comfy_upload puts a picture in ComfyUI's input folder for a LoadImage node.
+  Result<std::string> comfy_upload(const std::string &path, const std::string &tag);
+  Result<json> gen_image(const json &params);
   static std::string speech_node_of(const json &clip);
   Result<json> voice_make(const json &params);
   Result<json> voice_fit(const json &params);

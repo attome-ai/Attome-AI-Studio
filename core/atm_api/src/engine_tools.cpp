@@ -502,6 +502,19 @@ const Engine::Impl::Tool Engine::Impl::kTools[] = {
        "steps":{"type":"integer","description":"10 to 100, default 50"},"guidance":{"type":"number","description":"Default 4.5"},
        "size":{"type":"string","enum":["xxl","xl"]},"offload":{"type":"boolean"},"output":{"type":"string","description":"The .wav to write"}}})",
      &Impl::sfx_from_video},
+    {"gen.image", "core", true,
+     "Make a still picture from words, run by the user's ComfyUI (a few seconds once loaded): cast portraits, locations, and first frames for "
+     "gen.create_clip. model: krea2.turbo-int8 (the default when it is here; non-commercial licence) or z-image.turbo-int8 (Apache 2.0, also "
+     "commercially). prompt: four or five plain sentences (who or what, where, the light, the lens). realism: strength of the model's realism "
+     "add-on, 0 = off (Krea 2: 1.0-2.0; Z-Image: about 1.0, its trigger word is added). style_images (Krea 2 only): one to three pictures whose "
+     "look (colour, light, rendering) the picture takes, not their faces. width and height: multiples of 16, 256 to 2048, default 1024. Writes a "
+     "PNG to output, or keeps it in the project and imports it with project (asset_id). seed gives another picture for the same words.",
+     R"({"type":"object","properties":{"prompt":{"type":"string"},"model":{"type":"string","enum":["krea2.turbo-int8","z-image.turbo-int8"]},
+       "width":{"type":"integer"},"height":{"type":"integer"},"seed":{"type":"integer"},"steps":{"type":"integer","description":"1 to 50, default 8"},
+       "realism":{"type":"number","description":"0 (off) to 2.5"},"style_images":{"type":"array","items":{"type":"string"}},
+       "style_strength":{"type":"number","description":"0 to 2, default 1"},"output":{"type":"string","description":"The .png to write"},
+       "project":{"type":"string","description":"Instead of output: path of the .attome project folder, or its prj_ ID"}},"required":["prompt"]})",
+     &Impl::gen_image},
     {"media.remove", "core", true,
      "Take a file out of the project: every clip made from it (and the clips linked to them) is deleted, then the asset itself. "
      "Pass asset (its ast_ ID) or the file's path. A clip on a locked track stops it. Undo takes two steps: the clips, then the asset.",

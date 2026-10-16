@@ -33,6 +33,14 @@ namespace {
 #define ATM_SIGLIP2 "https://huggingface.co/google/siglip2-base-patch16-512/resolve/a89f5c5093f902bf39d3cd4d81d2c09867f0724b/"
 #define ATM_LCLAP "https://huggingface.co/laion/larger_clap_general/resolve/ada0c23a36c4e8582805bb38fec3905903f18b41/"
 #define ATM_ACESTEP "https://huggingface.co/Comfy-Org/ace_step_1.5_ComfyUI_files/resolve/6707deb277e9e0907fd9c14ce6b6f1d695c6a3fc/split_files/"
+// Comfy-Org/Krea-2 at revision 1171f4dc7e325bf3734586942e737872506c73e1 (read 2026-10-16: sizes and hashes are what the repository reports).
+#define ATM_KREA2 "https://huggingface.co/Comfy-Org/Krea-2/resolve/1171f4dc7e325bf3734586942e737872506c73e1/"
+// RudySen/Krea2-realism-V2 at revision ad6f07e426303e7087d215362dbc057b0073dca3 (read 2026-10-16; MIT).
+#define ATM_KREA2REALISM "https://huggingface.co/RudySen/Krea2-realism-V2/resolve/ad6f07e426303e7087d215362dbc057b0073dca3/"
+// Comfy-Org/z_image_turbo at revision 6fc90a3b1b653e935a0d175e260736de25b84df5 (read 2026-10-16; Apache-2.0).
+#define ATM_ZIMAGE "https://huggingface.co/Comfy-Org/z_image_turbo/resolve/6fc90a3b1b653e935a0d175e260736de25b84df5/split_files/"
+// suayptalha/Z-Image-Turbo-Realism-LoRA at revision 8dc179cb56844d4ddc6e4527c30e98347eeae971 (read 2026-10-16; Apache-2.0).
+#define ATM_ZIMAGEREALISM "https://huggingface.co/suayptalha/Z-Image-Turbo-Realism-LoRA/resolve/8dc179cb56844d4ddc6e4527c30e98347eeae971/"
 
 constexpr const char *kCatalog = R"json({
   "version": 1,
@@ -204,6 +212,83 @@ constexpr const char *kCatalog = R"json({
         {"path": "loras/minimax_h3_turbo_v4_step600_ema.safetensors", "size": 779849816,
          "sha256": "5f3a626cd72c93a8b9318d6760c510bc5092d2ab13aaba1f932c5bab07a416d3",
          "url": ")json" ATM_H3TURBOV4 R"json(minimax_h3_turbo_v4_step600_ema.safetensors"}
+      ]
+    },
+    {
+      "id": "krea2.turbo-int8",
+      "title": "Krea 2 Turbo: text to image, 8 steps (int8)",
+      "kind": "model",
+      "licence": "Krea 2 Community License: non-commercial use and research; commercial use needs a licence from Krea.",
+      "licence_url": "https://huggingface.co/Comfy-Org/Krea-2",
+      "notes": "A 12 B still-image model distilled to 8 steps, CFG off, up to 2048 x 2048; long natural-language prompts work best. For cast portraits, locations and first frames. Run by ComfyUI 0.26 or later; the text encoder loads with the CLIP type krea2. The files must be in the models folder ComfyUI reads.",
+      "files": [
+        {"path": "vae/qwen_image_vae.safetensors", "size": 253806246,
+         "sha256": "a70580f0213e67967ee9c95f05bb400e8fb08307e017a924bf3441223e023d1f",
+         "url": ")json" ATM_KREA2 R"json(vae/qwen_image_vae.safetensors"},
+        {"path": "text_encoders/qwen3vl_4b_fp8_scaled.safetensors", "size": 5242467968,
+         "sha256": "54bd5144df0bbc25dd6ccadfcb826b521445a1b06ae5a42570bdd2974ca87094",
+         "url": ")json" ATM_KREA2 R"json(text_encoders/qwen3vl_4b_fp8_scaled.safetensors"},
+        {"path": "diffusion_models/krea2_turbo_int8_convrot.safetensors", "size": 13492686496,
+         "sha256": "8e4eeda70dd5037ab1ba2bef6b417f9f901e26093117cf397f741fc1fdaaf3f1",
+         "url": ")json" ATM_KREA2 R"json(diffusion_models/krea2_turbo_int8_convrot.safetensors"}
+      ]
+    },
+    {
+      "id": "krea2.style-reference-lora",
+      "title": "Krea 2 Style Reference: an add-on that takes the look of 1-2 reference images",
+      "kind": "model",
+      "licence": "The Krea 2 Community License, as the model it adds to.",
+      "licence_url": "https://huggingface.co/ostris/krea2_turbo_style_reference",
+      "notes": "Ostris's LoRA for Krea 2 Turbo: colour, light and rendering from one or two reference images, no trigger word; used by gen.image style_images (ComfyUI's own nodes, 0.26 or later). Put in the models/loras folder ComfyUI reads.",
+      "files": [
+        {"path": "loras/krea2_style_reference.safetensors", "size": 457111760,
+         "sha256": "f50df5a9e62e4be8aa926a63dd5bb1a64770c4004f763c1208007ae13daa82b8",
+         "url": ")json" ATM_KREA2 R"json(loras/krea2_style_reference.safetensors"}
+      ]
+    },
+    {
+      "id": "krea2.realism-v2-lora",
+      "title": "Krea 2 Realism V2: an add-on for photoreal skin, light and detail",
+      "kind": "model",
+      "licence": "MIT for the add-on; the Krea 2 Community License applies to what you generate.",
+      "licence_url": "https://huggingface.co/RudySen/Krea2-realism-V2",
+      "notes": "RudySen's LoRA, used on Krea 2 Turbo; no trigger word. Its author suggests strength 1.0 with a good prompt and prefers 1.5-2.0, with prompts of four or five sentences. Put in the models/loras folder ComfyUI reads.",
+      "files": [
+        {"path": "loras/Krea2-realism-V2.safetensors", "size": 1562410344,
+         "sha256": "fb0048ce3340adc2842ccfcc1a9a61a9773b6628b01ae5a2e139ca9c679e715d",
+         "url": ")json" ATM_KREA2REALISM R"json(Krea2-realism-V2.safetensors"}
+      ]
+    },
+    {
+      "id": "z-image.turbo-int8",
+      "title": "Z-Image Turbo: text to image, 8 steps (int8)",
+      "kind": "model",
+      "licence": "Apache 2.0: free to use, also commercially.",
+      "licence_url": "https://huggingface.co/Tongyi-MAI/Z-Image-Turbo",
+      "notes": "Alibaba's 6 B still-image model distilled to 8-9 steps, CFG off; photoreal, and writes English and Chinese text. Run by ComfyUI; the files must be in the models folder ComfyUI reads.",
+      "files": [
+        {"path": "vae/ae.safetensors", "size": 335304388,
+         "sha256": "afc8e28272cd15db3919bacdb6918ce9c1ed22e96cb12c4d5ed0fba823529e38",
+         "url": ")json" ATM_ZIMAGE R"json(vae/ae.safetensors"},
+        {"path": "text_encoders/qwen_3_4b_fp8_mixed.safetensors", "size": 5631994051,
+         "sha256": "72450b19758172c5a7273cf7de729d1c17e7f434a104a00167624cba94f68f15",
+         "url": ")json" ATM_ZIMAGE R"json(text_encoders/qwen_3_4b_fp8_mixed.safetensors"},
+        {"path": "diffusion_models/z_image_turbo_int8_convrot.safetensors", "size": 6201001296,
+         "sha256": "be517ebd47c912a5626a588e1aeea43e6be4a43c0cdcd2b48a2a780d9f358635",
+         "url": ")json" ATM_ZIMAGE R"json(diffusion_models/z_image_turbo_int8_convrot.safetensors"}
+      ]
+    },
+    {
+      "id": "z-image.turbo-realism-lora",
+      "title": "Z-Image Turbo Realism: an add-on for ultra-realistic scenes",
+      "kind": "model",
+      "licence": "Apache 2.0, as the model it adds to.",
+      "licence_url": "https://huggingface.co/suayptalha/Z-Image-Turbo-Realism-LoRA",
+      "notes": "suayptalha's LoRA for Z-Image Turbo, trained on a hand-picked realistic part of CC12M; its trigger word is \"Realism\" at the start of the prompt. Put in the models/loras/z_image_turbo_realism folder ComfyUI reads (its file has a generic name).",
+      "files": [
+        {"path": "loras/z_image_turbo_realism/pytorch_lora_weights.safetensors", "size": 85094800,
+         "sha256": "b38b074964f1f6564c22fee42125accd7a218a916966b5d0f0b2f63d4939c2f7",
+         "url": ")json" ATM_ZIMAGEREALISM R"json(pytorch_lora_weights.safetensors"}
       ]
     },
     {

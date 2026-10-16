@@ -85,6 +85,14 @@ Model: `minimax-h3.singularity-ref2va.int8` (the only one that takes reference p
   - Anything else in the crop comes along in every shot (a strap, a hilt behind the shoulder, a collar): crop it out.
   - **Film the portrait with room around the head** (from the waist up, empty wall above and beside). A face that fills
     the portrait cannot be cropped tight: the crop is the whole frame, and shots cut to a copy of it (2 of 3).
+- **A portrait can also be drawn as a still with `gen.image`** (Krea 2 Turbo or Z-Image Turbo; seconds, not a video take).
+  An option, from one test of three prompts, not yet tried as a cast reference in a film:
+  - Krea 2: soft, film-like light and natural skin; it keeps a cartoon look when the words ask for one ("large round eyes").
+    Its realism add-on changed little at 1.5-2.0. Non-commercial licence.
+  - Z-Image: sharper and more photographic, and it follows the details of the words more closely (a lantern, a stove).
+    Its realism add-on at 1.0 over-sharpened faces and drifted (bare shoulders, a bent room); 0.5 was mild. Apache 2.0.
+  - `style_images` (Krea 2): one blurred film frame gave only its warm light and worn wood, not its rendering.
+  - The room-around-the-head and tight-crop rules above apply to these portraits too.
 - **One face picture per person.** A second angle made no visible difference. A "reference sheet" made by generating
   the person on a plain background does not work (the old background is copied into it).
 - **A voice sample** is 3-5 s of that person speaking alone. Each speaker of a shot gets their own (`voices`); at most
@@ -103,6 +111,12 @@ Model: `minimax-h3.singularity-ref2va.int8` (the only one that takes reference p
   voice, a description of the new state ("her hands are empty; she has no sword"). The description is stronger than the
   shot: with "she holds a sword" in it, a shot that says the sword is gone still shows it (0 of 3); with the second
   entry it is gone (2 of 2).
+- **A visible state belongs to the scene, not to the shot**: tears, wounds, blood, wet or dirty hair. It is in every shot of
+  the scene, the wide and medium ones too, written in the cast entry. A medium shot left without the tears the close-ups
+  had was the first thing the owner saw (one film).
+- **Tears**: "tears", "big glossy tears" give one cartoon drop that sits on the cheek and jumps from frame to frame. Real
+  crying is written as wet skin: "its eyes are glassy and brimming with water, the skin under each eye is wet and glistening,
+  thin wet streaks run down the cheeks to the chin; no cartoon teardrops" (6 shots, one film; fur instead of skin for an animal).
 - **A shot of things only has no cast in it**: name the people as subjects and a person is drawn. Describe what is seen
   as a plain subject ("two pairs of hands, a staff and a sword") and write "no faces and no bodies in the picture".
 - **An object as a `prop` with its own picture helps a small, distinct object and harms a long thin one.** A product, a
@@ -149,6 +163,9 @@ Model: `minimax-h3.singularity-ref2va.int8` (the only one that takes reference p
   water, skin, a product) a sentence of their own with nothing named in it: "a meadow in warm low evening sun; beyond the
   subject everything is a soft blur of green and gold light, no buildings" (close and soft, 3 of 3). The light words stay
   the same, so the shots still cut together.
+- **At night, say what lights the faces.** "Cold moonlight, deep shadows" gave black silhouettes and murky close-ups; "a warm
+  dim lamp out of the frame lights the faces softly from the side, cool blue moonlight from the window behind" kept the
+  night and made every face readable (most of a night scene, one film).
 
 ## How shots join (the most important choice in a scene)
 
@@ -173,6 +190,19 @@ Shots made on their own share nothing. Decide for each shot which of these it is
     (heard as an "extra word").
   - **Who leaves the frame is gone**: the next clip of the chain does not bring them back. Write the end of each clip so
     that everyone needed next is still in the picture ("drops to one knee in front of her", not "falls").
+- **One performance, cut into coverage.** An emotional beat of one person that runs over several actions (aims, breaks,
+  lets go, gives in) is ONE chain of up to four clips (`continue_from`) in one medium shot, made larger than the canvas
+  (`megapixels: 1.6` gave 1696 x 960), and the cut makes the angles: the medium shot, and punch-ins on the face from the
+  same frames (`add_clip` with `scale` about 2 and `position`). Face, tears, props and light are then the same in every
+  cut; separate shots of the same beats each drew them again and lost the tears between them (owner's idea; one scene, owner
+  preferred it at once). Cutaways of the other person go between the parts.
+  - **Measure where the face is before placing a punch-in**: draw a grid on 2-3 frames of the part you use (ffmpeg
+    `drawgrid`) and read the nose's position; a punch-in placed by eye missed twice. The person moves inside a chain:
+    measure each part on its own. `position` = `[0.5 + (0.5 - x) * scale, 0.5 + (0.5 - y) * scale]` puts the point
+    (x, y) of the picture in the centre; check a frame of the export.
+- **A match cut turns one action into another**: the end of a shot and the start of the next in the same pose, the same
+  side of the frame and the same direction (an attack that lands as an embrace, then the embrace somewhere else). Write the
+  second shot's framing and pose from the first (one cut, one film).
 - **The next scene in the same place starts on the last frame of the scene before** (`start_from` that clip,
   `start_at` its last second, `start_crop: [0, 0, 1, 1]`): the place is the same one, and a new object can be brought
   into it ("he lifts ... from under the table and lays it on the table").
@@ -196,6 +226,9 @@ Shots made on their own share nothing. Decide for each shot which of these it is
   right edge of the frame, out of focus; <Subject 1> looks at <Subject 2> and speaks to her; <Subject 2> does not
   speak". Alone in a tight close-up the speaker looks into the camera, and "look off to the right" only half works.
 - Name people by `<Subject N>` in the action, and say what each **does** from the first second.
+- **Bigger acting is written as body actions, not as feelings**: "the chest heaves with a sob, the head drops, the hands go
+  limp and what they hold slips out of them" acted; "slowly lowers it" was stiff. But "the whole body trembles, it shakes
+  hard in the hands" shook the whole frame: write "the hands tremble a little" (2 shots, one film).
 - Lines: short; at most three in a 9 s shot; a tone for each. Ask for a second more than the line needs: a line that
   just fits ends on the cut.
 - **Do not shorten a generated clip.** `gen.create_clip` gives the clip the length the model really makes (9 s asked is
@@ -231,8 +264,13 @@ Shots made on their own share nothing. Decide for each shot which of these it is
   minute; it needs ACE-Step 1.5 in the owner's ComfyUI and says so when it is missing). Put it on the timeline with
   `add_clip {asset, at: "0s", duration, gain_db: -25 - its lufs, fade_in, fade_out}`, then `audio.duck {clip: <music>,
   over: [<the spoken clips and the voice track>], db: 8}`: only under speech. Ducked under the whole film track it also dips
-  under the shots where nobody speaks, and with their thin sound that is heard as the sound cutting out. A piece stays at one
-  level from start to end: for a scene that changes make one piece for each part (tension, action, after) and cut between them on the picture.
+  under the shots where nobody speaks, and with their thin sound that is heard as the sound cutting out. A piece stays near one
+  mood from start to end: for a scene that changes, either one piece for each part (tension, action, after) cut on the picture,
+  or **one piece that builds**: make 4-6 seeds and measure each one's level per second (`ffmpeg astats`), keep one with no
+  silence in it that rises where the film turns. In a wordless film of two moods the one piece that builds was liked; two pieces
+  crossfaded at the turn were not (one film). Keep its own rise and fall: flattening it to one level (a loudness range under 2 LU) made it lifeless.
+- **`music.make` with the same seed and another `seconds` makes another piece.** Once a piece is chosen, keep its `seconds`
+  (and make it longer than the film, cutting it with the clip's duration).
 - A made piece with drums stops briefly at the end of each phrase (every 4 s or so): measure where, and move the piece
   (`source_in`) so those stops fall under speech, not on a shot where the music is alone.
 - **A piece that loops**: measure where it really ends (made music often ends in seconds of silence) and start the second pass
@@ -247,6 +285,15 @@ Shots made on their own share nothing. Decide for each shot which of these it is
 - **Sound effects follow the actions**, not the cuts: each thing that happens on screen (a smash, a reveal, a laugh, a failure, an
   exit) gets a sound that fits it and exaggerates it, on the frame where it lands; `short-video-music-and-sfx` says how. Synthesised
   whooshes and pops on every cut sound random.
+- **A take's own sound may be unusable** (animals voicing in every take, people murmuring): add the clips picture only
+  (`add_clip {with_audio: false}`) and build the sound on tracks of its own.
+- **`sfx.from_video` invents hits where nothing happens** (a knock in a shot of someone crying, clicks every second or two
+  in a still shot) and reacts to the picture changing. Measure each result's peaks per 0.25 s, look at the picture at every
+  hit, and use only the part of the file around a real action. A steady bed (rain, wind) from a still or looped frame of the
+  place has no hits. It makes at most about 15 s of sound, also from a longer video.
+- **`audio.match` measures the whole file**: a file that is mostly quiet with one hit in it is raised by up to 24 dB and the
+  hit clips. Set such a clip's `audio.gain_db` from its peak instead (`set_property {path: "audio.gain_db"}`).
+- Two sound clips that crossfade cannot overlap on one track: put them on two tracks in turn.
 
 ## The checks every take must pass
 
@@ -263,7 +310,7 @@ thing you made it again to fix: a take with the right detail and no action made 
 | (T) The line is over before the cut | the level of the sound in the last 0.15 s of the clip | above -34 dB (speech about -20, a quiet place about -45). Not the word times of `asr.transcribe`: the last word is stretched to the end of the file |
 | (T) A shot told to hold its place does | 1 - the correlation of a 48 x 27 grey copy of the first frame with each later frame; the largest | above 0.85 (held: 0.06-0.71; left: 1.05; one bad example, a thin margin). Not for a moving camera |
 | (T) The words are the script | `asr.transcribe`, word by word against the lines | less than 90 % alike, or extra words (a sigh, a name said twice) |
-| (T) A shot without lines is silent | `asr.transcribe` on it too | words are heard: people who are told nothing murmur (1 of 3). Retake with "their mouths are closed, nobody speaks, no voice is heard", or give the shot the sound of an empty shot of the place |
+| (T) A shot without lines is silent | `asr.transcribe` on it too | words are heard: people who are told nothing murmur (1 of 3). Retake with "their mouths are closed, nobody speaks, no voice is heard", or give the shot the sound of an empty shot of the place. Speech recognition writes "Thank you.", "you" or "um" on noise, rain or music with no voice in it, and labels like "*music*" for a sound: these are not words |
 | Nothing foreign in the picture | look at the corners of the frames | a broadcaster's mark, a caption, letters (1 of 10 cutaways): retake with "no logo, no watermark and no letters anywhere in the picture" (clean 2 of 2) |
 | Continuity | compare with the shot before and after | a thing held differently, on the back, a different length; a person somewhere they could not have got to |
 
@@ -276,6 +323,10 @@ thing you made it again to fix: a take with the right detail and no action made 
 - **Calibrate a check** on takes known good and known bad before trusting it.
 - Do not fix in the prompt what is a fault of the engine, and do not turn a check off for a whole scene.
 - Show a person only what you have looked at yourself, and say what you could not judge (sound, motion).
+- **Ask for times.** "Better", "still bad" leads to guessing; a note with a time ("0:12 the tears make no sense") led to the
+  real fix every time. When a note has no time, ask which moment, and offer the likely causes to choose from.
+- Keep every version: when a change makes it worse ("the one before was better"), go back to that one and change only what
+  was named.
 
 ## Known to work (measured)
 
@@ -302,3 +353,5 @@ does not, and how to light and frame people so they read as filmed. Drawn, anime
 - A place *identical* (not just alike) between shots that do not start inside a master.
 - Faces in wide shots where the face is small; more than four people.
 - A theme of music that returns across scenes.
+- **Sound effects a viewer likes in a wordless film.** Foley of each shot laid over the cut gave hits that meant nothing;
+  a designed track (steady beds, louder hits on their frames) was liked less than the quieter one before it (one film, owner).

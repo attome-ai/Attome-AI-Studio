@@ -433,6 +433,32 @@ TEST_CASE("music.make asks for what it needs before it calls an engine", "[gen][
   CHECK(none.hint.find("models.fetch") != std::string::npos);
 }
 
+TEST_CASE("gen.image asks for what it needs before it calls an engine", "[gen][image]") {
+  Film f;
+  CHECK(err(*f.engine, "gen.image", {{"project", f.project}}).rule == "E_PARAM");                                      // no prompt
+  CHECK(err(*f.engine, "gen.image", {{"prompt", "a cat"}}).rule == "E_PARAM");                                         // nowhere to write it
+  CHECK(err(*f.engine, "gen.image", {{"prompt", "a cat"}, {"project", f.project}, {"model", "sdxl"}}).rule == "E_PARAM");
+  CHECK(err(*f.engine, "gen.image", {{"prompt", "a cat"}, {"project", f.project}, {"width", 1000}}).rule == "E_PARAM"); // not a multiple of 16
+  CHECK(err(*f.engine, "gen.image", {{"prompt", "a cat"}, {"project", f.project}, {"height", 4096}}).rule == "E_PARAM");
+  CHECK(err(*f.engine, "gen.image", {{"prompt", "a cat"}, {"project", f.project}, {"realism", 5}}).rule == "E_PARAM");
+  CHECK(err(*f.engine, "gen.image", {{"prompt", "a cat"}, {"output", (f.dir / "a.jpg").string()}}).rule == "E_PARAM");
+  CHECK(err(*f.engine, "gen.image", {{"prompt", "a cat"}, {"project", f.project}, {"style_images", json::array({"C:/no/such.png"})}}).rule == "E_PARAM");
+  const std::string style = (f.dir / "style.png").string();
+  REQUIRE(atm::storage::atomic_write(f.dir / "style.png", std::string("png")));
+  CHECK(err(*f.engine, "gen.image", {{"prompt", "a cat"}, {"project", f.project}, {"model", "z-image.turbo-int8"}, {"style_images", json::array({style})}})
+            .rule == "E_PARAM"); // style pictures are Krea 2's
+  // Both models and their add-ons are in the catalog, so the engine can download them, and a computer without them is told how.
+  const std::string catalog = ok(*f.engine, "models.list", json::object()).dump();
+  for (const char *id : {"krea2.turbo-int8", "krea2.realism-v2-lora", "krea2.style-reference-lora", "z-image.turbo-int8", "z-image.turbo-realism-lora"})
+    CHECK(catalog.find(id) != std::string::npos);
+  for (const char *model : {"krea2.turbo-int8", "z-image.turbo-int8"}) {
+    const atm::Error none = err(*f.engine, "gen.image", {{"prompt", "a cat"}, {"project", f.project}, {"model", model}});
+    INFO(none.message);
+    CHECK(none.rule == "E_MODEL_FILE");
+    CHECK(none.hint.find("models.fetch") != std::string::npos);
+  }
+}
+
 TEST_CASE("sfx.from_video asks for what it needs before it calls an engine, and reads a generated shot's Take", "[gen][foley]") {
   Film f;
   CHECK(err(*f.engine, "sfx.from_video", json::object()).rule == "E_PARAM");                                           // no video
