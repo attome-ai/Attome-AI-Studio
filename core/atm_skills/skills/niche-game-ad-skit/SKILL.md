@@ -46,6 +46,9 @@ SPEECH
 - But a line squeezed into its shot is said in a rush, and 1.75x on top of that sounded robotic to the owner (3 s shots with
   lines of 6 to 9 words). Better: the shot 1.5 s longer, the tone "speaking slowly and clearly, drawing out every word, with
   pauses between the phrases", then start the clip just before the line and cut soon after it (owner preferred it, 1 ad).
+- Write lines in normal case and put the emphasis in the tone ("overjoyed, every word pronounced clearly"). A word in capitals
+  with "drawing out every word" came out bent ("GLOWING" heard as "glawing", 2 of 2 takes, owner's ear; speech recognition still
+  wrote "glowing"). Lowercase, said naturally, is the retake; a simpler line without the word is the fallback (1 word, 1 ad).
 - A voice sample cut from a scream or a gasp gives a flat, unreal copy. For a voice the owner likes, make 2-3 short clips of the
   person saying a calm, chatty line ("like chatting with a friend"), one per seed, no voice sample, and let the owner choose (1 of 1).
 - A line that answers an action (a reveal) goes in a shot that carries on from the action, not in the action's shot.
