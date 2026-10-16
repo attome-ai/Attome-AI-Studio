@@ -22,6 +22,13 @@ description: Learn the style of any video (a Short, a music video, a film clip) 
    (`project.create`, then `timeline.edit` `add_clip {path}`), then `see.contact_sheet {count: 12..24}` or `see.frames` at the cut
    times. Read the images. Look at: shot types (wide, close-up, action), what the camera does, how the first 3 seconds hook, text on
    screen (where, how big, what colour, word by word or not), the colours and grade, one character or many.
+   **Look at a frame of every shot, at its cut time**, not at one frame a second: shots of 0.3-0.5 s fall between such frames,
+   and in a short film they are often its turning point (a lunge, a leap, a match cut, all missed at 1 frame a second, one film).
+   Several cut times close together mark a fast beat: look at it at 8-10 frames a second.
+3b. **When the user wants the same video made again** ("make one like this", "a better version"), write its beats in order with
+   their times and make each beat. Before showing a version, put a frame of each beat of the reference beside the same beat of
+   yours and read the pairs: missing tears, dark faces, small framing and a missing beat show at once, before the user has to
+   say them (the first version of one film skipped this and was judged "a lot worse").
 4. **Write the draft niche** in the headings of the default niche (`niche-funny-short`), first line `DRAFT: check before use`,
    second line `KIND: short | music video | film` (a short: vertical and 70 s or less):
    - FORMAT: shape, length, number of shots and their length, how it opens, how it ends.
